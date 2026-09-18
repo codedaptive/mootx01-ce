@@ -1,0 +1,55 @@
+[
+  {
+    "sample_id": "spec-conv-01",
+    "conversation": {
+      "speaker_a": "Alice",
+      "speaker_b": "Bob",
+      "session_1_date_time": "3:00 pm on 1 Jan, 2024",
+      "session_1": [
+        {"speaker": "Alice", "dia_id": "D1:1", "text": "Hey Bob! I visited the art museum today."},
+        {
+          "speaker": "Bob",
+          "dia_id": "D1:2",
+          "text": "That sounds wonderful! Which exhibit?",
+          "blip_caption": "a painting of a sunset over the ocean",
+          "img_url": ["https://example.com/sunset.jpg"],
+          "query": "sunset painting"
+        },
+        {"speaker": "Alice", "dia_id": "D1:3", "text": "The impressionist gallery. Monet was stunning."}
+      ],
+      "session_2_date_time": "2:00 pm on 10 Jan, 2024",
+      "session_2": [
+        {"speaker": "Bob",   "dia_id": "D2:1", "text": "Did you get the new job at the library?"},
+        {"speaker": "Alice", "dia_id": "D2:2", "text": "Yes! I start next Monday as a librarian."}
+      ]
+    },
+    "qa": [
+      {
+        "question": "Where did Alice go today?",
+        "answer": "art museum",
+        "evidence": ["D1:1"],
+        "category": 1
+      },
+      {
+        "question": "What job did Alice get?",
+        "answer": "librarian",
+        "evidence": ["D2:2"],
+        "category": 4
+      },
+      {
+        "question": "What has Bob been up to lately?",
+        "evidence": [],
+        "category": 2
+      },
+      {
+        "question": "Did Alice say she hated the Monet exhibit?",
+        "adversarial_answer": "Yes, she hated it.",
+        "evidence": ["D1:3"],
+        "category": 5
+      }
+    ],
+    "event_summary": {},
+    "observation": {},
+    "session_summary": {}
+  }
+]

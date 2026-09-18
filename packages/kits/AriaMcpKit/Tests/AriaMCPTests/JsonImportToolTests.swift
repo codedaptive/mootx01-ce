@@ -63,65 +63,114 @@ struct JsonImportToolTests {
         return url
     }
 
-    @Test("a seed fixture round-trips through a real moot_json_import call")
-    func seedRoundTripsOverMCP() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-        let url = try tempSeedFile("""
-            {"format_version": 1, "name": "mcp-round-trip", "records": [
-              {"id": "m1", "content": "mcp round trip sentinel one", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/roundtrip"},
-              {"id": "m2", "content": "mcp round trip sentinel two", "event_time": "2026-02-01T11:00:00Z", "room": "mcp/roundtrip"}],
-             "facts": [{"subject": "sentinel", "predicate": "counted", "object": "two", "record_id": "m1"}],
-             "tunnels": [{"from": "m2", "to": "m1", "kind": "references"}]}
-            """)
-        defer { try? FileManager.default.removeItem(at: url) }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_json_import",
-            arguments: .object(["path": .string(url.path)]))
-
-        #expect(!isError(of: result), "import must succeed; got: \(text(of: result))")
-        let body = text(of: result)
-        #expect(body.contains("2 drawers"))
-        #expect(body.contains("1 facts"))
-        #expect(body.contains("1 tunnels"))
-        #expect(body.contains("seedSha256="))
-
-        // The records are really in the estate the dispatcher served.
-        // Provisioned estates pre-seed charter-hint drawers, so filter to
-        // this lane's addedBy stamp.
-        let drawers = try await kit.recall(
-            handle,
-            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 100))
-        let imported = drawers.filter { $0.addedBy == "jsonimportbridge-import" }
-        #expect(imported.count == 2)
-        #expect(imported.contains { $0.content == "mcp round trip sentinel one" })
+    /// Reads the Nth text block, so the id-map block can be addressed
+    /// separately from the prose receipt.
+    private func textBlock(_ index: Int, of result: JSONValue) -> String {
+        guard case let .object(obj) = result,
+              case let .array(content)? = obj["content"],
+              index < content.count,
+              case let .object(block) = content[index],
+              case let .string(s)? = block["text"]
+        else { return "" }
+        return s
     }
 
-    @Test("an invalid seed is an isError result naming the element, zero writes")
-    func invalidSeedIsErrorResultWithZeroWrites() async throws {
+    private func blockCount(of result: JSONValue) -> Int {
+        guard case let .object(obj) = result,
+              case let .array(content)? = obj["content"] else { return 0 }
+        return content.count
+    }
+
+    @Test("the id map is absent for omitted or false, and null is invalid")
+    func idMapOmittedFalseAndNullAreContractual() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         defer { Task { try? await kit.close(handle) } }
+        let seed = """
+            {"format_version": 1, "name": "opt-in", "records": [
+              {"id": "m1", "content": "opt in sentinel", "event_time": "2026-02-01T10:00:00Z", "room": "mcp/optin"}]}
+            """
+
+        // Omitted: one block, exactly as before this argument existed.
+        let url = try tempSeedFile(seed)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let plain = try await dispatcher.dispatch(
+            name: "moot_json_import",
+            arguments: .object(["path": .string(url.path)]))
+        #expect(!isError(of: plain))
+        #expect(blockCount(of: plain) == 1)
+
+        // Explicit false is identical to omission: accepted, with no id-map block.
+        let falseURL = try tempSeedFile(seed.replacingOccurrences(of: "\"m1\"", with: "\"m-false\""))
+        defer { try? FileManager.default.removeItem(at: falseURL) }
+        let explicitFalse = try await dispatcher.dispatch(
+            name: "moot_json_import",
+            arguments: .object([
+                "path": .string(falseURL.path),
+                "return_id_map": .bool(false),
+            ]))
+        #expect(!isError(of: explicitFalse))
+        #expect(blockCount(of: explicitFalse) == 1,
+                "return_id_map:false must not add an id-map content block")
+
+        // Explicit null is rejected rather than read as "use the default".
+        let url2 = try tempSeedFile(seed.replacingOccurrences(of: "\"m1\"", with: "\"m2\""))
+        defer { try? FileManager.default.removeItem(at: url2) }
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await dispatcher.dispatch(
+                name: "moot_json_import",
+                arguments: .object([
+                    "path": .string(url2.path),
+                    "return_id_map": .null,
+                ]))
+        }
+    }
+
+    /// A record missing `event_time` is a decode failure of the caller's file: an
+    /// `invalid_argument` refusal carrying the bridge's message, which names the
+    /// record (ruling 2026-09-17). Nothing is written. Rust twin:
+    /// selected_json_import_missing_event_time_is_an_invalid_argument_refusal.
+    @Test("a record lacking event_time is an invalid_argument refusal naming the record")
+    func missingEventTimeIsInvalidArgument() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        // The provisioned estate carries its charter drawers; the theorem is
+        // that the refused import adds none.
+        let before = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100)).count
         let url = try tempSeedFile("""
-            {"format_version": 1, "name": "bad", "records": [
-              {"id": "m1", "content": "c", "event_time": "2026-02-01T10:00:00Z", "room": "rm"}],
-             "tunnels": [{"from": "m1", "to": "m999", "kind": "references"}]}
+            {"format_version": 1, "name": "missing-event-time", "records": [
+              {"id": "r1", "content": "no event time", "room": "handoff/room"}]}
             """)
         defer { try? FileManager.default.removeItem(at: url) }
 
         let result = try await dispatcher.dispatch(
-            name: "moot_json_import",
-            arguments: .object(["path": .string(url.path)]))
+            name: "moot_json_import", arguments: .object(["path": .string(url.path)]))
+        #expect(isError(of: result), "a seed decode failure must be refused; got: \(result)")
+        let error = try #require(result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue)
+        #expect(error["code"] == .string("invalid_argument"), "got: \(error)")
+        #expect(error["retryable"] == .bool(false))
+        let message = try #require(error["message"]?.stringValue)
+        for fragment in ["record[0]", "\"r1\"", "event_time is missing"] {
+            #expect(message.contains(fragment), "message must name the record and field; got: \(message)")
+        }
+        let after = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100)).count
+        #expect(after == before, "a refused import must write zero drawers")
+    }
 
-        #expect(isError(of: result), "validation failure must be an isError result")
-        #expect(text(of: result).contains("\"m999\""),
-                "the offending element must be named; got: \(text(of: result))")
-
-        // Zero writes — never a partial estate. (Provisioned estates
-        // pre-seed charter-hint drawers; none may carry this lane's stamp.)
-        let drawers = try await kit.recall(
-            handle,
-            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 100))
-        #expect(!drawers.contains { $0.addedBy == "jsonimportbridge-import" })
+    /// A path that does not resolve stays the availability refusal: the no-oracle
+    /// rule for paths is unchanged by the decode-class ruling.
+    @Test("a nonexistent seed path stays a mobility_unavailable refusal")
+    func nonexistentPathStaysMobilityUnavailable() async throws {
+        let (dispatcher, kit, handle) = try await makeDispatcher()
+        defer { Task { try? await kit.close(handle) } }
+        let absent = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mcp-json-import-absent-\(UUID().uuidString).json")
+        let result = try await dispatcher.dispatch(
+            name: "moot_json_import", arguments: .object(["path": .string(absent.path)]))
+        #expect(isError(of: result), "an absent seed must be refused; got: \(result)")
+        let error = try #require(result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue)
+        #expect(error["code"] == .string("mobility_unavailable"), "got: \(error)")
+        #expect(error["message"] == .string("The requested data-mobility operation is unavailable in the selected estate."))
     }
 }

@@ -47,27 +47,114 @@ struct FdcReclassifyTests {
         return try await kit.capture(handle, frame).id
     }
 
-    private func text(_ result: JSONValue) throws -> String {
+    // Extract the structured data object from a v2 envelope response.
+    // Assertions on moot_reclassify_fdc must use this rather than the
+    // text block: content[0].text is capped at 512 Unicode scalars by
+    // AriaV2Envelope.compactText(), and the reclassify report exceeds
+    // that cap as soon as the change list has any entries.
+    private func data(_ result: JSONValue) throws -> [String: JSONValue] {
         let obj = try #require(result.objectValue)
         #expect(obj["isError"]?.boolValue == false)
-        return try #require(
-            obj["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue)
+        return try #require(obj["structuredContent"]?.objectValue?["data"]?.objectValue)
     }
 
     private func storedCode(_ kit: GeniusLocusKit, _ handle: EstateHandle, id: String) async throws -> String {
-        let estate = try await kit.estate(for: handle)
-        let drawer = try #require((try await estate.allDrawers()).first { $0.id == id })
+        let drawer = try #require((try await kit.allDrawers(in: handle)).first { $0.id == id })
         return drawer.udcCode
     }
 
     private func storedDrawer(_ kit: GeniusLocusKit, _ handle: EstateHandle, id: String) async throws -> Drawer {
-        let estate = try await kit.estate(for: handle)
-        return try #require((try await estate.allDrawers()).first { $0.id == id })
+        try #require((try await kit.allDrawers(in: handle)).first { $0.id == id })
     }
 
     private func fdcFloor(_ kit: GeniusLocusKit, _ handle: EstateHandle) async throws -> String? {
-        let estate = try await kit.estate(for: handle)
-        return try await estate.meta(key: Self.fdcFloorKey)
+        try await kit.meta(in: handle, key: Self.fdcFloorKey)
+    }
+
+    // Extract content[0].text from a v2 envelope response for compact-text
+    // assertions. The 512-scalar truncation is applied by AriaV2Envelope;
+    // only assert on the prefix and on short substrings near the start.
+    private func compactText(_ result: JSONValue) -> String {
+        result.objectValue?["content"]?.arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+    }
+
+    // MARK: — ITEM 1: invalid argument refusals (gate: dispatch must throw)
+
+    // These three cases mirror the Rust twins at
+    // aria_v2_fdc_reclassify_tests.rs:473,484,495. If either guard at
+    // AriaV2DataMobility.swift line 38 (mode) or line 49 (limit range) is
+    // removed, dispatch() no longer throws and `caught` stays nil — the
+    // #require fires, proving the guard is load-bearing.
+
+    @Test func unknownModeIsRefused() async throws {
+        let (_, _, dispatcher) = try await makeDispatcher()
+        var caught: JSONRPCError? = nil
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_reclassify_fdc",
+                arguments: .object(["mode": .string("everything")]))
+        } catch let e as JSONRPCError {
+            caught = e
+        }
+        let error = try #require(caught, "unrecognised mode must produce a JSONRPCError")
+        #expect(error.data?.objectValue?["path"] == .string("mode"),
+            "error path must identify the rejected argument")
+        #expect(error.data?.objectValue?["message"]?.stringValue?.contains("suspectOnly") == true,
+            "error message must name the accepted values")
+    }
+
+    @Test func limitZeroIsRefused() async throws {
+        let (_, _, dispatcher) = try await makeDispatcher()
+        var caught: JSONRPCError? = nil
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_reclassify_fdc",
+                arguments: .object(["limit": .integer(0)]))
+        } catch let e as JSONRPCError {
+            caught = e
+        }
+        let error = try #require(caught, "limit=0 must produce a JSONRPCError")
+        #expect(error.data?.objectValue?["path"] == .string("limit"),
+            "error path must identify the rejected argument")
+        #expect(error.data?.objectValue?["message"]?.stringValue?.contains("50000") == true,
+            "error message must state the accepted range")
+    }
+
+    @Test func limitAboveMaxIsRefused() async throws {
+        let (_, _, dispatcher) = try await makeDispatcher()
+        var caught: JSONRPCError? = nil
+        do {
+            _ = try await dispatcher.dispatch(
+                name: "moot_reclassify_fdc",
+                arguments: .object(["limit": .integer(50001)]))
+        } catch let e as JSONRPCError {
+            caught = e
+        }
+        let error = try #require(caught, "limit=50001 must produce a JSONRPCError")
+        #expect(error.data?.objectValue?["path"] == .string("limit"),
+            "error path must identify the rejected argument")
+        #expect(error.data?.objectValue?["message"]?.stringValue?.contains("50000") == true,
+            "error message must state the accepted range")
+    }
+
+    // MARK: — ITEM 2: compact-text prefix gate
+
+    // The compact text report is built at AriaV2DataMobility.swift:589-620.
+    // If the `lines` construction is neutered, content[0].text becomes an empty
+    // or generic string and this prefix assertion fails. Assert only on the
+    // prefix and on the UUID near the start (both well within the 512-scalar
+    // truncation point).
+    @Test func compactTextPrefixAndEstateArePresent() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        _ = try await capture(kit, handle, content: "sample content", code: "362.4", qid: "Q12131")
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object([:]))
+        let text = compactText(result)
+        #expect(text.hasPrefix("fdc_reclassify: "),
+            "compact text must open with the fdc_reclassify tool-name line")
+        #expect(text.contains("[\(handle.estateUUID)]"),
+            "compact text must identify the estate by UUID")
     }
 
     @Test func dryRunReportsSuspectButDoesNotMutate() async throws {
@@ -83,11 +170,18 @@ struct FdcReclassifyTests {
             name: "moot_reclassify_fdc",
             arguments: .object([:])
         )
-        let body = try text(result)
-        #expect(body.contains("fdc_reclassify: dry-run"))
-        #expect(body.contains("candidates: 1"))
-        #expect(body.contains("would_update: 1"))
-        #expect(body.contains("\(id): 362.4 [Q12131] -> 000"))
+        let d = try data(result)
+        #expect(d["applied"] == .bool(false))
+        #expect(d["candidates"] == .integer(1))
+        #expect(d["would_update"] == .integer(1))
+        let changes = try #require(d["changes"]?.arrayValue)
+        #expect(changes.first?.objectValue?["id"] == .string(id))
+        #expect(changes.first?.objectValue?["old_code"] == .string("362.4"))
+        #expect(changes.first?.objectValue?["new_code"] == .string("000"))
+        // old_qid is emitted at AriaV2DataMobility.swift:575 and declared in the
+        // conformance schema. Removing this assertion meant the field could be
+        // silently dropped and no test would catch it.
+        #expect(changes.first?.objectValue?["old_qid"] == .string("Q12131"))
         #expect(try await storedCode(kit, handle, id: id) == "362.4")
         #expect(try await fdcFloor(kit, handle) == nil)
     }
@@ -104,8 +198,8 @@ struct FdcReclassifyTests {
         let result = try await dispatcher.dispatch(
             name: "moot_reclassify_fdc",
             arguments: .object(["apply": .bool(true), "mode": .string("all")]))
-        let body = try text(result)
-        #expect(body.contains("updated: 2"))
+        let d = try data(result)
+        #expect(d["updated"] == .integer(2))
 
         let short = try await storedDrawer(kit, handle, id: shortID)
         #expect(short.udcCode == "005")
@@ -125,9 +219,9 @@ struct FdcReclassifyTests {
         let result = try await dispatcher.dispatch(
             name: "moot_reclassify_fdc",
             arguments: .object(["apply": .bool(true)]))
-        let body = try text(result)
-        #expect(body.contains("mode: suspectOnly"))
-        #expect(body.contains("updated: 1"))
+        let d = try data(result)
+        #expect(d["mode"] == .string("suspectOnly"))
+        #expect(d["updated"] == .integer(1))
         #expect(try await storedDrawer(kit, handle, id: id).wikidataQID == "Q17118377")
         #expect(try await fdcFloor(kit, handle) == nil)
     }
@@ -145,17 +239,18 @@ struct FdcReclassifyTests {
             name: "moot_reclassify_fdc",
             arguments: .object(["apply": .bool(true), "mode": .string("all")])
         )
-        let body = try text(result)
-        #expect(body.contains("fdc_reclassify: applied"))
-        #expect(body.contains("fdc_data_version: "))
-        #expect(body.contains("floor_stamp: stamped"))
-        #expect(body.contains("updated: 1"))
+        let d = try data(result)
+        #expect(d["applied"] == .bool(true))
+        #expect(d["fdc_data_version"]?.stringValue?.isEmpty == false)
+        #expect(d["floor_stamp"] == .string("stamped"))
+        #expect(d["updated"] == .integer(1))
         #expect(try await storedCode(kit, handle, id: id) == "000")
         #expect(try await fdcFloor(kit, handle)?.contains("classifier:4.2.0") == true)
 
         let status = try await dispatcher.dispatch(
             name: "moot_estate_status", arguments: .object([:]))
-        #expect(try text(status).contains("fdc_recalculation: current"))
+        let statusData = try data(status)
+        #expect(statusData["fdc_recalculation"] == .string("current"))
     }
 
     @Test func suspectOnlyDoesNotOverwriteBroadCodeChangeWithoutAllMode() async throws {
@@ -172,19 +267,38 @@ struct FdcReclassifyTests {
             name: "moot_reclassify_fdc",
             arguments: .object([:])
         )
-        let conservativeBody = try text(conservative)
-        #expect(conservativeBody.contains("candidates: 0"))
-        #expect(conservativeBody.contains("skipped_non_candidate_changes: 1"))
-        #expect(conservativeBody.contains("mode=all"))
+        let conservativeData = try data(conservative)
+        // A biology drawer reclassifies to a real subject code (not the 000 sentinel),
+        // so suspectOnly mode produces 0 candidates and skips the change as non-suspect.
+        #expect(conservativeData["candidates"] == .integer(0))
+        #expect(conservativeData["skipped_non_candidate_changes"] == .integer(1))
+        // The note at AriaV2DataMobility.swift:610 appends "rerun with mode=all"
+        // to compact text, but the fdc_recalculation_version field includes a
+        // 64-char SHA256 hash (~168 chars alone) that pushes the dry-run report
+        // well past the 512-scalar truncation. The note is unreachable from
+        // content[0].text. Gate the triggering condition via the apply=true path
+        // instead: the floor_stamp field in structured data says "mode=all is
+        // required" when suspectOnly mode leaves non-candidate changes unprocessed.
+        let appliedConservative = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true)])
+        )
+        let appliedData = try data(appliedConservative)
+        #expect(appliedData["skipped_non_candidate_changes"] == .integer(1))
+        #expect(
+            appliedData["floor_stamp"] == .string(
+                "skipped: mode=all is required for an estate-wide floor"),
+            "suspectOnly with non-suspect changes skipped must advise mode=all as remedy"
+        )
 
         let reset = try await dispatcher.dispatch(
             name: "moot_reclassify_fdc",
             arguments: .object(["mode": .string("all")])
         )
-        let resetBody = try text(reset)
-        #expect(resetBody.contains("mode: all"))
-        #expect(resetBody.contains("candidates: 1"))
-        #expect(resetBody.contains("would_update: 1"))
+        let resetData = try data(reset)
+        #expect(resetData["mode"] == .string("all"))
+        #expect(resetData["candidates"] == .integer(1))
+        #expect(resetData["would_update"] == .integer(1))
         #expect(try await fdcFloor(kit, handle) == nil)
     }
 
@@ -203,9 +317,9 @@ struct FdcReclassifyTests {
                 "apply": .bool(true), "mode": .string("all"), "limit": .integer(1)
             ])
         )
-        let body = try text(result)
-        #expect(body.contains("fdc_reclassify: applied"))
-        #expect(body.contains("floor_stamp: skipped: limited run cannot update estate-wide floor"))
+        let d = try data(result)
+        #expect(d["applied"] == .bool(true))
+        #expect(d["floor_stamp"] == .string("skipped: limited run cannot update estate-wide floor"))
         #expect(try await fdcFloor(kit, handle) == nil)
     }
 
@@ -223,24 +337,44 @@ struct FdcReclassifyTests {
             name: "moot_reclassify_fdc",
             arguments: .object(["apply": .bool(true)])
         )
-        let body = try text(result)
-        #expect(body.contains("fdc_reclassify: applied"))
-        #expect(body.contains("skipped_non_candidate_changes: 1"))
-        #expect(body.contains("floor_stamp: skipped: mode=all is required for an estate-wide floor"))
+        let d = try data(result)
+        #expect(d["applied"] == .bool(true))
+        #expect(d["skipped_non_candidate_changes"] == .integer(1))
+        #expect(d["floor_stamp"] == .string("skipped: mode=all is required for an estate-wide floor"))
         #expect(try await fdcFloor(kit, handle) == nil)
+    }
+
+    @Test func quiescedSelectedFDCApplyDoesNotReanchorOrStampFloor() async throws {
+        let (kit, handle, dispatcher) = try await makeDispatcher()
+        let id = try await capture(
+            kit, handle, content: "x += 1", code: "362.4", kind: .code)
+        let floorBefore = try await fdcFloor(kit, handle)
+        try await kit.quiesce(handle)
+        #expect(await kit.mountState(for: handle) == .quiesced)
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_reclassify_fdc",
+            arguments: .object(["apply": .bool(true), "mode": .string("all")]))
+        #expect(result.objectValue?["isError"] == .bool(true),
+                "a quiesced selected FDC apply must be refused by the typed reanchor verb")
+        #expect(try await storedCode(kit, handle, id: id) == "362.4",
+                "the refused apply must not change the anchor")
+        #expect(try await fdcFloor(kit, handle) == floorBefore,
+                "the refused apply must not stamp the fixed FDC floor")
     }
 
     @Test func estateStatusDistinguishesMissingAndStaleFDCFloors() async throws {
         let (kit, handle, dispatcher) = try await makeDispatcher()
         let missing = try await dispatcher.dispatch(
             name: "moot_estate_status", arguments: .object([:]))
-        #expect(try text(missing).contains("fdc_recalculation: missing"))
+        let missingData = try data(missing)
+        #expect(missingData["fdc_recalculation"] == .string("missing"))
 
-        let estate = try await kit.estate(for: handle)
-        try await estate.setMeta(key: Self.fdcFloorKey, value: "classifier:old")
+        try await kit.stampFDCRecalculationFloor(handle, value: "classifier:old")
         let stale = try await dispatcher.dispatch(
             name: "moot_estate_status", arguments: .object([:]))
-        #expect(try text(stale).contains("fdc_recalculation: stale"))
+        let staleData = try data(stale)
+        #expect(staleData["fdc_recalculation"] == .string("stale"))
     }
 
     // Advisory 1 (FDC-RECLASSIFY-ADVISORIES): apply must repair only the
@@ -264,9 +398,9 @@ struct FdcReclassifyTests {
             name: "moot_reclassify_fdc",
             arguments: .object(["apply": .bool(true)])
         )
-        let body = try text(result)
-        #expect(body.contains("fdc_reclassify: applied"))
-        #expect(body.contains("updated: 1"))
+        let d = try data(result)
+        #expect(d["applied"] == .bool(true))
+        #expect(d["updated"] == .integer(1))
 
         let drawer = try await storedDrawer(kit, handle, id: id)
         #expect(drawer.udcCode == "000")
@@ -279,10 +413,10 @@ struct FdcReclassifyTests {
     // for "parallelize a deterministic pure classify + apply in a fixed order":
     //
     //  (1) Invariance — repeated dry-runs over the same estate must produce
-    //      byte-identical output. The batch is heterogeneous (two distinct
+    //      identical structured data. The batch is heterogeneous (two distinct
     //      classify outcomes) and large enough to OVERFLOW the 25-entry
     //      `changes:` cap, so the ORDER of the emitted change list is
-    //      observable in the output; a racing write or an order-dependent
+    //      observable in the data; a racing write or an order-dependent
     //      classify would perturb the change-list order or the counters across
     //      runs. Dry-run does not mutate, so identical inputs must give
     //      identical output every time.
@@ -318,27 +452,29 @@ struct FdcReclassifyTests {
                 code: "362.4"))
         }
 
-        func dryRunAll() async throws -> String {
-            try text(try await dispatcher.dispatch(
+        func dryRunAll() async throws -> [String: JSONValue] {
+            try data(try await dispatcher.dispatch(
                 name: "moot_reclassify_fdc",
                 arguments: .object(["mode": .string("all")])))
         }
 
-        // (1) Invariance across repeated parallel runs.
+        // (1) Invariance across repeated parallel runs: structured data must be
+        //     identical every time, including the capped 25-entry change list order.
         let first = try await dryRunAll()
-        #expect(first.contains("scanned: 30 active drawer(s)"))
-        #expect(first.contains("candidates: 30"))
-        #expect(first.contains("would_update: 30"))
-        #expect(first.contains("... 5 more")) // 30 candidates − 25 examples
+        #expect(first["scanned"] == .integer(30))
+        #expect(first["candidates"] == .integer(30))
+        #expect(first["would_update"] == .integer(30))
+        #expect(first["changes"]?.arrayValue?.count == 25) // capped at 25
+        #expect(first["changes_omitted"] == .integer(5))   // 30 candidates − 25 examples
         for _ in 0..<4 {
             #expect(try await dryRunAll() == first)
         }
 
         // (2) Golden values — apply through the parallel path, then read back.
-        let applied = try text(try await dispatcher.dispatch(
+        let applied = try data(try await dispatcher.dispatch(
             name: "moot_reclassify_fdc",
             arguments: .object(["apply": .bool(true), "mode": .string("all")])))
-        #expect(applied.contains("updated: 30"))
+        #expect(applied["updated"] == .integer(30))
         for id in sentinelIDs {
             #expect(try await storedCode(kit, handle, id: id) == "000")
         }

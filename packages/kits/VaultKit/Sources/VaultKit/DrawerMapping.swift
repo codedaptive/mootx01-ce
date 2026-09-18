@@ -9,9 +9,7 @@ import LocusKit
 /// reaches a substrate primitive, schema, bitmap, or enum directly — it
 /// constructs `CaptureFrame` / `TunnelCaptureFrame` values and issues
 /// them through the GLK verb surface (`capture`, `recall`,
-/// `recallTunnels`) and, for standalone tunnel capture, through the
-/// LocusKit `Estate` actor that GLK hands back from its sanctioned
-/// `estate(for:)` access point.
+/// `recallTunnels`, `resolveNodeNames`, and `captureTunnel`).
 ///
 /// ## Invariant I-5 (binding)
 ///
@@ -177,10 +175,9 @@ public struct DrawerMapping: Sendable {
 
         // Resolve display names (wing, room) for all recalled drawers in one
         // batch. node-tree integrity removed wing/room from the Drawer struct; consumers
-        // obtain them from the node tree via Estate.resolveNodeNames.
-        let estate = try await kit.estate(for: handle)
-        let allNodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: recalled.map(\.parentNodeId))
+        // obtain them from the node tree via `kit.resolveNodeNames`.
+        let allNodeNames = try await kit.resolveNodeNames(
+            handle, parentNodeIds: recalled.map(\.parentNodeId))
 
         // data-movement privacy tiers tier partition. The predicates encode the
         // normative 4→3 mapping (Normal → normal+elevated, Private →
@@ -263,7 +260,7 @@ public struct DrawerMapping: Sendable {
     /// the pre-fetched parameters — testable in isolation.
     ///
     /// `wing` and `room` are the display names resolved from the estate's
-    /// node tree via `Estate.resolveNodeNames(parentNodeIds:)`. node-tree integrity
+    /// node tree via `kit.resolveNodeNames(handle,parentNodeIds:)`. node-tree integrity
     /// removed these stored properties from `Drawer`; callers resolve them
     /// once in batch and pass them in.
     ///
@@ -671,8 +668,8 @@ public struct DrawerMapping: Sendable {
                 subject: "record:kind", predicate: "is", object: note.kind,
                 sourceDrawerID: drawer.id, now: now)
         }
-        let estate = try await kit.estate(for: handle)
-        let drawerNodeNames = try await estate.resolveNodeNames(parentNodeIds: [drawer.parentNodeId])
+        let drawerNodeNames = try await kit.resolveNodeNames(
+            handle, parentNodeIds: [drawer.parentNodeId])
         let drawerWing = drawerNodeNames[drawer.parentNodeId]?.wing ?? ""
         let drawerRoom = drawerNodeNames[drawer.parentNodeId]?.room ?? ""
         var tunnelsCreated = 0
@@ -693,7 +690,7 @@ public struct DrawerMapping: Sendable {
                 label: link.raw, addedBy: frame.addedBy,
                 sourceDrawerId: drawer.id, targetDrawerId: nil,
                 kind: .references, originClass: .imported)
-            _ = try await estate.capture(tunnelFrame)
+            _ = try await kit.captureTunnel(handle, tunnelFrame)
             existingTunnelSignatures.insert(signature)
             tunnelsCreated += 1
         }
@@ -917,19 +914,12 @@ public struct DrawerMapping: Sendable {
             )
         }
 
-        // `GeniusLocusKit` is an actor; `estate(for:)` is actor-isolated,
-        // so the hop is awaited. It returns the live `LocusKit.Estate`
-        // actor — GLK's sanctioned access point for the tunnel-capture
-        // verb that the GLK verb surface does not itself re-export.
-        // Fetched once here and shared by both the provenance-tunnel path
-        // (Bug N fix) and the content-wikilink path below.
-        let estate = try await kit.estate(for: handle)
-
         // Resolve the captured drawer's display names from the node tree
         // (node-tree integrity: Drawer no longer stores wing/room). These names are
-        // needed for tunnel source endpoints and de-duplication signatures.
-        let drawerNodeNames = try await estate.resolveNodeNames(
-            parentNodeIds: [drawer.parentNodeId])
+        // needed for tunnel source endpoints and de-duplication signatures. The
+        // handle-scoped GLK read keeps this mapping within the public verb surface.
+        let drawerNodeNames = try await kit.resolveNodeNames(
+            handle, parentNodeIds: [drawer.parentNodeId])
         let drawerWing = drawerNodeNames[drawer.parentNodeId]?.wing ?? ""
         let drawerRoom = drawerNodeNames[drawer.parentNodeId]?.room ?? ""
         var tunnelsCreated = 0
@@ -967,7 +957,7 @@ public struct DrawerMapping: Sendable {
                 kind: .references,
                 originClass: .imported
             )
-            _ = try await estate.capture(tunnelFrame)
+            _ = try await kit.captureTunnel(handle, tunnelFrame)
             existingTunnelSignatures.insert(signature)
             tunnelsCreated += 1
         }

@@ -1,0 +1,696 @@
+import AriaMCPWire
+import Foundation
+import GeniusLocusKit
+import LatticeLib
+import LocusKit
+import NeuronKit
+import SubstrateTypes
+
+/// The context that binds every v2 estate diagnostic to one caller, session,
+/// clock, and selected estate.  The service does not borrow mutable dispatcher
+/// state and never treats a caller-supplied estate as an authorization grant.
+public struct AriaV2EstateDiagnosticsContext: Sendable {
+    public let estateID: UUID
+    public let estateName: String
+    public let callerID: String
+    public let serverIdentity: String
+    public let sessionID: String
+    public let buildSerial: String
+    /// Version-skew advisory injected at server construction time.  `nil` when
+    /// the host detected no mismatch between the installed plugin and this binary.
+    /// Surfaced verbatim under the `version_skew` key in the structured data of
+    /// `moot_estate_ping` and `moot_estate_status`; omitted entirely when `nil`.
+    public let versionSkewAdvisory: String?
+    /// Upstream-release advisory provider.  Evaluated ONLY inside the `ping`
+    /// and `status` provider methods — both are `async`, so `await` is safe
+    /// there.  `nil` when the host wired no provider (stdio one-shots, the
+    /// aria-mcp dev server).  Mirroring the rate-limiting note on
+    /// `ToolDispatcher.updateAdvisoryProvider`: the host owns the network
+    /// boundary and caches the feed on a TTL; calling it here keeps the probe
+    /// frequency bounded to orientation calls rather than every tool call.
+    public let updateAdvisoryProvider: (@Sendable () async -> String?)?
+    public let now: @Sendable () -> Date
+    public let accessGate: any AriaV2EstateDiagnosticsAccessGate
+
+    public init(
+        estateID: UUID,
+        estateName: String,
+        callerID: String,
+        serverIdentity: String,
+        sessionID: String,
+        buildSerial: String,
+        versionSkewAdvisory: String? = nil,
+        updateAdvisoryProvider: (@Sendable () async -> String?)? = nil,
+        now: @escaping @Sendable () -> Date = { Date() },
+        accessGate: any AriaV2EstateDiagnosticsAccessGate = AriaV2AllowEstateDiagnosticsAccess()
+    ) {
+        self.estateID = estateID
+        self.estateName = estateName
+        self.callerID = callerID
+        self.serverIdentity = serverIdentity
+        self.sessionID = sessionID
+        self.buildSerial = buildSerial
+        self.versionSkewAdvisory = versionSkewAdvisory
+        self.updateAdvisoryProvider = updateAdvisoryProvider
+        self.now = now
+        self.accessGate = accessGate
+    }
+}
+
+public enum AriaV2EstateDiagnosticOperation: String, Sendable, Equatable {
+    case estatePing = "moot_estate_ping"
+    case estateStatus = "moot_estate_status"
+    case estateMap = "moot_estate_map"
+    case drainStatus = "moot_drain_status"
+    case rebuildStatus = "moot_rebuild_status"
+    case timingReport = "moot_timing_report"
+}
+
+/// Admission remains outside data collection.  A host can bind this to the
+/// selected caller/session policy without exposing a legacy text runner.
+public protocol AriaV2EstateDiagnosticsAccessGate: Sendable {
+    func admit(
+        _ operation: AriaV2EstateDiagnosticOperation,
+        context: AriaV2EstateDiagnosticsContext
+    ) async -> AriaV2OperationalRefusal?
+}
+
+public struct AriaV2AllowEstateDiagnosticsAccess: AriaV2EstateDiagnosticsAccessGate {
+    public init() {}
+
+    public func admit(
+        _ operation: AriaV2EstateDiagnosticOperation,
+        context: AriaV2EstateDiagnosticsContext
+    ) async -> AriaV2OperationalRefusal? {
+        _ = operation
+        _ = context
+        return nil
+    }
+}
+
+/// The shared request shape frozen in the Mission 02 fixture.  These tools
+/// accept only an optional selected-estate UUID; timing windows are owned by
+/// the provider, not silently inherited from the legacy `since_ms` runner.
+public struct AriaV2EstateDiagnosticsRequest: Sendable, Equatable {
+    public let estateID: UUID?
+
+    public init(arguments: JSONValue) throws {
+        let decoder = try AriaV2ArgumentDecoder(arguments, allowedKeys: ["estate_id"])
+        estateID = try decoder.optionalUUID("estate_id")
+    }
+}
+
+public struct AriaV2EstatePingData: Sendable, Equatable {
+    public let estateID: UUID
+    public let estateName: String
+    public let state: String
+    public let buildSerial: String
+    /// Version-skew advisory forwarded from the context.  `nil` when no skew
+    /// was detected.  Surfaced as `version_skew` in the structured data.
+    /// Defaults to `nil` so call sites that have no advisory need not change.
+    public let versionSkewAdvisory: String?
+    /// Upstream-release advisory resolved from the provider at call time.
+    /// `nil` when the provider is absent or returns nil (up-to-date / feed
+    /// unreachable).  Surfaced as `update_available` in the structured data;
+    /// omitted entirely when `nil`.  Defaults to `nil` so call sites that do
+    /// not supply the provider need not change.
+    public let updateAdvisory: String?
+    /// Loud declaration that the estate has reached the LSA retrain document
+    /// backstop (`GeniusLocusKit.lsaRetrainingDocumentBackstop`): its dense
+    /// basis no longer retrains and recall is degraded until the estate is
+    /// looked at. Surfaced as `lsa_retraining_degraded`; omitted when the
+    /// estate is under the backstop.
+    public let lsaRetrainingDegraded: String?
+    public init(estateID: UUID, estateName: String, state: String, buildSerial: String,
+                versionSkewAdvisory: String? = nil, updateAdvisory: String? = nil,
+                lsaRetrainingDegraded: String? = nil) {
+        self.estateID = estateID
+        self.estateName = estateName
+        self.state = state
+        self.buildSerial = buildSerial
+        self.versionSkewAdvisory = versionSkewAdvisory
+        self.updateAdvisory = updateAdvisory
+        self.lsaRetrainingDegraded = lsaRetrainingDegraded
+    }
+}
+
+public struct AriaV2EstateStatusData: Sendable, Equatable {
+    public let estateID: UUID
+    public let estateName: String
+    public let memoryCount: Int
+    public let factCount: Int
+    public let drains: [AriaV2DrainStatusEntry]
+    /// FDC floor state: `current`, `missing`, or `stale`.
+    /// Computed from `aria.fdc.recalced_data_version` meta against the
+    /// current `FDC.recalculationVersion`. See contract §5.
+    public let fdcRecalculation: String
+    /// Recall-trace depth, or nil when the count could not be read.
+    ///
+    /// Absent is NOT zero, and the distinction is the point: a fabricated
+    /// zero is indistinguishable from a genuinely empty trace table and would
+    /// lie about how deep the reward pipeline actually is.
+    public let recallTraceCount: Int?
+    /// Sync backend state, or `local-only` when no sync engine is wired.
+    /// Always present so a consumer never has to guess from an absent field.
+    public let syncState: String
+    /// Subject debt: how many sensitivity-visible, non-empty memories carry a
+    /// subject, out of how many are eligible for one. The gap is the debt the
+    /// `subject_backfill` lane works through.
+    public let subjectsBearing: Int
+    public let subjectsEligible: Int
+    /// Shared-content reclaim state, present only when a migration record
+    /// exists — an estate that never ran detection leaves the shape unchanged.
+    public let sharedContentMigration: AriaV2SharedContentMigration?
+    /// Version-skew advisory forwarded from the context.  `nil` when no skew
+    /// was detected.  Surfaced as `version_skew` in the structured data.
+    /// Defaults to `nil` so call sites that have no advisory need not change.
+    public let versionSkewAdvisory: String?
+    /// Upstream-release advisory resolved from the provider at call time.
+    /// `nil` when the provider is absent or returns nil.  Surfaced as
+    /// `update_available` in the structured data; omitted entirely when `nil`.
+    /// Defaults to `nil` so call sites without the provider need not change.
+    public let updateAdvisory: String?
+
+    // Explicit init so existing callers can omit `versionSkewAdvisory` and `updateAdvisory`.
+    public init(
+        estateID: UUID, estateName: String, memoryCount: Int, factCount: Int,
+        drains: [AriaV2DrainStatusEntry], fdcRecalculation: String,
+        recallTraceCount: Int?, syncState: String,
+        subjectsBearing: Int, subjectsEligible: Int,
+        sharedContentMigration: AriaV2SharedContentMigration?,
+        versionSkewAdvisory: String? = nil,
+        updateAdvisory: String? = nil
+    ) {
+        self.estateID = estateID
+        self.estateName = estateName
+        self.memoryCount = memoryCount
+        self.factCount = factCount
+        self.drains = drains
+        self.fdcRecalculation = fdcRecalculation
+        self.recallTraceCount = recallTraceCount
+        self.syncState = syncState
+        self.subjectsBearing = subjectsBearing
+        self.subjectsEligible = subjectsEligible
+        self.sharedContentMigration = sharedContentMigration
+        self.versionSkewAdvisory = versionSkewAdvisory
+        self.updateAdvisory = updateAdvisory
+    }
+}
+
+/// Shared-content migration progress, reported by `moot_estate_status` when a
+/// migration record exists.
+public struct AriaV2SharedContentMigration: Sendable, Equatable {
+    public let state: String
+    public let estimatedReclaimableBytes: Int64?
+    public let reclaimedBytes: Int64?
+}
+
+public struct AriaV2EstateMapRoom: Sendable, Equatable {
+    public let name: String
+    public let memoryCount: Int
+}
+
+public struct AriaV2EstateMapWing: Sendable, Equatable {
+    public let name: String
+    public let rooms: [AriaV2EstateMapRoom]
+}
+
+public struct AriaV2EstateMapData: Sendable, Equatable {
+    public let estateID: UUID
+    public let wings: [AriaV2EstateMapWing]
+}
+
+public struct AriaV2DrainStatusEntry: Sendable, Equatable {
+    public let name: String
+    public let state: String
+    public let pending: Int
+    /// Lane detail as the kit reports it (outcome counts, model, missing
+    /// extractor). Omitted when the lane has none.
+    public let detail: String?
+    /// Rows the lane settled by rejecting them. Omitted for lanes without
+    /// that outcome.
+    public let rejected: Int?
+
+    public init(name: String, state: String, pending: Int, detail: String? = nil, rejected: Int? = nil) {
+        self.name = name
+        self.state = state
+        self.pending = pending
+        self.detail = detail
+        self.rejected = rejected
+    }
+}
+
+public struct AriaV2DrainStatusData: Sendable, Equatable {
+    public let drains: [AriaV2DrainStatusEntry]
+}
+
+public struct AriaV2RebuildStatusData: Sendable, Equatable {
+    public let state: String
+    public let matrix: MatrixRefreshStatus?
+    public init(state: String, matrix: MatrixRefreshStatus? = nil) {
+        self.state = state; self.matrix = matrix
+    }
+}
+
+public struct AriaV2TimingReportData: Sendable, Equatable {
+    public let sinceMilliseconds: Int64
+    public let watermarkMilliseconds: Int64
+    public let truncated: Bool
+}
+
+public enum AriaV2EstatePingResult: Sendable, Equatable {
+    case mounted(AriaV2EstatePingData)
+    case refusal(AriaV2OperationalRefusal)
+}
+
+/// Injection seam for the lower estate APIs.  Each method returns an
+/// operation-specific value, so ARIA never reparses a legacy tool response.
+public protocol AriaV2EstateDiagnosticsProvider: Sendable {
+    func ping(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstatePingResult
+    func status(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateStatusData
+    func map(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateMapData
+    func drains(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2DrainStatusData
+    func rebuild(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2RebuildStatusData
+    func timing(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2TimingReportData
+}
+
+/// Direct adapter for the public GeniusLocusKit and NeuronKit read APIs.
+/// It deliberately does not call `ToolDispatcher` or inspect rendered text.
+public struct AriaV2GeniusLocusEstateDiagnosticsProvider: AriaV2EstateDiagnosticsProvider {
+    public static let timingWindowMaxEvents = 262_144
+
+    private let kit: GeniusLocusKit
+    private let handle: EstateHandle
+
+    public init(kit: GeniusLocusKit, handle: EstateHandle) {
+        self.kit = kit
+        self.handle = handle
+    }
+
+    public func ping(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstatePingResult {
+        try validate(context)
+        // Evaluate the upstream-release provider here (async, orientation-only).
+        // Not evaluated for other operations — the host rate-limits its network
+        // probe and this is the sole call point for the two orientation tools.
+        let updateAdvisory = await context.updateAdvisoryProvider?()
+        switch await kit.mountState(for: handle) {
+        case .mounted:
+            // The LSA retrain backstop is a hardcoded absurd size; an estate
+            // that reaches it says so on every ping (Bob, 2026-09-16).
+            let rows = try await kit.countDrawerRows(in: handle)
+            let backstop = GeniusLocusKit.lsaRetrainingDocumentBackstop
+            let degraded = rows >= backstop
+                ? "LSA retraining DEGRADED due to size: \(rows) drawers reach the \(backstop) document backstop; the dense basis no longer retrains"
+                : nil
+            return .mounted(AriaV2EstatePingData(
+                estateID: handle.estateUUID,
+                estateName: handle.estateName,
+                state: "mounted",
+                buildSerial: context.buildSerial,
+                versionSkewAdvisory: context.versionSkewAdvisory,
+                updateAdvisory: updateAdvisory,
+                lsaRetrainingDegraded: degraded))
+        case .quiesced, .draining:
+            return .refusal(.init(
+                code: "estate_unavailable",
+                message: "The selected estate is quiesced and not accepting new work.",
+                retryable: false))
+        case .unmounted, .none:
+            return .refusal(.init(
+                code: "estate_unavailable",
+                message: "The selected estate is not mounted; re-open or re-provision it.",
+                retryable: true))
+        }
+    }
+
+    public func status(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateStatusData {
+        try validate(context)
+        // Evaluate the upstream-release provider here (async, orientation-only).
+        // Not evaluated for other operations — identical rationale as ping above.
+        let updateAdvisory = await context.updateAdvisoryProvider?()
+        let drawers = try await kit.allDrawers(in: handle)
+        let visible = drawers.filter { $0.tombstonedAt == nil && $0.adjectiveSensitivity.isBulkExportable }
+        let active = visible.filter {
+            let stateRaw = UInt8($0.adjectiveBitmap & 0x3F)
+            return RowState.cluster(ofRawState: stateRaw) == .some(.a)
+        }
+        let facts = try await kit.recallKGFacts(handle)
+        let drains = try await typedDrains()
+        // FDC recalculation state: compare the stored floor meta key against
+        // the current recalculation version. Reuses the same computation as
+        // the retired v1 status renderer. See contract §5.
+        let fdcFloor = try await kit.meta(in: handle, key: AriaV2GeniusLocusDataMobilityAuthority.fdcRecalcedDataVersionMetaKey)
+        let fdcRecalculation: String
+        if fdcFloor == FDC.recalculationVersion {
+            fdcRecalculation = "current"
+        } else if fdcFloor == nil {
+            fdcRecalculation = "missing"
+        } else {
+            fdcRecalculation = "stale"
+        }
+        // Every one of these is best-effort: a diagnostics read must not fail
+        // because one of its fields could not be gathered.
+        let recallTraceCount = try? await kit.countRecallTraces(handle)
+        let syncState = (try? await kit.syncStateToken(for: handle)) ?? "local-only"
+        // Subject debt over the sensitivity-visible set. Empty content is not
+        // eligible for a subject, so it is excluded from both sides rather
+        // than counted as permanently missing.
+        let subjectEligible = visible.filter { !$0.content.isEmpty }
+        let subjectBearing = subjectEligible.filter { $0.subject != nil }
+        var migration: AriaV2SharedContentMigration?
+        if let reclaim = try? await kit.sharedContentReclaimStatus(handle: handle),
+           let state = reclaim.state {
+            migration = AriaV2SharedContentMigration(
+                state: state.rawValue,
+                estimatedReclaimableBytes: reclaim.estimatedReclaimableBytes.map { Int64($0) },
+                reclaimedBytes: reclaim.reclaimedBytes.map { Int64($0) })
+        }
+        return AriaV2EstateStatusData(
+            estateID: handle.estateUUID,
+            estateName: handle.estateName,
+            memoryCount: active.count,
+            factCount: facts.count,
+            drains: drains,
+            fdcRecalculation: fdcRecalculation,
+            recallTraceCount: recallTraceCount,
+            syncState: syncState,
+            subjectsBearing: subjectBearing.count,
+            subjectsEligible: subjectEligible.count,
+            sharedContentMigration: migration,
+            versionSkewAdvisory: context.versionSkewAdvisory,
+            updateAdvisory: updateAdvisory)
+    }
+
+    public func map(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2EstateMapData {
+        try validate(context)
+        let drawers = try await kit.allDrawers(in: handle).filter {
+            $0.tombstonedAt == nil && $0.adjectiveSensitivity.isBulkExportable
+        }
+        let names = try await kit.resolveNodeNames(handle, parentNodeIds: drawers.map(\.parentNodeId))
+        var counts: [String: [String: Int]] = [:]
+        for drawer in drawers {
+            let location = names[drawer.parentNodeId]
+            let wing = location?.wing ?? ""
+            let room = location?.room ?? ""
+            counts[wing, default: [:]][room, default: 0] += 1
+        }
+        let wings = counts.keys.sorted().map { wing in
+            AriaV2EstateMapWing(
+                name: wing,
+                rooms: (counts[wing] ?? [:]).keys.sorted().map { room in
+                    AriaV2EstateMapRoom(name: room, memoryCount: counts[wing]?[room] ?? 0)
+                })
+        }
+        return AriaV2EstateMapData(estateID: handle.estateUUID, wings: wings)
+    }
+
+    public func drains(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2DrainStatusData {
+        try validate(context)
+        return AriaV2DrainStatusData(drains: try await typedDrains())
+    }
+
+    public func rebuild(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2RebuildStatusData {
+        try validate(context)
+        let matrix = try await kit.matrixRefreshStatus(handle)
+        let active = await kit.derivedRebuildActive(for: handle)
+        return AriaV2RebuildStatusData(state: active || matrix.phase == .running || matrix.phase == .queued ? "running" : "idle", matrix: matrix)
+    }
+
+    public func timing(context: AriaV2EstateDiagnosticsContext) async throws -> AriaV2TimingReportData {
+        try validate(context)
+        let (events, truncated) = try await timingEvents()
+        let derivation = deriveTimings(events: events, sinceExclusiveMs: 0)
+        return AriaV2TimingReportData(
+            sinceMilliseconds: 0,
+            watermarkMilliseconds: derivation.watermarkMs,
+            truncated: truncated)
+    }
+
+    private func validate(_ context: AriaV2EstateDiagnosticsContext) throws {
+        guard context.estateID == handle.estateUUID else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "The selected estate is not available to this diagnostics provider.")
+        }
+    }
+
+    private func timingEvents() async throws -> ([TimingAuditEvent], Bool) {
+        var events: [TimingAuditEvent] = []
+        var cursor: HLC?
+        var truncated = false
+        let pageSize = 4_096
+        while events.count < Self.timingWindowMaxEvents {
+            let page = try await kit.auditEvents(handle, after: cursor, limit: pageSize)
+            let remaining = Self.timingWindowMaxEvents - events.count
+            events.append(contentsOf: page.prefix(remaining).map {
+                TimingAuditEvent(
+                    verb: $0.verb,
+                    physicalTimeMs: $0.hlc.physicalTime,
+                    rowID: $0.rowId,
+                    reason: $0.reason)
+            })
+            if page.count > remaining {
+                truncated = true
+                break
+            }
+            guard page.count == pageSize, let last = page.last else { break }
+            cursor = last.hlc
+        }
+        if events.count == Self.timingWindowMaxEvents { truncated = true }
+        return (events, truncated)
+    }
+
+    private func typedDrains() async throws -> [AriaV2DrainStatusEntry] {
+        let statuses = try await kit.drainStatuses(handle)
+        return statuses.map {
+            AriaV2DrainStatusEntry(
+                name: $0.name,
+                state: $0.isDraining ? "draining" : "idle",
+                pending: $0.pending,
+                detail: $0.detail,
+                rejected: $0.rejected)
+        }
+    }
+}
+
+/// Strict, typed v2 estate diagnostics.  The selected registry/transport
+/// owner wires this service later; this file owns no catalog or dispatch path.
+public struct AriaV2EstateDiagnostics: Sendable {
+    private let provider: any AriaV2EstateDiagnosticsProvider
+    private let context: AriaV2EstateDiagnosticsContext
+
+    public init(
+        provider: any AriaV2EstateDiagnosticsProvider,
+        context: AriaV2EstateDiagnosticsContext
+    ) {
+        self.provider = provider
+        self.context = context
+    }
+
+    public func ping(arguments: JSONValue) async throws -> JSONValue {
+        let request = try AriaV2EstateDiagnosticsRequest(arguments: arguments)
+        try validate(request)
+        if let refusal = await context.accessGate.admit(.estatePing, context: context) {
+            return AriaV2Envelope.refusal(tool: AriaV2EstateDiagnosticOperation.estatePing.rawValue, error: refusal)
+        }
+        switch try await provider.ping(context: context) {
+        case .mounted(let data):
+            return success(.estatePing, data: data.json)
+        case .refusal(let refusal):
+            return AriaV2Envelope.refusal(tool: AriaV2EstateDiagnosticOperation.estatePing.rawValue, error: refusal)
+        }
+    }
+
+    public func status(arguments: JSONValue) async throws -> JSONValue {
+        try await execute(.estateStatus, arguments: arguments) {
+            try await self.provider.status(context: self.context).json
+        }
+    }
+
+    public func map(arguments: JSONValue) async throws -> JSONValue {
+        try await execute(.estateMap, arguments: arguments) {
+            try await self.provider.map(context: self.context).json
+        }
+    }
+
+    public func drainStatus(arguments: JSONValue) async throws -> JSONValue {
+        try await execute(.drainStatus, arguments: arguments) {
+            try await self.provider.drains(context: self.context).json
+        }
+    }
+
+    public func rebuildStatus(arguments: JSONValue) async throws -> JSONValue {
+        try await execute(.rebuildStatus, arguments: arguments) {
+            try await self.provider.rebuild(context: self.context).json
+        }
+    }
+
+    public func timingReport(arguments: JSONValue) async throws -> JSONValue {
+        try await execute(.timingReport, arguments: arguments) {
+            try await self.provider.timing(context: self.context).json
+        }
+    }
+
+    private func execute(
+        _ operation: AriaV2EstateDiagnosticOperation,
+        arguments: JSONValue,
+        body: () async throws -> JSONValue
+    ) async throws -> JSONValue {
+        let request = try AriaV2EstateDiagnosticsRequest(arguments: arguments)
+        try validate(request)
+        if let refusal = await context.accessGate.admit(operation, context: context) {
+            return AriaV2Envelope.refusal(tool: operation.rawValue, error: refusal)
+        }
+        return success(operation, data: try await body())
+    }
+
+    private func validate(_ request: AriaV2EstateDiagnosticsRequest) throws {
+        guard request.estateID == nil || request.estateID == context.estateID else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "The requested estate is not available to this caller.")
+        }
+    }
+
+    private func success(_ operation: AriaV2EstateDiagnosticOperation, data: JSONValue) -> JSONValue {
+        return AriaV2Envelope.success(
+            tool: operation.rawValue,
+            effect: .read,
+            data: data,
+            meta: [
+                "completeness": .string("incomplete"),
+                "server_identity": .string(context.serverIdentity),
+                "session_id": .string(context.sessionID),
+                "observed_at": .string(Self.timestamp(context.now())),
+            ],
+            compactText: "\(operation.rawValue) completed for estate \(context.estateID.uuidString.lowercased()).")
+    }
+
+    private static func timestamp(_ date: Date) -> String {
+        ISO8601DateFormatter().string(from: date)
+    }
+}
+
+private extension AriaV2EstatePingData {
+    var json: JSONValue {
+        var value: [String: JSONValue] = [
+            "estate_id": .string(estateID.uuidString.lowercased()),
+            "estate_name": .string(estateName),
+            "state": .string(state),
+            "build_serial": .string(buildSerial),
+        ]
+        // Omitted entirely when no skew was detected — never an empty string,
+        // never null.  Clients check for presence; absence means no skew.
+        if let versionSkewAdvisory { value["version_skew"] = .string(versionSkewAdvisory) }
+        // Omitted entirely when the provider is absent or returned nil (up-to-date
+        // or feed unreachable).  Clients check for presence; absence means current.
+        if let updateAdvisory { value["update_available"] = .string(updateAdvisory) }
+        // Omitted entirely under the backstop; presence is the declaration.
+        if let lsaRetrainingDegraded { value["lsa_retraining_degraded"] = .string(lsaRetrainingDegraded) }
+        return .object(value)
+    }
+}
+
+private extension AriaV2EstateStatusData {
+    var json: JSONValue {
+        var value: [String: JSONValue] = [
+            "estate_id": .string(estateID.uuidString.lowercased()),
+            "estate_name": .string(estateName),
+            "memory_count": .integer(Int64(memoryCount)),
+            "fact_count": .integer(Int64(factCount)),
+            "drains": .array(drains.map { $0.json }),
+            "fdc_recalculation": .string(fdcRecalculation),
+            "sync_state": .string(syncState),
+            "subjects_bearing": .integer(Int64(subjectsBearing)),
+            "subjects_eligible": .integer(Int64(subjectsEligible)),
+        ]
+        // Omitted rather than zeroed when the count could not be read: a
+        // fabricated zero would lie about the reward pipeline's depth.
+        if let recallTraceCount { value["recall_trace_count"] = .integer(Int64(recallTraceCount)) }
+        // Present only when a migration record exists, so an estate that never
+        // ran detection keeps the response shape it always had.
+        if let sharedContentMigration { value["shared_content_migration"] = sharedContentMigration.json }
+        // Omitted entirely when no skew was detected — never an empty string,
+        // never null.  Clients check for presence; absence means no skew.
+        if let versionSkewAdvisory { value["version_skew"] = .string(versionSkewAdvisory) }
+        // Omitted entirely when the provider is absent or returned nil.
+        if let updateAdvisory { value["update_available"] = .string(updateAdvisory) }
+        return .object(value)
+    }
+}
+
+private extension AriaV2SharedContentMigration {
+    var json: JSONValue {
+        var value: [String: JSONValue] = ["state": .string(state)]
+        if let estimated = estimatedReclaimableBytes { value["estimated_reclaimable_bytes"] = .integer(estimated) }
+        if let reclaimed = reclaimedBytes { value["reclaimed_bytes"] = .integer(reclaimed) }
+        return .object(value)
+    }
+}
+
+private extension AriaV2EstateMapData {
+    var json: JSONValue {
+        .object([
+            "estate_id": .string(estateID.uuidString.lowercased()),
+            "wings": .array(wings.map { wing in
+                .object([
+                    "name": .string(wing.name),
+                    "rooms": .array(wing.rooms.map {
+                        .object(["name": .string($0.name), "memory_count": .integer(Int64($0.memoryCount))])
+                    }),
+                ])
+            }),
+        ])
+    }
+}
+
+private extension AriaV2DrainStatusData {
+    var json: JSONValue {
+        .object([
+            "drains": .array(drains.map { $0.json }),
+        ])
+    }
+}
+
+private extension AriaV2RebuildStatusData {
+    var json: JSONValue {
+        var values: [String: JSONValue] = ["state": .string(state)]
+        if let matrix {
+            let h = matrix.watermark
+            values["matrix"] = .object([
+                "phase": .string(matrix.phase.rawValue),
+                "generation": matrix.generation.map(JSONValue.string) ?? .null,
+                "watermark": .string("\(h.physicalTime).\(h.logicalCount).\(h.nodeID)"),
+                "reason": matrix.reason.map(JSONValue.string) ?? .null,
+                "migration_phase": .string(matrix.migrationPhase),
+                "reclaimed_bytes": .integer(matrix.reclaimedBytes)
+            ])
+        }
+        return .object(values)
+    }
+}
+
+private extension AriaV2DrainStatusEntry {
+    var json: JSONValue {
+        var value: [String: JSONValue] = [
+            "name": .string(name),
+            "state": .string(state),
+            "pending": .integer(Int64(pending)),
+        ]
+        // Omitted rather than null: absence means the lane has no detail
+        // or no rejected outcome.
+        if let detail { value["detail"] = .string(detail) }
+        if let rejected { value["rejected"] = .integer(Int64(rejected)) }
+        return .object(value)
+    }
+}
+
+private extension AriaV2TimingReportData {
+    var json: JSONValue {
+        .object([
+            "since_ms": .integer(sinceMilliseconds),
+            "watermark_ms": .integer(watermarkMilliseconds),
+            "truncated": .bool(truncated),
+        ])
+    }
+}

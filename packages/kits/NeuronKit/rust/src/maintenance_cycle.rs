@@ -34,7 +34,7 @@ use crate::maintenance_decision::{self, AgedRow, AuditVerdict, Category, DriftRo
 
 /// One drawer's node-tree data for node-tree integrity invariant verification. The
 /// adapter populates these from the same active-drawer scan it uses for
-/// decay/forbidden checks; the daemon verifies I-NT-3 (non-empty
+/// the decay check; the daemon verifies I-NT-3 (non-empty
 /// parent_node_id) and sibling display-name consistency.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NodeInvariantRow {
@@ -72,8 +72,6 @@ pub struct MaintenanceCycleReport {
     pub proposals_emitted: Vec<ProposeFrameOut>,
     pub decay_candidates: usize,
     pub tombstone_candidates: usize,
-    pub forbidden_combinations: usize,
-    pub fingerprint_drifts: usize,
     pub by_reference_drifts: usize,
     pub suppressed_duplicates: usize,
     pub diary_entry: MaintenanceDiaryEntry,
@@ -118,23 +116,19 @@ pub struct MaintenancePolicy {
     /// Grace period past which a tombstoned drawer is an expunge candidate,
     /// in seconds (spec default 604_800 / 7 days).
     pub tombstone_grace_seconds: f64,
-    /// Per-room/wing fingerprint Hamming-distance drift fraction past which
-    /// a fingerprint-drift proposal is emitted (spec default 0.25).
-    pub fingerprint_drift_threshold: f32,
     /// LearnedReference source-drift threshold (spec default 0.25).
     pub by_reference_drift_threshold: f32,
 }
 
 impl Default for MaintenancePolicy {
     /// Spec defaults (NEURONKIT_SPEC § 3.2):
-    /// 300_000 / 300_000 / 30d / 7d / 0.25 / 0.25.
+    /// 300_000 / 300_000 / 30d / 7d / 0.25.
     fn default() -> Self {
         Self {
             tick_interval_ms: 300_000,
             audit_check_interval_ms: 300_000,
             decay_window_seconds: 2_592_000.0,
             tombstone_grace_seconds: 604_800.0,
-            fingerprint_drift_threshold: 0.25,
             by_reference_drift_threshold: 0.25,
         }
     }
@@ -183,6 +177,16 @@ pub struct MaintenanceDaemonState {
     pub last_audit_check_epoch_secs: Option<f64>,
     pub proposed_keys: Vec<String>,
     pub cycle_count: i64,
+    /// When the daily timing-derivation health duty last ran (A7), epoch seconds.
+    /// `None` = never run. Parity of Swift `lastPerformanceHealthAt`.
+    /// `#[serde(default)]` keeps states serialized before A7 loading cleanly.
+    #[serde(default)]
+    pub last_performance_health_epoch_secs: Option<f64>,
+    /// HLC physical-time watermark (epoch ms) for the audit-log page cursor.
+    /// 0 = start from the beginning of the log (first run or reset).
+    /// Parity of Swift `performanceHealthWatermarkMs`.
+    #[serde(default)]
+    pub performance_health_watermark_ms: i64,
 }
 
 /// In-memory `MaintenancePolicyStore` for tests and for hosts that do not
@@ -237,14 +241,10 @@ pub struct QidPendingRow {
 pub struct MaintenanceScan {
     /// The audit verdict when the chain was checked this cycle, else `None`.
     pub audit: Option<AuditVerdict>,
-    /// Active drawers failing invariant I-3 (secret AND public).
-    pub forbidden_drawer_ids: Vec<String>,
     /// `(id, age_seconds)` for active drawers (decay scan).
     pub aged_active: Vec<AgedRow>,
     /// `(id, tombstone_age_seconds)` for tombstoned drawers.
     pub aged_tombstoned: Vec<AgedRow>,
-    /// `(scope_key, drift_fraction)` fingerprint observations.
-    pub fingerprint_drift: Vec<DriftRow>,
     /// `(reference_id, source_drift_fraction)` learned-reference observations.
     pub reference_drift: Vec<DriftRow>,
     /// Active drawers with enrichment-status `qid_pending` (provenance bits
@@ -286,8 +286,41 @@ pub trait MaintenanceProposalSink {
     );
 }
 
+/// Seam for the maintenance daemon's daily timing-derivation performance-health
+/// duty (NEURONKIT_SPEC § 12.6.1 performance-health extension, A7). Rust parity
+/// of the Swift `PerformanceHealthDuty` protocol.
+///
+/// Injected into `MaintenanceDaemon` via `with_duty()`. The daemon calls
+/// `run_health_duty(watermark_ms, now_epoch_secs)` once per 24 h (gated on
+/// `last_performance_health_epoch_secs`). Each call pages the estate audit log
+/// from the watermark, derives INGEST and CYCLE timing samples, and emits them
+/// via the existing Intellectus path. Returns the new watermark (HLC physical-time
+/// ms of the last event consumed) or an error.
+///
+/// Failures are caught and logged by the daemon — they do not abort the cycle.
+/// `None` (`with_duty` never called) safely disables the duty.
+/// `Send` is required: the daemon travels into the governor's worker thread
+/// (see aria-mcp autonomic_governor_tests), so any duty implementation must
+/// be movable across threads with it.
+pub trait PerformanceHealthDuty: Send {
+    /// Run the daily timing-derivation health duty.
+    ///
+    /// - `watermark_ms`: HLC physical-time watermark (epoch ms). 0 = start of log.
+    /// - `now_epoch_secs`: deterministic timestamp from the caller.
+    /// - Returns: new watermark (physical-time ms of the last event consumed).
+    fn run_health_duty(
+        &mut self,
+        watermark_ms: i64,
+        now_epoch_secs: f64,
+    ) -> Result<i64, Box<dyn std::error::Error>>;
+}
+
 const AGENT_NAME: &str = "maintenance-daemon";
 const DIARY_WING: &str = "wing_maintenance-daemon";
+
+/// 24 h cadence for the daily health duty (A7), matching the DreamingDaemon's
+/// THETA cadence constant in Swift (`healthDutyCadenceSecs = 86_400`).
+const HEALTH_DUTY_CADENCE_SECS: f64 = 86_400.0;
 
 /// Maximum number of qid-pending drawers the daemon picks up in a single
 /// retry batch. Mirrors `QID_RETRY_SCAN_CAP` in
@@ -297,15 +330,13 @@ const DIARY_WING: &str = "wing_maintenance-daemon";
 const QID_RETRY_SCAN_CAP: usize = 64;
 
 /// The proposal-kind tag for a decision category, mirroring the Swift
-/// actor's `ProposalKind` choices (audit/fingerprint via the `.other`
-/// escape hatch; decay+tombstone both `mutateCandidate`).
+/// actor's `ProposalKind` choices (audit via the `.other` escape hatch;
+/// decay+tombstone both `mutateCandidate`).
 fn kind_tag(category: Category) -> &'static str {
     match category {
         Category::AuditIntegrity => "other:audit_integrity",
-        Category::DisciplineViolation => "disciplineViolation",
         Category::Decay => "mutateCandidate",
         Category::Tombstone => "mutateCandidate",
-        Category::FingerprintDrift => "other:fingerprint_drift",
         Category::ByReferenceDrift => "byReferenceDrift",
     }
 }
@@ -327,6 +358,44 @@ pub struct MaintenanceDaemon {
     /// so a slow full-chain verify need not run every cycle (§ 3.5). Mirrors
     /// Swift `lastAuditCheckAt`.
     last_audit_check_epoch_secs: Option<f64>,
+    /// Optional daily timing-derivation health duty (A7). Fires once per 24 h
+    /// (`HEALTH_DUTY_CADENCE_SECS`). `None` safely disables the duty (test
+    /// daemons, estates without timing markers). Mirrors Swift
+    /// `performanceHealthDuty: (any PerformanceHealthDuty)?`.
+    performance_health_duty: Option<Box<dyn PerformanceHealthDuty>>,
+    /// When the health duty last ran, epoch seconds. `None` = never run.
+    /// Mirrors Swift `lastPerformanceHealthAt`. Persisted in daemon state.
+    last_performance_health_epoch_secs: Option<f64>,
+    /// HLC physical-time watermark (epoch ms) for audit-log paging.
+    /// 0 = start from the beginning. Mirrors Swift `performanceHealthWatermarkMs`.
+    performance_health_watermark_ms: i64,
+}
+
+/// Which scan categories one maintenance cycle runs. The three standing
+/// signals (`maintenance-daemon`, `decay-sweep`, `by-reference-validity`)
+/// each drive one category on their own cadence; the audit-chain monitor,
+/// the QID-pending retry and the diary entry run on every cycle regardless.
+/// An unselected category is handed an empty input to the decision core, so
+/// it neither counts nor emits. Swift twin: `MaintenanceCategories` (OptionSet).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MaintenanceCategories {
+    /// Tombstoned drawers past the expunge grace window.
+    pub tombstone: bool,
+    /// Active drawers past the decay window.
+    pub decay: bool,
+    /// LearnedReference rows whose source drift is at or above threshold.
+    pub by_reference: bool,
+}
+
+impl MaintenanceCategories {
+    /// Every category — what `pump` and `run_cycle` run.
+    pub const ALL: Self = Self { tombstone: true, decay: true, by_reference: true };
+    /// Only the tombstone category (the `maintenance-daemon` signal).
+    pub const TOMBSTONE: Self = Self { tombstone: true, decay: false, by_reference: false };
+    /// Only the decay category (the `decay-sweep` signal).
+    pub const DECAY: Self = Self { tombstone: false, decay: true, by_reference: false };
+    /// Only the by-reference category (the `by-reference-validity` signal).
+    pub const BY_REFERENCE: Self = Self { tombstone: false, decay: false, by_reference: true };
 }
 
 impl MaintenanceDaemon {
@@ -337,7 +406,19 @@ impl MaintenanceDaemon {
             cycle_count: 0,
             last_fire_epoch_secs: None,
             last_audit_check_epoch_secs: None,
+            performance_health_duty: None,
+            last_performance_health_epoch_secs: None,
+            performance_health_watermark_ms: 0,
         }
+    }
+
+    /// Attach a `PerformanceHealthDuty` that fires once per 24 h (A7).
+    /// The production adapter (`EstatePerformanceHealthDuty`) is the expected value;
+    /// nil (default from `new`) safely disables the duty in test daemons.
+    /// Mirrors Swift `MaintenanceDaemon.init(... performanceHealthDuty:)`.
+    pub fn with_duty(mut self, duty: Box<dyn PerformanceHealthDuty>) -> Self {
+        self.performance_health_duty = Some(duty);
+        self
     }
 
     /// Export the daemon's across-cycle state for persistence.
@@ -349,17 +430,22 @@ impl MaintenanceDaemon {
             last_audit_check_epoch_secs: self.last_audit_check_epoch_secs,
             proposed_keys: self.proposed_keys.iter().cloned().collect(),
             cycle_count: self.cycle_count,
+            last_performance_health_epoch_secs: self.last_performance_health_epoch_secs,
+            performance_health_watermark_ms: self.performance_health_watermark_ms,
         }
     }
 
     /// Restore the daemon's across-cycle state from persistence.
     /// Called once at governor construction so a restart resumes the prior run's
-    /// idempotency/cycle memory.
+    /// idempotency/cycle memory. A7 fields default to None/0 when absent from
+    /// states serialized before A7 landed (`#[serde(default)]` on the fields).
     pub fn restore_state(&mut self, state: MaintenanceDaemonState) {
         self.last_fire_epoch_secs = state.last_fire_epoch_secs;
         self.last_audit_check_epoch_secs = state.last_audit_check_epoch_secs;
         self.proposed_keys = state.proposed_keys.into_iter().collect();
         self.cycle_count = state.cycle_count;
+        self.last_performance_health_epoch_secs = state.last_performance_health_epoch_secs;
+        self.performance_health_watermark_ms = state.performance_health_watermark_ms;
     }
 
     /// Interval-gated pump — the entry point for the resident loop.
@@ -423,12 +509,8 @@ impl MaintenanceDaemon {
         }
     }
 
-    /// Run one maintenance cycle (steps 0-6) against the seams. Mirrors
-    /// `MaintenanceDaemon.runCycle`.
-    ///
-    /// DETERMINISM: `now_epoch_secs` is the injected timestamp the caller
-    /// supplies. Neither dreaming nor maintenance reads the system clock
-    /// internally; the clock is owned by the resident pump loop.
+    /// Run one maintenance cycle over every scan category. Mirrors Swift
+    /// `MaintenanceDaemon.triggerMaintenanceCycle(now:)`.
     pub fn run_cycle<R, S>(
         &mut self,
         now_epoch_secs: f64,
@@ -439,7 +521,39 @@ impl MaintenanceDaemon {
         R: MaintenanceSubstrateReader,
         S: MaintenanceProposalSink,
     {
+        self.run_cycle_scoped(now_epoch_secs, reader, sink, MaintenanceCategories::ALL)
+    }
+
+    /// Run one maintenance cycle (steps 0-6) against the seams over the
+    /// selected scan categories only. The standing signals call this with
+    /// one category each so every category runs on its own signal cadence;
+    /// an unselected category is handed an empty input to the decision core.
+    /// Mirrors Swift `MaintenanceDaemon.triggerMaintenanceCycle(now:categories:)`.
+    ///
+    /// DETERMINISM: `now_epoch_secs` is the injected timestamp the caller
+    /// supplies. Neither dreaming nor maintenance reads the system clock
+    /// internally; the clock is owned by the caller.
+    pub fn run_cycle_scoped<R, S>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        sink: &mut S,
+        categories: MaintenanceCategories,
+    ) -> MaintenanceCycleReport
+    where
+        R: MaintenanceSubstrateReader,
+        S: MaintenanceProposalSink,
+    {
+        // The reader seam returns one snapshot for every category; the
+        // per-category gate below is what keeps an unselected category out
+        // of the core (Swift reads each seam lazily, same observable result).
         let scan = reader.scan();
+        let aged_active: &[maintenance_decision::AgedRow] =
+            if categories.decay { &scan.aged_active } else { &[] };
+        let aged_tombstoned: &[maintenance_decision::AgedRow] =
+            if categories.tombstone { &scan.aged_tombstoned } else { &[] };
+        let reference_drift: &[maintenance_decision::DriftRow] =
+            if categories.by_reference { &scan.reference_drift } else { &[] };
 
         // ── Step 0: audit-chain integrity monitor cadence (§ 3.5) ──────────
         // The audit verdict is consumed only when DUE, tracked independently of
@@ -468,17 +582,14 @@ impl MaintenanceDaemon {
         }
         let audit_checked = audit_due;
 
-        // Delegate every decision to the pure core (steps 0-5).
+        // Delegate every decision to the pure core (steps 0-3).
         let outcome = maintenance_decision::decide(&maintenance_decision::Inputs {
             audit: audit_input,
-            forbidden_drawer_ids: &scan.forbidden_drawer_ids,
-            aged_active: &scan.aged_active,
+            aged_active,
             decay_window_seconds: self.policy.decay_window_seconds,
-            aged_tombstoned: &scan.aged_tombstoned,
+            aged_tombstoned,
             tombstone_grace_seconds: self.policy.tombstone_grace_seconds,
-            fingerprint_drift: &scan.fingerprint_drift,
-            fingerprint_drift_threshold: self.policy.fingerprint_drift_threshold,
-            reference_drift: &scan.reference_drift,
+            reference_drift,
             by_reference_drift_threshold: self.policy.by_reference_drift_threshold,
             already_proposed_keys: &self.proposed_keys,
         });
@@ -675,16 +786,14 @@ drawer {} (mdcc: {}); enrichment proposal filed for human/agent Q-ID assignment"
         let entry = MaintenanceDiaryEntry {
             agent_name: AGENT_NAME.to_string(),
             entry: format!(
-                "maintenance cycle {}: audit-checked {}, forbidden {}, decay {}, \
-tombstone {}, fingerprint-drift {}, byReference-drift {}, proposed {}, suppressed {}, \
+                "maintenance cycle {}: audit-checked {}, decay {}, tombstone {}, \
+byReference-drift {}, proposed {}, suppressed {}, \
 qid-retried {}, qid-resolved {}, qid-proposed {}, qid-pending {}, \
 node-invariant-violations {}",
                 self.cycle_count,
                 audit_checked,
-                outcome.forbidden_combinations,
                 outcome.decay_candidates,
                 outcome.tombstone_candidates,
-                outcome.fingerprint_drifts,
                 outcome.by_reference_drifts,
                 proposals_emitted.len(),
                 outcome.suppressed_duplicates,
@@ -700,13 +809,45 @@ node-invariant-violations {}",
         };
         sink.record_cycle_diary(entry.clone());
 
+        // ── Step 6.5: daily timing-derivation health duty (A7) ───────────
+        // Fires once per 24 h (`HEALTH_DUTY_CADENCE_SECS`). Pages audit events
+        // from the persisted watermark via `PerformanceHealthDuty::run_health_duty`,
+        // derives INGEST and CYCLE timing samples, and emits them via Intellectus
+        // into the existing PersistenceStatsSink write path.
+        //
+        // Best-effort: a failure is caught and discarded — the proposal + diary
+        // functions have already succeeded by this point. The watermark and
+        // last-run timestamp are NOT advanced on failure so the next due cycle
+        // retries the same window.
+        //
+        // Uses take/replace to avoid borrow conflicts between the boxed duty and
+        // the other `self` fields the duty call passes as arguments.
+        let health_due = match self.last_performance_health_epoch_secs {
+            None => true, // never run → always due
+            Some(last) => (now_epoch_secs - last) >= HEALTH_DUTY_CADENCE_SECS,
+        };
+        if health_due {
+            if let Some(mut duty) = self.performance_health_duty.take() {
+                match duty.run_health_duty(self.performance_health_watermark_ms, now_epoch_secs) {
+                    Ok(new_watermark) => {
+                        self.performance_health_watermark_ms = new_watermark;
+                        self.last_performance_health_epoch_secs = Some(now_epoch_secs);
+                    }
+                    Err(_) => {
+                        // Best-effort: ignore — the watermark is not advanced so the
+                        // next due cycle retries the same window. Mirrors the Swift
+                        // daemon's catch block which logs and discards the error.
+                    }
+                }
+                self.performance_health_duty = Some(duty);
+            }
+        }
+
         MaintenanceCycleReport {
             audit_checked,
             proposals_emitted,
             decay_candidates: outcome.decay_candidates,
             tombstone_candidates: outcome.tombstone_candidates,
-            forbidden_combinations: outcome.forbidden_combinations,
-            fingerprint_drifts: outcome.fingerprint_drifts,
             by_reference_drifts: outcome.by_reference_drifts,
             suppressed_duplicates: outcome.suppressed_duplicates,
             diary_entry: entry,
@@ -776,30 +917,26 @@ mod tests {
                 first_broken_at_millis: None,
                 rejected_entry_count: 0,
             }),
-            forbidden_drawer_ids: vec!["d-forbidden".to_string()],
-            aged_active: vec![aged("d-old", 3_000_000.0), aged("d-forbidden", 1.0)],
+            aged_active: vec![aged("d-old", 3_000_000.0), aged("d-new", 1.0)],
             aged_tombstoned: vec![aged("d-tomb", 700_000.0)],
-            fingerprint_drift: vec![drift("wing_a/room_b", 0.5)],
             reference_drift: vec![drift("ref-1", 0.5)],
             qid_pending_drawers: vec![],
             node_invariant_rows: vec![],
         }
     }
 
-    // MC-1: all five scan categories emit (valid chain adds no audit
+    // MC-1: all three scan categories emit (valid chain adds no audit
     // proposal); the report counts and the single diary entry are assembled.
     #[test]
-    fn mc1_all_five_categories_emit_and_report() {
+    fn mc1_all_three_categories_emit_and_report() {
         let reader = FakeReader { scan: full_scan() };
         let mut sink = RecordingSink::default();
         let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
         let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
 
-        assert_eq!(report.proposals_emitted.len(), 5);
-        assert_eq!(report.forbidden_combinations, 1);
+        assert_eq!(report.proposals_emitted.len(), 3);
         assert_eq!(report.decay_candidates, 1);
         assert_eq!(report.tombstone_candidates, 1);
-        assert_eq!(report.fingerprint_drifts, 1);
         assert_eq!(report.by_reference_drifts, 1);
         assert!(report.audit_checked);
         // decay + tombstone both map to the mutateCandidate kind.
@@ -813,8 +950,8 @@ mod tests {
         assert_eq!(sink.diaries[0].wing, "wing_maintenance-daemon");
         assert_eq!(
             sink.diaries[0].entry,
-            "maintenance cycle 1: audit-checked true, forbidden 1, decay 1, \
-tombstone 1, fingerprint-drift 1, byReference-drift 1, proposed 5, suppressed 0, \
+            "maintenance cycle 1: audit-checked true, decay 1, tombstone 1, \
+byReference-drift 1, proposed 3, suppressed 0, \
 qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0, \
 node-invariant-violations 0"
         );
@@ -929,7 +1066,7 @@ node-invariant-violations 0"
     }
 
     // MC-3: a second cycle over unchanged state proposes nothing new — all
-    // five suppressed by the B-4 idempotency memory; counts still report
+    // three suppressed by the B-4 idempotency memory; counts still report
     // the crossers; the diary's cycle index advances. (Swift B4.)
     #[test]
     fn mc3_second_cycle_suppresses_all() {
@@ -938,14 +1075,14 @@ node-invariant-violations 0"
         let mut d = MaintenanceDaemon::new(MaintenancePolicy::default());
 
         let first = d.run_cycle(1_000_000.0, &reader, &mut sink);
-        assert_eq!(first.proposals_emitted.len(), 5);
+        assert_eq!(first.proposals_emitted.len(), 3);
 
         let second = d.run_cycle(1_300_000.0, &reader, &mut sink);
         assert_eq!(second.proposals_emitted.len(), 0);
-        assert_eq!(second.suppressed_duplicates, 5);
+        assert_eq!(second.suppressed_duplicates, 3);
         assert_eq!(second.decay_candidates, 1, "counts still report crossers");
         assert!(sink.diaries[1].entry.starts_with("maintenance cycle 2:"));
-        assert!(sink.diaries[1].entry.contains("proposed 0, suppressed 5"));
+        assert!(sink.diaries[1].entry.contains("proposed 0, suppressed 3"));
         assert!(sink.diaries[1].entry.contains("qid-retried 0, qid-resolved 0, qid-proposed 0, qid-pending 0, node-invariant-violations 0"));
     }
 
@@ -960,7 +1097,6 @@ node-invariant-violations 0"
             audit_check_interval_ms: 120_000,
             decay_window_seconds: 1_296_000.0, // 15 days
             tombstone_grace_seconds: 302_400.0,  // 3.5 days
-            fingerprint_drift_threshold: 0.15,
             by_reference_drift_threshold: 0.10,
         };
         store.save_policy(custom);
@@ -1379,5 +1515,157 @@ node-invariant-violations 0"
         let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
         // 1 empty parent + 1 inconsistent display = 2 violations.
         assert_eq!(report.node_invariant_violations, 2);
+    }
+
+    // ─── A7: performance-health duty (Rust parity) ────────────────────────
+
+    /// Fake duty that records call count and the watermark it received.
+    struct FakeHealthDuty {
+        call_count: usize,
+        received_watermark_ms: i64,
+        return_watermark_ms: i64,
+    }
+    impl FakeHealthDuty {
+        fn new(return_watermark_ms: i64) -> Self {
+            Self {
+                call_count: 0,
+                received_watermark_ms: 0,
+                return_watermark_ms,
+            }
+        }
+    }
+    impl PerformanceHealthDuty for FakeHealthDuty {
+        fn run_health_duty(
+            &mut self,
+            watermark_ms: i64,
+            _now_epoch_secs: f64,
+        ) -> Result<i64, Box<dyn std::error::Error>> {
+            self.call_count += 1;
+            self.received_watermark_ms = watermark_ms;
+            Ok(self.return_watermark_ms)
+        }
+    }
+
+    /// Fake duty that always fails.
+    struct FakeFailingHealthDuty {
+        call_count: usize,
+    }
+    impl PerformanceHealthDuty for FakeFailingHealthDuty {
+        fn run_health_duty(
+            &mut self,
+            _watermark_ms: i64,
+            _now_epoch_secs: f64,
+        ) -> Result<i64, Box<dyn std::error::Error>> {
+            self.call_count += 1;
+            Err("fake duty error".into())
+        }
+    }
+
+    // A7-R1: duty fires on the first cycle (last_performance_health_epoch_secs
+    // is None → always due). Diary entry still written. Mirrors Swift
+    // `a7HealthDutyFiresOnFirstCycle`.
+    #[test]
+    fn a7_r1_duty_fires_on_first_cycle() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        // Box the fake duty and pass it via with_duty().
+        let duty_raw = Box::new(FakeHealthDuty::new(1_000_000));
+        // SAFETY: we'll recover duty_raw after run_cycle via daemon_state inspection.
+        // Instead, use a shared counter via pointer aliasing is not needed here —
+        // the take/replace round-trip returns the duty. We cannot access the duty
+        // directly after run_cycle because it's owned by the daemon. So we verify
+        // via indirect signals: watermark advanced, diary written.
+        //
+        // To verify call_count without unsafe, we observe the daemon's new
+        // watermark (returned via daemon_state) and check that it matches
+        // return_watermark_ms = 1_000_000.
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default())
+            .with_duty(duty_raw);
+
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        // Diary entry was written (the cycle ran to completion).
+        assert_eq!(sink.diaries.len(), 1, "diary must be written even when duty runs");
+        // The daemon advanced last_performance_health_epoch_secs to now.
+        let state = d.daemon_state();
+        assert_eq!(
+            state.last_performance_health_epoch_secs,
+            Some(1_000_000.0),
+            "last_performance_health_epoch_secs must be set after first duty run"
+        );
+        // The watermark advanced to the return value from FakeHealthDuty (1_000_000).
+        assert_eq!(
+            state.performance_health_watermark_ms, 1_000_000,
+            "watermark must advance to the duty's returned value"
+        );
+        // Cycle completed normally — report has at least one diary entry.
+        let _ = report;
+    }
+
+    // A7-R2: duty is NOT called when < 24 h have elapsed. Two cycles: first
+    // fires duty, second (12 h later) does not. Mirrors Swift
+    // `a7HealthDutySkippedWhenNotDue`.
+    #[test]
+    fn a7_r2_duty_skipped_when_not_due() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let duty_raw = Box::new(FakeHealthDuty::new(1_000_000));
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default())
+            .with_duty(duty_raw);
+
+        // First cycle at t=0 s: duty fires.
+        let _ = d.run_cycle(0.0, &reader, &mut sink);
+        let state_after_first = d.daemon_state();
+        assert_eq!(
+            state_after_first.last_performance_health_epoch_secs,
+            Some(0.0),
+            "duty must have run on the first cycle"
+        );
+
+        // Second cycle at t = 12 h (< 24 h): duty must NOT fire.
+        let twelve_hours: f64 = 12.0 * 3_600.0;
+        let _ = d.run_cycle(twelve_hours, &reader, &mut sink);
+        let state_after_second = d.daemon_state();
+        assert_eq!(
+            state_after_second.last_performance_health_epoch_secs,
+            Some(0.0), // unchanged — duty did not fire
+            "last_performance_health_epoch_secs must NOT advance when duty is not due"
+        );
+        assert_eq!(
+            state_after_second.performance_health_watermark_ms,
+            1_000_000, // unchanged from first run
+            "watermark must not change when duty is not due"
+        );
+    }
+
+    // A7-R3: duty failure does not abort the cycle. Diary is still written,
+    // report is returned, watermark does NOT advance. Mirrors Swift
+    // `a7DutyFailureDoesNotAbortCycle`.
+    #[test]
+    fn a7_r3_duty_failure_does_not_abort_cycle() {
+        let reader = empty_reader();
+        let mut sink = RecordingSink::default();
+        let duty_raw = Box::new(FakeFailingHealthDuty { call_count: 0 });
+        let mut d = MaintenanceDaemon::new(MaintenancePolicy::default())
+            .with_duty(duty_raw);
+
+        // run_cycle must return normally even though the duty throws.
+        let report = d.run_cycle(1_000_000.0, &reader, &mut sink);
+
+        // Diary was written: cycle completed.
+        assert_eq!(sink.diaries.len(), 1, "diary must be written even when duty fails");
+        // Watermark did NOT advance (failure → no advance, so next cycle retries).
+        let state = d.daemon_state();
+        assert_eq!(
+            state.performance_health_watermark_ms, 0,
+            "watermark must not advance when duty fails"
+        );
+        // last_performance_health_epoch_secs also stays None (duty did not succeed).
+        assert!(
+            state.last_performance_health_epoch_secs.is_none(),
+            "last_performance_health_epoch_secs must stay None when duty fails"
+        );
+        // Report has the correct cycle count (cycle completed normally).
+        assert_eq!(report.audit_checked, true, "cycle ran to completion");
     }
 }

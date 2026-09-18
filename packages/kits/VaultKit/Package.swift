@@ -9,10 +9,11 @@
 // wiki.
 //
 // Layering: VaultKit sits ABOVE GeniusLocusKit (the verb/composition
-// layer). It consumes the GLK verb surface (`capture`, `recall`,
-// `recallTunnels`, `estate(for:)`) and LocusKit value types through
-// their public products only — it modifies no substrate primitive,
-// schema, bitmap, or enum. FDC classification on import is a soft,
+// layer). It consumes GLK's handle-scoped capture, batch capture, recall,
+// tunnel recall, node-name resolution, diary, reindex, encode-speed, and
+// tombstone reads/verbs, plus LocusKit value types through their public
+// products only — it modifies no substrate primitive, schema, bitmap, or enum.
+// FDC classification on import is a soft,
 // feature-flagged dependency on EideticLib: when `lookup` resolves, the
 // live FDC anchor is used; otherwise the deterministic fallback UDC
 // "000" lands the drawer with provenance intact (no fakery either way).
@@ -42,6 +43,7 @@ let package = Package(
         ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(name: "GeniusLocusKit", path: "../GeniusLocusKit"),
         .package(name: "LocusKit", path: "../LocusKit"),
         .package(name: "EideticLib", path: "../../libs/EideticLib"),
@@ -69,6 +71,7 @@ let package = Package(
         .target(
             name: "VaultKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "EideticLib", package: "EideticLib"),
@@ -90,7 +93,9 @@ let package = Package(
                 // Part B encode-enqueue test (secfix/c-vault-export2).
                 .product(name: "CorpusKit", package: "CorpusKit"),
             ],
-            path: "Tests/VaultKitTests"
+            path: "Tests/VaultKitTests",
+            // Test fixtures are read through #filePath, not Bundle.module.
+            exclude: ["Fixtures"]
         ),
     ]
 )

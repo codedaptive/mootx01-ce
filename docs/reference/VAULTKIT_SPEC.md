@@ -1,8 +1,8 @@
 ---
 title: VaultKit Specification
-version: v0.3
+version: v0.5
 status: active
-date: 2026-08-03
+date: 2026-08-15
 description: "Behavioral specification for VaultKit: invariants, behavioral contracts, and the guarantees the bridge makes to callers and the substrate."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -309,14 +309,28 @@ value of 0 on a bulk import means every drawer was already indexed
 `.moot/export-manifest.json` inside the vault (a hidden directory,
 invisible to `ObsidianAdapter.toIR`'s `.skipsHiddenFiles` enumerator).
 `VaultBridge.export` itself does not stamp per-note hashes — drift
-detection is the tool layer's responsibility. `moot_vault_reconcile`
-recomputes SHA-256 hashes and classifies notes as added, modified, or
-deleted; deleted notes are reported only, never actioned.
+detection is the tool layer's responsibility; the bridge contributes only
+its written-paths receipt (`ExportReport.notePaths`). A manifest entry is
+a certification that the note's disk content agreed with the estate's
+record at stamp time, so schema-v2 manifests stamp ONLY the paths the
+export wrote — never a whole-disk enumeration. `moot_vault_reconcile`
+recomputes SHA-256 hashes and classifies notes as added (unstamped —
+changed / needs review), modified, or deleted; under a legacy manifest
+(no `version` key) prior hashes are unavailable and every current note
+classifies changed / needs review. After a successful apply import the
+tool layer re-stamps the manifest for the imported paths (hashes captured
+at reconcile start), converging certification to schema v2 so surfaced
+notes do not re-surface forever. Deleted notes are reported only, never
+actioned.
 
 **B-8 (candidate seam is return-only):** `moot_vault_reconcile` produces
-a candidate list (added + modified notes) but writes no Proposal noun and
-mounts no QueueKit instance. Deletions are reported in the diff, never
-actioned (no drawer is expunged through the vault channel).
+a candidate list (changed / needs-review notes) plus the missing set
+(estate-lacks) — the full import set an apply would action, surfaced in
+both modes so apply never imports a note the dry-run would not list
+(VR-01 Finding B) — but writes no Proposal noun and mounts no QueueKit
+instance. The dry-run writes nothing at all; apply's only side-channel
+write is the B-7 manifest re-stamp. Deletions are reported in the diff,
+never actioned (no drawer is expunged through the vault channel).
 
 **B-9 (palace pump KG envelope rides `source_closet`):** when
 `PalacePumpMapping.call(for:)` / `call(item)` maps a KG fact, the
@@ -463,6 +477,24 @@ fixture and the golden OKF round-trip fixture are asserted byte-identically
 in both ports.
 
 ## Changelog
+
+### v0.5 — 2026-08-15
+
+B-7/B-8 extended for VR-01 Part 3 (Codex Finding B — apply imported notes
+never surfaced for review): reconcile surfaces the full import set
+(candidates ∪ missing) in both modes via one shared computation, apply
+imports exactly the surfaced set, and a successful apply re-stamps the
+manifest for imported paths (schema-v2 convergence). Dry-run remains
+write-free; apply's only side-channel write is the B-7 manifest re-stamp.
+
+### v0.4 — 2026-08-15
+
+B-7 tightened for VR-01 (Codex Finding A — reconcile skipped changed notes
+after a manifest reset): a manifest entry is now defined as a certification
+of vault↔estate agreement at stamp time. Schema-v2 manifests stamp only the
+export's written-paths receipt (`ExportReport.notePaths`); legacy manifests
+(no `version` key) certify nothing and every current note classifies
+changed / needs review. Fail toward surfacing, never silence.
 
 ### v0.3 — 2026-08-03
 

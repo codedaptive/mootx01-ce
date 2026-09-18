@@ -52,6 +52,15 @@ public extension GeniusLocusKit {
         return await scheduler.register(spec, registeredAt: now)
     }
 
+    /// Remove a standing signal and its subscriptions. Unknown signals or an
+    /// estate without a scheduler return false; stale estate handles throw.
+    @discardableResult
+    func signalUnregister(_ signalID: SignalID, in handle: EstateHandle) async throws -> Bool {
+        _ = try estate(for: handle)
+        guard let scheduler = schedulers[handle] else { return false }
+        return await scheduler.unregister(signalID)
+    }
+
     /// Snapshot of every registered signal's status for the estate
     /// addressed by `handle`. Architecture spec §7.8.5:
     /// `signalStatus() -> [SignalReport]`. Raises
@@ -108,6 +117,11 @@ public extension GeniusLocusKit {
         guard let scheduler = schedulers[handle] else {
             throw GeniusLocusKitError.schedulerNotStarted(estateUUID: handle.estateUUID)
         }
+        // Row-debt duties ride QueueKit (DutyQueue.swift): the tick only
+        // QUEUES what the estate owes. The host's duty worker pays the
+        // batches off the tick (§ DUTY_LIFECYCLE), so a model-bound batch
+        // never stalls the brain.
+        try await enqueueOwedDuties(in: handle, now: now)
         try await scheduler.tick(now: now)
     }
 

@@ -67,8 +67,14 @@ Icon
 # Makefile and scripts/moot-test). Replaces the 30 per-workspace target/ dirs.
 cargo-target/
 
-# Cargo lockfiles are not tracked, any depth
-**/Cargo.lock
+# Cargo lockfiles ARE tracked for reproducible builds (owner decision
+# 2026-06-29), matching EE. Do not re-add a **/Cargo.lock ignore: this
+# repository already tracks 29 of them force-added past the rule that
+# used to sit here, and the ignore made CE unable to receive a NEW
+# lockfile through the port. The file landed on disk, `git add -A`
+# skipped it, and SHARED parity reported it "missing from staging" with
+# nothing naming the ignore as the cause — a silent failure, once per
+# new crate.
 
 # Security-audit Finder-flag manifest (local triage sidecar)
 packages/.audit-flagged
@@ -152,3 +158,11 @@ AuthKey_*.p8
 # never be published. Synced here from the docs repo; not CE deliverables.
 .agents/
 .codex/
+
+# Tier-3 agent project profile. Tracked deliberately: .claude/ is otherwise
+# ignored, and an untracked profile drifts per-machine (see settings.json
+# drift, 2026-08-13). Git cannot re-include a file inside an excluded
+# directory, so the directory is re-included and its contents re-excluded.
+!.claude/
+.claude/*
+!.claude/PROJECT.md

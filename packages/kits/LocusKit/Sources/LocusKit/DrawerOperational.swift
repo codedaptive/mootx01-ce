@@ -28,7 +28,7 @@ import SubstrateLib
 /// what kind of content it is, what feature flags apply, plus the
 /// state-extension and lineage-clustering flags.
 ///
-/// Drawer operational layout (cookbook §2.4 v0.6):
+/// Drawer operational layout (cookbook §2.4 v0.6, schema v19):
 ///
 /// ```
 /// bits 0–5    capture_channel        (contiguous, 6 cases at raw 0…5)
@@ -36,7 +36,16 @@ import SubstrateLib
 /// bits 12–23  feature_flags          (bitset, 11 named bits 12…23)
 /// bit  24     state_extension flag
 /// bit  25     lineage_clustering flag (NEW in v0.6)
-/// bits 26–63  reserved
+/// bit  26     isAnomalous — low-cohesion outlier flag (§11.18, 2026-08-20)
+/// bit  27     spanIndexed — encoder span rows exist for the current content
+///             (Encoder Rerank Program, 2026-09-05)
+/// bit  28     factsExtracted — fact extraction settled for the current content
+///             under the active recipe (may be zero facts)
+/// bit  29     factsRejected — the active recipe rejected the current content;
+///             settled (bit 28 is set with it) and queryable as the rejected
+///             corpus (ruling 2026-09-16)
+/// bit  30     FREE (1 bit headroom)
+/// bits 31–63  FREE (33 bits headroom)
 /// ```
 ///
 /// F12 cascade (2026-05-27): bumped from v0.35's 4-bit fields to
@@ -137,22 +146,14 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     /// additional zone-policy check at recall time.
     public static let isLockedZone = DrawerFeatureFlags(rawValue: 1 << 18)
 
-    /// Bit 19 — drawer carries a current distilled representation per
-    /// SPEC_DISTILLATION_STORAGE §4 (cookbook §2.4.1, 2026-07-28).
+    /// Bit 19 — retained assignment with no writer at schema v19.
     ///
-    /// Set iff all four distillation columns (`distilled`,
-    /// `distilled_pipeline_version`, `distilled_token_count`,
-    /// `distilled_at`) are populated. Clear when those columns are NULL.
-    ///
-    /// The §4 invariant ("NULL together or populated together") makes this
-    /// bit skew-impossible: it travels in the SAME SQL UPDATE statement as
-    /// the four columns — set by `setDistilledRepresentation`, cleared by
-    /// every `withClearedRepresentation` call site (content-edit §7.3,
-    /// expunge scrub, gate-reject scrub, dataset-content patch).
-    ///
-    /// Design tenet: open bitmap space means new features enter WITHOUT
-    /// migration overhead. 1.0.x rows migrated to 1.1.x carry the bit
-    /// clear (all-NULL columns) — no schema change, no backfill required.
+    /// It marked "a distilled representation is stored for this row" while
+    /// the distilled columns existed; schema v19 removed those columns and
+    /// distillation is rendered inline at hydration instead, so nothing
+    /// sets this bit any more and every content-clearing path still clears
+    /// it. The position stays assigned because a bit is never reused (a
+    /// populated estate may carry it set on rows written before v19).
     ///
     /// Wire value: 1 << 19 = 524288 (0x80000).
     public static let hasCurrentRepresentation = DrawerFeatureFlags(rawValue: 1 << 19)
@@ -193,6 +194,68 @@ public struct DrawerFeatureFlags: OptionSet, Sendable, Codable {
     // the `Drawer.vagueLevel` computed property using
     // `BitField.extractField(operationalBitmap, shift: 22, width: 2)`.
     // Mask for the entire sub-field: 0xC00000.
+
+    // ── Anomalous flag (§11.18 anomalous-flag recall prefilter, 2026-08-20) ──
+
+    /// Bit 26 — drawer is a low-cohesion outlier in its room, computed by
+    /// the anomaly-flag maintenance sweep in GeniusLocusKit (§11.18).
+    ///
+    /// Set/cleared by `Estate.setAnomalousFlag` during the room-cohesion
+    /// sweep: drawers whose shingle-similarity z-score against room peers
+    /// falls below the anomaly threshold get this bit set; all others are
+    /// cleared. Requires ≥ 3 drawers in the room for z-score stability.
+    ///
+    /// This is a DERIVED signal — the maintenance sweep owns it. Do NOT
+    /// set this flag through belief-state or manual edit paths.
+    ///
+    /// NOTE: bit 26 is above the 12-bit feature-flags region (bits 12–23).
+    /// `hasFeatureFlag(.isAnomalous)` will always return false. Use the
+    /// `Drawer.isAnomalous` computed property to test this bit.
+    ///
+    /// Wire value: 1 << 26 = 67108864 (0x4000000).
+    public static let isAnomalous = DrawerFeatureFlags(rawValue: 1 << 26)
+
+    // ── Span index flag (Encoder Rerank Program, 2026-09-05) ─────────────
+
+    /// Bit 27 — at least one encoder span row exists in `vectors` under the
+    /// ACTIVE encoder model for this row's current `content_hash`.
+    ///
+    /// Set by the span-encode duty (`Estate.setSpanIndexed`) after a
+    /// successful `writeSpanVectors`. Cleared by every content write (the
+    /// same statement that bumps `content_hash`, through
+    /// `clearedOnContentWrite`) and by `EncoderModelStore.activate`, which
+    /// clears it estate-wide so the duty re-encodes under the new model. A
+    /// clear bit IS the duty's work-item predicate (`spanIndexDebtBatch`).
+    ///
+    /// NOTE: bit 27 is above the 12-bit feature-flags region (bits 12–23).
+    /// `hasFeatureFlag(.spanIndexed)` will always return false. Use the
+    /// `Drawer.isSpanIndexed` computed property to test this bit.
+    ///
+    /// Wire value: 1 << 27 = 134217728 (0x8000000).
+    public static let spanIndexed = DrawerFeatureFlags(rawValue: 1 << 27)
+
+    /// Bit 28 — distilled fact extraction has settled for this drawer's
+    /// current content under the active extractor recipe. A settled result
+    /// may contain zero facts. Cleared by content writes and recipe activation.
+    public static let factsExtracted = DrawerFeatureFlags(rawValue: 1 << 28)
+
+    /// Bit 29 — the active recipe rejected this drawer's current content (the
+    /// extractor's output failed source grounding twice, or the request was
+    /// invalid). Always set together with bit 28: a rejection is settled for
+    /// the recipe, and the row is the rejected corpus for analysis. The
+    /// checkpoint row keeps the reason. Cleared with bit 28 by content writes
+    /// and recipe activation. Wire value: 1 << 29 = 536870912 (0x20000000).
+    public static let factsRejected = DrawerFeatureFlags(rawValue: 1 << 29)
+
+    /// The bits every content write clears in the same UPDATE that changes
+    /// `content`: bit 19 (retained, always cleared), bit 27 (the span rows
+    /// describe the previous content), and bits 28 and 29 (the extraction
+    /// outcome described the previous content, so the drawer owes a fresh
+    /// extraction attempt). Applied as `operationalBitmap & ~clearedOnContentWrite`.
+    public static let clearedOnContentWrite: Int64 =
+        hasCurrentRepresentation.rawValue | spanIndexed.rawValue
+        | factsExtracted.rawValue | factsRejected.rawValue
+
 }
 
 // MARK: - Drawer accessors
@@ -236,19 +299,9 @@ public extension Drawer {
         featureFlags.contains(flag)
     }
 
-    /// True when bit 19 of `operationalBitmap` is set, indicating that
-    /// all four distillation columns are populated (cookbook §2.4.1).
-    ///
-    /// Consumers use this instead of `distilled == nil` for eligibility
-    /// checks — it is a direct bitmap read, not a column-presence test.
-    /// `distillItemsSweep` and `wireCorpusRoomRollup` use this accessor
-    /// as the primary eligibility gate; `countUndistilled` uses the
-    /// corresponding `bitmaskNone` predicate on the database side.
-    ///
-    /// The bit and the four columns are always in agreement by
-    /// construction: they travel in the same SQL UPDATE statement
-    /// (`setDistilledRepresentation` sets both; every content-clearing
-    /// path clears both simultaneously).
+    /// True when bit 19 of `operationalBitmap` is set. No writer sets the
+    /// bit at schema v19 (see `DrawerFeatureFlags.hasCurrentRepresentation`);
+    /// rows written before v19 may still carry it.
     var hasCurrentRepresentation: Bool {
         // Cookbook §2.4.1: has_current_representation at bit 19.
         featureFlags.contains(.hasCurrentRepresentation)
@@ -313,4 +366,46 @@ public extension Drawer {
         // Cookbook §2.4 bit 25: lineage_clustering flag.
         BitField.extractFlag(operationalBitmap, bit: 25)
     }
+
+    // ── Anomalous flag (bit 26, §11.18 anomalous-flag recall prefilter) ───────
+
+    /// True when bit 26 of `operationalBitmap` is set, indicating this
+    /// drawer is a low-cohesion outlier in its room (cookbook §2.4, §11.18).
+    ///
+    /// Computed and maintained by GeniusLocusKit's anomaly-flag sweep:
+    /// the sweep scores each drawer's mean shingle-similarity to its room
+    /// peers, computes z-scores, and sets this flag on negative-z-score
+    /// outliers. Rooms with fewer than 3 drawers are skipped.
+    ///
+    /// Callers filtering on anomaly status should use this accessor
+    /// rather than `featureFlags.contains(.isAnomalous)` — bit 26 is
+    /// above the 12-bit feature-flags region (bits 12–23) and will not
+    /// appear in the `featureFlags` OptionSet.
+    ///
+    /// Wire: `operationalBitmap & (1 << 26) != 0`. Mirrors Rust
+    /// `Drawer::is_anomalous()`.
+    var isAnomalous: Bool {
+        // Cookbook §2.4 bit 26: anomalous flag (§11.18). Reads the raw
+        // bitmap directly because bit 26 is outside the featureFlags region.
+        operationalBitmap & DrawerFeatureFlags.isAnomalous.rawValue != 0
+    }
+
+    /// True when bit 27 of `operationalBitmap` is set: encoder span rows
+    /// exist under the active model for this row's current content. Reads
+    /// the raw bitmap because bit 27 is outside the `featureFlags` region.
+    /// Mirrors Rust `Drawer::is_span_indexed()`.
+    var isSpanIndexed: Bool {
+        operationalBitmap & DrawerFeatureFlags.spanIndexed.rawValue != 0
+    }
+
+    /// True when bit 28 is set for the current content and active extractor.
+    /// Bit 29: the active recipe rejected the current content (settled).
+    var areFactsRejected: Bool {
+        operationalBitmap & DrawerFeatureFlags.factsRejected.rawValue != 0
+    }
+
+    var areFactsExtracted: Bool {
+        operationalBitmap & DrawerFeatureFlags.factsExtracted.rawValue != 0
+    }
+
 }

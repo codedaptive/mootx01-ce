@@ -8,7 +8,7 @@
 import Testing
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 import SubstrateTypes
 import PersistenceKit
@@ -105,6 +105,25 @@ struct ContradictionHuntTests {
         #expect(tunnel.lifecycle == .proposed)
         #expect(tunnel.originClass == .derived)
         #expect(tunnel.addedBy == "contradiction-hunter")
+    }
+
+    @Test("quiesced hunt refuses a strong-candidate tunnel before filing")
+    func quiescedStrongCandidateDoesNotFileTunnel() async throws {
+        let (kit, handle, vectorStore) = try await makeKit()
+        try await plant(
+            "the api timeout is 30 seconds",
+            engram: near, kit: kit, handle: handle, vectorStore: vectorStore)
+        try await plant(
+            "the api timeout is 90 seconds",
+            engram: near, kit: kit, handle: handle, vectorStore: vectorStore)
+        let estate = try await kit.estate(for: handle)
+        try await kit.quiesce(handle)
+
+        await #expect(throws: GeniusLocusKitError.self) {
+            _ = try await kit.huntContradictions(in: handle, now: Self.t0)
+        }
+        #expect(try await estate.allTunnels().isEmpty,
+                "quiesced strong-candidate filing must not reach tunnel storage")
     }
 
     @Test("second pass deduplicates; rejection is durable")

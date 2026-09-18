@@ -26,9 +26,10 @@
 //! recall-trace reward window is bounded by this constant.
 
 use aria_mcp::dream_runner::run_one_dreaming_cycle;
-use aria_mcp::estate_registry::EstateRegistry;
+use aria_mcp::estate_registry::{EstateRegistry, EstateOpening};
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
@@ -90,12 +91,14 @@ fn seed_dreaming_queue(registry: &EstateRegistry, now_i64: i64) {
 
     // External-origin recall triggers the dreaming queue mount and enqueues
     // one DreamingItem (two captured drawer ids ≥ 2 → guard passes).
-    let ext_request = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
-        .external();
+    let ext_request = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    );
     registry
         .coord
         .lock()
@@ -138,7 +141,7 @@ fn dream_runner_nonempty_queue_cycle_ran() {
     drop(registry);
 
     // Run one REM-ALPHA cycle against the on-disk estate.
-    let result = run_one_dreaming_cycle(&path, "dream-test-owner", NOW)
+    let result = run_one_dreaming_cycle(&path, "dream-test-owner", EstateOpening::REGISTERED, NOW)
         .expect("run_one_dreaming_cycle must not error on a seeded estate");
 
     assert!(
@@ -165,7 +168,7 @@ fn dream_runner_empty_queue_no_cycle() {
         .expect("new_sqlite must succeed on a fresh path");
     drop(_registry); // release before calling run_one_dreaming_cycle
 
-    let result = run_one_dreaming_cycle(&path, "dream-test-owner", NOW)
+    let result = run_one_dreaming_cycle(&path, "dream-test-owner", EstateOpening::REGISTERED, NOW)
         .expect("run_one_dreaming_cycle must not error on an empty estate");
 
     assert!(
@@ -194,7 +197,7 @@ fn dream_runner_nonexistent_path_noop() {
         "pre-condition: path must not exist for this test to be meaningful"
     );
 
-    let result = run_one_dreaming_cycle(&absent, "dream-test-owner", NOW)
+    let result = run_one_dreaming_cycle(&absent, "dream-test-owner", EstateOpening::REGISTERED, NOW)
         .expect("run_one_dreaming_cycle must not error for a nonexistent path");
 
     assert!(

@@ -452,6 +452,11 @@ fn mutate_operational_persists() {
         .get_drawer("11111111-1111-4111-8111-111111111111")
         .unwrap()
         .unwrap();
+    // sample_drawer has operational_bitmap = 0; drawer_values no longer ORs in
+    // bit 27 at persist time. After mutate_operational(0x100), the gate writes
+    // the declared slots from 0x100 onto the prior (0), yielding 0x100 exactly.
+    // Bits 27-30 are now declared vocabulary slots and their value (0) is
+    // preserved from the prior through the mutation — no masking required.
     assert_eq!(back.operational_bitmap, 0x100);
 }
 
@@ -474,6 +479,7 @@ fn expunge_gated_tombstones_zeros_content_sets_bit_26() {
             Some("GDPR"),
             NOW + 500,
             true,
+            AdjectiveSensitivity::Secret,
         )
         .unwrap();
     let after = store
@@ -528,6 +534,7 @@ fn lineage_wide_expunge_conformance_predecessor_content_zeroed() {
             Some("lineage conformance"),
             NOW + 200,
             true,
+            AdjectiveSensitivity::Secret,
         )
         .unwrap();
 
@@ -579,15 +586,15 @@ fn expunge_gate_rejected_sibling_left_byte_identical() {
     let lineage = Uuid::new_v4();
 
     // D1: Trust=Canonical (bits 18-23) so S-1 allows promote to Accepted.
-    // Representation columns populated so their survival through the
+    // Content-derived columns populated so their survival through the
     // gate refusal can be verified byte-identical below.
     let mut d1 = sample_drawer("d1-gate-reject-accepted", "w", "r", "accepted-sibling-content");
     d1.lineage_id = lineage;
     d1.adjective_bitmap = Trust::Canonical.raw_value() << 18;
-    d1.distilled = Some("accepted-sibling-distilled-text".to_string());
-    d1.distilled_pipeline_version = Some("p1".to_string());
-    d1.distilled_token_count = Some(7);
-    d1.distilled_at = Some(NOW);
+    d1.ssc_facts = Some("kind: note, entity: sibling".to_string());
+    d1.subject = Some("Accepted sibling".to_string());
+    d1.subject_pipeline_version = Some("p1".to_string());
+    d1.subject_at = Some(NOW);
     store.add_drawer(&d1, NOW).unwrap();
     // Promote D1: Active → Accepted. Trust=Canonical satisfies S-1.
     store
@@ -624,7 +631,7 @@ fn expunge_gate_rejected_sibling_left_byte_identical() {
     // byte-identical: no content write, no state write, no
     // representation clear.
     store
-        .expunge_gated(&d2.id, "test", None, NOW + 300, true)
+        .expunge_gated(&d2.id, "test", None, NOW + 300, true, AdjectiveSensitivity::Secret)
         .unwrap();
 
     // D2 itself is scrubbed and tombstoned as before.
@@ -659,27 +666,23 @@ fn expunge_gate_rejected_sibling_left_byte_identical() {
         d1_after.operational_bitmap, d1_before.operational_bitmap,
         "operational bitmap must be untouched on refusal"
     );
-    // All four representation columns intact.
+    // Content-derived columns intact.
     assert_eq!(
-        d1_after.distilled.as_deref(),
-        Some("accepted-sibling-distilled-text"),
-        "distilled must survive the refusal"
+        d1_after.ssc_facts.as_deref(),
+        Some("kind: note, entity: sibling"),
+        "ssc_facts must survive the refusal"
     );
     assert_eq!(
-        d1_after.distilled_pipeline_version.as_deref(),
+        d1_after.subject.as_deref(),
+        Some("Accepted sibling"),
+        "subject must survive the refusal"
+    );
+    assert_eq!(
+        d1_after.subject_pipeline_version.as_deref(),
         Some("p1"),
-        "distilled_pipeline_version must survive the refusal"
+        "subject_pipeline_version must survive the refusal"
     );
-    assert_eq!(
-        d1_after.distilled_token_count,
-        Some(7),
-        "distilled_token_count must survive the refusal"
-    );
-    assert_eq!(
-        d1_after.distilled_at,
-        Some(NOW),
-        "distilled_at must survive the refusal"
-    );
+    assert_eq!(d1_after.subject_at, Some(NOW), "subject_at must survive the refusal");
     assert!(
         d1_after.tombstoned_at.is_none(),
         "refused sibling must not be tombstone-stamped"
@@ -708,7 +711,7 @@ fn expunge_outcome_reports_refused_siblings() {
     store.add_drawer(&d2, NOW + 200).unwrap();
 
     let outcome = store
-        .expunge_gated(&d2.id, "test", None, NOW + 300, true)
+        .expunge_gated(&d2.id, "test", None, NOW + 300, true, AdjectiveSensitivity::Secret)
         .unwrap();
     assert_eq!(
         outcome.refused_sibling_ids,
@@ -734,7 +737,7 @@ fn expunge_outcome_empty_for_clean_lineage() {
     store.add_drawer(&d2, NOW + 100).unwrap();
 
     let outcome = store
-        .expunge_gated(&d2.id, "test", None, NOW + 200, true)
+        .expunge_gated(&d2.id, "test", None, NOW + 200, true, AdjectiveSensitivity::Secret)
         .unwrap();
     assert!(
         outcome.refused_sibling_ids.is_empty(),
@@ -804,7 +807,7 @@ fn attacker_lineage_join_cannot_scrub_accepted_row() {
 
     // Expunging the attacker's own row walks the shared lineage.
     estate
-        .expunge(&attacker_row.id, "attacker-initiated expunge", true, NOW + 300, true)
+        .expunge(&attacker_row.id, "attacker-initiated expunge", true, NOW + 300, true, AdjectiveSensitivity::Secret)
         .unwrap();
 
     // The attacker's row is gone…
@@ -1333,7 +1336,10 @@ fn bitmap_mutation_survives_reopen() {
         .get_drawer("11111111-1111-4111-8111-111111111111")
         .unwrap()
         .unwrap();
-    // The operational bitmap written before the drop must survive.
+    // Bits 27-30 are now declared vocabulary slots; drawer_values no longer
+    // ORs in bit 27 at persist time. sample_drawer starts with operational = 0.
+    // mutate_operational(valid_op_bitmap) writes all declared slots from
+    // valid_op_bitmap onto the prior (0), yielding valid_op_bitmap exactly.
     assert_eq!(back.operational_bitmap, valid_op_bitmap);
 }
 
@@ -1505,7 +1511,7 @@ fn finding3_sqlite_all_kg_facts_including_retired_sees_retired_facts() {
         NOW,
     );
     store.add_kg_fact(&f).unwrap();
-    store.withdraw_kg_fact(&tid("f2"), NOW + 1).unwrap();
+    store.withdraw_kg_fact(&tid("f2"), "test-actor", None, NOW + 1).unwrap();
 
     // Active-only scan must not include the retired fact.
     let active = store.all_kg_facts().unwrap();
@@ -1543,7 +1549,7 @@ fn finding3_sqlite_all_kg_facts_including_retired_survives_reopen() {
         );
         store.add_kg_fact(&f_active).unwrap();
         store.add_kg_fact(&f_retired).unwrap();
-        store.withdraw_kg_fact(&tid("fr"), NOW + 2).unwrap();
+        store.withdraw_kg_fact(&tid("fr"), "test-actor", None, NOW + 2).unwrap();
         // Drop store — flushes WAL-mode SQLite.
     }
     // Reopen from same path.
@@ -1699,12 +1705,12 @@ fn tombstoned_rows_without_expunge_audit_sql_join_returns_only_orphans() {
 
     // Expunge A with audit sealed (normal expunge path — not an orphan).
     store
-        .expunge_gated(id_a, "alice", None, NOW + 10, true)
+        .expunge_gated(id_a, "alice", None, NOW + 10, true, AdjectiveSensitivity::Secret)
         .unwrap();
 
     // Expunge B with audit NOT sealed (crash-window simulation — is an orphan).
     store
-        .expunge_gated(id_b, "alice", None, NOW + 20, false)
+        .expunge_gated(id_b, "alice", None, NOW + 20, false, AdjectiveSensitivity::Secret)
         .unwrap();
 
     // tombstoned_rows_without_expunge_audit must return exactly [B].
@@ -1766,8 +1772,8 @@ fn tombstoned_rows_without_expunge_audit_all_sealed_returns_empty() {
     store.add_drawer(&sample_drawer(id_y, "w", "k", "cy"), NOW).unwrap();
 
     // Both expunged with audit sealed — neither is an orphan.
-    store.expunge_gated(id_x, "alice", None, NOW + 1, true).unwrap();
-    store.expunge_gated(id_y, "alice", None, NOW + 2, true).unwrap();
+    store.expunge_gated(id_x, "alice", None, NOW + 1, true, AdjectiveSensitivity::Secret).unwrap();
+    store.expunge_gated(id_y, "alice", None, NOW + 2, true, AdjectiveSensitivity::Secret).unwrap();
 
     let orphans = store
         .tombstoned_rows_without_expunge_audit()

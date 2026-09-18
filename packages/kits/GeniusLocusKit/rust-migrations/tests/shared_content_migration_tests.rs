@@ -223,7 +223,7 @@ fn make_legacy_estate(
         .migrate(&corpus_kit::removed_source_store::RemovedSourceStore::schema_declaration())
         .expect("legacy removed_sources schema");
     storage
-        .migrate(&vectorkit::VectorStore::schema_declaration())
+        .migrate(&synapsekit::VectorStore::schema_declaration())
         .expect("vectors schema");
     let row_store = storage.row_store();
     for (index, content) in contents.iter().enumerate() {

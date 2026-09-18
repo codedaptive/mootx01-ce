@@ -1,9 +1,9 @@
 ---
 title: LocusKit Interface
-version: 1.23.0
+version: 3.11.0
 status: active
-date: 2026-08-07
-description: Public API surface for LocusKit in both the Swift and Rust ports.
+date: 2026-09-15
+description: "Interface contract for LOCUSKIT. 3.4.0: withdrawKGFact / withdraw_kg_fact signature widened — changedBy/changed_by and reason added; both ports route through AuditGate.admit (verb Retract) and emit a sealed audit row. 3.5.0: expungeGated / expunge_gated, Estate.expunge, and Estate.expungeReturningUnsealedEvent all accept a sensitivityCeiling / sensitivity_ceiling parameter (AdjectiveSensitivity, default .secret / Secret); the lineage cascade refuses siblings above the ceiling byte-identically and reports them in ExpungeOutcome.refusedSiblingIDs / refused_sibling_ids. 3.6.0: BitmapEvaluationResult / BitmapEvaluationResult adds an evaluator result with admitted rows and the default-sensitivity-withheld count. 3.8.0: estate format V1_8 is current; the raw manifest key fact_extraction is a GeniusLocusKit-owned key stored via Estate.meta/setMeta. 3.9.0: RecallRating and the Estate/DrawerStore pair upsertRecallRatings / recallRatings(ids:) over the recall_ratings table."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -88,7 +88,19 @@ synchronous struct in Rust (SPEC § 8).
 public actor Estate {
     public static let expectedBitmapLayoutVersion: String   // "v0.35"
 
-    public static func open(storage: any Storage, owner: OwnerCredentials) async throws -> Estate
+    public static func open(storage: any Storage, owner: OwnerCredentials,
+                            identityKeyStore: (any EstateIdentityKeyStore)? = nil,
+                            federate: Bool = false) async throws -> Estate
+    // federate is the caller's declaration, off by default: false skips the
+    // Ed25519 identity step entirely (no keypair, no key-store contact, no
+    // manifest public key) and grant issuance throws for that instance;
+    // true mints on first open and loads the key on later opens. Nothing is
+    // read from the process environment; the host decides from the estate
+    // catalog record (a registered estate federates, a transient or branch
+    // estate does not). Per-open declaration, never a persistent estate
+    // property. Rust twin: Estate::open is a non-federating open;
+    // Estate::open_with_federation(store, owner, federate) is the
+    // explicit-posture form.
     public static func create(storage: any Storage, owner: OwnerCredentials,
                               manifest initialValues: ManifestValues? = nil) async throws -> Estate
     public func close() async throws
@@ -139,8 +151,8 @@ public actor Estate {
     // @discardableResult. Invariant (SPEC B-8b): an expunge that refused a sibling is not
     // a success, and a layer that summarises it as one is the defect. On the sealing path
     // auditEvent is nil (already sealed); on the deferred path it is always non-nil.
-    public func expunge(rowID: RowID, reason: String, confirmation: Bool, now: Date = Date()) async throws -> DrawerStore.ExpungeOutcome
-    func expungeReturningUnsealedEvent(rowID: RowID, reason: String, confirmation: Bool, now: Date = Date()) async throws -> DrawerStore.ExpungeOutcome
+    public func expunge(rowID: RowID, reason: String, confirmation: Bool, sensitivityCeiling: AdjectiveSensitivity = .secret, now: Date = Date()) async throws -> DrawerStore.ExpungeOutcome
+    func expungeReturningUnsealedEvent(rowID: RowID, reason: String, confirmation: Bool, sensitivityCeiling: AdjectiveSensitivity = .secret, now: Date = Date()) async throws -> DrawerStore.ExpungeOutcome
     // The storage-layer verb behind expunge is DrawerStore.expungeGated (public; Rust trait
     // DrawerStore::expunge_gated). It returns ExpungeOutcome rather than a bare event: the
     // lineage walk preserves gate-refused (accepted, S-3) siblings byte-identical — no
@@ -178,6 +190,8 @@ public actor Estate {
 
     // Dreaming substrate reads (extension Estate, Estate.swift):
     public func recentRecallTraces(since: Date, now: Date) async throws -> [RecallTraceItem]
+    public func upsertRecallRatings(_ ratings: [RecallRating]) async throws          // one insert-or-replace per row keyed on recall_ratings.drawer_id
+    public func recallRatings(ids: [String]) async throws -> [String: RecallRating]  // ids without a row are absent
     public func allTunnels() async throws -> [Tunnel]
 
     // Dataset handle verbs (public extension Estate, DatasetHandle.swift — MX-TAB-4 / MX-TAB-5):
@@ -283,17 +297,17 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     public let udcFacets: String?
     public let wikidataQID: String?
     public let wikidataQidsSecondary: String?
-    // Distilled representation quad — derived compression of `content`.
-    // NULL-together; every content-touching write clears all four.
-    public let distilled: String?
-    public let distilledPipelineVersion: String?
-    public let distilledTokenCount: Int64?
-    public let distilledAt: Date?
-    // Subject trio — one-sentence AI-facing summary returned in the
-    // progressive-recall dense row. RETURNED, never searched or indexed.
+    // SSC facts — the grammar-v1 fact anchors of `content` as inner text
+    // (`kind: hobby, entity: painting, place: brazil`); NULL when none and
+    // NULL after every content write (the enrichment stage's "needs facts"
+    // predicate). Written by setSSCFacts; rides the structured tier.
+    public let sscFacts: String?
+    // Subject trio — one-sentence AI-facing summary returned as the
+    // canonical candidate row's subject column (ARIA_MCP_SPEC 2.0.0 § 8).
+    // RETURNED, never searched or indexed.
     // NULL-together; cleared by the same content-write invalidation as
-    // the distilled quad. NULL `subject` = backfill-eligible.
-    public let subject: String?                 // ≤ 120 chars (subjectLengthContract)
+    // ssc_facts. NULL `subject` = backfill-eligible.
+    public let subject: String?                 // ≤ 120 grapheme clusters (subjectLengthContract)
     public let subjectPipelineVersion: String?  // producer provenance: "ai-v1", "minillm-v1"
     public let subjectAt: Date?
     public init(id: String = UUID().uuidString, content: String, parentNodeId: String,
@@ -303,8 +317,7 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
                 provenance: Int64 = 0, adjectiveBitmap: Int64 = 0, operationalBitmap: Int64 = 0,
                 lineageID: UUID = UUID(), udcCode: String = "", udcFacets: String? = nil,
                 wikidataQID: String? = nil, wikidataQidsSecondary: String? = nil,
-                distilled: String? = nil, distilledPipelineVersion: String? = nil,
-                distilledTokenCount: Int64? = nil, distilledAt: Date? = nil,
+                sscFacts: String? = nil,
                 subject: String? = nil, subjectPipelineVersion: String? = nil,
                 subjectAt: Date? = nil)
 
@@ -319,6 +332,8 @@ public struct Drawer: Equatable, Hashable, Codable, Sendable {
     public var stateExtensionActive: Bool
     public var isCurrentlyBelieved: Bool; public var isKnewPast: Bool; public var isTerminal: Bool
     public var isUserConfirmed: Bool; public var isInstruction: Bool; public var isContested: Bool
+    public var isAnomalous: Bool                // bit 26 (outside the featureFlags region)
+    public var isSpanIndexed: Bool              // bit 27 (outside the featureFlags region)
 }
 ```
 **Rust:** `pub struct Drawer` with the same fields (`snake_case`) and the
@@ -337,11 +352,25 @@ public struct KGFact: Equatable, Hashable, Codable, Sendable {
     public let addedBy: String            // filing host/agent identity, "" when unrecorded
     public let foreignSourceKey: String   // foreign palace's stable source key, "" when local
     public let foreignRecordID: String    // foreign palace's own record id, "" when local
+    // v20 evidence and projection fields (default "" / -1 for pre-extraction rows):
+    public let evidenceQuote: String
+    public let evidenceStart: Int; public let evidenceEnd: Int      // Unicode-scalar range, -1/-1 when absent
+    public let evidenceStartUTF8Byte: Int; public let evidenceEndUTF8Byte: Int
+    public let sourceDigest: String
+    public let extractorProviderID: String; public let extractorModelID: String
+    public let extractorModelVersion: String; public let extractionSchemaVersion: String
+    public let searchProjection: String; public let searchProjectionVersion: String
     public let adjectiveBitmap, operationalBitmap, provenanceBitmap: Int64
     public let filedAt: Date
     public init(id: String = UUID().uuidString, subject: String, predicate: String, object: String,
                 sourceDrawerID: String, addedBy: String = "", foreignSourceKey: String = "",
-                foreignRecordID: String = "", adjectiveBitmap: Int64 = 0,
+                foreignRecordID: String = "", evidenceQuote: String = "",
+                evidenceStart: Int = -1, evidenceEnd: Int = -1,
+                evidenceStartUTF8Byte: Int = -1, evidenceEndUTF8Byte: Int = -1,
+                sourceDigest: String = "", extractorProviderID: String = "",
+                extractorModelID: String = "", extractorModelVersion: String = "",
+                extractionSchemaVersion: String = "", searchProjection: String = "",
+                searchProjectionVersion: String = "", adjectiveBitmap: Int64 = 0,
                 operationalBitmap: Int64 = 0, provenanceBitmap: Int64 = 0, filedAt: Date)
     // All four adjective-bitmap axes (cookbook §2.3 / §5.5; same encoding as Drawer):
     public var state: State                            // bits 0–5,  default .active
@@ -487,6 +516,15 @@ public struct CaptureFrame: Sendable {
     public var confidence: Confidence                // bits 24–29; default .null
     public var lineageID: LineageID?; public var room: RoomID; public var latticeAnchor: LatticeAnchor
     public var addedBy: String; public var embeddingModelID: String; public var eventTime: Date?
+    public var wing: String?                         // nil → defaultWing() at capture time
+    public var subject: String?                      // nil → born as subject debt (B-21)
+    /// Per-record ingest clock (schema v1.2 import seam). When non-nil,
+    /// `captureBatch` uses this as `filedAt` and HLC physical-time seed for
+    /// this drawer instead of the batch wall-clock `now`. Nil → wall-clock
+    /// (byte-identical legacy behavior). Rust: `pub capture_date: Option<i64>`
+    /// (epoch milliseconds). Cross-port golden pin: "2026-01-15T10:00:00Z"
+    /// → `filedAt = 1768471200000 ms`.
+    public var captureDate: Date?
     public init(content: String, channel: CaptureChannel, room: RoomID, latticeAnchor: LatticeAnchor,
                 addedBy: String, embeddingModelID: String, sensitivity: AdjectiveSensitivity = .normal,
                 kind: ContentKind = .prose, provenanceChannel: Channel = .uiTyped,
@@ -494,7 +532,8 @@ public struct CaptureFrame: Sendable {
                 confirmation: Confirmation = .unconfirmed, confidence: Confidence = .null,
                 lineageID: LineageID? = nil, eventTime: Date? = nil,
                 featureFlags: DrawerFeatureFlags = [],
-                exportability: AdjectiveExportability = .private_)
+                exportability: AdjectiveExportability = .private_,
+                wing: String? = nil, subject: String? = nil, captureDate: Date? = nil)
 }
 public struct RecallFrame: Sendable {
     public var filterChain: [Filter]            // implicit AND (B-4)
@@ -577,7 +616,7 @@ public indirect enum Filter: Sendable {
 public enum StateCluster: Sendable { case knowNow, knewPast, terminal }
 public enum HydrationLevel: Sendable { case structured, full, bitmapOnly }   // B-6
 public enum Ordering: Sendable { case byCaptureTimeDesc, byCaptureTimeAsc, byRoomAsc }
-// Note: byRelevanceDesc was removed. Relevance ordering requires VectorKit's
+// Note: byRelevanceDesc was removed. Relevance ordering requires SynapseKit's
 // scoring signal and lives at the GLK RecallDirector layer (NeuronKit/HybridRecall).
 // LocusKit is a bitmap-filter engine; no in-kit relevance score exists.
 ```
@@ -666,7 +705,7 @@ public enum Channel: Int { case uiTyped=0, uiVoiced, mcpAgent, fileImport, apiGr
 public enum Sensitivity: Int { case normal=0, elevated=16, restricted=32, secret=48 }   // scale-gapped, mirrors AdjectiveSensitivity
 public enum EnrichmentStatus: Int { case none=0, qidPending, qidCompleted, closureCached, qidProposed }   // §2.5 (QID resolution lifecycle); qidProposed(4) = terminal in-workflow after an enrichment proposal is filed
 public typealias ProvenanceChannel = Channel
-public typealias Vector = [Float]      // vector recall composes via VectorKit
+public typealias Vector = [Float]      // vector recall composes via SynapseKit
 ```
 **Rust:** identical enums and raw values (`snake_case` cases); `DrawerFeatureFlags`
 is a Rust bitflags-style struct with the same bit positions.
@@ -709,6 +748,38 @@ The two-source reward hook (SPEC § 5, B-10). `used` is bit 0 — computed, neve
 stored (I-2).
 
 ```swift
+/// One drawer's Bradley-Terry rating from the end-of-day tournament (RecallRating.swift).
+/// Persisted in recall_ratings (drawer_id TEXT PRIMARY KEY, rating REAL, contests INTEGER,
+/// updated_at TEXT ISO8601). rating is the estimator log-strength; contests is the running
+/// count of preference observations the drawer has taken part in.
+public struct RecallRating: Sendable, Equatable {
+    public let drawerID: String
+    public var rating: Double
+    public var contests: Int
+    public var updatedAt: Date
+    public init(drawerID: String, rating: Double, contests: Int, updatedAt: Date)
+}
+```
+
+**Rust twin (`recall_rating.rs`, `drawer_store.rs`, `estate_verbs.rs`):**
+
+```rust
+pub const RECALL_RATINGS_TABLE: &str = "recall_ratings";
+pub struct RecallRating {
+    pub drawer_id: String,
+    pub rating: f64,
+    pub contests: i64,
+    pub updated_at: String,        // ISO8601 TEXT, as stored
+}
+pub fn recall_ratings_schema() -> SchemaDeclaration;   // kit id "GLKRecallRatings", version 1
+
+// DrawerStore trait (default impl returns DatabaseUnavailable; SQLite, PostgreSQL and
+// InMemory stores implement both) and the Estate wrappers in estate_verbs.rs:
+fn upsert_recall_ratings(&self, ratings: &[RecallRating]) -> Result<(), LocusKitError>;   // insert-or-replace keyed on drawer_id
+fn recall_ratings(&self, ids: &[&str]) -> Result<Vec<RecallRating>, LocusKitError>;       // rows for ids that have one; ids without a row are absent
+```
+
+```swift
 public struct RecallTraceItem: Equatable, Hashable, Codable, Sendable {
     public static let flagUsed: Int64 = 1 << 0
     public let id, target: String; public let recalledAt: Date
@@ -726,7 +797,7 @@ public struct RecallTraceItem: Equatable, Hashable, Codable, Sendable {
 The estate key-value manifest contract (architecture spec § 5.9).
 
 ```swift
-public enum ManifestKey: String, CaseIterable { /* 18 required + 7 optional keys; static .required, .optional */ }
+public enum ManifestKey: String, CaseIterable { /* 18 required + 8 optional keys; static .required, .optional */ }
 public struct ManifestValues: Sendable {
     // 18 required fields (manifestVersion, schemaVersion, estateUUID, estateName, ownerIdentifier,
     // latticeCitation, frameworkProfile, frameworkProfileDefinition, zoomWindowLow/High,
@@ -736,6 +807,11 @@ public struct ManifestValues: Sendable {
     public init(/* memberwise; two Ed25519 fields default nil */)
 }
 ```
+The manifest key `index_composition_policy`, written by GeniusLocusKit 2.15.0
+through 2.22.0 via `Estate.setMeta(key:value:)`, is no longer a `ManifestKey`
+case: no port reads or writes it, and a manifest row that still carries it is
+ignored (GeniusLocusKit spec I-23, historical record).
+
 **Rust:** `pub enum ManifestKey`, `pub struct ManifestValues` mirror these.
 
 #### `LocusKitSchema`, `DrawerStore`
@@ -773,7 +849,7 @@ public actor DrawerStore {
     /// review policy. Also surfaced at Estate level with getTunnel(id:).
     public func stampTunnelReview(id: String, operationalBitmap: Int64, ext: String?) async throws
     public func addKGFact(_ f: KGFact) async throws; public func kgFacts(forDrawerID: String) async throws -> [KGFact]
-    public func withdrawKGFact(id: String) async throws  // transitions adjectiveBitmap to State.withdrawn raw 18 (RowState Cluster B), exiting the active-recall filter (g_state_cluster < RowState.activeClusterUpperBoundRaw, 16)
+    public func withdrawKGFact(id: String, changedBy: String, reason: String? = nil, now: Date) async throws  // routes through AuditGate.admit (verb Retract); transitions adjectiveBitmap bits 0-5 to State.withdrawn raw 18 (RowState Cluster B) and emits a sealed audit row in the same transaction; changedBy must be non-empty
     public func addDiaryEntry(_ e: DiaryEntry) async throws; public func readDiary(agentName: String, lastN: Int = 10) async throws -> [DiaryEntry]
     public func insertRecallTrace(_ item: RecallTraceItem) async throws
     public func getRecallTrace(id: String) async throws -> RecallTraceItem?
@@ -783,9 +859,12 @@ public actor DrawerStore {
     /// Bulk-marks every trace row for `target` within [since, now] as used (bit 0 of operationalBitmap).
     /// Returns the count of rows updated. Positive-only; internal callers must not call this (B-10a).
     public func markRecallTracesUsed(target: String, since: Date, now: Date) async throws -> Int
+    /// End-of-day tournament ratings (recall_ratings: drawer_id TEXT PK, rating REAL, contests INTEGER, updated_at TEXT).
+    public func upsertRecallRatings(_ ratings: [RecallRating]) async throws
+    public func recallRatings(ids: [String]) async throws -> [String: RecallRating]
     /// Returns the total number of recall_trace rows in the estate. Used by moot_estate_status.
     public func countRecallTraces() async throws -> Int
-    /// Subject trio (progressive recall). Contract cap for `subject` length in characters.
+    /// Subject trio (progressive recall). Contract cap for `subject` length in grapheme clusters.
     public static let subjectLengthContract = 120  // = Rust SUBJECT_LENGTH_CONTRACT
     /// Writes subject + pipelineVersion + at in ONE atomic UPDATE and seals a
     /// "setSubject" custody audit event in the same transaction — the column
@@ -822,10 +901,12 @@ public actor DrawerStore {
 methods are synchronous and take `now: i64`. The Swift `DrawerStore` is a
 concrete actor over any injected `Storage` (SQLite in production); the Rust
 version realises the same store contract through the trait (SPEC § 8).
-The Rust port adds `withdraw_kg_fact(id: &str, now: i64)` to the
-trait with a `DatabaseUnavailable` default; `DrawerStoreCore` carries the
-live implementation (sets bits 0–5 of `adjective_bitmap` to `State::Withdrawn`
-raw 18, preserving upper bits — mirrors `withdrawKGFact` in the Swift actor).
+The Rust trait exposes `withdraw_kg_fact(id: &str, changed_by: &str, reason: Option<&str>, now: i64)`
+with a `DatabaseUnavailable` default; `DrawerStoreCore` carries the live
+implementation which routes through `audit_gate::admit` (verb `Retract`),
+writes bits 0-5 of `adjective_bitmap` to `State::Withdrawn` raw 18, and
+appends a sealed audit row in the same transaction — mirrors `withdrawKGFact`
+in the Swift actor. `changed_by` must be non-empty.
 
 **Newtype-forwarding contract (durable backends).** Every `DrawerStore`
 trait method that carries a `DatabaseUnavailable` fail-loud default MUST be
@@ -891,8 +972,9 @@ cited file.
   `ForbiddenCombinationValidator.swift`.
 - **Bitmap helpers:** free functions `andMask`, `thresholdCompare` + `ThresholdOp`,
   `xor`, `isIdentical`, `hammingDistance`, `shiftExtract`, `simdBallot` —
-  `BitmapOps.swift`. (The recall evaluator `BitmapEvaluator` is `internal` in
-  the Swift version; the Rust version exposes it as `pub struct BitmapEvaluator`.)
+  `BitmapOps.swift`; `BitmapEvaluator.evaluateResult` /
+  `BitmapEvaluator::evaluate_result` returns `BitmapEvaluationResult` with the
+  admitted rows and `withheldBySensitivity` / `withheld_by_sensitivity`.
 - **KG-fact operational axes:** `KGExtractorClass`, `KGAssertionKind`,
   `KGSpecificity`, `KGConfidenceBand` — `KGFactOperational.swift`.
 - **Diary operational axes:** `DiaryEventClass`, `DiarySeverity`,
@@ -947,7 +1029,7 @@ cited file.
   `public let hintRoom: String = "AI_Charter_Hint"` — room name for per-wing hint drawers.
   `public let hintUDCCode: String = "001"` — UDC class code stamped on hint drawers.
   `public let hintAddedBy: String = "estate-provision"` — actor string for hint drawer
-  provenance (honest provenance only — no code branches on this value).
+  provenance (recorded for provenance only — no code branches on this value).
   `public struct WingDefinition: Sendable, Equatable { name: String; hint: String }` — a wing
   name paired with its hint text.
   `public let defaultWings: [WingDefinition]` — the seven wings seeded at estate provision
@@ -1094,7 +1176,7 @@ bit-identical DDL. Gaps are tracked until resolved.
 
 | Element | Swift | Rust | Status | Notes |
 |---------|-------|------|--------|-------|
-| `drawers` table | `LocusKitSchema.drawersTable` (LocusKitSchema.swift) | `drawers_table()` (schema.rs) | Present | Generated columns and indices match; distilled quad + subject trio columns match (pinned by `drawers_column_set` and the GLK composite layout-signature fixture) |
+| `drawers` table | `LocusKitSchema.drawersTable` (LocusKitSchema.swift) | `drawers_table()` (schema.rs) | Present | Generated columns and indices match; `ssc_facts` + the subject trio match (pinned by `drawers_column_set` and the GLK composite layout-signature fixture) |
 | `tunnels` table | `LocusKitSchema.tunnelsTable` (LocusKitSchema.swift:206) | `tunnels_table()` (schema.rs:186) | Present | `kind_id` default 1 matches |
 | `diary` table | `LocusKitSchema.diaryTable` (LocusKitSchema.swift:236) | `diary_table()` (schema.rs:222) | Present | |
 | `manifest` table | `LocusKitSchema.manifestTable` (LocusKitSchema.swift:257) | `manifest_table()` (schema.rs:250) | Present | |
@@ -1111,17 +1193,18 @@ bit-identical DDL. Gaps are tracked until resolved.
 `ColumnType::Timestamp` in Rust (emitted as TEXT ISO8601 by PersistenceKit backends),
 matching Swift's `.timestamp(...)` — never REAL (Unix timestamp).
 
-**Schema version:** both ports declare `version = 12` (`LocusKitSchema.version`
-↔ `SCHEMA_VERSION`, pinned by `schema_version_is_twelve`). The base declaration
-carries every column fresh; a three-entry migration ladder covers in-development
-estates upgrading across a binary bump: v9 → v10 (associations natural-key
-dedup + UNIQUE index, FINDING-3), v10 → v11 (`operationalAND` on
-`container_fingerprints`), v11 → v12 (subject trio on `drawers`: `subject`,
-`subject_pipeline_version`, `subject_at`, all nullable, no backfill — NULL
-`subject` is the backfill-eligibility predicate). Earlier versions (v2 `keys.ext`
-forward-compat slot through v9 `content_fingerprint`) pre-date the ladder and
-live only in the base declaration; the per-version history is the
-`LocusKitSchema.version` doc comment in both ports.
+**Schema version:** both ports declare `version = 20` (`LocusKitSchema.version`
+↔ `SCHEMA_VERSION`, pinned by `schema_version_is_twenty_with_fact_extraction_hop`).
+The base declaration carries every column fresh; the migration ladder is TWO
+entries: v10 → v19 and v19 → v20. The first hop applies the deltas that survive
+at 19 (`operationalAND`, the subject trio, the kg_facts identity trio,
+`idx_drawers_filedAt`, the recall_trace attribution trio, `encoder_models`,
+`ssc_facts`) and never the v16–v18 adornment or distilled objects. The second
+hop adds the twelve kg_facts evidence and projection columns and creates
+`fact_extractor_models`. Populated estates exist at 10 (CE 1.0.35/1.0.37) and
+at 19; `upgradePath(storedVersion:)` / `upgrade_path` refuses everything else
+before the schema opens. The per-version history is the `LocusKitSchema.version`
+doc comment in both ports.
 
 ### Public type surface — concept-level concordance
 
@@ -1158,6 +1241,7 @@ Recurring sanctioned shapes:
 | Learned reference | `LearnedReference` (LearnedReference.swift:86) | `LearnedReference` (learned_reference.rs:132) | public / pub | identical | `LearnedReferenceTests.swift` ↔ `learned_reference_tests.rs` | Confirmed |
 | Container fingerprint | `ContainerFingerprint` (ContainerFingerprintStore.swift:40) | `ContainerFingerprint` (container_fingerprint_store.rs:62) | public / pub | identical | `ContainerFingerprintStoreTests.swift` | Confirmed |
 | Tree node | `Node` (Node.swift:25, `public struct`) | `Node` (node.rs:30, `pub struct`) | public / pub | identical; thirteen fields: `id`, `parentId`/`parent_id`, `displayName`/`display_name`, `lookupName`/`lookup_name`, `depth`, `lifecycle` (lifecycle-state bitmap, no-resurrection guard the node-integrity contract), `createdHlc`/`created_hlc`, `tombstonedHlc`/`tombstoned_hlc`, `tombstonedAt`/`tombstoned_at`, `merkleRoot`/`merkle_root`, `createdAt`/`created_at`, `updatedAt`/`updated_at`, `ext` (JSON forward-compat). `Date?` / `Option<i64>` for date fields — ISO8601-TEXT seam (sanctioned). NT-L1. | `NodeStoreTests.swift` ↔ `node_store_tests.rs` | Confirmed |
+| Recall rating (tournament) | `RecallRating` `Sources/LocusKit/RecallRating.swift:11` | `RecallRating` `rust/src/recall_rating.rs:18` | `public` / `pub` | identical fields; Swift `updatedAt: Date` / Rust `updated_at: String` (ISO8601 TEXT as stored); store pair `upsertRecallRatings` / `upsert_recall_ratings`, `recallRatings(ids:)` (keyed dictionary) / `recall_ratings` (vector of found rows) | `DrawerStoreTests.swift` ; `drawer_store` tests | Confirmed |
 
 #### Adjective enums (proved by `adjective_bitmap_conformance.rs`)
 
@@ -1186,7 +1270,7 @@ Recurring sanctioned shapes:
 |---------|--------------|-------------|------------|------------|---------------------|--------|
 | Capture channel | `CaptureChannel` (DrawerOperational.swift:62) | `CaptureChannel` (drawer_operational.rs:57) | public / pub | identical | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` | Confirmed |
 | Content kind | `ContentKind` (DrawerOperational.swift:79) | `ContentKind` (drawer_operational.rs:99) | public / pub | identical | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` | Confirmed |
-| Drawer feature flags | `DrawerFeatureFlags` (DrawerOperational.swift:101) | `DrawerFeatureFlags` (drawer_operational.rs:146) | public / pub | Swift `OptionSet` struct / Rust ZST struct of `const` bit masks (idiomatic; same bit layout) | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` (FIELD_MASK + per-bit table) | Confirmed |
+| Drawer feature flags | `DrawerFeatureFlags` (DrawerOperational.swift:101) | `DrawerFeatureFlags` (drawer_operational.rs:146) | public / pub | Swift `OptionSet` struct / Rust ZST struct of `const` bit masks (idiomatic; same bit layout). Bit 26 (`isAnomalous` / `IS_ANOMALOUS`) is the low-cohesion outlier flag (§11.18); `Drawer.isAnomalous` / `is_anomalous()` reads bit 26 of `operationalBitmap` directly (not via `featureFlags`, which covers bits 12–23 only). Set/cleared by the GeniusLocusKit anomaly-flag sweep; LocusKit write primitive `Estate.setAnomalousFlag`. | `OperationalBitmapConformanceTests.swift` ↔ `operational_bitmap_conformance.rs` (FIELD_MASK + per-bit table; `DrawerOperationalTests.swift` covers bit 26) | Confirmed |
 | Tunnel kind | `TunnelKind` (TunnelOperational.swift:39) | `TunnelKind` (tunnel_operational.rs:54) | public / pub | identical | `TunnelKindTests.swift` ↔ `capture_tunnel_tests.rs` | Confirmed |
 | Tunnel direction | `TunnelDirection` (TunnelOperational.swift:54) | `TunnelDirection` (tunnel_operational.rs:99) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
 | Tunnel lifecycle | `TunnelLifecycle` (TunnelOperational.swift:64) | `TunnelLifecycle` (tunnel_operational.rs:131) | public / pub | identical | `TunnelBitmapTests.swift` | Confirmed |
@@ -1294,15 +1378,7 @@ Recurring sanctioned shapes:
 | Drawer state validator | `DrawerStateValidator` (DrawerStateValidator.swift:41, caseless `enum`) | `mod drawer_state_validator` free fns (drawer_state_validator.rs:97) | public / pub | Swift-enum-namespace / Rust free-fn module (thin adapter to substrate row-state, per M1) | `StateTransitionTests.swift` ↔ substrate row-state conformance | Confirmed |
 | Forbidden-combination validator | `ForbiddenCombinationValidator` (ForbiddenCombinationValidator.swift:52, caseless `enum`) | `mod forbidden_combination_validator` `pub fn validate` (forbidden_combination_validator.rs:58) | public / pub | Swift-enum-namespace / Rust free-fn module (cookbook §9.5 forbidden combo) | `ForbiddenCombinationTests.swift` ↔ `forbidden_combination_validator.rs` inline tests | Confirmed |
 | Kit vocabulary | `LocusKitVocabulary` (LocusKitVocabulary.swift:28, caseless `enum`) | `mod vocabulary` free fns (`frozen()`/`union_slots()`, vocabulary.rs:90/22) | public / pub | Swift-enum-namespace / Rust free-fn module (frozen write-gate vocabulary) | `LocusKitVocabularyTests.swift` | Confirmed |
-| Bitmap evaluator | `BitmapEvaluator` (BitmapEvaluator.swift:59) — `internal struct` | `BitmapEvaluator` (bitmap_evaluator.rs:132) — `pub struct` (ZST) | internal / pub | Implementation-detail evaluator. Swift keeps it `internal` (entry point `BitmapEvaluator.evaluate` is module-private; cf. `EstateAudit.swift` note); Rust exposes it `pub` as a module-organisation choice. Not a contract concept either port commits to externally — same algorithm, different chosen visibility. | `EvaluatorTests.swift` ↔ `operational_bitmap_conformance.rs` (evaluation tier) | Confirmed |
-
-**Visibility-asymmetry note (`BitmapEvaluator`):** the only visibility
-asymmetry in the surface. Swift declares the evaluator `internal` and the
-Rust port declares it `pub`. The behaviour is conformance-bound identically
-(`EvaluatorTests.swift` ↔ `operational_bitmap_conformance.rs`), and neither
-port advertises it as a consumer-facing contract type, so this is recorded
-as Confirmed — but the asymmetry is flagged here so a
-future pass can decide whether Rust should narrow it to `pub(crate)`.
+| Bitmap evaluator | `BitmapEvaluator`, `BitmapEvaluationResult` (BitmapEvaluator.swift) | `BitmapEvaluator`, `BitmapEvaluationResult` (bitmap_evaluator.rs) | public / pub | `evaluate` / `evaluate_result` preserve the row-returning evaluator surface. `evaluateResult` / `evaluate_result` add admitted `rows` plus `withheldBySensitivity` / `withheld_by_sensitivity`: the count of rows excluded only by the default-injected sensitivity ceiling. Explicit sensitivity filters return zero and the withheld rows do not leave LocusKit. | `EvaluatorTests.swift` ↔ `bitmap_evaluator.rs` inline tests | Confirmed |
 
 ### Additional public types
 
@@ -1452,9 +1528,590 @@ dereference verbs and the dreaming daemon's Bradley-Terry sweep.
 
 ---
 
+## Audit markers (§ 17 — A2/A3, benchmark reset 2026-08-13)
+
+Informational audit events with `beforeBitmaps == afterBitmaps`, appended
+directly (no `AuditGate` — the gate governs bitmap mutations and these
+mutate nothing; same precedent as `setSubject`). The `reason` column
+carries the machine-parseable payload; no schema change.
+
+### Swift: `DrawerStore` (actor) and `Estate` wrappers
+
+| Method | Parameters | Returns | Notes |
+|---|---|---|---|
+| `appendEncodeCompleteMarker(drawerId:rowCount:unitSessionID:at:)` | `String, Int, String, Date` | — | One per encode drain unit, anchored on the unit's FIRST drawer. Verb `encodeComplete`, actor `encode_worker`, reason `session=<id> rows=<n>`. Absent row = silent no-op. |
+| `appendDreamCycleMarker(phase:unitSessionID:at:)` | `DreamCyclePhase, String, Date` | — | Estate-anchored (`rowId == estateUuid`), verbs `dreamStart` / `dreamEnd`, actor `dreaming_daemon`, reason `session=<id>`. |
+| `appendReindexCompleteMarker(rowCount:unitSessionID:at:)` | `Int, String, Date` | — | C3: estate-anchored, verb `reindexComplete`, actor `reindex_worker`, reason `session=<id> rows=<n>` — the CYCLE tier-3 boundary. Empty session id refused. |
+| `auditEvents(after:limit:)` | `HLC?, Int` | `[AuditEvent]` | Estate-wide HLC-ordered audit page (pass-through to `AuditLog.iterate`); the C3/A6 timing-derivation watermark-paging seam. |
+| `Estate.appendEncodeCompleteMarker(firstDrawerID:rowCount:unitSessionID:at:)` | — | — | Pass-through. |
+| `Estate.appendDreamCycleMarker(phase:unitSessionID:at:)` | — | — | Pass-through. |
+| `Estate.appendReindexCompleteMarker(rowCount:unitSessionID:at:)` | — | — | Pass-through. |
+| `Estate.auditEventsForRow(_:)` | `UUID` | `[AuditEvent]` | Public audit read pass-through (marker readers, C3 derivation). |
+| `Estate.auditEvents(after:limit:)` | `HLC?, Int` | `[AuditEvent]` | Pass-through. |
+
+Constants: `DrawerStore.encodeCompleteVerb`, `DrawerStore.encodeWorkerActor`,
+`DrawerStore.DreamCyclePhase` (`.start` = `dreamStart`, `.end` = `dreamEnd`).
+
+### Rust: `DrawerStore` trait (`rust/src/drawer_store.rs`)
+
+| Method | Parameters | Returns | Notes |
+|---|---|---|---|
+| `append_encode_complete_marker` | `&str, usize, &str, i64` | `Result<(), LocusKitError>` | `completed_at` epoch ms. Default: DatabaseUnavailable. |
+| `append_dream_cycle_marker` | `verb: &str, &str, i64` | `Result<(), LocusKitError>` | Verb string `dreamStart` / `dreamEnd`. |
+| `append_reindex_complete_marker` | `usize, &str, i64` | `Result<(), LocusKitError>` | C3: estate-anchored `reindexComplete` / `reindex_worker`, reason `session=<id> rows=<n>`. Default: DatabaseUnavailable. |
+| `audit_events` | `Option<HLC>, usize` | `Result<Vec<AuditEvent>, LocusKitError>` | Estate-wide HLC-ordered page (`AuditLog::iterate` pass-through); C3/A6 paging seam. Default: DatabaseUnavailable. `Estate::audit_events` mirrors. |
+
+Constants: `ENCODE_COMPLETE_VERB`, `ENCODE_WORKER_ACTOR`. Backend coverage
+identical to the trace-reward verbs (Core live; SQLite/Postgres delegate;
+InMemory inherits).
+
+### Test suites
+
+- Swift: `Tests/LocusKitTests/EncodeMarkerTests.swift` — 6 tests
+  (A2 encode ×3, A3 dream ×1, C3 reindex ×2).
+- Rust: `drawer_store_inmemory.rs` tests `encode_marker_*`,
+  `dream_brackets_share_session`, `reindex_marker_*` — 6 tests.
+
+---
+
+## Anomalous-flag write primitive (§11.18)
+
+Derived-signal write: sets or clears bit 26 (`isAnomalous`) of a drawer's
+`operationalBitmap`. No audit event is written, no lifecycle or lineage
+field is touched. The GeniusLocusKit anomaly-flag sweep is the only caller;
+LocusKit owns the write primitive so the composition layer does not bypass
+the store interface.
+
+### Swift: `DrawerStore` and `Estate` wrappers
+
+| Method | Parameters | Returns | Notes |
+|---|---|---|---|
+| `DrawerStore.setAnomalousFlag(drawerId:anomalous:)` | `String, Bool` | `async throws -> Int` | Serializable transaction: read-modify-write on `operationalBitmap`. Sets bit 26 when `anomalous == true`, clears it otherwise. Returns 0 when the bit is already in the correct state (skip-write optimisation). Throws `invalidContent` on empty `drawerId`; unknown `drawerId` returns 0. |
+| `Estate.setAnomalousFlag(drawerId:anomalous:now:)` | `String, Bool, Date` | `async throws -> Int` | Pass-through to `DrawerStore`. Accepts `now:` for call-site determinism discipline; the write carries no timestamp. |
+
+Note: the `now:` parameter is accepted and discarded; the method signature
+honours the fleet-wide determinism rule (never call `Date()` inside an
+engine) without storing a timestamp for this derived-signal write.
+
+### Rust
+
+No Rust equivalent is shipped in this mission: the anomaly-flag sweep is
+a Swift-side maintenance function in GeniusLocusKit. Rust recall filtering
+reads `is_anomalous()` (bit 26 of `operational_bitmap`) on hydrated drawers
+— no write primitive is required in Rust for the §11.18 feature set.
+
+---
+
+## Encoder registry, span index bit and ssc_facts (schema v19)
+
+**Swift:**
+
+```swift
+public enum Pooling: String, Sendable, Equatable, Codable { case mean, cls }
+
+public struct EncoderModelRow: Sendable, Equatable, Codable {   // one encoder_models row
+    public let modelID: String; public let modelVersion: String; public let dim: Int
+    public let queryPrefix: String; public let docPrefix: String; public let pooling: Pooling
+    public let tokenizerHash: String
+    public let windowWords: Int; public let overlapDivisor: Int; public let maxSpans: Int; public let maxSequence: Int
+    public let isActive: Bool                                  // decoded from INTEGER is_active
+}
+
+public actor EncoderModelStore {
+    public init(storage: any Storage)
+    public func active() async throws -> EncoderModelRow?
+    public func all() async throws -> [EncoderModelRow]
+    public func upsert(_ spec: EncoderModelRow) async throws
+    @discardableResult public func activate(modelID: String) async throws -> Int   // drawers whose bit 27 cleared
+}
+
+// DrawerStore and Estate (pass-throughs)
+@discardableResult public func setSSCFacts(_ facts: String?, for drawerId: String) async throws -> Int
+@discardableResult public func setSpanIndexed(drawerId: String) async throws -> Int
+public func spanIndexDebtBatch(limit: Int, afterDrawerID: String? = nil) async throws -> [Drawer]
+public func countSpanIndexDebt() async throws -> Int
+
+// LocusKitSchema
+public static let version = 20
+public static let supportedUpgradeFloor = 10
+public static func upgradePath(storedVersion: Int) -> SchemaUpgradePath
+public enum SchemaUpgradePath: Equatable, Sendable { case fresh, upgrade(from: Int), current, unsupported(found: Int) }
+
+// DrawerFeatureFlags
+public static let spanIndexed = DrawerFeatureFlags(rawValue: 1 << 27)
+public static let clearedOnContentWrite: Int64   // bit 19 | bit 27 | bit 28
+```
+
+**Rust:**
+
+```rust
+pub enum Pooling { Mean, Cls }               // as_str() / parse()
+pub struct EncoderModelRow { pub model_id: String, pub model_version: String, pub dim: i64,
+    pub query_prefix: String, pub doc_prefix: String, pub pooling: Pooling, pub tokenizer_hash: String,
+    pub window_words: i64, pub overlap_divisor: i64, pub max_spans: i64, pub max_sequence: i64, pub is_active: bool }
+pub struct EncoderModelStore { /* storage */ }
+impl EncoderModelStore {
+    pub fn new(storage: Arc<dyn Storage>) -> Self;
+    pub fn active(&self) -> Result<Option<EncoderModelRow>, LocusKitError>;
+    pub fn all(&self) -> Result<Vec<EncoderModelRow>, LocusKitError>;
+    pub fn upsert(&self, spec: &EncoderModelRow) -> Result<(), LocusKitError>;
+    pub fn activate(&self, model_id: &str) -> Result<usize, LocusKitError>;
+}
+// DrawerStore trait and Estate
+fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError>;
+fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError>;
+fn span_index_debt_batch(&self, limit: usize, after_drawer_id: Option<&str>) -> Result<Vec<Drawer>, LocusKitError>;
+fn count_span_index_debt(&self) -> Result<usize, LocusKitError>;
+// schema
+pub const SCHEMA_VERSION: i32 = 20;
+pub const SUPPORTED_UPGRADE_FLOOR: i32 = 10;
+pub fn upgrade_path(stored_version: i32) -> SchemaUpgradePath;
+pub enum SchemaUpgradePath { Fresh, Upgrade { from: i32 }, Current, Unsupported { found: i32 } }
+// DrawerFeatureFlags
+pub const SPAN_INDEXED: i64 = 1 << 27;
+pub const CLEARED_ON_CONTENT_WRITE: i64;      // bit 19 | bit 27 | bit 28
+```
+
+`activate` clears bit 27 row by row inside one transaction: PersistenceKit's
+RowStore has no bitwise UPDATE expression, and only rows carrying the bit are
+touched. `EncoderModelRow` is declared in LocusKit because the registry row
+is LocusKit's; CorpusKit's encoder contract declares a field-identical type
+and the composition layer converts field for field (the two kits are
+siblings and neither imports the other).
+
+Inline compression reads source content without adding fields to Drawer.
+There is no `Drawer.adornment`, no `Drawer.distilled*`, no adornment store
+API and no `setDistilledRepresentation` in the 3.0 surface. Bit 28 is
+`factsExtracted` (see the Fact extraction section below); bits 29 and 30 are
+unassigned; bit 19 keeps its assignment with no writer.
+
+---
+
+## Fact extraction registry and kg_facts columns (schema v20)
+
+**Swift:**
+
+```swift
+// KGFact v20 fields — carried directly on the struct (see KGFact concordance row)
+// evidenceQuote: String, evidenceStart: Int, evidenceEnd: Int,
+// evidenceStartUTF8Byte: Int, evidenceEndUTF8Byte: Int,
+// sourceDigest: String, extractorProviderID: String, extractorModelID: String,
+// extractorModelVersion: String, extractionSchemaVersion: String,
+// searchProjection: String, searchProjectionVersion: String
+// All default to "" / -1 in the designated initializer.
+
+// KGFactExtractionMetadata — convenience bundle for passing v20 fields together
+public struct KGFactExtractionMetadata: Sendable, Equatable, Hashable, Codable {
+    public let evidenceQuote: String
+    public let evidenceStart: Int; public let evidenceEnd: Int
+    public let evidenceStartUTF8Byte: Int; public let evidenceEndUTF8Byte: Int
+    public let sourceDigest: String
+    public let extractorProviderID: String; public let extractorModelID: String
+    public let extractorModelVersion: String; public let extractionSchemaVersion: String
+    public let searchProjection: String; public let searchProjectionVersion: String
+    public let operationalBitmap: Int64
+    public static let empty: KGFactExtractionMetadata    // all-empty-string / -1 / 0 defaults
+}
+
+public struct FactExtractorModelRow: Sendable, Equatable, Codable {
+    public let recipeID: String; public let providerID: String
+    public let modelID: String; public let modelVersion: String
+    public let schemaVersion: String; public let extractorKind: String
+    public let maximumInputCharacters: Int; public let maximumFactsPerSource: Int
+    public let isActive: Bool                             // decoded from INTEGER is_active
+}
+
+public actor FactExtractorModelStore {
+    public init(storage: any Storage)
+    public func active() async throws -> FactExtractorModelRow?
+    public func all() async throws -> [FactExtractorModelRow]
+    public func upsert(_ row: FactExtractorModelRow) async throws
+    @discardableResult public func activate(recipeID: String) async throws -> Int   // drawers whose bit 28 cleared
+}
+
+// KGFactSearchProjectionBackfill
+public struct KGFactSearchProjectionBackfillReport: Sendable, Equatable {
+    public var scanned: Int; public var updated: Int
+}
+public enum KGFactSearchProjectionBackfill {
+    public static func run(
+        storage: any Storage,
+        buildProjection: @Sendable (String, String, String) -> String,
+        projectionVersion: String
+    ) async throws -> KGFactSearchProjectionBackfillReport
+}
+
+// DrawerFeatureFlags
+public static let factsExtracted = DrawerFeatureFlags(rawValue: 1 << 28)
+// clearedOnContentWrite now: bit 19 | bit 27 | bit 28
+```
+
+**Rust:**
+
+```rust
+// KGFact gains twelve fields; see concordance table row for kg_fact.rs line reference.
+// All default to "" / -1 in the struct initializer.
+
+// KGFactExtractionMetadata — convenience bundle for passing v20 fields together
+// into the capture door. Manual and imported callers use Default::default().
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KGFactExtractionMetadata {
+    pub evidence_quote: String,
+    pub evidence_start: i64, pub evidence_end: i64,
+    pub evidence_start_utf8_byte: i64, pub evidence_end_utf8_byte: i64,
+    pub source_digest: String,
+    pub extractor_provider_id: String, pub extractor_model_id: String,
+    pub extractor_model_version: String, pub extraction_schema_version: String,
+    pub search_projection: String, pub search_projection_version: String,
+    pub operational_bitmap: i64,
+    // Default: all "" / -1 / 0
+}
+
+pub struct FactExtractorModelRow {
+    pub recipe_id: String, pub provider_id: String,
+    pub model_id: String, pub model_version: String,
+    pub schema_version: String, pub extractor_kind: String,
+    pub maximum_input_characters: i64, pub maximum_facts_per_source: i64,
+    pub is_active: bool,
+}
+
+pub struct FactExtractorModelStore { /* storage: Arc<dyn Storage> */ }
+impl FactExtractorModelStore {
+    pub fn new(storage: Arc<dyn Storage>) -> Self;
+    pub fn active(&self) -> Result<Option<FactExtractorModelRow>, LocusKitError>;
+    pub fn all(&self) -> Result<Vec<FactExtractorModelRow>, LocusKitError>;
+    pub fn upsert(&self, row: &FactExtractorModelRow) -> Result<(), LocusKitError>;
+    pub fn activate(&self, recipe_id: &str) -> Result<usize, LocusKitError>;
+}
+
+// locus_kit::kg_fact_search_projection_backfill
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct KGFactSearchProjectionBackfillReport { pub scanned: usize, pub updated: usize }
+pub fn run(
+    storage: &dyn Storage,
+    build_projection: &dyn Fn(&str, &str, &str) -> String,
+    projection_version: &str,
+) -> Result<KGFactSearchProjectionBackfillReport, LocusKitError>;
+
+// DrawerFeatureFlags
+pub const FACTS_EXTRACTED: i64 = 1 << 28;
+// CLEARED_ON_CONTENT_WRITE: bit 19 | bit 27 | bit 28
+```
+
+`FactExtractorModelRow` has no `ext` field in the Swift or Rust value type;
+the `ext` column is present in the schema for forward compatibility but is
+neither written nor read by this surface.
+
+`KGFactSearchProjectionBackfill.run` is idempotent: rows whose
+`searchProjectionVersion` already equals `projectionVersion` are skipped.
+A second run over a fully projected estate reports scanned: 0, updated: 0.
+The projection function and version are injected by the caller because
+LocusKit sits below FactExtractionKit and must not import it.
+
+`activate(recipeID:)` clears bit 28 on every drawer in one transaction.
+PersistenceKit's RowStore has no bitwise UPDATE expression, so the clear uses
+a read-modify-write per carrier row, touching only rows that carry the bit.
+
 *End of LocusKit Interface.*
 
+## Counted endpoint hydration
+
+Swift: `Estate.hydrateWithSensitivityCount(ids:matchingFrame:hydrationLevel:)`
+returns `BitmapEvaluationResult`. Rust:
+`Estate::hydrate_with_sensitivity_count(ids: &[RowID], frame: &RecallFrame)`
+returns `Result<BitmapEvaluationResult, LocusKitError>`. The result contains
+only `rows` and `withheldBySensitivity` / `withheld_by_sensitivity`.
+Unlike `FrameFilteredDrawers`, it exposes no loaded-ID channel. The count uses
+the exact supplied candidate IDs and all caller-frame predicates; only the
+implicit adjective-sensitivity ceiling is removed for the comparison.
+
+## Security repair contract
+
+`Estate.activeCorpusContentIDs(limit:)` / `active_corpus_content_ids_limited(limit)` expose a bounded list of eligible training IDs. Shipping stores apply active/nonempty/nondataset filters and `(filedAt, content, id)` ascending order in storage, project IDs only, and enforce the limit before loading document bodies. Swift `DrawerStore` and each Rust storage adapter implement the same query.
+
+### Candidate counts and extractor upserts
+
+`RecallStream.withheldBySensitivity` (Swift) and
+`RecallStream::withheld_by_sensitivity()` (Rust) carry the sensitivity-only
+exclusion count from the stream's existing candidate evaluation.
+`FrameFilteredDrawers` carries the same count for the requested loaded IDs.
+No companion estate scan is performed. The default is zero for streams not
+created by a counted evaluation.
+
+`FactExtractorModelStore.upsert` is transactional. An active insertion, or a
+change to an existing recipe's provider, model, model version, schema version,
+or activation, invalidates facts-extracted bit 28 through the same path as
+`activate`. Active upserts deactivate other recipes. Debt counts use storage
+COUNT without materializing drawer rows.
+
+Fact `evidenceStart`/`evidenceEnd` and Rust twins are half-open Unicode-scalar
+offsets. UTF-8 byte offsets remain separate; absent offsets are -1/-1.
+
 ## Changelog
+
+### 3.11.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 3.10.0 -- 2026-09-14
+
+Rust twin of the recall-rating surface documented: `RecallRating`
+(`drawer_id`, `rating`, `contests`, `updated_at` ISO8601 TEXT),
+`RECALL_RATINGS_TABLE`, `recall_ratings_schema()` (kit id `GLKRecallRatings`
+version 1), and the `DrawerStore` / `Estate` pair `upsert_recall_ratings` /
+`recall_ratings` implemented by the SQLite, PostgreSQL and InMemory stores.
+Concordance row added.
+
+### 3.9.0 -- 2026-09-14
+
+Added `RecallRating` (drawerID, rating, contests, updatedAt) and the store/estate
+pair `upsertRecallRatings(_:)` (one insert-or-replace per row keyed on `drawer_id`,
+`updated_at` as ISO8601 TEXT) and `recallRatings(ids:)` (keyed result; ids without a
+row are absent) over the `recall_ratings` table introduced by estate format 1.9.
+
+### 3.6.0 -- 2026-09-13
+
+Added the counted endpoint hydration API and admitted-rows-only result contract
+for ranked topK keystones hydration.
+
+Added public `BitmapEvaluationResult` / `BitmapEvaluationResult` and
+`BitmapEvaluator.evaluateResult` / `BitmapEvaluator::evaluate_result`. The
+result carries the admitted rows and the count withheld only by the
+default-injected sensitivity ceiling; an explicit sensitivity filter yields a
+zero count and withheld rows remain inside LocusKit.
+
+### 3.5.0 -- 2026-09-13
+
+`DrawerStore.expungeGated` / `DrawerStore::expunge_gated`,
+`Estate.expunge`, and `Estate.expungeReturningUnsealedEvent` each accept a
+new `sensitivityCeiling` / `sensitivity_ceiling` parameter
+(`AdjectiveSensitivity`, default `.secret` / `Secret`). The lineage cascade
+in `expungeGated` refuses any sibling whose sensitivity tier (bits 6–11 of
+`adjective_bitmap`) strictly exceeds the ceiling, leaving it byte-identical
+and appending its id to `ExpungeOutcome.refusedSiblingIDs` /
+`refused_sibling_ids`. GeniusLocusKit's erase verb passes `.elevated` /
+`Elevated`; all existing callers that do not pass the parameter receive
+`.secret` / `Secret` (no behaviour change).
+
+### 3.4.0 -- 2026-09-12
+
+`withdrawKGFact` / `withdraw_kg_fact` signature widened. Both ports now
+require `changedBy` / `changed_by` (non-empty string) and accept
+`reason` / `reason` (optional string). Both route through
+`AuditGate.admit` / `audit_gate::admit` (verb `Retract`) and emit a
+sealed audit row in the same transaction as the bitmap update. The
+`now` parameter (Swift `Date`, Rust `i64` millis) was already present.
+All callers updated: `VerbSurface.retireKGFact` (and its widened
+`retireKGFact(_:rowID:changedBy:reason:now:)` signature), both
+`FactExtractionDuty` call sites, both `ToolDispatch` / `tool_dispatch`
+stubs, and both `AriaV2KnowledgeJournal` / `knowledge_journal` stubs.
+
+### 3.2.1 -- 2026-09-08
+
+The `Estate.open` signature block reads `federate: Bool = false`, the
+declared default since the environment read left in 3.2.0 (the block still
+showed the earlier `Bool? = nil`). Wording only; no contract change.
+
+### 3.2.0 -- 2026-09-08
+
+`Estate.open`'s `federate` is the caller's declaration only; the
+`MOOTX01_ESTATE_FEDERATE` environment read is gone from both ports. Rust
+`Estate::open(store, owner)` is a non-federating open and
+`Estate::open_with_federation(store, owner, federate)` the explicit form.
+
+### 3.1.0 -- 2026-09-05
+
+`ManifestKey.indexCompositionPolicy` (Rust `ManifestKey::IndexCompositionPolicy`)
+removed from the enum and from the optional-key list, both ports; the
+`index_composition_policy` string no longer parses to a key. The row is not
+migrated: an estate that stored it opens and the value is ignored
+(GeniusLocusKit spec 2.23.0).
+
+### 3.0.0 -- 2026-09-05
+
+Schema v19 (Encoder Rerank Program). Added `EncoderModelRow`, `Pooling`,
+`EncoderModelStore` (`active`, `all`, `upsert`, `activate`), `Drawer.sscFacts`
+/ `ssc_facts`, `setSSCFacts` / `set_ssc_facts`, `setSpanIndexed`,
+`spanIndexDebtBatch`, `countSpanIndexDebt` (+ Rust twins),
+`DrawerFeatureFlags.spanIndexed` / `SPAN_INDEXED`, `clearedOnContentWrite`,
+`Drawer.isSpanIndexed`, `LocusKitSchema.supportedUpgradeFloor`,
+`upgradePath(storedVersion:)` and `SchemaUpgradePath`. Removed the five
+`distilled*` Drawer fields and initializer parameters,
+`setDistilledRepresentation`, `countUndistilled`,
+`roomsWithStaleDistilledRepresentations`, `drawersWithRepresentations`, the
+whole normalized adornment storage API (`AdornmentDebt`,
+`listAdornmentMinters`, `registerAdornmentMinter`, `setAdornmentMinterActive`,
+`setActiveAdornmentMinters`, `adornmentDebtBatch`, `putAdornment`,
+`adornments`, `activeAdornments`) and the AdornmentLib dependency (BREAKING;
+MAJOR). The migration ladder is one hop, v10 → v19. Both ports.
+
+### 2.5.0 -- 2026-09-04
+
+- Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
+
+### 2.4.0 -- 2026-09-03
+
+`ManifestKey` gains the optional case `indexCompositionPolicy =
+"index_composition_policy"` (Rust `ManifestKey::IndexCompositionPolicy`,
+`as_str` / `from_str` round-trip): the estate's stored index composition
+policy id, written once at creation or by the GeniusLocusKit 1.3→1.4
+estate-format capsule and read by GeniusLocusKit at every open. Optional set
+7 → 8, 26 cases in all; `ManifestValues` is unchanged. Both ports.
+
+### 2.3.0 -- 2026-09-03
+
+Schema v18 (both ports). `Drawer` gains `distilledSourceDigest: String?` /
+`distilled_source_digest: Option<String>` (Codable key
+`distilledSourceDigest`, decodeIfPresent). `setDistilledRepresentation`
+gains `sourceDigest:` between `pipelineVersion:` and `tokenCount:` (Rust
+`set_distilled_representation(drawer_id, distilled, pipeline_version,
+source_digest, token_count, generated_at)`); an empty digest is rejected.
+`drawersWithRepresentations` gains `pipelineVersion:` and returns only rows
+current under it (Rust `drawers_with_representations(pipeline_version)`).
+New Rust `DrawerStore::rooms_with_stale_distilled_representations(pipeline_version)`
+and `Estate::rooms_with_stale_distilled_representations`, twins of the Swift
+methods. `countUndistilled` / `count_undistilled` and the stale-rooms query
+count a NULL digest as stale.
+
+### 2.2.0 -- 2026-08-28
+
+Federation opt-out: `Estate.open` gains `federate: Bool? = nil` (Swift) /
+`Estate::open_with_federation` (Rust). Default posture reads
+`MOOTX01_ESTATE_FEDERATE`; the exact value "false" skips the Ed25519
+identity step entirely — no keypair, no identity-key-store contact, no
+manifest public key. Grant issuance throws on a non-federating instance.
+Root cause: durable plaintext bulk estates (benchmark fleets) minted one
+login-keychain identity entry per estate (53,222 observed 2026-08-28).
+
+### 2.0.2 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 2.0.1 -- 2026-08-25
+
+Subject-trio comment aligned to ARIA_MCP_SPEC 2.0.0 § 8 (canonical
+candidate row replaces the retired dense-row spelling). No API change.
+
+### 2.0.0 -- 2026-08-25
+
+Replaced the scalar Drawer adornment API with permanent normalized minter and
+adornment values and store methods. Added runtime minter registration and
+activation, computed pair debt, per-pair writes, all-adornment reads, and
+batched active-adornment projection. Retired the legacy backfill, scalar write,
+and bits 27 through 30 from the target interface.
+
+### 1.32.0 -- 2026-08-24
+
+- **`AdornmentRequiredBackfill` / `adornment_required_backfill` (ADORN-BACKFILL).** New
+  public backfill entry, run only by `mootx01 upgrade`:
+
+  ```swift
+  public struct AdornmentRequiredBackfillReport: Sendable, Equatable {
+      public var scanned: Int   // live un-adorned rows examined
+      public var backfilled: Int // rows where bit 27 was set
+  }
+  public enum AdornmentRequiredBackfill {
+      public static func run(
+          storage: any Storage
+      ) async throws -> AdornmentRequiredBackfillReport
+  }
+  ```
+
+  ```rust
+  // locus_kit::adornment_required_backfill
+  #[derive(Debug, Clone, Default, PartialEq, Eq)]
+  pub struct AdornmentRequiredBackfillReport {
+      pub scanned: usize,
+      pub backfilled: usize,
+  }
+  pub fn run(
+      storage: &dyn Storage,
+  ) -> Result<AdornmentRequiredBackfillReport, LocusKitError>;
+  ```
+
+  Sets `adornmentRequired` (bit 27 of `operationalBitmap`) on every live,
+  never-adorned drawer (`tombstonedAt IS NULL AND adornment IS NULL AND
+  bitmaskNone(bit 27)`) so `AdornmentPass` processes pre-v16 drawers on the
+  next dream cycle. Idempotent and re-runnable. Wired immediately after
+  `KGFactIdentityBackfill` in both the up-to-date early-return path and the
+  full convergence path of `mootx01 upgrade`. No injected resolver (unlike
+  `KGFactIdentityBackfill`) — all evidence is within the estate itself.
+
+### 1.31.0 -- 2026-08-24
+
+SCORE-ORDERING mission: `DrawerStore` three-column ORDER BY.
+
+All ordered scan methods in `DrawerStore` (Swift `DrawerStore` protocol and
+SQLite implementation; Rust `DrawerStore` trait and `InMemoryDrawerStore`)
+now use a three-column ORDER BY with `content` inserted between `filedAt`
+and `id`. This makes scan results deterministic when multiple drawers share
+the same `filedAt`. No callers change; the ordering change affects only the
+position of equal-`filedAt` drawers within a single scan result.
+
+### 1.30.0 -- 2026-08-23
+
+- Drawer API §: `adornment: String?` stored column. Computed `Bool` accessors:
+  `adornmentRequired` (bit 27 of `operationalBitmap`) and `adornmentBitmask`
+  returning the 3-bit Int value from bits 28–30 (apple gen1=0b001, gen2=0b011,
+  gen3=0b111; non-apple gen1=0b100, gen2=0b110, gen3=0b101; unadorned=0b000).
+- New Estate API (Swift): `adornmentDebtBatch(limit:afterID:) async throws -> [Drawer]`
+  — fetch up to `limit` active drawers with `adornmentRequired` set.
+  `setAdornment(drawerId:adornment:bitmaskCode:) async throws -> Int` — write
+  adornment field + bits 28–30 and clear bit 27 atomically; returns updated row count.
+- Rust twins: `adornment_debt_batch(limit, after_id)` and
+  `set_adornment(drawer_id, adornment, bitmask_code)` on `DrawerStore`.
+
+### 1.29.0 -- 2026-08-20
+
+- `CaptureFrame` gains three nil-defaulted fields (schema v1.2 import seam, feat P2a). `wing: String?` — when nil, `captureBatch` substitutes `defaultWing()` at capture time. `subject: String?` — when nil, the drawer is born as subject debt (B-21) pending backfill. `captureDate: Date?` — per-record ingest clock override; when non-nil, `captureBatch` uses this value as `filedAt` and as the HLC physical-time seed for that drawer (Rust: `pub capture_date: Option<i64>`, epoch milliseconds). When nil, batch wall-clock `now` applies (byte-identical legacy behavior). Cross-port golden pin: `"2026-01-15T10:00:00Z"` → `filedAt = 1768471200000 ms`. `CaptureFrame.init` updated with all three as optional parameters defaulting to `nil`.
+
+### 1.28.0 -- 2026-08-20
+
+- Bit 26 of `operationalBitmap` assigned as `isAnomalous` / `IS_ANOMALOUS`
+  (§11.18). `DrawerFeatureFlags.isAnomalous` (Swift `OptionSet` member) and
+  `DrawerFeatureFlags::IS_ANOMALOUS` (Rust const) define the mask. Computed
+  accessor `Drawer.isAnomalous: Bool` / `Drawer::is_anomalous() -> bool`
+  reads bit 26 directly from `operationalBitmap` (bit 26 is outside the
+  feature-flags region 12–23). New write primitive
+  `DrawerStore.setAnomalousFlag(drawerId:anomalous:)` /
+  `Estate.setAnomalousFlag(drawerId:anomalous:now:)` — no audit event, no
+  lifecycle touch, skip-write when unchanged. Bits 27–63 remain reserved.
+
+### 1.27.0 -- 2026-08-20
+
+- `RecallTraceItem` gains the lane-attribution trio (schema v15, W2.5
+  Track R(a)): optional `door`, `composition`, `laneRanks` fields
+  (Swift init parameters defaulted to nil; Rust `with_attribution`
+  builder). New static `packLaneRanks(_:)` / `pack_lane_ranks` packs
+  per-lane 1-based ranks into the canonical JSON string in the fixed
+  `laneRankOrder` / `LANE_RANK_ORDER` (locus, bm25, hamming, dense) —
+  a cross-port byte-identical conformance surface. `DrawerStore`
+  trace encode/decode and both used-mark rebuild paths carry the trio.
+
+### 1.26.0 -- 2026-08-19
+
+- New `Filter` cases `eventAfter(Date)` / `eventBefore(Date)` (Rust `EventAfter(i64)` / `EventBefore(i64)`, epoch milliseconds). `BitmapEvaluator` classifies these as the structured tier and evaluates them inclusively against `drawer.eventTime`.
+
+### 1.25.0 -- 2026-08-13
+
+- C3 reindex-completion marker (benchmark reset): `appendReindexCompleteMarker`
+  / `append_reindex_complete_marker` (estate-anchored `reindexComplete`
+  informational event, reason `session=<id> rows=<n>` — the CYCLE tier-3
+  boundary) and the estate-wide audit page `auditEvents(after:limit:)` /
+  `audit_events` (HLC-cursor pass-through to `AuditLog.iterate`, the C3/A6
+  timing-derivation watermark-paging seam), both ports, with `Estate`
+  pass-throughs.
+
+### 1.24.0 -- 2026-08-13
+
+- Audit markers (A2/A3, benchmark reset): `appendEncodeCompleteMarker`
+  (one informational event per encode drain unit; verb `encodeComplete`,
+  actor `encode_worker`, reason `session=<id> rows=<n>`) and
+  `appendDreamCycleMarker` (`dreamStart`/`dreamEnd` estate-anchored cycle
+  brackets), both ports, plus `Estate` pass-throughs. No schema change;
+  markers close finding P2's missing encode-end timestamp so INGEST and
+  CYCLE-dreamt become derivable from the audit log.
 
 ### 1.23.0 -- 2026-08-07
 
@@ -1717,6 +2374,9 @@ fresh-batch drawers. `DrawerStore.findActivePredecessor` visibility widened from
 order. Callers must invoke `moot_reindex` / `moot_dream` to rebuild BM25/vector
 lanes after batch import.
 
+### 1.26.0 -- 2026-08-19
+MACD-3D (Kong ruling 3002C59F, Work Unit C): `SensitivityFilteredStorage` and `SensitivityCeilingError` re-homed from `MootProGateway/Sync/` to `LocusKit` — the cross-platform (macOS + iOS v26) kit that owns `AdjectiveSensitivity` and the `adjectiveBitmap` schema semantics. Both types are EE-only by usage policy (sync ceiling enforcement) but are defined in the open LocusKit module; daemon and app packages both import LocusKit and can reference the single implementation. `SensitivityFilteredStorage` is a public `final class` wrapping `any Storage` with a dynamic `AdjectiveSensitivity` ceiling; `SensitivityCeilingError` is the inbound-gate error (thrown when `adjectiveBitmap` sensitivity exceeds the ceiling). The internal `_retractionStream` test hook remains unexported. Swift-only — no Rust port required (sync ceiling enforcement is app/daemon-layer concern, not substrate).
+
 ### 1.8.0 -- 2026-06-21
 NT-DOC-1: Added 5 the node-integrity contract concordance rows to § 7. Entities section gains `Node`
 (tree node entity, 13 fields, ISO8601-TEXT date seam). Estate/store types gains
@@ -1745,3 +2405,43 @@ Schema v1 → v2 (the forward-compatible ext-slot contract): added the nullable 
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 3.1.1 -- 2026-09-06
+
+Clarified that inline compression adds no stored Drawer representation.
+
+### 3.3.0 -- 2026-09-11
+
+Schema v20 (Fact Extraction Program). `KGFact` gains twelve stored fields:
+`evidenceQuote`, `evidenceStart`, `evidenceEnd`, `evidenceStartUTF8Byte`,
+`evidenceEndUTF8Byte`, `sourceDigest`, `extractorProviderID`,
+`extractorModelID`, `extractorModelVersion`, `extractionSchemaVersion`,
+`searchProjection`, and `searchProjectionVersion`; all carry defaults of
+`""` / `-1` so pre-extraction rows are unchanged in behavior. Added
+`KGFactExtractionMetadata` (convenience bundle), `FactExtractorModelRow`,
+`FactExtractorModelStore` (`active`, `all`, `upsert`, `activate`),
+`KGFactSearchProjectionBackfillReport`, `KGFactSearchProjectionBackfill.run`,
+and `DrawerFeatureFlags.factsExtracted` / `FACTS_EXTRACTED` (bit 28).
+`clearedOnContentWrite` now includes bit 28. `LocusKitSchema.version` /
+`SCHEMA_VERSION` advances to 20; the migration ladder is now two hops
+(v10 to v19 and v19 to v20); the pinning test is
+`schema_version_is_twenty_with_fact_extraction_hop`. New "Fact extraction
+registry and kg_facts columns (schema v20)" section documents the full API
+surface. Both ports. No consumer action is required.
+
+### 3.7.0 -- 2026-09-14
+
+Subject contract unit corrected to grapheme clusters in two places: the
+`Drawer.subject` field comment (line 308) and the `DrawerStore.subjectLengthContract`
+doc comment. The cap is 120 grapheme clusters, counted identically by Swift's
+`String.count` and by the Rust `locus_kit::drawer_store::subject_length` helper.
+
+### 3.8.0 -- 2026-09-14
+
+FACT_EXTRACTION_WIRE: estate format V1_8 is current; `Estate.meta(key:)` /
+`Estate.setMeta(key:value:)` are used by GeniusLocusKit to store and read the
+new `"fact_extraction"` raw manifest key (not a `ManifestKey` enum case — same
+convention as `door_config`, `modes_config`, and other GLK-owned settings).
+No LocusKit type signature changes; this entry records that the raw key
+`"fact_extraction"` is a GeniusLocusKit-owned manifest key stored in the
+estate via the existing meta surface.

@@ -169,6 +169,10 @@ struct SecretSyncAlgorithmRegistryTests {
         )
     }
 
+    /// The security target depends on ConvergenceKit and on MootProductIdentity
+    /// only: the identity library is a constants-only leaf (the Keychain
+    /// service names the secret-sync stores spell), so it does not widen the
+    /// target's reach.
     @Test("manifest preserves leaf isolation and test-only conformance edges")
     func dependencyEdgesAreExact() throws {
         let manifest = try packageManifest()
@@ -189,6 +193,7 @@ struct SecretSyncAlgorithmRegistryTests {
                 .target(
                             name: "ConvergenceKitAppleSecurity",
                             dependencies: [
+                                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                                 "ConvergenceKit",
                             ],
                             path: "Sources/ConvergenceKitAppleSecurity"

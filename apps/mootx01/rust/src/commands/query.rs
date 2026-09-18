@@ -17,6 +17,17 @@ use crate::core::daemon_client;
 use crate::exit;
 
 pub fn run(verb: String, db: Option<String>, json: bool, args: Vec<String>) -> ExitCode {
+    // `--db` is resolved by the catalog here, so a bad value fails in this
+    // process with the catalog's message instead of inside the serve child.
+    // The value itself is passed to serve unchanged; serve resolves it the
+    // same way (a registered name, or `<dir>/<name>` for a transient estate).
+    // Routes through the funnel (Windows base-directory adoption + catalog
+    // open) so the adoption always precedes the open.
+    if let Err(e) = crate::core::estate_open::catalog(db.as_deref()) {
+        eprintln!("mootx01 query: {e}");
+        return ExitCode::from(exit::FAILURE);
+    }
+
     let tool = format!("moot_{verb}");
     let arguments = match parse_kv_args(&args) {
         Ok(a) => a,
@@ -126,9 +137,28 @@ fn subprocess_call(
 
 /// `--key value` pairs → JSON object. Values that parse as JSON (numbers,
 /// bools, arrays, objects, quoted strings) are taken as such; anything else
-/// is a string. A trailing key without a value is an error.
+/// is a string.
+///
+/// ## Conformance rules (parity with Swift `parseArguments`)
+///
+/// - A leading bare `--` is skipped (bash-style option terminator). This lets
+///   `mootx01 query moot_tool -- --key value` work correctly.
+/// - A bare `--` at any position other than the leading slot is rejected with
+///   a named error (empty key), matching the intent of flag validation.
+/// - A bare value (no `--` prefix) is rejected with an error.
+/// - Flag-style: `--key` followed by another `--` argument or end-of-args
+///   sets `key = true`, matching Swift `parseArguments` flag-style handling.
 fn parse_kv_args(args: &[String]) -> Result<serde_json::Value, String> {
     let mut obj = serde_json::Map::new();
+    // Skip a leading bare "--" (bash-style option terminator).
+    // `mootx01 query moot_tool -- --key value` is idiomatic shell; without
+    // this skip, strip_prefix("--") on "--" yields an empty key that silently
+    // swallows the next argument as its value.
+    let args = if args.first().map(|s| s.as_str()) == Some("--") {
+        &args[1..]
+    } else {
+        args
+    };
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let Some(key) = a.strip_prefix("--") else {
@@ -136,11 +166,24 @@ fn parse_kv_args(args: &[String]) -> Result<serde_json::Value, String> {
                 "mootx01 query: expected '--key value' pairs, got '{a}'."
             ));
         };
-        let Some(raw) = it.next() else {
-            return Err(format!("mootx01 query: '--{key}' requires a value."));
+        if key.is_empty() {
+            // A non-leading bare "--": the leading-separator skip above consumed
+            // the first one. Any further "--" is a usage error.
+            return Err(
+                "mootx01 query: bare '--' is only valid as the leading separator.".to_string(),
+            );
+        }
+        // Flag-style: if the next token is absent or begins with "--", treat
+        // the current key as a boolean flag (value = true). This mirrors Swift
+        // `parseArguments`, which sets `result[key] = true` in the same case.
+        let value = match it.as_slice().first() {
+            Some(next) if !next.starts_with("--") => {
+                let raw = it.next().unwrap();
+                serde_json::from_str::<serde_json::Value>(raw)
+                    .unwrap_or_else(|_| serde_json::Value::String(raw.clone()))
+            }
+            _ => serde_json::Value::Bool(true),
         };
-        let value = serde_json::from_str::<serde_json::Value>(raw)
-            .unwrap_or_else(|_| serde_json::Value::String(raw.clone()));
         obj.insert(key.to_string(), value);
     }
     Ok(serde_json::Value::Object(obj))
@@ -196,21 +239,87 @@ fn render(response: &serde_json::Value, json: bool) -> ExitCode {
 mod tests {
     use super::*;
 
+    fn args(v: &[&str]) -> Vec<String> {
+        v.iter().map(|s| s.to_string()).collect()
+    }
+
+    // ─── existing conformance ────────────────────────────────────────────
+
     #[test]
     fn kv_args_parse_json_and_strings() {
-        let a: Vec<String> = ["--limit", "5", "--wing", "work", "--flag", "true"]
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        let v = parse_kv_args(&a).unwrap();
+        let v = parse_kv_args(&args(&["--limit", "5", "--wing", "work", "--flag", "true"])).unwrap();
         assert_eq!(v["limit"], 5);
         assert_eq!(v["wing"], "work");
         assert_eq!(v["flag"], true);
     }
 
     #[test]
-    fn kv_args_reject_bare_value_and_trailing_key() {
-        assert!(parse_kv_args(&["oops".to_string()]).is_err());
-        assert!(parse_kv_args(&["--key".to_string()]).is_err());
+    fn kv_args_reject_bare_value() {
+        // A positional arg without "--" prefix is a usage error.
+        assert!(parse_kv_args(&args(&["oops"])).is_err());
+    }
+
+    // ─── V3 conformance vectors (VAULT-FIX-01) ──────────────────────────
+    // Parity with Swift `parseArguments`. Each vector is documented with
+    // the corresponding Swift outcome to verify cross-port alignment.
+
+    #[test]
+    fn kv_args_leading_separator_is_skipped() {
+        // ["--", "--key", "value"] → {"key": "value"}
+        // Swift: result[""] = true, then {"key": "value"} — Rust is stricter
+        // (skips "--" entirely rather than creating empty key).
+        let v = parse_kv_args(&args(&["--", "--key", "value"])).unwrap();
+        assert_eq!(v["key"], "value");
+        assert!(v.get("").is_none(), "leading '--' must not insert empty key");
+    }
+
+    #[test]
+    fn kv_args_lone_separator_yields_empty_object() {
+        // ["--"] → {} (nothing to parse after the separator)
+        let v = parse_kv_args(&args(&["--"])).unwrap();
+        assert!(v.as_object().unwrap().is_empty(), "lone '--' must yield {{}}");
+    }
+
+    #[test]
+    fn kv_args_non_leading_bare_separator_is_rejected() {
+        // ["--key", "val", "--"] → error: non-leading "--" is a usage error.
+        // This prevents silent swallowing of the argument after the second "--".
+        assert!(
+            parse_kv_args(&args(&["--key", "val", "--"])).is_err(),
+            "non-leading '--' must be an error"
+        );
+    }
+
+    #[test]
+    fn kv_args_flag_style_trailing_key_is_true() {
+        // ["--key"] → {"key": true} (flag-style, no value token follows)
+        // Previously this was rejected with "requires a value" — the V3 fix
+        // aligns with Swift `parseArguments` which sets result[key] = true.
+        let v = parse_kv_args(&args(&["--key"])).unwrap();
+        assert_eq!(v["key"], true, "--key alone must parse as flag (true)");
+    }
+
+    #[test]
+    fn kv_args_flag_style_followed_by_another_flag() {
+        // ["--verbose", "--limit", "5"] → {"verbose": true, "limit": 5}
+        // When the next token starts with "--", current key is a flag.
+        let v = parse_kv_args(&args(&["--verbose", "--limit", "5"])).unwrap();
+        assert_eq!(v["verbose"], true, "--verbose must be a flag");
+        assert_eq!(v["limit"], 5);
+    }
+
+    #[test]
+    fn kv_args_separator_then_flag_style() {
+        // ["--", "--key"] → {"key": true} (separator skipped, then flag-style)
+        let v = parse_kv_args(&args(&["--", "--key"])).unwrap();
+        assert_eq!(v["key"], true, "flag after separator must parse as true");
+    }
+
+    #[test]
+    fn kv_args_separator_then_kv_pairs() {
+        // ["--", "--a", "1", "--b", "hello"] → {"a": 1, "b": "hello"}
+        let v = parse_kv_args(&args(&["--", "--a", "1", "--b", "hello"])).unwrap();
+        assert_eq!(v["a"], 1);
+        assert_eq!(v["b"], "hello");
     }
 }

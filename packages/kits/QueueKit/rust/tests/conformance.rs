@@ -126,9 +126,14 @@ fn signal_byte_identical() {
 }
 
 // -------------------------------------------------------------
-// Area 4: concurrent-claim conformance per QUEUEKIT_SPEC §9.
+// Area 4: concurrent-claim conformance per QUEUEKIT_SPEC I-3.
 // Ten drainer threads, 100 jobs, zero duplicates. Confirms the
-// Rust FilesystemBackend honours POSIX rename atomicity.
+// two-step claim (new/ → claim/<unique> → cur/) yields exactly
+// one winner per job. A direct new/→cur/ rename is NOT a safe
+// claim: POSIX's same-file rule lets a losing racer's rename
+// return success as a no-op, which this test catches when the
+// maildir sits on a volume that exposes the window (e.g. TMPDIR
+// on the external dev volume).
 // -------------------------------------------------------------
 
 fn make_test_job(i: u32) -> Job {
@@ -180,9 +185,53 @@ fn area4_concurrent_claim_filesystem() {
     let before_dedup = all_ids.len();
     all_ids.dedup();
     assert_eq!(all_ids.len(), before_dedup,
-        "Duplicate claims detected — POSIX rename atomicity violated");
+        "Duplicate claims detected — two-step claim exclusivity violated (I-3)");
     assert_eq!(all_ids.len(), 100,
         "Expected 100 unique ids after dedup, got {}", all_ids.len());
+
+    let _ = fs::remove_dir_all(&dir);
+}
+
+// -------------------------------------------------------------
+// Claim-slot crash recovery per QUEUEKIT_SPEC I-3: a process that
+// dies between the two claim renames strands the job file in
+// claim/ under its prefixed name. The next mount's
+// reclaim_in_flight must sweep it back to new/ under its original
+// name so it is re-driven — exactly once, alongside cur/ orphans.
+// -------------------------------------------------------------
+
+#[test]
+fn claim_orphan_reclaimed_on_mount() {
+    let dir = std::env::temp_dir()
+        .join(format!("queuekit-claimorphan-{}", uuid::Uuid::new_v4()));
+    fs::create_dir_all(&dir).unwrap();
+
+    let backend = FilesystemBackend::new(&dir, 7).unwrap();
+    let job = make_test_job(0);
+    backend.write(&job).unwrap();
+
+    // Simulate a crash after claim step 1: the job file sits in claim/
+    // under its per-claim unique name, and new/ is empty.
+    let filename = filename_for_job(&job);
+    let stranded = format!("{}-{}", uuid::Uuid::new_v4().simple(), filename);
+    fs::rename(dir.join("new").join(&filename), dir.join("claim").join(&stranded))
+        .unwrap();
+
+    // A name too short to carry the 33-char prefix is not a claim file and
+    // must be left in place, not mangled into new/.
+    fs::write(dir.join("claim").join("stray"), b"not-a-claim").unwrap();
+
+    // Fresh mount: reclaim must recover exactly the one stranded job.
+    let remounted = FilesystemBackend::new(&dir, 7).unwrap();
+    let reclaimed = remounted.reclaim_in_flight().unwrap();
+    assert_eq!(reclaimed, 1, "expected exactly the stranded claim reclaimed");
+
+    let drained = remounted.drain_available().unwrap();
+    assert_eq!(drained.len(), 1, "reclaimed job must be re-driven once");
+    assert_eq!(drained[0].0.id.0, job.id.0);
+
+    assert!(dir.join("claim").join("stray").exists(),
+        "non-claim file must be left in claim/ untouched");
 
     let _ = fs::remove_dir_all(&dir);
 }

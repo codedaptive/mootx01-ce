@@ -16,7 +16,7 @@
 
 [package]
 name = "mootx01-cli"
-version = "1.1.0-beta-19"
+version = "1.1.0-rc1"
 edition = "2021"
 rust-version = "1.75"
 description = "mootx01 — ARIA MCP server and estate management CLI (Rust vertical for Linux/Windows). Conforms to CLI_SURFACE_SPEC_v1.0."
@@ -25,9 +25,17 @@ description = "mootx01 — ARIA MCP server and estate management CLI (Rust verti
 name = "mootx01"
 path = "src/main.rs"
 
+[[bin]]
+name = "moot-nuextract-worker"
+path = "src/bin/moot_nuextract_worker.rs"
+
 [lib]
 name = "mootx01_cli"
 path = "src/lib.rs"
+
+[target.'cfg(windows)'.dependencies]
+# Native Application Event Log and best-effort source registration.
+windows-sys = { version = "0.61.2", features = ["Win32_System_EventLog", "Win32_System_Registry", "Win32_Security"] }
 
 [dependencies]
 serde      = { version = "1", features = ["derive"] }
@@ -45,10 +53,15 @@ libc       = { version = "0.2" }
 # Autonomic Governor). `serve` is a thin translation of spec flags onto
 # this library's ServerConfig.
 aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
+# moot-product-identity: install.rs calls settings::seed_defaults_if_absent to
+# write the daemon.stats_store default to config.json (R6, 2026-09-09). Already
+# a transitive dep via aria-mcp; named directly so the install command can
+# reference the crate explicitly.
+moot-product-identity = { path = "../../../packages/libs/MootProductIdentity/rust" }
 # Reuse-estate installer repair: open the existing SQLCipher database with its
 # sibling install key, then retire the legacy Rust audit-column dialect before
 # the new binary serves it. Both crates are already in the product graph via
-# aria-mcp; naming them directly keeps the install code honest and removable.
+# aria-mcp; naming them directly keeps the install code plain and removable.
 persistence-kit = { path = "../../../packages/kits/PersistenceKit/rust" }
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # queuekit: dream command acquires the "dreaming" DrainLease to prevent
@@ -70,7 +83,7 @@ trash = "5.2.3"
 # DrawerMapping stable-source-key resolver, injected at this app layer
 # because locus-kit sits below vault-kit and must not depend on it. Both
 # crates are already in the product graph via aria-mcp; naming them directly
-# keeps the upgrade wiring honest and removable (same rationale as
+# keeps the upgrade wiring plain and removable (same rationale as
 # persistence-kit above). locus-kit also serves the installer reuse
 # integration gate in this crate's tests.
 locus-kit = { path = "../../../packages/kits/LocusKit/rust" }
@@ -79,10 +92,63 @@ vault-kit = { path = "../../../packages/kits/VaultKit/rust" }
 # shared-content reclaim (MXE_RC_01). EstateCoordinator::open is the
 # migration-host seam; SharedContentMigrationExt provides the P5 step.
 # Both are already in the product graph via aria-mcp; naming them directly
-# keeps the upgrade wiring honest and removable.
+# keeps the upgrade wiring plain and removable.
 genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
 genius-locus-kit-migrations = { path = "../../../packages/kits/GeniusLocusKit/rust-migrations" }
+# corpus-kit: `mootx01 upgrade` corpus-counts migration (CORPUS-COUNTS-01).
+# Owns the reindex latch (reindex_required) called at the tail of the
+# vocab-table clear + counts-blob zeroing step. Already in the product graph
+# via aria-mcp; naming it directly keeps the upgrade wiring plain and
+# removable (same rationale as persistence-kit above).
+corpus-kit = { path = "../../../packages/kits/CorpusKit/rust" }
+# synapsekit + substrate-kernel: the span-encode and vector-reclaim steps of
+# `mootx01 upgrade` write encoder span rows (VectorStore::write_span_vectors,
+# int8_vec::quantize) and reclaim the retired dense-family rows
+# (VectorStore::reclaim_retired_vector_rows). Both were resolving transitively
+# through genius-locus-kit; naming them keeps the upgrade wiring explicit.
+synapsekit = { path = "../../../packages/kits/SynapseKit/rust" }
+substrate-kernel = { path = "../../../packages/libs/SubstrateKernel/rust" }
+fact-extraction-kit-providers = { path = "../../../packages/kits/FactExtractionKit/rust-providers", features = ["candle"] }
+# corpus-kit-providers: the span-encode backfill and the upgrade steps use
+# the encoder factory and BASIS_FORMAT_VERSION directly. Already in the
+# product graph via aria-mcp; naming it directly keeps the commands plain
+# and removable (same rationale as persistence-kit above).
+corpus-kit-providers = { path = "../../../packages/kits/CorpusKit/rust-providers" }
+# is upstream of locus-kit in the dependency graph.
+
+# unicode-normalization: NFC normalization for the review engine's normalize_subject.
+# Required for F9 parity: Swift uses precomposedStringWithCanonicalMapping (NFC) to
+# normalize subject strings before duplicate-detection comparison. Without NFC, a
+# decomposed Unicode subject (e.g. "e" + U+0301 combining acute) would not match the
+# precomposed form ("é") in the Rust engine, causing divergence from Swift's output.
+# Authorized by the mission orchestrator as a correctness dependency (2026-08-24).
+unicode-normalization = "0.1"
+
+[features]
+# The span-encoder runtime (candle, all-MiniLM-L6-v2) ships in the product
+# binary by default: `mootx01 serve` activates it for estates provisioned with
+# embedding_provider = "encoder" and a bundled model directory. Build with
+# `--no-default-features` for a lexical-only binary without the ML crates.
+default = ["encoder", "cross-encoder"]
+encoder = ["genius-locus-kit/encoder"]
+# The retrieval-time cross-encoder runtime (candle, ms-marco-MiniLM-L-6-v2)
+# ships in the product so an `apply` rerank directive can load the packaged
+# model directory; the kit default is off. Twin of the Swift product trait
+# `CrossEncoder` on GeniusLocusKit.
+cross-encoder = ["genius-locus-kit/cross-encoder"]
+# harness-keyfile: the benchmark harness serves scratch estates it converted
+# to ciphertext, so the open posture must consult the `db.key` file beside
+# the database. Off by default; no shipping build enables it. The bench
+# Makefile's `rust-moot-binary` target passes --features harness-keyfile so
+# the matrix lane can serve the encrypted cell.
+harness-keyfile = ["genius-locus-kit/harness-keyfile"]
 
 [dev-dependencies]
+# genius-locus-kit/test-seams: EstateCatalog::set_configuration_directory_override,
+# so the db command tests run on a scratch catalog instead of the machine's.
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust", features = ["test-seams"] }
 # tempfile: temporary directories for sensitivity_hashes unit tests.
 tempfile = "3"
+# context-distill-lib: the upgrade convergence test stamps rows with the
+# library's source digest to prove regeneration under the currency rule.
+context-distill-lib = { path = "../../../packages/libs/ContextDistillLib/rust" }

@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import CryptoKit
 import OSLog
 import LocusKit
@@ -86,6 +87,13 @@ public struct JsonSeedRecord: Sendable, Equatable {
     /// → the drawer enters the estate's subject-debt queue for AI
     /// backfill.
     public var subject: String?
+    /// Per-record capture timestamp (schema v1.2). When present, the
+    /// record's capture path uses this as the ingest clock (`filedAt`)
+    /// instead of the batch `now`. Capture HLC physical time derives
+    /// from this value, enabling spread-capture benchmarks where
+    /// different records simulate being filed at distinct instants.
+    /// Absent → the batch `now` is used (byte-identical legacy behavior).
+    public var captureDate: Date?
 }
 
 /// One validated fact from the seed file's `facts` array. `recordID` is
@@ -110,7 +118,7 @@ public struct JsonSeedTunnel: Sendable, Equatable {
     public var label: String?
 }
 
-/// A fully validated seed file. Constructing one via `parse(data:limits:)`
+/// A fully validated seed file. Constructing one via `parse(data:limits:now:)`
 /// IS phases 1–2 of the import: after it returns, every schema rule holds
 /// and the import may proceed to estate work knowing the file cannot fail
 /// validation mid-write.
@@ -134,7 +142,7 @@ public struct JsonSeedFile: Sendable, Equatable {
         ["format_version", "name", "records", "facts", "tunnels"]
     private static let recordKeys: Set<String> =
         ["id", "content", "event_time", "wing", "room", "kind",
-         "sensitivity", "exportability", "subject"]
+         "sensitivity", "exportability", "subject", "capture_date"]
     private static let factKeys: Set<String> =
         ["subject", "predicate", "object", "record_id"]
     private static let tunnelKeys: Set<String> =
@@ -170,7 +178,9 @@ public struct JsonSeedFile: Sendable, Equatable {
     /// Any violation throws `VaultKitError.adapterError` with ONE message
     /// naming the first offending element (record index + id where
     /// applicable). Messages are pinned byte-identical to the Rust twin.
-    public static func parse(data: Data, limits: JsonImportLimits) throws -> JsonSeedFile {
+    /// `now` is the import instant supplied by the caller (deterministic
+    /// clock discipline) — it anchors the capture_date future-skew gate.
+    public static func parse(data: Data, limits: JsonImportLimits, now: Date) throws -> JsonSeedFile {
         // Byte ceiling on the in-memory document. `importSeed` additionally
         // charges the on-disk size before reading (palace pattern); this
         // check keeps the parser safe for callers that hand it raw bytes.
@@ -227,7 +237,7 @@ public struct JsonSeedFile: Sendable, Equatable {
         records.reserveCapacity(recordsRaw.count)
         var seenIDs: Set<String> = []
         for (index, element) in recordsRaw.enumerated() {
-            let record = try parseRecord(element, index: index, seenIDs: &seenIDs)
+            let record = try parseRecord(element, index: index, seenIDs: &seenIDs, now: now)
             records.append(record)
         }
         let recordIDs = seenIDs
@@ -252,7 +262,7 @@ public struct JsonSeedFile: Sendable, Equatable {
     // MARK: Element parsers
 
     private static func parseRecord(
-        _ element: Any, index: Int, seenIDs: inout Set<String>
+        _ element: Any, index: Int, seenIDs: inout Set<String>, now: Date
     ) throws -> JsonSeedRecord {
         guard let object = element as? [String: Any] else {
             throw err("record[\(index)]: must be a JSON object")
@@ -264,7 +274,7 @@ public struct JsonSeedFile: Sendable, Equatable {
         let at = "record[\(index)] (id \"\(id)\")"
 
         if let unknown = object.keys.filter({ !recordKeys.contains($0) }).sorted().first {
-            throw err("\(at): unknown key \"\(unknown)\" — schema v1.1 record keys are id, content, event_time, wing, room, kind, sensitivity, exportability, subject")
+            throw err("\(at): unknown key \"\(unknown)\" — schema v1.2 record keys are id, content, event_time, wing, room, kind, sensitivity, exportability, subject, capture_date")
         }
         guard !seenIDs.contains(id) else {
             throw err("\(at): duplicate id — ids must be unique within the seed file")
@@ -346,6 +356,37 @@ public struct JsonSeedFile: Sendable, Equatable {
             subject = subjectValue
         }
 
+        // Schema v1.2 — optional per-record capture timestamp. When
+        // present, this record's filedAt (and the HLC physical time
+        // derived from it) equals captureDate rather than the batch
+        // wall-clock now. Absent → nil; captureBatch falls back to
+        // its internal Date() (byte-identical legacy behavior).
+        // Validation mirrors event_time: UTC ISO8601 only; offset
+        // forms rejected for cross-port parser parity.
+        var captureDate: Date?
+        if object.keys.contains("capture_date") {
+            guard let captureDateRaw = object["capture_date"] as? String else {
+                throw err("\(at): capture_date is not a string (expected UTC ISO8601, e.g. 2026-01-15T10:00:00Z)")
+            }
+            guard let parsed = parseUTCISO8601(captureDateRaw) else {
+                throw err("\(at): capture_date is not UTC ISO8601 (\"\(captureDateRaw)\" — expected the form 2026-01-15T10:00:00Z; offset forms are not accepted)")
+            }
+            // Future-skew gate (codex finding 2026-08-26): capture_date
+            // becomes filedAt and the HLC physical time, and HLCGenerator
+            // advances its clock to any FUTURE value it is handed — one
+            // far-future seed row would poison every later write's HLC and
+            // the audit timeline with it. Historical dates are the feature
+            // (real corpora file with their real capture instants) and pass
+            // untouched; only dates beyond now + 24h (generous zone/skew
+            // allowance) are rejected. Rejected, not clamped, per the same
+            // determinism rule as I-22 below. Runs in total validation so
+            // the zero-partial-write contract holds.
+            if parsed.timeIntervalSince(now) > 24 * 3600 {
+                throw err("\(at): capture_date \"\(captureDateRaw)\" is more than 24h in the future — a future capture instant would poison the estate's HLC clock; use the real capture time or omit the key")
+            }
+            captureDate = parsed
+        }
+
         // Invariant I-22: a secret row can never be public. The storage
         // gate refuses this combination on every write, so it MUST be
         // rejected here in total validation — otherwise a multi-window
@@ -360,7 +401,8 @@ public struct JsonSeedFile: Sendable, Equatable {
         return JsonSeedRecord(
             id: id, content: content, eventTime: eventTime, wing: wing,
             room: room, kind: kind, sensitivity: sensitivity,
-            exportability: exportability, subject: subject)
+            exportability: exportability, subject: subject,
+            captureDate: captureDate)
     }
 
     private static func parseFact(
@@ -428,8 +470,13 @@ public struct JsonSeedFile: Sendable, Equatable {
 
     // MARK: Small helpers
 
+    /// Every decode and validation rule in `parse` answers with the
+    /// seed-file class, which the ARIA surface reports as the caller's
+    /// argument problem. Path, byte-ceiling and lineage-collision failures
+    /// in `importSeed` throw `.adapterError` directly and stay availability
+    /// refusals.
     private static func err(_ message: String) -> VaultKitError {
-        .adapterError(message)
+        .seedFileInvalid(message)
     }
 
     /// `facts` / `tunnels` are optional sections; when present they must be
@@ -530,7 +577,7 @@ public struct JsonSeedFile: Sendable, Equatable {
 public struct JsonImportBridge: Sendable {
 
     let kit: GeniusLocusKit
-    private let log = Logger(subsystem: "com.mootx01.kit", category: "VaultKit")
+    private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "VaultKit")
 
     /// The ceilings this bridge enforces on an untrusted seed file.
     public var limits: JsonImportLimits
@@ -648,7 +695,12 @@ public struct JsonImportBridge: Sendable {
                 lineageID: DrawerMapping.lineageID(forStableSourceKey: record.id),
                 eventTime: record.eventTime,
                 exportability: record.exportability,
-                wing: record.wing ?? defaultWing
+                wing: record.wing ?? defaultWing,
+                // Schema v1.2: per-record capture timestamp. When non-nil,
+                // captureBatch uses this as filedAt and HLC physical time
+                // for this specific drawer rather than the batch wall clock.
+                // Nil → batch wall clock (legacy behavior, byte-identical).
+                captureDate: record.captureDate
             )
         }
     }
@@ -690,6 +742,18 @@ public struct JsonImportReport: Sendable, Equatable {
     /// into the audit receipt so any estate is traceable to the seed file
     /// that built it.
     public var seedSha256 = ""
+
+    /// Seed `record.id` → the drawer id capture minted for it.
+    ///
+    /// Drawer ids cannot be derived client-side: a record's lineage is
+    /// deterministic (FNV-1a-128 of the record id) but `captureBatch` mints
+    /// the drawer id fresh at insert, and no recall surface addresses a
+    /// drawer by lineage. Without this map a caller that needs to address
+    /// what it just imported has to re-discover each drawer by searching for
+    /// its own content — which cannot be made exact, because ranking decides
+    /// what comes back. The pipeline already builds this map to resolve fact
+    /// and tunnel endpoints; carrying it out costs nothing.
+    public var drawerIDByRecordID: [String: String] = [:]
 
     public init() {}
 }
@@ -756,17 +820,15 @@ extension JsonImportBridge {
                 "seed file exceeds byte ceiling: \(onDiskBytes) bytes > limit \(limits.maxSeedFileBytes) at \(seedURL.path)")
         }
         let data = try Data(contentsOf: seedURL)
-        let file = try JsonSeedFile.parse(data: data, limits: limits)
+        let file = try JsonSeedFile.parse(data: data, limits: limits, now: now)
 
         // Phase 3 — ONE snapshot, then the strict-append assertion. Any
         // overlap is a hard error before any write.
         let occupied = try await occupiedLineageIDs(handle: handle)
         try Self.assertStrictAppend(file: file, occupied: occupied)
 
-        // Fetch the estate actor once (tunnel capture + node-name
-        // resolution); declare the encode SPEED before any encode work is
-        // enqueued — SPEED only, the write strategy is fixed.
-        let estate = try await kit.estate(for: handle)
+        // Declare the encode SPEED before any encode work is enqueued — SPEED
+        // only, the write strategy is fixed.
         await kit.setEncodeSpeed(mode, for: handle)
 
         var report = JsonImportReport()
@@ -804,7 +866,8 @@ extension JsonImportBridge {
         for record in file.records {
             if let subject = record.subject {
                 let drawer = drawersByRecordID[record.id]!
-                _ = try await estate.setSubjectRepresentation(
+                _ = try await kit.setSubjectRepresentation(
+                    in: handle,
                     drawerId: drawer.id,
                     subject: subject,
                     pipelineVersion: DrawerStore.subjectPipelineImportV1,
@@ -813,6 +876,11 @@ extension JsonImportBridge {
             }
         }
         report.subjectsDebt = file.records.count - report.subjectsProvided
+
+        // Carry the record-id → drawer-id map out with the receipt. The map is
+        // already complete here (phase 5 filled it; phase 6 resolves fact and
+        // tunnel endpoints through it), so this is a projection, not new work.
+        report.drawerIDByRecordID = drawersByRecordID.mapValues(\.id)
 
         // Phase 6 — relationship pass. Facts and tunnels resolve their
         // endpoints through the id → drawer map (the validator guaranteed
@@ -835,7 +903,8 @@ extension JsonImportBridge {
         if !file.tunnels.isEmpty {
             // Endpoint wing/room names resolved once for all imported
             // drawers (batch-returned drawers carry node ids, not names).
-            let nodeNames = try await estate.resolveNodeNames(
+            let nodeNames = try await kit.resolveNodeNames(
+                handle,
                 parentNodeIds: file.records.compactMap { drawersByRecordID[$0.id]?.parentNodeId })
             for tunnel in file.tunnels {
                 let source = drawersByRecordID[tunnel.from]!
@@ -861,16 +930,20 @@ extension JsonImportBridge {
                     targetDrawerId: target.id,
                     kind: tunnel.kind,
                     originClass: .imported)
-                _ = try await estate.capture(tunnelFrame)
+                _ = try await kit.captureTunnel(handle, tunnelFrame)
                 report.tunnelsCreated += 1
             }
         }
 
-        // Phase 7 — ONE deferred encode-enqueue sweep (delta-aware), the
-        // exact `importNotes` seam (`VaultBridge.importNotes` phase). The
+        // Phase 7 — deferred encode backfill. The import returns when its
+        // rows are durable; `reindexMissingDeferred` counts the missing set
+        // for the report and runs the auto-continued backfill (passes,
+        // retrain tail, Merkle rollup) on a detached task — the
+        // `moot_palace_import` background contract. Callers watch
+        // `moot_drain_status` / `moot_rebuild_status` converge; the
         // importer adds no drain barrier of its own and never dreams —
         // those are caller protocol steps in the seed-run protocol.
-        report.enqueuedForEncode = try await kit.reindexMissing(handle: handle, now: now)
+        report.enqueuedForEncode = try await kit.reindexMissingDeferred(handle: handle, now: now)
 
         // Phase 8 — audit receipt in the established receipt shape plus
         // `seedSha256` over the exact input bytes, so any estate is

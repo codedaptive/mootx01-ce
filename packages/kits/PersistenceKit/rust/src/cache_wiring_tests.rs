@@ -72,8 +72,10 @@ fn make_inmemory(cache_enabled: bool) -> InMemoryStorage {
         },
         // HMM is the default and the only valid choice on Rust.
         novel_token_tagger: crate::storage::NovelTokenTaggerChoice::Hmm,
-        // DiskBacked default: cache-wiring tests don't exercise residency.
+        // Cache-wiring tests don't exercise residency; use the estate default.
         residency_hint: crate::storage::ResidencyHint::default(),
+        // Cache-wiring tests don't exercise the admission cap; use the default.
+        resident_index_budget: crate::storage::ResidentIndexBudget::default(),
     };
     let storage = InMemoryStorage::new(config);
     storage.open(&wiring_schema()).expect("inmemory schema open");
@@ -200,8 +202,10 @@ fn make_sqlite(cache_enabled: bool) -> SqliteStorage {
         },
         // HMM is the default and the only valid choice on Rust.
         novel_token_tagger: crate::storage::NovelTokenTaggerChoice::Hmm,
-        // DiskBacked default: cache-wiring tests don't exercise residency.
+        // Cache-wiring tests don't exercise residency; use the estate default.
         residency_hint: crate::storage::ResidencyHint::default(),
+        // Cache-wiring tests don't exercise the admission cap; use the default.
+        resident_index_budget: crate::storage::ResidentIndexBudget::default(),
     };
     let storage = SqliteStorage::new(config).expect("sqlite open");
     storage.open(&wiring_schema()).expect("sqlite schema open");

@@ -115,156 +115,220 @@ struct TunnelLifecycleDisclosureTests {
         return text
     }
 
-    // MARK: - connection_search lifecycle gate
+    /// Dispatch moot_memory_get and return the first memory's structured fields,
+    /// or nil when the response carries no admissible record.
+    ///
+    /// Path: result["structuredContent"]["data"]["memories"][0].
+    private func dispatchAndGetFirstMemory(
+        dispatcher: ARIA_MCPDispatcher,
+        memoryID: String
+    ) async -> [String: JSONValue]? {
+        let request = JSONRPCRequest(
+            id: .integer(0),
+            method: "tools/call",
+            params: .object([
+                "name": .string("moot_memory_get"),
+                "arguments": .object(["memory_id": .string(memoryID)]),
+            ])
+        )
+        let rawResponse = await dispatcher.handle(request)
+        guard let response = rawResponse,
+              case .result(let result) = response.payload,
+              let obj = result.objectValue else { return nil }
+        return obj["structuredContent"]?.objectValue?["data"]?.objectValue?["memories"]?.arrayValue?.first?.objectValue
+    }
 
-    @Test("connection_search excludes proposed tunnels (FIND4)")
+    // MARK: - connection_search lifecycle gate
+    //
+    // v2 reshape: `moot_connection_search` no longer takes `from_id`/`to_id`
+    // string args; it takes `memory_id` (UUID, required) plus `direction`
+    // (outgoing|incoming|both, default both) and routes through
+    // `AriaV2KnowledgeJournalService.connectionSearch`
+    // (Sources/AriaMCP/AriaV2KnowledgeJournal.swift:473-477), which still calls
+    // `estate.activeTunnelsFrom(drawerId:)` / `activeTunnelsTo(drawerId:)` —
+    // the same LocusKit-level lifecycle/retirement bitmap filter. Response text is reshaped from "found N outgoing
+    // connections" to "Found N authorized connections." — the exact new
+    // string is pinned below.
+    //
+    // Endpoint IDs must be REAL, admissible drawers in v2, not bare UUID
+    // strings: `AriaV2GeniusLocusKnowledgeJournalBackend.visibleTunnels`
+    // resolves every non-nil sourceDrawerId/targetDrawerId against
+    // `estate.getDrawers(ids:...)` and drops the tunnel entirely if either
+    // endpoint does not resolve to a drawer at or below the sensitivity
+    // ceiling (AriaV2KnowledgeJournal.swift:399-413). A tunnel whose
+    // endpoints are unminted UUIDs is excluded for that reason ALONE,
+    // regardless of lifecycle — which would make every "excludes" assertion
+    // below pass vacuously (0 results because nothing is visible, not
+    // because lifecycle filtering worked) and prove nothing. Both endpoints
+    // are captured as real drawers via `captureDrawer` so the exclusion
+    // assertion actually exercises the lifecycle predicate in
+    // activeTunnelsFrom/activeTunnelsTo, not endpoint invisibility.
+
+    @Test("connection_search excludes proposed tunnels (FIND4, v2 memory_id/direction shape)")
     func connectionSearchExcludesProposed() async throws {
         let harness = try await makeHarness()
-        let srcID = "find4-src-proposed-\(UUID().uuidString)"
-        let tgtID = "find4-tgt-proposed-\(UUID().uuidString)"
+        let src = try await captureDrawer(content: "cs-excl-proposed-src", room: "find4/cs", in: harness)
+        let tgt = try await captureDrawer(content: "cs-excl-proposed-tgt", room: "find4/cs", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: srcID, targetDrawerId: tgtID, lifecycle: .proposed)
+            tunnelWith(sourceDrawerId: src.id, targetDrawerId: tgt.id, lifecycle: .proposed)
         )
 
         let text = await dispatchAndExtractText(
             dispatcher: harness.dispatcher,
             toolName: "moot_connection_search",
-            args: ["from_id": .string(srcID)]
+            args: ["memory_id": .string(src.id), "direction": .string("outgoing")]
         )
         #expect(
-            text.contains(": 0"),
+            text == "Found 0 authorized connections.",
             "proposed tunnel must not appear in connection_search; got: \(text)"
         )
     }
 
-    @Test("connection_search excludes withdrawn tunnels (FIND4)")
+    @Test("connection_search excludes withdrawn tunnels (FIND4, v2 memory_id/direction shape)")
     func connectionSearchExcludesWithdrawn() async throws {
         let harness = try await makeHarness()
-        let srcID = "find4-src-withdrawn-\(UUID().uuidString)"
-        let tgtID = "find4-tgt-withdrawn-\(UUID().uuidString)"
+        let src = try await captureDrawer(content: "cs-excl-withdrawn-src", room: "find4/cs", in: harness)
+        let tgt = try await captureDrawer(content: "cs-excl-withdrawn-tgt", room: "find4/cs", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: srcID, targetDrawerId: tgtID, lifecycle: .withdrawn)
+            tunnelWith(sourceDrawerId: src.id, targetDrawerId: tgt.id, lifecycle: .withdrawn)
         )
 
         let text = await dispatchAndExtractText(
             dispatcher: harness.dispatcher,
             toolName: "moot_connection_search",
-            args: ["from_id": .string(srcID)]
+            args: ["memory_id": .string(src.id), "direction": .string("outgoing")]
         )
         #expect(
-            text.contains(": 0"),
+            text == "Found 0 authorized connections.",
             "withdrawn tunnel must not appear in connection_search; got: \(text)"
         )
     }
 
-    @Test("connection_search excludes superseded tunnels (FIND4)")
+    @Test("connection_search excludes superseded tunnels (FIND4, v2 memory_id/direction shape)")
     func connectionSearchExcludesSuperseded() async throws {
         let harness = try await makeHarness()
-        let srcID = "find4-src-superseded-\(UUID().uuidString)"
-        let tgtID = "find4-tgt-superseded-\(UUID().uuidString)"
+        let src = try await captureDrawer(content: "cs-excl-superseded-src", room: "find4/cs", in: harness)
+        let tgt = try await captureDrawer(content: "cs-excl-superseded-tgt", room: "find4/cs", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: srcID, targetDrawerId: tgtID, lifecycle: .superseded)
+            tunnelWith(sourceDrawerId: src.id, targetDrawerId: tgt.id, lifecycle: .superseded)
         )
 
         let text = await dispatchAndExtractText(
             dispatcher: harness.dispatcher,
             toolName: "moot_connection_search",
-            args: ["from_id": .string(srcID)]
+            args: ["memory_id": .string(src.id), "direction": .string("outgoing")]
         )
         #expect(
-            text.contains(": 0"),
+            text == "Found 0 authorized connections.",
             "superseded tunnel must not appear in connection_search; got: \(text)"
         )
     }
 
-    @Test("connection_search returns active tunnels and excludes proposed on the same source (FIND4)")
+    @Test("connection_search returns active tunnels and excludes proposed on the same source (FIND4, v2 memory_id/direction shape)")
     func connectionSearchReturnsActiveExcludesProposedSameSource() async throws {
         let harness = try await makeHarness()
-        let srcID = "find4-src-mixed-\(UUID().uuidString)"
-        let tgt1 = "find4-tgt-mixed-active-\(UUID().uuidString)"
-        let tgt2 = "find4-tgt-mixed-proposed-\(UUID().uuidString)"
+        let src = try await captureDrawer(content: "cs-mixed-src", room: "find4/cs", in: harness)
+        let tgt1 = try await captureDrawer(content: "cs-mixed-tgt-active", room: "find4/cs", in: harness)
+        let tgt2 = try await captureDrawer(content: "cs-mixed-tgt-proposed", room: "find4/cs", in: harness)
 
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: srcID, targetDrawerId: tgt1, lifecycle: .active)
+            tunnelWith(sourceDrawerId: src.id, targetDrawerId: tgt1.id, lifecycle: .active)
         )
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: srcID, targetDrawerId: tgt2, lifecycle: .proposed)
+            tunnelWith(sourceDrawerId: src.id, targetDrawerId: tgt2.id, lifecycle: .proposed)
         )
 
         let text = await dispatchAndExtractText(
             dispatcher: harness.dispatcher,
             toolName: "moot_connection_search",
-            args: ["from_id": .string(srcID)]
+            args: ["memory_id": .string(src.id), "direction": .string("outgoing")]
         )
         #expect(
-            text.contains(": 1"),
+            text == "Found 1 authorized connections.",
             "exactly one active tunnel must appear; proposed must be excluded; got: \(text)"
         )
     }
 
-    // MARK: - connection_map lifecycle gate
 
-    @Test("connection_map excludes proposed tunnels (FIND4)")
+    // MARK: - connection_map lifecycle gate
+    //
+    // v2 reshape: `moot_connection_map` is no longer "find who points at
+    // to_id" — it takes `memory_id` (UUID, required) plus `depth`/`limit` and
+    // does a bounded bidirectional graph traversal from `memory_id`
+    // (`AriaV2GeniusLocusKnowledgeJournalBackend.connectionMap`,
+    // AriaV2KnowledgeJournal.swift:283-304). With the default depth (1), the
+    // first (and only, at depth 1) BFS iteration collects
+    // `activeTunnelsFrom(memory_id)` and `activeTunnelsTo(memory_id)` — same
+    // lifecycle-filtered storage query as before — so calling connection_map
+    // with `memory_id` set to the tunnel's TARGET endpoint reproduces the v1
+    // "who points at this drawer, excluding non-active lifecycles" check.
+    // Response text reshapes from "found N incoming connections" to
+    // "Mapped N authorized connections." Endpoints are captured as real
+    // drawers for the same reason as the connection_search block above:
+    // `visibleTunnels` drops any tunnel whose endpoints do not resolve to
+    // an admissible drawer, independent of lifecycle.
+
+    @Test("connection_map excludes proposed tunnels (FIND4, v2 memory_id/depth shape)")
     func connectionMapExcludesProposed() async throws {
         let harness = try await makeHarness()
-        let srcID = "find4-map-src-proposed-\(UUID().uuidString)"
-        let tgtID = "find4-map-tgt-proposed-\(UUID().uuidString)"
+        let src = try await captureDrawer(content: "cm-excl-proposed-src", room: "find4/cm", in: harness)
+        let tgt = try await captureDrawer(content: "cm-excl-proposed-tgt", room: "find4/cm", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: srcID, targetDrawerId: tgtID, lifecycle: .proposed)
+            tunnelWith(sourceDrawerId: src.id, targetDrawerId: tgt.id, lifecycle: .proposed)
         )
 
         let text = await dispatchAndExtractText(
             dispatcher: harness.dispatcher,
             toolName: "moot_connection_map",
-            args: ["to_id": .string(tgtID)]
+            args: ["memory_id": .string(tgt.id)]
         )
         #expect(
-            text.contains(": 0"),
+            text == "Mapped 0 authorized connections.",
             "proposed tunnel must not appear in connection_map; got: \(text)"
         )
     }
 
-    @Test("connection_map excludes withdrawn tunnels (FIND4)")
+    @Test("connection_map excludes withdrawn tunnels (FIND4, v2 memory_id/depth shape)")
     func connectionMapExcludesWithdrawn() async throws {
         let harness = try await makeHarness()
-        let srcID = "find4-map-src-withdrawn-\(UUID().uuidString)"
-        let tgtID = "find4-map-tgt-withdrawn-\(UUID().uuidString)"
+        let src = try await captureDrawer(content: "cm-excl-withdrawn-src", room: "find4/cm", in: harness)
+        let tgt = try await captureDrawer(content: "cm-excl-withdrawn-tgt", room: "find4/cm", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: srcID, targetDrawerId: tgtID, lifecycle: .withdrawn)
+            tunnelWith(sourceDrawerId: src.id, targetDrawerId: tgt.id, lifecycle: .withdrawn)
         )
 
         let text = await dispatchAndExtractText(
             dispatcher: harness.dispatcher,
             toolName: "moot_connection_map",
-            args: ["to_id": .string(tgtID)]
+            args: ["memory_id": .string(tgt.id)]
         )
         #expect(
-            text.contains(": 0"),
+            text == "Mapped 0 authorized connections.",
             "withdrawn tunnel must not appear in connection_map; got: \(text)"
         )
     }
 
-    @Test("connection_map returns active tunnels and excludes proposed on the same target (FIND4)")
+    @Test("connection_map returns active tunnels and excludes proposed on the same target (FIND4, v2 memory_id/depth shape)")
     func connectionMapReturnsActiveExcludesProposedSameTarget() async throws {
         let harness = try await makeHarness()
-        let tgtID = "find4-map-tgt-mixed-\(UUID().uuidString)"
-        let src1 = "find4-map-src-mixed-active-\(UUID().uuidString)"
-        let src2 = "find4-map-src-mixed-proposed-\(UUID().uuidString)"
+        let tgt = try await captureDrawer(content: "cm-mixed-tgt", room: "find4/cm", in: harness)
+        let src1 = try await captureDrawer(content: "cm-mixed-src-active", room: "find4/cm", in: harness)
+        let src2 = try await captureDrawer(content: "cm-mixed-src-proposed", room: "find4/cm", in: harness)
 
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: src1, targetDrawerId: tgtID, lifecycle: .active)
+            tunnelWith(sourceDrawerId: src1.id, targetDrawerId: tgt.id, lifecycle: .active)
         )
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: src2, targetDrawerId: tgtID, lifecycle: .proposed)
+            tunnelWith(sourceDrawerId: src2.id, targetDrawerId: tgt.id, lifecycle: .proposed)
         )
 
         let text = await dispatchAndExtractText(
             dispatcher: harness.dispatcher,
             toolName: "moot_connection_map",
-            args: ["to_id": .string(tgtID)]
+            args: ["memory_id": .string(tgt.id)]
         )
         #expect(
-            text.contains(": 1"),
+            text == "Mapped 1 authorized connections.",
             "exactly one active tunnel must appear; proposed must be excluded; got: \(text)"
         )
     }
@@ -288,63 +352,105 @@ struct TunnelLifecycleDisclosureTests {
         return try await harness.kit.capture(harness.handle, frame)
     }
 
-    @Test("memory_get excludes proposed tunnels from linked-tunnel summary (FIND4 residual)")
+    // MARK: - memory_get tunnel-lifecycle gate
+    //
+    // v2 moot_memory_get depth:full restores tunnel rows at
+    // AriaV2MemoryOperations.swift:loadTunnels(for:estate:ceiling:).
+    // The lifecycle filter runs at the SQL layer via
+    // estate.activeTunnelsFrom/activeTunnelsTo, which encode the same
+    // tombstonedAt == nil && lifecycle == .active predicate as v1
+    // (ToolDispatch.swift:2568-2579). Assertions are structural: the
+    // tunnels array in structuredContent.data.memories[0] must be empty
+    // when only non-active-lifecycle tunnels are present.
+    //
+    // Far endpoints are REAL drawers captured at normal sensitivity (below the
+    // default elevated ceiling). This is load-bearing: a bare UUID that is not
+    // in the estate is dropped by the far-endpoint visibility check in
+    // loadTunnels regardless of lifecycle, so a bare-UUID test passes even when
+    // the lifecycle filter is deleted. A real normal-sensitivity far endpoint
+    // means the visibility check passes, and the only gate that can exclude the
+    // tunnel is the lifecycle filter — which is what these tests cover.
+    //
+    // Positive control: an active tunnel to the same real far endpoint DOES appear
+    // (proves the insert path reaches the code under test).
+
+    /// Positive control: an active tunnel to a real far endpoint appears in depth:full.
+    @Test("memory_get includes active tunnel to real far endpoint (FIND4, positive control)")
+    func memoryGetIncludesActiveTunnel() async throws {
+        let harness = try await makeHarness()
+        let drawer = try await captureDrawer(in: harness)
+        let farEndpoint = try await captureDrawer(content: "far-endpoint-active", room: "find4/far", in: harness)
+        try await harness.estate.addTunnel(
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: farEndpoint.id, lifecycle: .active)
+        )
+
+        let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
+        #expect(
+            tunnels?.isEmpty == false,
+            "active tunnel to a real far endpoint must appear in memory_get tunnels; got: \(String(describing: tunnels))"
+        )
+        let farID = tunnels?.first?.objectValue?["far_endpoint_id"]?.stringValue
+        #expect(
+            farID?.lowercased() == farEndpoint.id.lowercased(),
+            "tunnel far_endpoint_id must reference the real far endpoint; got: \(String(describing: farID))"
+        )
+    }
+
+    @Test("memory_get excludes proposed tunnels from depth:full tunnel rows (FIND4, v2 structural)")
     func memoryGetExcludesProposedTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
-        let otherID = "find4-mg-proposed-other-\(UUID().uuidString)"
+        // Real far endpoint at normal sensitivity — visibility check passes so
+        // only the lifecycle filter can drop the tunnel.
+        let farEndpoint = try await captureDrawer(content: "far-endpoint-proposed", room: "find4/far", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .proposed)
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: farEndpoint.id, lifecycle: .proposed)
         )
 
-        let text = await dispatchAndExtractText(
-            dispatcher: harness.dispatcher,
-            toolName: "moot_memory_get",
-            args: ["id": .string(drawer.id)]
-        )
+        let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
         #expect(
-            text.contains("tunnels: 0"),
-            "proposed tunnel must not appear in memory_get tunnel summary; got: \(text)"
+            tunnels?.isEmpty == true,
+            "proposed tunnel must not appear in memory_get tunnels; got: \(String(describing: tunnels))"
         )
     }
 
-    @Test("memory_get excludes withdrawn tunnels from linked-tunnel summary (FIND4 residual)")
+    @Test("memory_get excludes withdrawn tunnels from depth:full tunnel rows (FIND4, v2 structural)")
     func memoryGetExcludesWithdrawnTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
-        let otherID = "find4-mg-withdrawn-other-\(UUID().uuidString)"
+        // Real far endpoint at normal sensitivity — visibility check passes so
+        // only the lifecycle filter can drop the tunnel.
+        let farEndpoint = try await captureDrawer(content: "far-endpoint-withdrawn", room: "find4/far", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .withdrawn)
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: farEndpoint.id, lifecycle: .withdrawn)
         )
 
-        let text = await dispatchAndExtractText(
-            dispatcher: harness.dispatcher,
-            toolName: "moot_memory_get",
-            args: ["id": .string(drawer.id)]
-        )
+        let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
         #expect(
-            text.contains("tunnels: 0"),
-            "withdrawn tunnel must not appear in memory_get tunnel summary; got: \(text)"
+            tunnels?.isEmpty == true,
+            "withdrawn tunnel must not appear in memory_get tunnels; got: \(String(describing: tunnels))"
         )
     }
 
-    @Test("memory_get excludes superseded tunnels from linked-tunnel summary (FIND4 residual)")
+    @Test("memory_get excludes superseded tunnels from depth:full tunnel rows (FIND4, v2 structural)")
     func memoryGetExcludesSupersededTunnels() async throws {
         let harness = try await makeHarness()
         let drawer = try await captureDrawer(in: harness)
-        let otherID = "find4-mg-superseded-other-\(UUID().uuidString)"
+        // Real far endpoint at normal sensitivity — visibility check passes so
+        // only the lifecycle filter can drop the tunnel.
+        let farEndpoint = try await captureDrawer(content: "far-endpoint-superseded", room: "find4/far", in: harness)
         try await harness.estate.addTunnel(
-            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: otherID, lifecycle: .superseded)
+            tunnelWith(sourceDrawerId: drawer.id, targetDrawerId: farEndpoint.id, lifecycle: .superseded)
         )
 
-        let text = await dispatchAndExtractText(
-            dispatcher: harness.dispatcher,
-            toolName: "moot_memory_get",
-            args: ["id": .string(drawer.id)]
-        )
+        let firstMemory = await dispatchAndGetFirstMemory(dispatcher: harness.dispatcher, memoryID: drawer.id)
+        let tunnels = firstMemory?["tunnels"]?.arrayValue
         #expect(
-            text.contains("tunnels: 0"),
-            "superseded tunnel must not appear in memory_get tunnel summary; got: \(text)"
+            tunnels?.isEmpty == true,
+            "superseded tunnel must not appear in memory_get tunnels; got: \(String(describing: tunnels))"
         )
     }
 }

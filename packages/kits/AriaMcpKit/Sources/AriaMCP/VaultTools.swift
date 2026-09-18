@@ -1,10 +1,11 @@
+import AriaMCPWire
+
 // VaultTools.swift
 //
 // The VaultKit control surface on ARIA_MCP — the `moot_vault_*` tool
 // family that exposes VaultKit's `VaultBridge` (export / import / status)
 // plus drift detection (`moot_vault_reconcile`) and a candidate-enqueue
-// seam. Same dispatch shape as LensTools/RecipeTools:
-// matched by name ABOVE the lexicon projection (these tools have no
+// seam. Matched by name ABOVE the lexicon projection (these tools have no
 // (verb, noun) pair, so `parseToolName` would reject them).
 //
 // ## Shipped MCP binary
@@ -66,18 +67,34 @@ enum VaultTools {
         let sha256: String
     }
 
+    /// Manifest schema version stamped by this build. Version 2 means every
+    /// entry is a CERTIFICATION: the note's disk content was known to agree
+    /// with the estate's record when stamped (written by the export, or
+    /// imported by a reconcile apply and re-stamped). A manifest without a
+    /// `version` key is legacy: it was built by hashing every `.md` on disk,
+    /// so its entries certify nothing and reconcile must not treat a hash
+    /// match as "unchanged" (VR-01 Finding A).
+    static let manifestSchemaVersion = 2
+
     /// The sidecar manifest `moot_vault_export` writes after a successful
-    /// bridge export. `reconcile` diffs current file hashes against
+    /// bridge export (and `moot_vault_reconcile` apply re-stamps for the
+    /// paths it imports). `reconcile` diffs current file hashes against
     /// `files`; `status` reports the header.
     struct ExportManifest: Codable, Sendable, Equatable {
+        /// Manifest schema version (see `manifestSchemaVersion`). `nil` on
+        /// legacy manifests, whose hashes are not certifications — reconcile
+        /// classifies every note under a legacy manifest as changed /
+        /// needs-review, failing toward surfacing rather than silence.
+        let version: Int?
         /// ISO8601 instant the export ran. Display / status only; not part
         /// of the drift compare.
         let exportedAt: String
-        /// Note count at export (`== files.count`). Carried for the status
-        /// summary so it needs no re-enumeration.
+        /// Note count at stamp time (`== files.count`). Carried for the
+        /// status summary so it needs no re-enumeration.
         let noteCount: Int
         /// Vault-relative path (forward slashes, e.g. `Chem/Aromatics.md`)
-        /// → content stamp.
+        /// → content stamp. Version 2: ONLY paths the export wrote (or a
+        /// reconcile apply imported) — never a whole-disk enumeration.
         let files: [String: ManifestEntry]
     }
 
@@ -119,11 +136,14 @@ enum VaultTools {
             ProjectedTool(
                 name: "moot_vault_reconcile",
                 description: """
-                Re-hash a vault's notes and report drift (added / modified / deleted) vs the export \
-                manifest. Dry-run by default: returns candidates and writes nothing. Pass apply=true \
-                to action the added and modified candidates by importing them into the estate \
-                synchronously — completing the reconcile workflow. Deleted files are always reported \
-                only; no drawer is expunged by this tool.
+                Re-hash a vault's notes, report drift (added / modified / deleted) vs the export \
+                manifest, and surface the FULL import set: the changed/needs-review candidates plus \
+                the notes the estate does not hold. Dry-run by default: lists the set and writes \
+                nothing. Pass apply=true to import exactly the surfaced set synchronously and \
+                re-stamp the manifest for imported paths — apply never imports a note the dry-run \
+                would not list. Notes under a legacy (pre-certification) manifest are all surfaced \
+                as changed/needs review. Deleted files are always reported only; no drawer is \
+                expunged by this tool.
                 """,
                 inputSchema: objectSchema(
                     properties: [
@@ -149,105 +169,9 @@ enum VaultTools {
         stringSchema("Job ID returned by moot_vault_import or moot_vault_export.")
     }
 
-    // MARK: - Dispatch
-
-    /// Run the named vault tool. Same contract as `LensTools.dispatch`:
-    /// out-of-band faults (missing `vaultPath` or `job_id`, malformed
-    /// `estateID`) throw `JSONRPCError`; everything else returns a result.
-    ///
-    /// `moot_vault_import` and `moot_vault_export` return a `job_id`
-    /// immediately and run the bridge in a background `Task`. Poll with
-    /// `moot_vault_job` to retrieve the outcome.
-    static func dispatch(
-        name: String,
-        args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        defaultHandle: EstateHandle,
-        resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
-        jobRegistry: VaultJobRegistry,
-        environment: [String: String]
-    ) async throws -> JSONValue {
-        // Guard: vault surface is disabled (installed with --vault-off).
-        // Return a clear refusal rather than an opaque failure. The tool
-        // should never be called when disabled (it is absent from tools/list),
-        // but the guard ensures a clean error if a client hard-codes the name.
-        // MOOTX01_VAULT env var: absent/≠"0" = enabled; "0" = disabled.
-        guard ToolProjection.vaultEnabled(environment: environment) else {
-            return ToolDispatcher.errorResult(
-                "vault is disabled; reinstall with mootx01 install --vault-on to enable import/export"
-            )
-        }
-
-        // moot_vault_job only needs a job_id — no vaultPath.
-        if name == "moot_vault_job" {
-            let jobID = try requireString(args, "job_id")
-            return await runJob(jobID: jobID, registry: jobRegistry)
-        }
-
-        // All remaining vault tools require vaultPath.
-        let vaultURL = URL(
-            fileURLWithPath: try requireString(args, "vaultPath"), isDirectory: true)
-
-        switch name {
-        case "moot_vault_export":
-            // export/import target an estate, resolved through the
-            // dispatcher's own registry exactly like the lexicon tools.
-            // Parse the optional scope string; default to .believed.
-            let scope = try parseScope(args["scope"])
-            return try await runExport(
-                kit: kit, handle: try resolveHandle(args), vaultURL: vaultURL,
-                scope: scope, jobRegistry: jobRegistry)
-
-        case "moot_vault_import":
-            // mode = encode SPEED (foreground default); the WRITE strategy (bulk
-            // vs per-item stream) is size-gated automatically (ImportPolicy), not
-            // chosen here. Fail-closed on an unknown value.
-            let modeStr = (args["mode"]?.stringValue ?? "foreground").lowercased()
-            let importMode: EncodeSpeed
-            switch modeStr {
-            case "foreground": importMode = .foreground
-            case "background": importMode = .background
-            default:
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)")
-            }
-            return try await runImport(
-                kit: kit, handle: try resolveHandle(args), vaultURL: vaultURL,
-                mode: importMode, jobRegistry: jobRegistry)
-
-        case "moot_vault_status":
-            // status reads only the filesystem — no estate is consulted,
-            // so it takes no estateID.
-            return try runStatus(vaultURL: vaultURL)
-
-        case "moot_vault_reconcile":
-            // `apply` is optional — absent or false means dry-run.
-            let apply = args["apply"]?.boolValue ?? false
-            return try await runReconcile(
-                kit: kit, handle: try resolveHandle(args),
-                vaultURL: vaultURL, apply: apply, now: Date())
-
-        default:
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.methodNotFound,
-                message: "Unknown vault tool: \(name)")
-        }
-    }
 
     // MARK: - Handlers
 
-    /// Register a vault export job and immediately return its `job_id`.
-    ///
-    /// The bridge export and manifest stamp run in an unstructured `Task`
-    /// so the MCP channel is freed before the bridge finishes — critical
-    /// for vaults large enough to exceed the MCP timeout. All captured
-    /// values (`VaultBridge` struct Sendable, `EstateHandle` Sendable,
-    /// `VaultExportScope` enum Sendable, `URL` struct Sendable,
-    /// `VaultJobRegistry` actor Sendable) satisfy Swift 6 task-capture
-    /// requirements. `Date()` inside the Task samples the real export
-    /// instant (a wall-clock event, not a deterministic computation —
-    /// same precedent as `LensTools` sampling `Date()` for manifests).
     /// Maximum number of vault jobs (import or export) that may run concurrently.
     ///
     /// Each vault job spawns an unstructured Task that performs potentially
@@ -258,11 +182,14 @@ enum VaultTools {
     /// running-job count before registration so it is enforced per-process.
     private static let maxConcurrentVaultJobs = 4
 
-    private static func runExport(
+
+    /// Starts the real asynchronous export and returns the registry-minted job
+    /// identity for the selected v2 data-mobility provider.
+    static func launchExport(
         kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
         scope: VaultExportScope = .exportable,
         jobRegistry: VaultJobRegistry
-    ) async throws -> JSONValue {
+    ) async throws -> VaultJobLaunch {
         // Atomic cap-check-and-register: a single actor turn enforces the cap
         // and inserts the job record. Using two separate actor calls
         // (runningJobCount then register) had a TOCTOU window — concurrent
@@ -283,13 +210,18 @@ enum VaultTools {
                 // surface via the receipt in the estate diary.
                 let capturedJobID = jobID
                 let capturedRegistry = jobRegistry
-                _ = try await bridge.export(
+                let exportReport = try await bridge.export(
                     estate: handle, to: vaultURL, scope: capturedScope, now: Date(),
                     progress: { processed, total in
                         Task { await capturedRegistry.updateProgress(
                             jobID: capturedJobID, processed: processed, total: total) }
                     })
-                let manifest = try VaultTools.buildManifest(vaultURL: vaultURL, now: Date())
+                // Stamp ONLY the paths the export wrote (its certification
+                // receipt) — never a whole-disk enumeration, which would
+                // certify unexported notes and hide their edits from every
+                // future reconcile (VR-01 Finding A).
+                let manifest = try VaultTools.buildManifest(
+                    vaultURL: vaultURL, writtenPaths: exportReport.notePaths, now: Date())
                 try VaultTools.writeManifest(manifest, to: vaultURL)
                 // Export companion CSVs for dataset handles (MX-TAB-7b §6).
                 // Non-fatal — CSV export failures are silently collected so a broken
@@ -308,12 +240,24 @@ enum VaultTools {
             }
         }
 
-        return ToolDispatcher.textResult("""
-        job_id: \(jobID)
-        vault: \(vaultURL.path)
-        scope: \(capturedScope.rawValue)
-        poll: moot_vault_job to check status
-        """)
+        guard let parsedID = UUID(uuidString: jobID) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.internalError, message: "vault export generated an invalid job id")
+        }
+        return VaultJobLaunch(
+            jobID: parsedID, kind: .export, vaultPath: vaultURL.path,
+            noteCount: nil, scope: capturedScope.rawValue)
+    }
+
+    /// Canonical-string entry point for the selected v2 provider.  Parsing is
+    /// shared with v1 rather than permitting a second scope vocabulary.
+    static func launchExport(
+        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
+        scopeName: String?, jobRegistry: VaultJobRegistry
+    ) async throws -> VaultJobLaunch {
+        let scope = try parseScope(scopeName.map(JSONValue.string))
+        return try await launchExport(
+            kit: kit, handle: handle, vaultURL: vaultURL,
+            scope: scope, jobRegistry: jobRegistry)
     }
 
     /// Register a vault import job and immediately return its `job_id`.
@@ -335,13 +279,16 @@ enum VaultTools {
     /// handles bridge throws.
     ///
     /// The bridge import itself runs in an unstructured `Task`; all captured
-    /// values satisfy Swift 6 task-capture requirements (see `runExport` for
+/// values satisfy Swift 6 task-capture requirements (see `launchExport` for
     /// the same Sendability analysis). The bridge is idempotent per note's
     /// `stableSourceKey`.
-    private static func runImport(
+
+    /// Starts the real asynchronous import and returns its typed lifecycle
+    /// receipt.  This preserves the cap/preflight/task ownership of v1.
+    static func launchImport(
         kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
         mode: EncodeSpeed, jobRegistry: VaultJobRegistry
-    ) async throws -> JSONValue {
+    ) async throws -> VaultJobLaunch {
         // Acquire the cap slot BEFORE running the expensive preflight.
         // The cap must bound expensive filesystem/estate work; running hashAllNotes
         // outside checkAndRegister allowed up to the HTTP transport concurrency
@@ -379,7 +326,7 @@ enum VaultTools {
         // Dataset notes are excluded from the bridge import because DrawerMapping
         // does not re-honour `contentKind` on import — importing them through the
         // standard path creates drawers with contentKind=0 (wrong). They are instead
-        // imported via the direct estate path after the bridge finishes (MX-TAB-7b §6).
+        // filed through governed `kit.fileDataset` typed GLK filing after the bridge finishes (MX-TAB-7b §6).
         let datasetNotes = VaultTools.scanDatasetNotes(vaultURL: vaultURL)
         let datasetNotePaths = Set(datasetNotes.map { $0.path })
         let nonDatasetPaths: Set<String> = datasetNotes.isEmpty
@@ -416,7 +363,7 @@ enum VaultTools {
                         now: Date(), mode: mode)
                 }
 
-                // Step B: import dataset notes via the direct estate path (MX-TAB-7b §6).
+                // Step B: import dataset notes through GLK's governed filing path (MX-TAB-7b §6).
                 // Non-fatal — dataset import failures do not discard the bridge result.
                 _ = await VaultTools.importDatasetNotes(
                     vaultURL: vaultURL,
@@ -441,62 +388,110 @@ enum VaultTools {
             }
         }
 
-        return ToolDispatcher.textResult("""
-        job_id: \(jobID)
-        vault: \(vaultURL.path)
-        note_count: \(noteCount)
-        status: RUNNING — import is processing in the background.
-        IMPORTANT: Vault imports are long-running (~2 seconds per document). A \(noteCount)-note \
-        vault will take approximately \(noteCount * 2 / 60) minutes. Do NOT cancel or re-issue \
-        the import — it is running correctly. Poll moot_vault_job with this job_id to check progress.
-        """)
+        guard let parsedID = UUID(uuidString: jobID) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.internalError, message: "vault import generated an invalid job id")
+        }
+        return VaultJobLaunch(
+            jobID: parsedID, kind: .import, vaultPath: vaultURL.path,
+            noteCount: noteCount, scope: nil)
+    }
+
+    /// Canonical-string entry point for the selected v2 provider.  The mode is
+    /// encode speed only; write strategy remains owned by VaultBridge.
+    static func launchImport(
+        kit: GeniusLocusKit, handle: EstateHandle, vaultURL: URL,
+        modeName: String?, jobRegistry: VaultJobRegistry
+    ) async throws -> VaultJobLaunch {
+        let mode: EncodeSpeed
+        switch (modeName ?? "foreground").lowercased() {
+        case "foreground": mode = .foreground
+        case "background": mode = .background
+        default:
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "mode must be \"foreground\" or \"background\"; omit it to use the default (foreground)")
+        }
+        return try await launchImport(
+            kit: kit, handle: handle, vaultURL: vaultURL,
+            mode: mode, jobRegistry: jobRegistry)
+    }
+
+    struct VaultStatusSnapshot: Sendable, Equatable {
+        let path: String
+        let manifest: ExportManifest?
+    }
+
+    struct VaultReconcileCandidate: Sendable, Equatable {
+        let stableSourceKey: String
+        let vaultPath: String
+        let sha256: String
+    }
+
+    struct VaultReconcileSnapshot: Sendable, Equatable {
+        let added: [String]
+        let modified: [String]
+        let deleted: [String]
+        let candidates: [VaultReconcileCandidate]
+        let missing: [String]
+        let importSetCount: Int
+        let candidateCount: Int
+        let applied: Bool
+        let importReport: ImportReport?
+        let manifestWasLegacy: Bool
+        let restampedCount: Int?
     }
 
     /// Report manifest presence and, when present, its header. Pure
     /// filesystem read — mutates nothing.
-    private static func runStatus(vaultURL: URL) throws -> JSONValue {
-        guard let manifest = try readManifest(vaultURL: vaultURL) else {
-            return ToolDispatcher.textResult("""
-            vault_status: no export manifest at \(manifestRelativePath)
-            path: \(vaultURL.path)
-            (run moot_vault_export to stamp one)
-            """)
-        }
-        return ToolDispatcher.textResult("""
-        vault_status: manifest present
-        path: \(vaultURL.path)
-        noteCount: \(manifest.noteCount)
-        lastExport: \(manifest.exportedAt)
-        """)
+    static func statusSnapshot(vaultURL: URL) throws -> VaultStatusSnapshot {
+        .init(path: vaultURL.path, manifest: try readManifest(vaultURL: vaultURL))
     }
 
-    /// Re-hash the vault and report drift against the export manifest.
+
+    /// Re-hash the vault, report drift against the export manifest, and
+    /// surface the FULL import set — the review gate (VR-01 Finding B).
     ///
-    /// Dry-run mode (`apply=false`, the default): returns the candidate list
-    /// and writes nothing. Each added/modified file is reported with its
-    /// stableSourceKey and new SHA-256. Deletions are always reported only;
-    /// no drawer is ever expunged here.
+    /// Both modes compute and list the same import set: the changed /
+    /// needs-review candidates union the notes the estate does not hold
+    /// ("missing"), derived by one body of VaultBridge code
+    /// (`reconcileSelection` / `importVaultReconciling`). The MCP surface is
+    /// stateless across calls, so the gate is a deterministic recompute:
+    /// apply re-derives the selection rather than trusting a caller-supplied
+    /// one, and can never import a note the dry-run would not have listed.
     ///
-    /// Apply mode (`apply=true`): actions the added/modified candidates by
-    /// calling `VaultBridge.importVault` synchronously. The import is
-    /// idempotent per note's `stableSourceKey` — a re-reconcile after a
-    /// partial run is safe. Returns the full drift report plus the import
-    /// counts. Deletions are still reported only, never actioned.
+    /// Dry-run mode (`apply=false`, the default): lists the import set and
+    /// writes nothing. Each candidate is reported with its stableSourceKey
+    /// and new SHA-256. Deletions are always reported only; no drawer is
+    /// ever expunged here.
+    ///
+    /// Apply mode (`apply=true`): imports exactly the surfaced set
+    /// synchronously (idempotent per note's `stableSourceKey` — a
+    /// re-reconcile after a partial run is safe), then re-stamps the
+    /// manifest for the imported paths so certification converges (schema
+    /// v2) and surfaced notes do not re-surface forever. Deletions are
+    /// still reported only, never actioned.
     ///
     /// `now` is the operation instant, supplied by the caller (determinism
     /// rule — this method never reads the wall clock).
-    private static func runReconcile(
+    static func reconcileSnapshot(
         kit: GeniusLocusKit,
         handle: EstateHandle,
         vaultURL: URL,
         apply: Bool,
         now: Date
-    ) async throws -> JSONValue {
+    ) async throws -> VaultReconcileSnapshot? {
         guard let manifest = try readManifest(vaultURL: vaultURL) else {
-            return ToolDispatcher.errorResult(
-                "vault_reconcile: no export manifest at \(manifestRelativePath). Run moot_vault_export first.")
+            return nil
         }
         let current = try hashAllNotes(vaultURL: vaultURL)
+
+        // A manifest entry is only trustworthy as a certification of
+        // vault↔estate agreement on schema v2+ (stamped from the export's
+        // written-paths receipt, or re-stamped by a reconcile apply). A
+        // legacy manifest was built by hashing every `.md` on disk — after
+        // such a "manifest reset" its prior hashes are unavailable and a
+        // hash match proves nothing about the estate's record.
+        let manifestCertifies = (manifest.version ?? 0) >= manifestSchemaVersion
 
         // Drift = exact hash compare of the current note set against the
         // export stamp. A path present now but absent from the manifest is
@@ -515,134 +510,158 @@ enum VaultTools {
         added.sort(); modified.sort()
         let deletedSorted = deleted.sorted()
 
-        // Candidate paths: the added and modified notes whose content has drifted
-        // from the export stamp. In dry-run mode these are reported only. In apply
-        // mode these drive the path-scoped import so only M candidates are
-        // actioned, not the entire N-note vault.
-        let candidatePaths = Set(added + modified)
-        let candidatePathsSorted = candidatePaths.sorted()
-
-        var lines = [
-            "vault_reconcile: \(added.count) added, \(modified.count) modified, \(deletedSorted.count) deleted",
-        ]
-        lines.append("added:")
-        lines += added.map { "  + \($0)" }
-        lines.append("modified:")
-        lines += modified.map { "  ~ \($0)" }
-        lines.append("deleted (reported, not actioned):")
-        lines += deletedSorted.map { "  - \($0)" }
-
+        // Candidate paths: the notes classified changed / needs-review.
+        // Certified (v2) manifest: the added and modified notes — what the
+        // manifest diff can establish. Legacy manifest: EVERY note currently
+        // on disk. A note whose content differs from the estate's record must
+        // be reported as changed, and with prior hashes unavailable the safe
+        // classification is "changed / needs review", never "unchanged" —
+        // fail toward surfacing, not toward silence. The import's
+        // content-idempotent check absorbs the over-selection without a
+        // write, and the apply-mode re-stamp converges the manifest to v2 so
+        // the full surface happens once, not forever.
+        let candidatePaths = manifestCertifies ? Set(added + modified) : Set(current.keys)
+        // The review gate (VR-01 Finding B): the FULL import set — candidates
+        // union the notes the estate does not hold ("missing") — is computed
+        // by one body of VaultBridge code and surfaced in BOTH modes. The
+        // dry-run lists exactly what an apply over the same vault + estate
+        // state imports, so apply can never import a note the review step
+        // would not have listed. Deterministic recompute IS the gate: the MCP
+        // surface is stateless across calls, so apply re-derives the same
+        // selection rather than trusting a caller-supplied one.
+        let bridge = VaultBridge(kit: kit)
+        let selected: Set<String>
+        let report: ImportReport?
         if apply {
-            // Apply mode: import only the candidate set (added + modified paths)
-            // so drawersUpdated reports M (candidates actioned), not N (vault
-            // size). candidatePaths drives the path-scoped import overload —
-            // non-candidate notes never enter the capture loop.
-            let bridge = VaultBridge(kit: kit)
-            let report = try await bridge.importVault(
-                at: vaultURL, includingPaths: candidatePaths, into: handle, now: now, mode: .foreground)
-            lines.append("apply: true — candidates actioned via vault import")
-            lines.append("  drawersWritten: \(report.drawersWritten)")
-            lines.append("  drawersUpdated: \(report.drawersUpdated)")
-            lines.append("  itemsSkipped: \(report.itemsSkipped)")
-            lines.append("  tunnelsCreated: \(report.tunnelsCreated)")
-            lines.append("  fdcClassified: \(report.fdcClassified)")
-            lines.append("  fdcUnclassified: \(report.fdcUnclassified)")
-            lines.append("  drawersSkippedUnchanged: \(report.drawersSkippedUnchanged)")
-            lines.append("  drawersSkippedTombstoned: \(report.drawersSkippedTombstoned)")
+            // Single estate snapshot: importVaultReconciling computes the
+            // selection and imports it in one pass, then returns both.
+            let outcome = try await bridge.importVaultReconciling(
+                at: vaultURL,
+                allPaths: Set(current.keys),
+                candidatePaths: candidatePaths,
+                into: handle,
+                now: now,
+                mode: .foreground)
+            selected = outcome.selectedPaths
+            report = outcome.report
         } else {
-            // Dry-run mode: report candidates only, write nothing.
-            lines.append("candidates (dry-run — pass apply=true to action):")
-            for path in candidatePathsSorted {
-                let key = path.hasSuffix(".md") ? String(path.dropLast(3)) : path
-                let hash = current[path]?.sha256 ?? ""
-                lines.append("  candidate stableSourceKey=\(key) vaultPath=\(path) sha256=\(hash)")
-            }
-            lines.append("no Proposal written — dry-run")
+            // Dry-run: same selection, computed without importing (one estate
+            // snapshot, no note read, nothing written).
+            selected = try await bridge.reconcileSelection(
+                allPaths: Set(current.keys),
+                candidatePaths: candidatePaths,
+                into: handle)
+            report = nil
         }
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        let missingSorted = selected.subtracting(candidatePaths).sorted()
+
+        if report != nil {
+            // Re-stamp: the import above made the estate agree with the disk
+            // content hashed at reconcile start, so each imported path's stamp
+            // becomes a true certification (schema v2). Without this, a
+            // surfaced note (foreign, scope-excluded, or legacy-manifest)
+            // would re-surface on every reconcile forever. Stamps reuse the
+            // hashes captured in `current` above: if a file changed mid-apply,
+            // the stale stamp fails toward surfacing on the next reconcile.
+            // Entries for paths gone from disk are retained so deletions keep
+            // reporting; a legacy manifest converges to v2 here after its
+            // first apply (every current note was selected). Tool-layer
+            // manifest write — same owner as the export stamp (B-7); the
+            // dry-run branch writes nothing (B-8).
+            var restampedFiles = manifest.files
+            for path in selected {
+                if let entry = current[path] { restampedFiles[path] = entry }
+            }
+            let restamped = ExportManifest(
+                version: manifestSchemaVersion,
+                exportedAt: manifest.exportedAt,
+                noteCount: restampedFiles.count,
+                files: restampedFiles)
+            try writeManifest(restamped, to: vaultURL)
+        }
+        let candidates = candidatePaths.sorted().map { path in
+            VaultReconcileCandidate(
+                stableSourceKey: path.hasSuffix(".md") ? String(path.dropLast(3)) : path,
+                vaultPath: path,
+                sha256: current[path]?.sha256 ?? "")
+        }
+        return .init(
+            added: added,
+            modified: modified,
+            deleted: deletedSorted,
+            candidates: candidates,
+            missing: missingSorted,
+            importSetCount: selected.count,
+            candidateCount: candidatePaths.count,
+            applied: apply,
+            importReport: report,
+            manifestWasLegacy: !manifestCertifies,
+            restampedCount: report == nil ? nil : selected.count)
     }
+
+
 
     /// Return the current status of a vault job, or an error result when
     /// `jobID` is not registered. Sampling `Date()` here is correct —
     /// `elapsed_s` is a real-time measurement, not a deterministic
     /// computation.
-    private static func runJob(
-        jobID: String, registry: VaultJobRegistry
-    ) async -> JSONValue {
-        guard let job = await registry.job(for: jobID) else {
-            return ToolDispatcher.errorResult("unknown job_id: \(jobID)")
-        }
-        let elapsed = Date().timeIntervalSince(job.startedAt)
-        let elapsedStr = String(format: "%.1f", elapsed)
 
-        switch job.status {
-        case .running:
-            var runningLines = """
-            job_id: \(job.jobID)
-            kind: \(job.kind.rawValue)
-            vault: \(job.vaultPath)
-            status: running
-            elapsed_s: \(elapsedStr)
-            """
-            if let p = job.latestProgress {
-                runningLines += "\nprogress: \(p.processed)/\(p.total)"
-            }
-            return ToolDispatcher.textResult(runningLines)
-        case .complete:
-            switch job.result {
-            case .imported(let r):
-                return ToolDispatcher.textResult("""
-                job_id: \(job.jobID)
-                kind: \(job.kind.rawValue)
-                vault: \(job.vaultPath)
-                status: complete
-                elapsed_s: \(elapsedStr)
-                drawersWritten: \(r.drawersWritten)
-                drawersUpdated: \(r.drawersUpdated)
-                itemsSkipped: \(r.itemsSkipped)
-                tunnelsCreated: \(r.tunnelsCreated)
-                fdcClassified: \(r.fdcClassified)
-                fdcUnclassified: \(r.fdcUnclassified)
-                drawersSkippedUnchanged: \(r.drawersSkippedUnchanged)
-                drawersSkippedTombstoned: \(r.drawersSkippedTombstoned)
-                """)
-            case .exported(let r):
-                return ToolDispatcher.textResult("""
-                job_id: \(job.jobID)
-                kind: \(job.kind.rawValue)
-                vault: \(job.vaultPath)
-                status: complete
-                elapsed_s: \(elapsedStr)
-                noteCount: \(r.noteCount)
-                exportedAt: \(r.exportedAt)
-                """)
-            case nil:
-                // Unreachable: registry.complete always sets result before
-                // transitioning to .complete.
-                return ToolDispatcher.errorResult(
-                    "job \(jobID): complete but no result recorded — unexpected state")
-            }
-        case .failed:
-            return ToolDispatcher.textResult("""
-            job_id: \(job.jobID)
-            kind: \(job.kind.rawValue)
-            vault: \(job.vaultPath)
-            status: failed
-            elapsed_s: \(elapsedStr)
-            error: \(job.errorMessage ?? "(unknown error)")
-            """)
-        }
-    }
+    /// V1's presentation layer over the same typed lifecycle snapshot exposed
+    /// to the v2 data-mobility provider.  No response text is read back.
 
     // MARK: - Manifest IO + hashing
 
-    /// SHA-256 every `.md` note under `vaultURL` and assemble the manifest.
-    static func buildManifest(vaultURL: URL, now: Date) throws -> ExportManifest {
-        let files = try hashAllNotes(vaultURL: vaultURL)
+    /// SHA-256 the export-written notes and assemble the manifest.
+    ///
+    /// `writtenPaths` is the export's receipt (`ExportReport.notePaths`) —
+    /// the only notes whose disk content is known to agree with the estate's
+    /// record at this instant. Hashing is restricted to that set: stamping a
+    /// note the export did not write (foreign, scope-excluded, or user-edited
+    /// and not re-exported) would certify agreement nobody verified, and a
+    /// note so mis-certified matches the manifest on the next reconcile and
+    /// is never surfaced again (VR-01 Finding A). Un-stamped notes fall into
+    /// reconcile's "added" bucket — changed/needs-review, fail toward
+    /// surfacing.
+    static func buildManifest(
+        vaultURL: URL, writtenPaths: [String], now: Date
+    ) throws -> ExportManifest {
+        var files: [String: ManifestEntry] = [:]
+        for rel in Set(writtenPaths) {
+            // Containment guard (Perkins VR-01 finding 2): fromIR throws on
+            // traversal before this runs, but that is containment by call
+            // ordering, not by construction. Enforce it here too so a future
+            // caller with un-vetted paths cannot turn the stamp read into an
+            // arbitrary-file hash oracle. Same lexical rules as the fromIR
+            // write guard: no "..", no absolute prefix, no backslash, no
+            // empty components.
+            let components = rel.split(separator: "/", omittingEmptySubsequences: false)
+            guard !rel.hasPrefix("/"), !rel.contains("\\"),
+                  components.allSatisfy({ !$0.isEmpty && $0 != ".." && $0 != "." }) else {
+                throw VaultKitError.adapterError(
+                    "manifest stamp path escapes the vault root; stamp refused")
+            }
+            let url = vaultURL.appendingPathComponent(rel)
+            // Regular-file gate (Perkins VR-01 finding 1): the read follows
+            // symlinks, so a note swapped for a symlink between fromIR's
+            // write and this hash (TOCTOU) would stamp the hash of any file
+            // this process can read. Reading .isSymbolicLinkKey detects both
+            // live and broken symlinks (same rationale as writeManifest's
+            // leaf guard). A non-regular entry is skipped, not stamped —
+            // no certification, so the path surfaces as changed / needs
+            // review on the next reconcile. Fail toward surfacing.
+            guard let rv = try? url.resourceValues(
+                    forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                  rv.isSymbolicLink != true, rv.isRegularFile == true else { continue }
+            // The export just wrote this path through fromIR's containment
+            // guards; the direct read hashes the actual disk bytes so the
+            // stamp certifies exactly what landed.
+            let data = try Data(contentsOf: url)
+            files[rel] = ManifestEntry(sha256: sha256Hex(data))
+        }
         // Fresh formatter per call: ISO8601DateFormatter is not Sendable,
-        // so it cannot be a shared static under Swift 6 strict concurrency
-        // (same per-call construction LensTools uses).
+        // so it cannot be a shared static under Swift 6 strict concurrency.
         return ExportManifest(
+            version: manifestSchemaVersion,
             exportedAt: ISO8601DateFormatter().string(from: now),
             noteCount: files.count,
             files: files)
@@ -657,7 +676,7 @@ enum VaultTools {
     ///   directory named `something.md` or a broken `.md` symlink — these are
     ///   not notes. Reading their resource value and skipping non-regular entries
     ///   prevents a spurious throw and, as defense-in-depth, avoids triggering
-    ///   the slot-release guard in `runImport` on non-note entries. A genuinely
+///   the slot-release guard in `launchImport` on non-note entries. A genuinely
     ///   unreadable REGULAR `.md` file still throws — that is a real error; the
     ///   guard releases the slot via `fail()` and propagates the error to the caller.
     /// - Skips OKF navigation files (`index.md`, `log.md`) that `fromIR`
@@ -768,8 +787,7 @@ enum VaultTools {
 
     /// Forward-slash vault-relative path of `fileURL` under `root`. A
     /// local copy of `ObsidianAdapter`'s path logic (that helper is
-    /// internal to VaultKit); same precedent as the LensTools schema
-    /// helpers being small local copies.
+    /// internal to VaultKit).
     static func relativePath(of fileURL: URL, under root: URL) -> String {
         let rootComponents = root.standardizedFileURL.pathComponents
         let fileComponents = fileURL.standardizedFileURL.pathComponents
@@ -794,7 +812,7 @@ enum VaultTools {
         return value
     }
 
-    // MARK: - JSON schema helpers (same small copies as LensTools)
+    // MARK: - JSON schema helpers
 
     private static var vaultPathSchema: JSONValue {
         stringSchema("Filesystem path of the vault directory.")
@@ -886,7 +904,7 @@ enum VaultTools {
     /// A dataset handle note record from a vault scan.
     ///
     /// Declared as a `Sendable` struct (rather than a named tuple) so it can be
-    /// captured safely in the unstructured `Task` inside `runImport`.
+/// captured safely in the unstructured `Task` inside `launchImport`.
     private struct VaultDatasetNoteRecord: Sendable {
         let path: String
         let frontmatter: [String: String]
@@ -1036,7 +1054,7 @@ enum VaultTools {
 
     /// Export companion CSV files alongside dataset handle notes in the vault.
     ///
-    /// Called as a post-step in `runExport` after `bridge.export` and
+/// Called as a post-step in `launchExport` after `bridge.export` and
     /// `writeManifest` complete. For each note with `contentKind: 7`, queries
     /// the DatasetStore and writes a companion `<slug>.csv` next to the `.md`.
     ///
@@ -1145,14 +1163,14 @@ enum VaultTools {
         return (count, warnings)
     }
 
-    /// Import dataset handle notes via the direct estate path (bypasses DrawerMapping).
+    /// Import dataset handle notes through GLK's governed filing path (bypasses DrawerMapping).
     ///
     /// For each `VaultDatasetNoteRecord` with `contentKind: 7`:
     ///   1. Decode `DatasetHandleContent` from note body.
     ///   2. Validate column identifiers before DDL.
     ///   3. Read companion `.csv` at same path with `.csv` extension.
     ///   4. Parse CSV; check size cap.
-    ///   5. `createDataset` → `appendRows` → `captureDatasetHandle`.
+    ///   5. `fileDataset` coordinates `createDataset` → `appendRows` → typed handle capture.
     ///   6. Compute signatures non-fatally.
     ///
     /// Returns `(importedCount, warnings)`.
@@ -1170,13 +1188,6 @@ enum VaultTools {
             datasetStore = try await kit.datasetStore(for: handle)
         } catch {
             return (0, ["vault_import: no DatasetStore; dataset notes skipped: \(error.localizedDescription)"])
-        }
-
-        let estate: LocusKit.Estate
-        do {
-            estate = try await kit.estate(for: handle)
-        } catch {
-            return (0, ["vault_import: estate not accessible for dataset import; dataset notes skipped: \(error.localizedDescription)"])
         }
 
         var imported = 0
@@ -1274,27 +1285,8 @@ enum VaultTools {
                 typedRows.append(row)
             }
 
-            // 6a. Create dataset table (idempotent via CREATE TABLE IF NOT EXISTS).
-            do {
-                try await datasetStore.createDataset(id: datasetId, schema: schema, indexes: [])
-            } catch {
-                warnings.append("vault_import: \(note.path): createDataset failed (\(error.localizedDescription)); skipped")
-                continue
-            }
-
-            // 6b. Append rows. On failure, drop the table (atomic intent).
-            if !typedRows.isEmpty {
-                do {
-                    try await datasetStore.appendRows(id: datasetId, rows: typedRows)
-                } catch {
-                    try? await datasetStore.dropDataset(id: datasetId)
-                    warnings.append("vault_import: \(note.path): appendRows failed (\(error.localizedDescription)); table dropped")
-                    continue
-                }
-            }
-
-            // 6c. captureDatasetHandle — the ONLY authorised creation path for .dataset drawers.
-            // Source description preserved from the original handle content (audit-trail fidelity).
+            // 6. File backend table and typed handle through GLK. Source
+            // description stays faithful to the original handle for audit.
             let sensitivity = vaultSensitivityToAdjectiveSensitivity(
                 from: note.frontmatter["sensitivity"])
             let udc = note.frontmatter["udc"].flatMap { $0.isEmpty ? nil : $0 } ?? "000"
@@ -1305,23 +1297,36 @@ enum VaultTools {
 
             let drawer: Drawer
             do {
-                drawer = try await estate.captureDatasetHandle(
-                    datasetId: datasetId,
+                drawer = try await kit.fileDataset(handle, DatasetFilingFrame(
+                    datasetID: datasetId,
+                    schema: schema,
+                    rows: typedRows,
                     columns: columnSummaries,
-                    rowCount: typedRows.count,
                     sourceDescription: handleContent.sourceDescription,
                     wing: note.frontmatter["wing"].flatMap { $0.isEmpty ? nil : $0 },
                     room: room,
                     addedBy: "aria-mcp-vault-import",
                     sensitivity: sensitivity,
-                    latticeAnchor: LatticeAnchor.udc(udc))
+                    udcCode: udc))
             } catch {
-                try? await datasetStore.dropDataset(id: datasetId)
-                warnings.append("vault_import: \(note.path): captureDatasetHandle failed (\(error.localizedDescription)); table dropped")
+                if let filing = error as? DatasetFilingError {
+                    switch filing {
+                    case .storageUnavailable:
+                        warnings.append("vault_import: \(note.path): no DatasetStore; skipped")
+                    case .createFailed:
+                        warnings.append("vault_import: \(note.path): createDataset failed (\(error.localizedDescription)); skipped")
+                    case .appendFailed:
+                        warnings.append("vault_import: \(note.path): appendRows failed (\(error.localizedDescription)); table dropped")
+                    case .handleFailed:
+                        warnings.append("vault_import: \(note.path): captureDatasetHandle failed (\(error.localizedDescription)); table dropped")
+                    }
+                } else {
+                    warnings.append("vault_import: \(note.path): captureDatasetHandle failed (\(error.localizedDescription)); table dropped")
+                }
                 continue
             }
 
-            // 6d. Signatures (MX-TAB-5) — non-fatal.
+            // 7. Signatures (MX-TAB-5) — non-fatal.
             // The dataset and handle are already committed; signature failure is recoverable.
             do {
                 let sampledRows = try await datasetStore.queryRows(

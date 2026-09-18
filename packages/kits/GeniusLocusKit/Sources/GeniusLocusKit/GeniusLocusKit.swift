@@ -1,19 +1,21 @@
 import ConvergenceKit
 import CorpusKit
+import FactExtractionKit
 import Foundation
+import MootProductIdentity
 import OSLog
 import LocusKit
 import PersistenceKit
 import QueueKit
 import SubstrateML
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 
 /// The composition layer for the GeniusLocus substrate.
 ///
 /// `GeniusLocusKit` is the public actor that coordinates N estates on
 /// one device. Each estate is its own composed substrate (LocusKit with
-/// VectorKit and CorpusKit wired in) with its own manifest and its own
+/// SynapseKit and CorpusKit wired in) with its own manifest and its own
 /// injected storage. Estates are isolated from one another: a handle
 /// reaches exactly one estate's data.
 ///
@@ -46,7 +48,7 @@ public actor GeniusLocusKit {
     /// Logger for the kit, fleet-standard subsystem and category per
     /// CLAUDE.md.
     private static let logger = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "GeniusLocusKit"
     )
 
@@ -56,6 +58,15 @@ public actor GeniusLocusKit {
     /// row for a drawer is within the mark window used by `markRecallUsed`.
     /// Internal — only the verb surface and tests reference this constant.
     internal static let traceRetentionSeconds: TimeInterval = 30 * 24 * 60 * 60
+
+    /// The production distillation function for the consolidation sweep:
+    /// `defaultDistillFn`, the intra-item reduction with the contract-pinned
+    /// default extractor. Named for the host outside the module (the ARIA
+    /// resident) that passes it to `consolidationSweepReport` when it wires
+    /// the consolidation standing signal.
+    public static var consolidationDistillFn: @Sendable (SubstrateML.DistillationInput) -> DistillationOutput {
+        defaultDistillFn
+    }
 
     // MARK: - Per-estate registries
     //
@@ -121,6 +132,27 @@ public actor GeniusLocusKit {
     /// `hybrid` BM25/vector lanes. Dropped when the estate is closed.
     internal var corpusKits: [EstateHandle: CorpusContentEngine] = [:]
 
+    /// Estates with a derived-state rebuild span in flight (reindexMissing
+    /// backfill and/or a corpus basis retrain via reindexCorpus). A DEPTH,
+    /// not a flag: nested/overlapping spans (reindexMissing's own retrain
+    /// tail) increment and decrement symmetrically. Backs
+    /// `derivedRebuildActive(for:)` — the `moot_rebuild_status` surface
+    /// (Bob ruling 2026-08-26: rebuild status is its own vocabulary, never
+    /// a drain lane — a drain is a queue; a rebuild is an operation).
+    internal var derivedRebuildDepth: [EstateHandle: Int] = [:]
+
+    /// True while any derived-state rebuild span is open for `handle`.
+    public func derivedRebuildActive(for handle: EstateHandle) -> Bool {
+        (derivedRebuildDepth[handle] ?? 0) > 0
+    }
+
+    /// Open/close a derived-rebuild span (internal; called by the
+    /// reindexMissing and reindexCorpus entry/exit points).
+    internal func derivedRebuildSpan(_ handle: EstateHandle, open: Bool) {
+        derivedRebuildDepth[handle, default: 0] += open ? 1 : -1
+        if derivedRebuildDepth[handle] == 0 { derivedRebuildDepth[handle] = nil }
+    }
+
     /// Subject-backfill rider registry (PR-09): the pluggable producer
     /// that writes subjects for subject-debt rows. NO producer ships in
     /// this mission — the Apple miniLLM producer is the PR-10 rider;
@@ -140,15 +172,44 @@ public actor GeniusLocusKit {
     /// LocusKit `Drawer` rows. Dropped when the estate is closed.
     internal var vectorStores: [EstateHandle: VectorStore] = [:]
 
-    /// Per-estate distillation function override for the drain-stage path
-    /// (SPEC_DISTILLATION_STORAGE §7.1). When absent, the drain-stage
-    /// distills with `GeniusLocusKit.defaultDistillFn` — the p1 contract
-    /// (intra-item pipeline, default extractor). Test scaffolds register a
-    /// stub via `registerDistillationFunction(_:for:)`; production wiring
-    /// never needs to (the p1 contract pins ONE function so drain-stage
-    /// and sweep renderings are byte-identical). Dropped on close.
-    internal var distillFunctions:
-        [EstateHandle: @Sendable (DistillationInput) -> DistillationOutput] = [:]
+    /// Per-estate `SpanEncoder` for the recall rerank stage and the
+    /// `spanEncode` duty. Populated by `activateSpanEncoder(for:)` when the
+    /// estate's `embedding_provider` is `"encoder"` and the model loads;
+    /// absent otherwise (lexical-only recall). Dropped when the estate is
+    /// closed. See EncoderActivation.swift.
+    internal var spanEncoders: [EstateHandle: any SpanEncoder] = [:]
+
+    /// Per-estate runtime and active recipe for the distilled-fact standing
+    /// duty. Registration is explicit; no model loads inside the long-lived
+    /// server merely because an estate opens.
+    internal var factExtractors: [EstateHandle: any FactExtractor] = [:]
+    internal var factExtractorRecipeIDs: [EstateHandle: String] = [:]
+
+    /// Where encoder model directories live on this device. The bundling
+    /// unit installs the production resolver via
+    /// `setModelDirectoryResolver(_:)`; the default answers `nil` for every
+    /// model id, so an estate provisioned with `"encoder"` on a device
+    /// without the model runs lexical-only.
+    internal var modelDirectoryResolver: any ModelDirectoryResolving = NilModelDirectoryResolver()
+    /// Per-estate span rerank seams (encoder + span rows + head), registered by
+    /// `registerSpanRerank(_:spanVectors:head:for:)`. Absent ⇒ the unionBest
+    /// lane skips the span rerank stage (lexical-only, contract sheet §7).
+    internal var spanRerankSources: [EstateHandle: SpanRerankSource] = [:]
+    /// Per-estate cross-encoder scorer slot: loaded lazily by the first
+    /// `apply` (`pairScorer(profile:for:)`), or registered by a host or test
+    /// (`registerPairScorer(_:for:)`); a failed load is remembered as
+    /// `.unavailable`. Absent until an apply is tried. Dropped in `close`.
+    /// See CrossEncoderActivation.swift.
+    internal var pairScorers: [EstateHandle: PairScorerSlot] = [:]
+
+#if MOOTX01_CROSS_ENCODER
+    /// Test seam: when set, `pairScorer(profile:for:)` calls this factory
+    /// before consulting the model directory resolver. Tests inject a counting
+    /// factory here to verify cold-load behaviour without real model assets.
+    /// The seam intercepts first so no model directory or resolver setup is
+    /// required. Production code never sets this.
+    internal var testPairScorerMaker: ((CrossEncoderProfile, URL) throws -> any PairScorer)?
+#endif
 
     /// Per-estate grant persistence (GRT-01). Built lazily on the first
     /// grant verb against a handle via `ensureGrantSurface(for:)`; the
@@ -235,21 +296,10 @@ public actor GeniusLocusKit {
     /// separate facade to avoid cross-concern entanglement. Dropped in `close`.
     internal var fingerprintStores: [EstateHandle: DrawerStore] = [:]
 
-    /// Per-estate LLM calibration curve registries.
-    ///
-    /// Populated on first `glkRecordCalibrationOutcome` and readable via
-    /// `glkCalibrationCurve`. Holds the in-memory state; callers that need
-    /// persistence register a `MatrixPersistenceBackend` via
-    /// `registerMatrixPersistence(_:for:)`. Dropped in `close`.
-    internal var calibrationRegistries: [EstateHandle: MatrixCalibrationRegistry] = [:]
-
-    /// Optional per-estate matrix persistence backends for calibration snapshots.
-    ///
-    /// When present, `glkRecordCalibrationOutcome` saves a `MatrixSnapshot`
-    /// (tier + calibration registry) after each update so calibration survives
-    /// a process restart. Registered via `registerMatrixPersistence(_:for:)`.
-    /// Dropped in `close`.
-    internal var matrixPersistenceBackends: [EstateHandle: MatrixPersistenceBackend] = [:]
+    /// Per-estate refresh owners and independent keyed calibration stores.
+    internal var matrixRefreshWorkers: [EstateHandle: MatrixRefreshWorker] = [:]
+    internal var matrixFrozenHandles: Set<EstateHandle> = []
+    internal var matrixRecordStores: [EstateHandle: MatrixRecordStore] = [:]
 
     /// Per-estate dreaming QueueKit handles.
     ///
@@ -270,6 +320,24 @@ public actor GeniusLocusKit {
     /// alongside the dreaming queue in `ensureDreamingQueue(for:)`.
     /// Dropped in `close` alongside `dreamingQueues`.
     internal var dreamingHLCs: [EstateHandle: HLCGenerator] = [:]
+    /// Duties this process has queued and not yet drained, per estate: the
+    /// single-occupancy guard for `enqueueDuty` (DutyQueue.swift).
+    internal var dutyQueued: [EstateHandle: Set<DutyKind>] = [:]
+    /// Host-supplied batch limits per estate (DutyLimits.swift); absent →
+    /// `DutyLimits()`.
+    internal var dutyLimitsByHandle: [EstateHandle: DutyLimits] = [:]
+    /// F11: whether the MOST RECENT `reindexCorpus(handle:now:)` call for
+    /// this estate fully completed (`true`) or was DEGRADED — a document or
+    /// time backstop was reached and the serving basis was kept (`false`).
+    /// `EstateThetaBasisRetrainHook.retrain(now:)` (NeuronKit) reads this
+    /// after `payDutyUntilSettled(.retrainBasis, ...)` returns, because that
+    /// call's own return value (units paid) cannot carry the distinction —
+    /// it is the seam that lets the THETA vocabulary-baseline gate skip
+    /// advancing on a degraded retrain without threading a new return type
+    /// through the shared duty-queue machinery. Absent (estate never
+    /// retrained, or LocusOnly with no corpus) reads as `true`: nothing was
+    /// skipped because there was nothing to retrain.
+    internal var lastReindexCompleted: [EstateHandle: Bool] = [:]
 
     // The encode QUEUE + DRAIN worker + per-estate HLC + at-least-once ingest
     // failure hook used to live here. They were relocated into CorpusKit: a
@@ -404,6 +472,29 @@ public actor GeniusLocusKit {
     public var handles: [EstateHandle] {
         Array(registry.keys)
     }
+
+    /// The persistence backend the estate at `handle` was opened on, or nil
+    /// when the handle is not open. Status surfaces (the resident's
+    /// `/api/admin/estates`) report this instead of guessing from the
+    /// process environment, so a server hosting several estates on
+    /// different backends labels each one correctly.
+    public func storageBackend(for handle: EstateHandle) -> EstateStorageBackend? {
+        guard let storage = storages[handle] else { return nil }
+        switch storage.configuration.backend {
+        case .sqlite: return .sqlite
+        case .postgresql: return .postgresql
+        case .inMemory: return .inMemory
+        }
+    }
+}
+
+/// The three PersistenceKit backends an estate can be open on, named as the
+/// status surfaces print them. The raw values are the labels moot-mgr's
+/// estate table binds to; changing one changes what operators see.
+public enum EstateStorageBackend: String, Sendable, Equatable {
+    case sqlite = "SQLite"
+    case postgresql = "PostgreSQL"
+    case inMemory = "InMemory"
 }
 
 // MARK: - CorpusKit / VectorStore registration (RECALL-DIRECTOR-002)
@@ -443,19 +534,30 @@ public extension GeniusLocusKit {
         vectorStores[handle] = store
     }
 
-    /// Register a distillation-function override for the given estate's
-    /// drain-stage path (SPEC_DISTILLATION_STORAGE §7.1). Test scaffolds
-    /// inject stubs here; production wiring omits it and the drain-stage
-    /// runs `GeniusLocusKit.defaultDistillFn` (the p1 contract — one
-    /// function for drain-stage AND sweep, so renderings are
-    /// byte-identical regardless of which path produced them).
+    /// Register the span rerank seams for the given estate handle (Encoder
+    /// Rerank Program, contract sheet §7/§8): the query-side encoder built from
+    /// the active `encoder_models` row, the span-row reader (the estate's
+    /// SynapseKit store), and the head size (`encoder_head`, default
+    /// `SpanRerankStage.defaultEncoderHead`). The unionBest lane runs the span
+    /// rerank stage only while a source is registered; the lifecycle registers
+    /// one when the manifest key `embedding_provider` is `"encoder"` and the
+    /// model loaded, and registers nothing when the model is unavailable, so an
+    /// estate without an encoder recalls lexical-only with no error.
     ///
-    /// Re-registering replaces the existing entry.
-    func registerDistillationFunction(
-        _ distillFn: @escaping @Sendable (DistillationInput) -> DistillationOutput,
+    /// Re-registering replaces the existing entry; `close` drops it.
+    ///
+    /// - Parameters:
+    ///   - encoder: the query encoder for the active model.
+    ///   - spanVectors: the span-row reader keyed by drawer id.
+    ///   - head: the number of lexical candidates the encoder reranks.
+    ///   - handle: the estate these seams serve. Must be open.
+    func registerSpanRerank(
+        _ encoder: any SpanRerankEncoding,
+        spanVectors: any SpanVectorReading,
+        head: Int = SpanRerankStage.defaultEncoderHead,
         for handle: EstateHandle
     ) {
-        distillFunctions[handle] = distillFn
+        spanRerankSources[handle] = SpanRerankSource(encoder: encoder, store: spanVectors, head: max(1, head))
     }
 
     /// The `VectorStore` registered for `handle`, or `nil` when none has been
@@ -473,11 +575,9 @@ public extension GeniusLocusKit {
     ///
     /// The RecallDirector reads this registry to compute `fieldFit`,
     /// `coOccurrence`, and `temporal` score columns during the `unionBest`
-    /// scoring pass. Build the tier via `MatrixTier.rebuild(from:)` or
-    /// `MatrixPersistenceBackend.rebuild(from:)` after feeding the estate's
-    /// unified audit log. Re-registering with a fresh snapshot replaces the
-    /// existing entry; call with a fresh tier after each dreaming cycle to keep
-    /// recall scoring current.
+    /// scoring pass. Offline callers can build a tier via `MatrixTier.rebuild(from:)`.
+    /// Product refreshes use `requestMatrixRefresh`, whose worker loads records,
+    /// folds counts forward, and publishes the completed generation here.
     ///
     /// When no tier is registered for an estate, all matrix score columns
     /// remain 0.0 — correct behaviour for a fresh estate with no captured

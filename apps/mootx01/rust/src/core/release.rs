@@ -426,6 +426,33 @@ pub fn place_binary(new_binary: &Path, home: &Path) -> Result<PathBuf, ReleaseEr
         }
         std::fs::rename(&staging, &target)?;
 
+        // Create (or refresh) the sibling botLink symlink `mootx01-botLink → mootx01`
+        // beside the binary in bin_dir. Parity with Installer.swift placeBinary step 5
+        // (BL-1). Capital-L in the name byte-matches the CLI's BOTLINK_INVOCATION_NAME
+        // and the Swift symlink name so ArgvDispatch recognises the invocation.
+        //
+        // Relative target ("mootx01", not an absolute path) — survives home-directory
+        // moves or username changes, exactly as the Swift port does.
+        //
+        // Lifecycle: created/refreshed here by place_binary on every install or upgrade.
+        // Uninstall removes data_dir() only (disjoint from ~/.mootx01/bin), so the
+        // symlink shares the placed binary's lifecycle wholesale — no individual unlink
+        // needed elsewhere, matching the Swift uninstall symmetry.
+        //
+        // Guard: symlink_metadata (NOT Path::exists()) is used to detect any existing
+        // entry. Path::exists() follows the link and returns false for a dangling
+        // symlink, which would silently skip the remove-and-replace step (reviewer
+        // gate G-5). symlink_metadata returns Ok for the symlink inode itself
+        // regardless of whether the link target exists.
+        #[cfg(unix)]
+        {
+            let botlink = bin_dir.join("mootx01-botLink");
+            if std::fs::symlink_metadata(&botlink).is_ok() {
+                std::fs::remove_file(&botlink)?;
+            }
+            std::os::unix::fs::symlink("mootx01", &botlink)?;
+        }
+
         // Refresh the ~/.local/bin symlink.
         let local_bin = home.join(".local/bin");
         std::fs::create_dir_all(&local_bin)?;
@@ -525,11 +552,7 @@ pub fn validate_tarball_members(tarball: &Path) -> Result<(), ReleaseError> {
     Ok(())
 }
 
-fn curl_stdout(url: &str) -> Result<Vec<u8>, ReleaseError> {
-    curl_stdout_within(url, None)
-}
-
-/// `curl_stdout` with an optional whole-transfer deadline (`--max-time`).
+/// Fetch `url` with curl, with an optional whole-transfer deadline (`--max-time`).
 /// See `latest_version_within` for why the daemon-side caller bounds it.
 fn curl_stdout_within(url: &str, timeout_secs: Option<u64>) -> Result<Vec<u8>, ReleaseError> {
     let mut cmd = Command::new("curl");
@@ -710,6 +733,105 @@ mod tests {
         std::fs::write(&new, b"#!/bin/sh\necho v2\n").unwrap();
         place_binary(&new, &home).unwrap();
         assert_eq!(std::fs::read(&installed).unwrap(), b"#!/bin/sh\necho v2\n");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // Verify that place_binary creates the sibling `mootx01-botLink` symlink with a
+    // RELATIVE target ("mootx01"), matching Installer.swift placeBinary step 5 (BL-1).
+    #[cfg(unix)]
+    #[test]
+    fn place_binary_creates_botlink_symlink() {
+        let home = std::env::temp_dir().join(format!("mootx01-botlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let new = home.join("new-binary");
+        std::fs::write(&new, b"#!/bin/sh\necho hi\n").unwrap();
+        place_binary(&new, &home).unwrap();
+
+        // Symlink must exist in the same directory as the binary.
+        let botlink = home.join(".mootx01/bin/mootx01-botLink");
+        assert!(
+            std::fs::symlink_metadata(&botlink).is_ok(),
+            "mootx01-botLink symlink must exist after place_binary"
+        );
+        // Target must be RELATIVE — the literal string "mootx01", not an absolute path.
+        let dest = std::fs::read_link(&botlink).unwrap();
+        assert_eq!(
+            dest,
+            std::path::Path::new("mootx01"),
+            "mootx01-botLink must point to the relative target \"mootx01\""
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // Idempotency: calling place_binary a second time must succeed and leave the
+    // botLink symlink pointing correctly to "mootx01".
+    #[cfg(unix)]
+    #[test]
+    fn place_binary_botlink_idempotent() {
+        let home =
+            std::env::temp_dir().join(format!("mootx01-botlink-idem-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&home).unwrap();
+        let new = home.join("new-binary");
+        std::fs::write(&new, b"#!/bin/sh\necho v1\n").unwrap();
+        place_binary(&new, &home).unwrap();
+
+        // Second call — simulates an upgrade over an existing install.
+        std::fs::write(&new, b"#!/bin/sh\necho v2\n").unwrap();
+        place_binary(&new, &home).unwrap();
+
+        let botlink = home.join(".mootx01/bin/mootx01-botLink");
+        assert!(
+            std::fs::symlink_metadata(&botlink).is_ok(),
+            "mootx01-botLink must still exist after second place_binary call"
+        );
+        let dest = std::fs::read_link(&botlink).unwrap();
+        assert_eq!(
+            dest,
+            std::path::Path::new("mootx01"),
+            "mootx01-botLink must still point to \"mootx01\" after idempotent replace"
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    // G-5 dangling-symlink guard: if a dangling mootx01-botLink symlink already
+    // exists (pointing to a nonexistent target), place_binary must detect it via
+    // symlink_metadata (NOT Path::exists()) and replace it with the correct link.
+    // A Path::exists()-based guard would return false for the dangling link and
+    // skip the remove step, leaving the dangling entry in place.
+    #[cfg(unix)]
+    #[test]
+    fn place_binary_replaces_dangling_botlink() {
+        let home =
+            std::env::temp_dir().join(format!("mootx01-botlink-dangle-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        // Pre-create bin_dir with a dangling symlink pointing at a nonexistent target.
+        let bin_dir = home.join(".mootx01/bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        let botlink = bin_dir.join("mootx01-botLink");
+        std::os::unix::fs::symlink("no-such-target", &botlink).unwrap();
+        // Confirm it is genuinely dangling: symlink_metadata succeeds, exists() does not.
+        assert!(
+            std::fs::symlink_metadata(&botlink).is_ok(),
+            "pre-condition: dangling symlink must be visible via symlink_metadata"
+        );
+        assert!(
+            !botlink.exists(),
+            "pre-condition: dangling symlink target must not exist so Path::exists() returns false"
+        );
+
+        let new = home.join("new-binary");
+        std::fs::write(&new, b"#!/bin/sh\necho hi\n").unwrap();
+        // place_binary must succeed and overwrite the dangling entry.
+        place_binary(&new, &home).unwrap();
+
+        let dest = std::fs::read_link(&botlink).unwrap();
+        assert_eq!(
+            dest,
+            std::path::Path::new("mootx01"),
+            "mootx01-botLink must point to \"mootx01\" after replacing dangling symlink"
+        );
         let _ = std::fs::remove_dir_all(&home);
     }
 }

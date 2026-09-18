@@ -1,4 +1,5 @@
 import Foundation
+import SubstrateML
 
 /// A grant is the unit of sharing in the federation model.
 ///
@@ -304,6 +305,8 @@ public struct DecayPolicy: Sendable, Codable, Equatable {
     /// `now` before `startedAt` yields the undecayed `baseLevel`, and a
     /// non-positive `halfLifeSeconds` is clamped to 1 so the exponent is always
     /// finite. The surviving level is `baseLevel * 0.5^(elapsed/halfLife)`,
+    /// with the factor from `SubstrateML.MatrixDecay.decayFactor` (the one
+    /// half-life formula shared by every decaying surface in both ports),
     /// rounded to the nearest integer (`.toNearestOrAwayFromZero`, matching the
     /// Rust `round()` so both ports agree on the discrete value), then floored
     /// at `floor`.
@@ -315,7 +318,8 @@ public struct DecayPolicy: Sendable, Codable, Equatable {
     func effectiveLevel(baseLevel: Int, now: Date) -> Int {
         let elapsed = max(0.0, now.timeIntervalSince(startedAt))
         let halfLife = Double(max(1, halfLifeSeconds))
-        let surviving = Double(baseLevel) * pow(0.5, elapsed / halfLife)
+        let surviving = Double(baseLevel)
+            * MatrixDecay.decayFactor(elapsedSeconds: elapsed, halfLifeSeconds: halfLife)
         let rounded = Int(surviving.rounded(.toNearestOrAwayFromZero))
         // Cap at baseLevel: time-aging is strictly attenuating — floor must not
         // raise access above the original grant's content level even if the

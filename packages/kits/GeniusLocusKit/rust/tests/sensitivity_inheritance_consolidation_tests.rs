@@ -25,7 +25,7 @@ use locus_kit::frames::CaptureFrame;
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use persistence_kit::inmemory::InMemoryStorage;
 use uuid::Uuid;
-use vectorkit::vector_store::VectorStore;
+use synapsekit::vector_store::VectorStore;
 
 const NOW: i64 = 1_700_000_000;
 const DAY: i64 = 86_400;
@@ -79,16 +79,29 @@ fn capture_with_sensitivity(
     coord.capture(handle, frame, at).expect("capture").id
 }
 
-/// Sweep: distill then consolidate at 91 days out.
+
+/// Write the structural fingerprint lane entry for every active drawer —
+/// the encode rider's per-drawer work, applied estate-wide so tests that
+/// capture without draining a corpus queue reach the same populated lane.
+fn fingerprint_all(coord: &EstateCoordinator, handle: &genius_locus_kit::EstateHandle, now: i64) {
+    let estate = coord.estate_for(handle).expect("estate");
+    for d in estate.all_drawers().expect("all_drawers") {
+        if !d.content.is_empty() {
+            coord
+                .write_structural_fingerprint(handle, &d.id, &d.content, now)
+                .expect("write_structural_fingerprint");
+        }
+    }
+}
+
+/// Sweep: fingerprint then consolidate at 91 days out.
 fn sweep(
     coord: &EstateCoordinator,
     handle: &genius_locus_kit::EstateHandle,
     aged: i64,
     config: &ConsolidationConfig,
 ) -> usize {
-    coord
-        .distill_items_sweep(handle, aged - DAY, None)
-        .expect("distill sweep");
+    fingerprint_all(coord, handle, aged - DAY);
     coord
         .consolidation_sweep(handle, aged, config, None)
         .expect("consolidation sweep")
@@ -161,9 +174,7 @@ fn fold_in_monotone_ceiling_does_not_lower_tier() {
     // A fifth NORMAL item arrives and folds in.
     let fifth = "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria confirmed the Falcon rollout checklist.";
     capture_with_sensitivity(&coord, &handle, fifth, AdjectiveSensitivity::Normal, aged + 1);
-    coord
-        .distill_items_sweep(&handle, aged + 3_600, None)
-        .expect("distill fifth");
+    fingerprint_all(&coord, &handle, aged + 3_600);
 
     let mut fold_config = ConsolidationConfig::default();
     fold_config.hamming_ceiling = Some(90);
@@ -191,7 +202,7 @@ fn fold_in_monotone_ceiling_does_not_lower_tier() {
 // ── 3. Secret vague item invisible to vague_recall (§D.3) ────────────────
 
 #[test]
-fn secret_vague_invisible_to_vague_recall() {
+fn vague_withheld_count_excludes_primary_secret_candidate() {
     let (coord, handle) = open_one();
     let aged = NOW + 91 * DAY;
 
@@ -230,6 +241,8 @@ fn secret_vague_invisible_to_vague_recall() {
         !has_secret_constituent_via_hop1,
         "hop-2 must not surface .secret constituents via a .secret vague item (hop-1 gates)"
     );
+    assert_eq!(result.withheld_by_sensitivity, 1,
+        "only the secret hop-1 vague candidate counts; constituents do not");
 }
 
 // ── 4. Elevated vague item IS visible to vague_recall (§D.3) ─────────────

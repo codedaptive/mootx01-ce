@@ -5,9 +5,11 @@
 // (rust/src/commands/upgrade.rs):
 //
 //   Remote (default): fetch the latest GitHub release via ReleaseDownloader
-//   (SHA-256 + minisign on Linux/POSIX + tarball-member validation), confirm
-//   unless --yes, place, and run the convergence steps (plugin rematerialization,
-//   permission-tier migration, service restart).
+//   (SHA-256 + minisign signature verification on every platform +
+//   tarball-member validation — all inside download(), before anything is
+//   extracted, placed, or executed), confirm unless --yes, place, and run the
+//   convergence steps (plugin rematerialization, permission-tier migration,
+//   service restart).
 //
 //   Local (--from <path>): the developer workflow — copies a freshly built
 //   binary from an explicit path (e.g. --from .build/release/mootx01).
@@ -16,13 +18,17 @@
 
 import AriaMCP
 import ArgumentParser
+import CorpusKit
+import CorpusKitProviders
 import Foundation
 import GeniusLocusKit
 import GeniusLocusKitMigrations
 import LocusKit
 import MootInstallerCore
+import MootEstateOpen
 import PersistenceKit
 import PersistenceKitSQLite
+import SynapseKit
 import VaultKit
 
 struct UpgradeCommand: AsyncParsableCommand {
@@ -31,15 +37,25 @@ struct UpgradeCommand: AsyncParsableCommand {
         abstract: "Upgrade mootx01 to the latest release (or from a local build).",
         discussion: """
             Without flags, upgrade downloads the latest release (SHA-256
-            verified, with checksums.txt authenticated by minisign on
-            Linux/POSIX), installs it, converges plugin packages and tool
-            permissions, and restarts the background services.
+            verified, with checksums.txt authenticated by minisign before
+            anything is installed or executed), installs it, converges plugin
+            packages and tool permissions, and restarts the background
+            services.
 
             Use --from to install a local build instead of downloading:
               mootx01 upgrade --from .build/release/mootx01
 
             Use --check to print the latest available version without downloading:
               mootx01 upgrade --check
+
+            Use --backfill-only to run only the estate migration steps
+            (schema 10 → 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record
+            vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim)
+            against the estate --db selects (the active estate when absent), then exit. No network,
+            no download, no plugin convergence, no encryption offer, no restartAgents
+            cycle — each step quiesces and restores the daemon itself when the
+            estate is the resident one, and leaves it running otherwise:
+              mootx01 upgrade --backfill-only
             """
     )
 
@@ -64,6 +80,9 @@ struct UpgradeCommand: AsyncParsableCommand {
         help: "Install this exact release tag (e.g. 1.1.0-beta-08) instead of the newest stable. Also settable via MOOTX01_VERSION.")
     var version: String?
 
+    @Option(name: .long, help: "Estate to upgrade: a registered name, or <dir>/<name> for a transient estate. Default: the active estate. A transient estate gets the estate migration steps only.")
+    var db: String?
+
     @Flag(name: .customLong("check"), help: "Print the latest available version and exit without downloading.")
     var checkOnly: Bool = false
 
@@ -72,6 +91,33 @@ struct UpgradeCommand: AsyncParsableCommand {
 
     @Flag(name: .long, help: "Copy the binary but skip restarting the background agents.")
     var noRestart: Bool = false
+
+    /// Run ONLY the estate migration steps: schema 10 → 19 → 20, kg_facts
+    /// identity, projection backfill, shared-content reclaim, whole-record vacuum,
+    /// ssc facts, dense pooling convergence, span encode, and vector reclaim.
+    /// Intended for scripted and benchmark estates, which the caller names with
+    /// `--db <path>/<name>` (a transient estate) or a registered name. No
+    /// network, no download, no plugin convergence, no encryption offer, no
+    /// restartAgents cycle. Each step handles its own daemon quiesce and
+    /// restore so the caller need not manage service state, and quiesces only
+    /// when a live resident is serving this estate; a cloned estate is
+    /// upgraded with the daemon left running.
+    ///
+    /// Ordering matches `runConvergence`: the schema step first (it decides
+    /// whether the estate is one this build upgrades at all; a refusal stops
+    /// the sequence before any other step can open the schema), kg_facts
+    /// identity second (correctness migration), projection backfill third
+    /// (restores recall visibility for pre-v20 facts), shared-content reclaim
+    /// fourth (VACUUM-backed, most I/O), whole-record vacuum fifth (the first
+    /// estate open of the sequence, so the migration chain runs and reports
+    /// here), ssc facts sixth, dense pooling convergence seventh (retrains
+    /// stale-format provider bases before any other step opens the corpus),
+    /// span encode eighth (needs the registry row and the corpus wired), vector
+    /// reclaim last (deletes what nothing serves any more).
+    @Flag(
+        name: .customLong("backfill-only"),
+        help: "Run only the estate migration steps (schema 10 → 19 → 20, kg_facts identity, projection backfill, shared-content reclaim, whole-record vacuum, ssc facts, dense pooling convergence, span encode, vector reclaim) then exit. No network, no download, no plugin convergence, no encryption offer, no restartAgents cycle — each step quiesces and restores the daemon itself when the estate is the resident one. Exits non-zero if any step fails; a refused schema version stops the sequence before any other step runs.")
+    var backfillOnly = false
 
     /// Internal: run ONLY the post-install convergence steps, skipping the
     /// download and the binary placement.
@@ -112,6 +158,33 @@ struct UpgradeCommand: AsyncParsableCommand {
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let cwd  = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+
+        // The catalog names the estate every migration step opens. `--db`
+        // selects a registered estate or attaches a transient one; absent, the
+        // active estate. Install-wide work (binary, plugin, agents, encryption
+        // offer) belongs to the machine's own estates only, so a transient
+        // estate runs the estate migration steps and nothing else.
+        let estate: EstateRecord
+        do {
+            estate = try EstateOpen.catalog(selecting: db).active
+        } catch {
+            print("mootx01 upgrade: \(error)")
+            throw ExitCode.failure
+        }
+        #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG && os(macOS)
+        // A 1.0.x install kept its estate flat in the configuration directory;
+        // the record above names databases/default/. Move it before any step
+        // opens the record's database (see FlatLayoutStep).
+        if FlatLayoutStep.pending(estate) {
+            let moved = await ResidentDaemonQuiesce.run(
+                residentServes: true,
+                step: "estate layout migration",
+                daemon: .launchd(homeDirectory: home)
+            ) { FlatLayoutStep.migrate(estate) } ?? false
+            guard moved else { throw ExitCode.failure }
+        }
+        #endif
+        let estateOnly = backfillOnly || estate.kind == .transient
         let downloader = ReleaseDownloader(
             repo: Self.repoSlug(),
             currentVersion: Mootx01.currentVersion)
@@ -119,9 +192,48 @@ struct UpgradeCommand: AsyncParsableCommand {
         // --converge-only: we ARE the freshly installed binary, re-executed by the
         // upgrade that placed us. Run the convergence steps and nothing else.
         if convergeOnly {
-            await runConvergence(
-                home: home,
+            try await runConvergence(
+                estate: estate, home: home,
                 binaryPath: MootPaths.installedBinaryURL(homeDirectory: home).path)
+            return
+        }
+
+        // --backfill-only: headless estate convergence for scripted and
+        // benchmark estates. Runs only the nine estate migration
+        // steps (schema 10 → 19 → 20, kg_facts identity, projection
+        // backfill, shared-content reclaim, whole-record vacuum, ssc facts,
+        // dense pooling convergence, span encode, vector reclaim) against the
+        // estate the catalog selected above. No network, no download, no plugin
+        // convergence, no encryption offer, no restartAgents cycle. Each step
+        // owns its daemon quiesce+restore through ResidentDaemonQuiesce, which
+        // touches the daemon only for the resident estate. A refused schema
+        // version stops the sequence (every later step would open the schema
+        // and stamp it); otherwise failures aggregate and exit non-zero,
+        // matching the Rust `--backfill-only` contract.
+        if estateOnly {
+            if estate.kind == .transient, !backfillOnly {
+                print("Transient estate '\(estate.name)' at \(estate.directory.path): running the estate migration steps only.")
+            }
+            // One quiesce around the whole sequence (one Keychain read), the
+            // steps run inside it.
+            let settled: Bool? = await ResidentDaemonQuiesce.hold(
+                estatePIDURL: estate.pidURL, daemon: .launchd(homeDirectory: home)
+            ) {
+                guard await runSchemaUpgrade(estate: estate, home: home) else { return false }
+                guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { return false }
+                retireLegacyEncryptionOptOut(estate: estate)
+                refreshManifest(estate: estate)
+                let okKG     = await runKGFactIdentityBackfill(estate: estate, home: home)
+                let okSP     = await runSearchProjectionBackfill(estate: estate, home: home)
+                let okVacuum = await runWholeRecordVacuum(estate: estate, home: home)
+                let okRecl   = await runSharedContentReclaimIfPending(estate: estate, home: home)
+                let okFacts  = await runSSCFactsBackfill(estate: estate, home: home)
+                let okDense  = await runDensePoolingConvergence(estate: estate, home: home)
+                let okSpan   = await runSpanEncodeBackfill(estate: estate, home: home)
+                let okVec    = await runVectorReclaim(estate: estate, home: home)
+                return okKG && okSP && okVacuum && okRecl && okFacts && okDense && okSpan && okVec
+            }
+            guard settled == true else { throw ExitCode.failure }
             return
         }
 
@@ -155,10 +267,12 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
 
         // Source resolution, mirroring the Rust vertical: --from is the
-        // local developer path; the default is the verified remote download
-        // (MOOT-INSTALL-E fix 3a — ReleaseDownloader's SHA-256 + independent
-        // checksums.txt authentication + tarball member validation, the
-        // machinery ReleaseDownloaderTests covers).
+        // local developer path (an explicit operator choice, exempt from the
+        // release-signature gate); the default is the verified remote download
+        // (MOOT-INSTALL-E fix 3a — ReleaseDownloader's SHA-256 + minisign
+        // authentication of checksums.txt on every platform + tarball member
+        // validation, all gating inside download() itself, the machinery
+        // ReleaseDownloaderTests covers).
         let sourcePath: String
         var downloadTmpDir: URL?
         let isRemoteDownload: Bool
@@ -231,15 +345,36 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // and offers. The backfill may quiesce the daemon, so restore
                 // the installed agents before returning, as below.
                 // No new binary was placed, so there is no newer code to
-                // re-execute into and converging in THIS image is correct. This
-                // path deliberately runs only the estate migrations + restart,
-                // NOT plugin rematerialization or permission tiering: those
-                // converge an install onto a NEW binary's shape and have nothing
-                // to do when the binary did not change.
-                await runKGFactIdentityBackfill(home: home)
-                await runSharedContentReclaimIfPending(home: home)
+                // re-execute into and converging in THIS image is correct.
+                // Full plugin rematerialization and permission tiering are
+                // skipped here — those converge the install onto a NEW binary's
+                // shape and are handled by the binary-placement paths.
+                // Plugin manifest cache refresh IS included: a prior upgrade
+                // may have placed a new binary but left the Claude Code plugin
+                // cache stale (version_skew advisory firing on every ping).
+                // One quiesce around the whole sequence (one Keychain read).
+                let matrixOK: Bool? = await ResidentDaemonQuiesce.hold(
+                    estatePIDURL: estate.pidURL, daemon: .launchd(homeDirectory: home)
+                ) {
+                    guard await runSchemaUpgrade(estate: estate, home: home) else { return true }
+                    guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { return false }
+                    retireLegacyEncryptionOptOut(estate: estate)
+                    refreshManifest(estate: estate)
+                    await runKGFactIdentityBackfill(estate: estate, home: home)
+                    await runSearchProjectionBackfill(estate: estate, home: home)
+                    await runWholeRecordVacuum(estate: estate, home: home)
+                    await runSharedContentReclaimIfPending(estate: estate, home: home)
+                    await runSSCFactsBackfill(estate: estate, home: home)
+                    await runDensePoolingConvergence(estate: estate, home: home)
+                    await runSpanEncodeBackfill(estate: estate, home: home)
+                    _ = await runVectorReclaim(estate: estate, home: home)
+                    return true
+                }
+                guard matrixOK != false else { throw ExitCode.failure }
+                updatePluginManifestIfNeeded(home: home)
+                convergeDaemonBundle(home: home)
                 restartAgents(home: home)
-                offerEstateEncryptionIfNeeded(home: home)
+                offerEstateEncryptionIfNeeded(estate: estate, home: home)
                 return
             }
             print("New version available: \(tag) (current: \(Mootx01.currentVersion))")
@@ -296,26 +431,28 @@ struct UpgradeCommand: AsyncParsableCommand {
         // Gatekeeper quarantine is applied AFTER convergence, not here — see the
         // re-exec comment below.
 
-        // an upgrade alone never touches
-        // ~/.claude/mootx01-plugin or Claude Code's plugin cache — without
-        // this, a machine upgraded via `mootx01 upgrade` keeps a stranded
-        // plugin package (and Claude Code keeps a stranded cached snapshot)
-        // indefinitely. Rematerialize plugin-depth packages for every host
-        // that already has one on disk (never CREATES a new plugin-depth
-        // install for a host that never had one — upgrade only converges
-        // existing installs), and refresh Claude Code's cache the same way
-        // `mootx01 install` does.
+        // Targeted plugin manifest cache refresh before the main convergence.
+        // Covers the case where the binary being replaced already had a stale
+        // plugin cache (version_skew advisory firing before this upgrade);
+        // updatePluginManifestIfNeeded is a no-op when the cache is current.
+        // The main convergence below also rematerializes the full plugin package
+        // for the newly placed binary, so this is an additive safety step only.
+        updatePluginManifestIfNeeded(home: home)
         // Convergence runs in the binary we JUST INSTALLED, not in this image.
         // Re-execute the new binary with --converge-only and let it do the work;
         // otherwise every step below would run the version being replaced (see
         // the --converge-only flag comment).
         //
-        // This happens BEFORE the Gatekeeper quarantine tag is applied on
-        // purpose: executing a freshly quarantined binary makes the kernel hold
-        // it pre-`main` for assessment, which on an interactive machine surfaces
-        // an "app downloaded from the Internet" dialog and blocks until someone
-        // clicks. Tagging after the child exits keeps the assessment where it
-        // belongs — the operator's next run — and keeps the upgrade unattended.
+        // Security ordering (UP-01): the binary executed here has already passed
+        // the minisign Ed25519 verification gate inside download() — no remote
+        // artifact reaches this line unverified. The Gatekeeper quarantine tag
+        // is still applied only AFTER this re-exec, on purpose: executing a
+        // freshly quarantined binary makes the kernel hold it pre-`main` for
+        // assessment, which on an interactive machine surfaces an "app
+        // downloaded from the Internet" dialog and blocks until someone clicks.
+        // Tagging after the child exits keeps the upgrade unattended; the tag is
+        // defense-in-depth for the operator's next run, not the verification
+        // gate — the minisign check is the gate.
         let converged = await runConvergenceInNewBinary(
             binaryPath: binaryPath, home: home)
         if !converged {
@@ -323,7 +460,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             // back to converging in THIS image: the pre-existing behaviour, so a
             // failed re-exec never leaves an upgrade less converged than before.
             print("Note: converging with the previous binary — the installed one could not run.")
-            await runConvergence(home: home, binaryPath: binaryPath)
+            try await runConvergence(estate: estate, home: home, binaryPath: binaryPath)
         }
 
         #if os(macOS)
@@ -340,7 +477,198 @@ struct UpgradeCommand: AsyncParsableCommand {
         // The encryption offer runs AFTER the services are back up so a
         // decline leaves a fully converged install, and an accept owns the
         // whole stop → migrate → restart sequence itself.
-        offerEstateEncryptionIfNeeded(home: home)
+        offerEstateEncryptionIfNeeded(estate: estate, home: home)
+    }
+
+    /// The identity key store an upgrade step opens the estate with. The
+    /// catalog decided what kind of estate this is and the kind decides every
+    /// Keychain question: a registered estate resolves its Ed25519 identity
+    /// per backend (nil, the Keychain for SQLite); a transient estate keeps it
+    /// in memory and never touches the Keychain, so a headless sweep over
+    /// scratch estates cannot stall on a consent dialog. Same rule as `serve`.
+    private static func identityKeyStore(for estate: EstateRecord) -> (any EstateIdentityKeyStore)? {
+        estate.kind == .registered ? nil : InMemoryEstateIdentityKeyStore()
+    }
+
+    /// Offline matrix upgrade: preserve calibration, rebuild records and reclaim before serving.
+    @discardableResult
+    private func runMatrixRecordsUpgrade(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        guard FileManager.default.fileExists(atPath: estate.databaseURL.path) else { return true }
+        let configuration: EstateConfiguration
+        do {
+            configuration = EstateConfiguration(estateID: UUID(),
+                backend: .sqlite(url: estate.databaseURL, busyTimeout: 5.0),
+                encryptionConfig: try EstateOpenPosture.resolve(for: estate).encryption)
+        } catch {
+            print("  ✗ matrix storage upgrade: \(error)")
+            return false
+        }
+        return await ResidentDaemonQuiesce.run(estatePIDURL: estate.pidURL,
+            step: "matrix storage upgrade", daemon: .launchd(homeDirectory: home)) {
+            do {
+                let storage = try SQLiteStorage(configuration: configuration)
+                let kit = GeniusLocusKit()
+                var handle: EstateHandle?
+                do {
+                    let opened = try await kit.open(storage: storage,
+                        owner: OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier),
+                        identityKeyStore: Self.identityKeyStore(for: estate))
+                    handle = opened
+                    _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: opened,
+                        now: Date(), offlineUpgrade: true)
+                    try await kit.close(opened)
+                    await storage.close()
+                    print("  ✓ matrix records prepared; required retirement and reclamation complete")
+                    return true
+                } catch {
+                    if let handle { try? await kit.close(handle) }
+                    await storage.close()
+                    throw error
+                }
+            } catch {
+                print("  ✗ matrix storage upgrade failed: \(error); serving remains gated until upgrade succeeds")
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// Schema upgrade: the one product schema migration. Reads the LocusKit
+    /// ledger row RAW, before any schema open, and decides with
+    /// `LocusKitSchema.upgradePath(storedVersion:)`:
+    ///   - 10 (CE 1.0.35/1.0.37) → open the schema, which applies the
+    ///     v10 → v19 → v20 ladder in two hops.
+    ///   - 19 → open the schema, which applies the single v19 → v20 hop.
+    ///   - no row → fresh; anything else → REFUSE, naming the version found,
+    ///     and return false so the caller skips every later step.
+    /// The refusal must come first because PersistenceKit's runner stamps the
+    /// declared version whenever no ladder entry matches: any later step's open
+    /// would mark an estate at 11–18 as 20 with none of the v20 objects in
+    /// place. Pre-release development estates at 11–18 are moved to a supported
+    /// version by the schema surgery script, never by this command.
+    ///
+    /// Also runs the CorpusKit basis ladder and stamps an unstamped 1.0.x
+    /// estate at format 1.0 so the migration chain seeds it.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+    /// Returns `true` when the estate is at 20 afterwards (or absent).
+    @discardableResult
+
+    private func runSchemaUpgrade(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        let estateURL = estate.databaseURL
+        // Absent estate means first run — serve creates new estates at 20.
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
+        } catch {
+            print("  ✗ schema upgrade skipped — estate key unavailable: \(error)")
+            return false
+        }
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "schema upgrade",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                // The ledger row, read before any schema open (see the doc comment).
+                let stored = try await storage.currentSchemaVersion(for: LocusKitSchema.kitID)
+                var stampedFormat = false
+                switch LocusKitSchema.upgradePath(storedVersion: stored) {
+                case .unsupported(let found):
+                    print("""
+                          ✗ schema upgrade refused: this estate is at LocusKit schema \(found).
+                            This build upgrades schema \(LocusKitSchema.supportedUpgradeFloor) (CE 1.0.35/1.0.37) and serves schema \(LocusKitSchema.version); nothing was changed.
+                            A pre-release development estate at 11–18 is moved to a supported version by the schema surgery script, not by this build; a newer estate needs a newer build.
+                        """)
+                    await storage.close()
+                    return false
+                case .current:
+                    // Schema application also converges legacy migration-ledger
+                    // timestamps. Keep this inside mootx01 upgrade: the raw
+                    // version gate above remains the only authority for schema
+                    // acceptance before an open can mutate the estate.
+                    try await storage.open(schema: LocusKitSchema.schema)
+                    // CorpusKit's basis ladder (v2 single-blob → v4 chunked, with
+                    // part_index in the PRIMARY KEY). GeniusLocusKit opens CorpusKit
+                    // through the attached profile, which creates the component tables
+                    // for a fresh estate but carries no component migrations, so a
+                    // fielded 1.0.x estate keeps the v2 shape and every basis write fails
+                    // with "no column named part_index". mootx01 upgrade is the only
+                    // migration vehicle, so the ladder runs here, before any later step
+                    // opens the estate.
+                    try await storage.migrate(to: BasisStore.schemaDeclaration)
+                    // A 1.0.x estate carries no glk_estate_format stamp (the table first
+                    // appeared in 1.1) and GLKMigrationCatalog.prepare treats a missing
+                    // stamp as a fresh estate: it stamps current and runs no capsule.
+                    // Stamping 1.0 makes the compiled chain run 1.0 → … → 1.9 on the first
+                    // GeniusLocusKit open of this upgrade (the whole-record vacuum step),
+                    // which seeds fact_extraction, the six preferences and recall_ratings.
+                    let formatStore = EstateFormatStore(storage: storage)
+                    if try await formatStore.readIfPresent() == nil {
+                        try await formatStore.stamp(.v1_0, now: Date())
+                        stampedFormat = true
+                    }
+                    print("  ✓ schema: already at LocusKit schema \(LocusKitSchema.version)\(stampedFormat ? "; estate format stamped 1.0 for the migration chain" : "")")
+                case .fresh:
+                    print("  ✓ schema: no LocusKit ledger row; schema \(LocusKitSchema.version) is created on the first open")
+                case .upgrade(let from):
+                    try await storage.open(schema: LocusKitSchema.schema)
+                    let after = try await storage.currentSchemaVersion(for: LocusKitSchema.kitID)
+                    guard after == LocusKitSchema.version else {
+                        print("  ✗ schema upgrade: expected LocusKit schema \(LocusKitSchema.version) after the hop, found \(after). Run `mootx01 upgrade` to retry.")
+                        await storage.close()
+                        return false
+                    }
+                    // CorpusKit's basis ladder (v2 single-blob → v4 chunked, with
+                    // part_index in the PRIMARY KEY). GeniusLocusKit opens CorpusKit
+                    // through the attached profile, which creates the component tables
+                    // for a fresh estate but carries no component migrations, so a
+                    // fielded 1.0.x estate keeps the v2 shape and every basis write fails
+                    // with "no column named part_index". mootx01 upgrade is the only
+                    // migration vehicle, so the ladder runs here, before any later step
+                    // opens the estate.
+                    try await storage.migrate(to: BasisStore.schemaDeclaration)
+                    // A 1.0.x estate carries no glk_estate_format stamp (the table first
+                    // appeared in 1.1) and GLKMigrationCatalog.prepare treats a missing
+                    // stamp as a fresh estate: it stamps current and runs no capsule.
+                    // Stamping 1.0 makes the compiled chain run 1.0 → … → 1.9 on the first
+                    // GeniusLocusKit open of this upgrade (the whole-record vacuum step),
+                    // which seeds fact_extraction, the six preferences and recall_ratings.
+                    let formatStore = EstateFormatStore(storage: storage)
+                    if try await formatStore.readIfPresent() == nil {
+                        try await formatStore.stamp(.v1_0, now: Date())
+                        stampedFormat = true
+                    }
+                    let v20Objects = "twelve kg_facts extraction columns, fact_extractor_models"
+                    let hopObjects = from == 19
+                        ? v20Objects
+                        : "encoder_models, ssc_facts, subject trio, kg_facts identity trio, operationalAND, idx_drawers_filedAt, recall_trace attribution; \(v20Objects)"
+                    print("  ✓ schema: LocusKit \(from) → \(after) (\(hopObjects))\(stampedFormat ? "; estate format stamped 1.0 for the migration chain" : "")")
+                }
+                await storage.close()
+                return true
+            } catch {
+                print("""
+                      ✗ schema upgrade failed: \(error)
+                        Nothing was changed. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
     }
 
     /// MXE-MI: move pre-MXE-KH `kg_facts.sourceDrawerID` identity values
@@ -360,14 +688,14 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// opens through the SUBSTRATE path on purpose: the schema ladder's
     /// v12 → v13 migration is what adds the identity columns to estates
     /// that predate them.
-    private func runKGFactIdentityBackfill(home: URL) async {
+    /// Returns `true` on success or when there is nothing to backfill, `false` on failure.
+    @discardableResult
+    private func runKGFactIdentityBackfill(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         // Absent estate means first run — serve creates new estates
         // post-KH; there is nothing to backfill.
-        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
 
         // Same key custody as serve's open path: existing key for an
         // encrypted estate, plaintext posture preserved for a plaintext
@@ -375,52 +703,615 @@ struct UpgradeCommand: AsyncParsableCommand {
         // TTY-gated offer's job, below.
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ kg_facts identity backfill skipped — estate key unavailable: \(error)")
-            return
+            return false
         }
 
-        // Quiesce first (single-writer discipline, same direction as the
-        // encryption migration): if the daemon will not stop, skip —
-        // nothing is half-done, and the next `mootx01 upgrade` retries.
-        // restartAgents (the very next step in run()) starts the daemon
-        // again over the migrated estate, so there is no start here.
-        if LaunchAgent.isDaemonRunning() && !LaunchAgent.stopDaemon() {
-            print("  ✗ kg_facts identity backfill skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return
-        }
-
-        do {
-            let configuration = EstateConfiguration(
-                estateID: UUID(),
-                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-                encryptionConfig: encryption
-            )
-            let storage = try SQLiteStorage(configuration: configuration)
-            // The class-B resolver is VaultKit's stable-source-key hash,
-            // injected here because LocusKit sits below VaultKit and must
-            // not import it.
-            let report = try await KGFactIdentityBackfill.run(
-                storage: storage,
-                resolveForeignKey: DrawerMapping.lineageID(forStableSourceKey:))
-            await storage.close()
-            if report.scanned == 0 {
-                print("  ✓ kg_facts identity columns: nothing to backfill")
-            } else {
+        // Single-writer discipline: the resident daemon is stopped around
+        // the work only when this is its estate (ResidentDaemonQuiesce
+        // prints why when it is not). A nil result means the daemon would
+        // not stop; the step is skipped and the next upgrade retries.
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "kg_facts identity backfill",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                // The class-B resolver is VaultKit's stable-source-key hash,
+                // injected here because LocusKit sits below VaultKit and must
+                // not import it.
+                let report = try await KGFactIdentityBackfill.run(
+                    storage: storage,
+                    resolveForeignKey: DrawerMapping.lineageID(forStableSourceKey:))
+                await storage.close()
+                if report.scanned == 0 {
+                    print("  ✓ kg_facts identity columns: nothing to backfill")
+                } else {
+                    print("""
+                          ✓ kg_facts identity backfill: \(report.scanned) scanned — \
+                        addedBy \(report.hostIdentities), foreignSourceKey \(report.foreignPalaceKeys), \
+                        foreignRecordID \(report.tripleIDs), local anchors kept \(report.localDrawerIDs) \
+                        (sensitivity inherited \(report.inheritanceApplied)), unclassified \(report.unclassified)
+                        """)
+                }
+                return true
+            } catch {
                 print("""
-                      ✓ kg_facts identity backfill: \(report.scanned) scanned — \
-                    addedBy \(report.hostIdentities), foreignSourceKey \(report.foreignPalaceKeys), \
-                    foreignRecordID \(report.tripleIDs), local anchors kept \(report.localDrawerIDs) \
-                    (sensitivity inherited \(report.inheritanceApplied)), unclassified \(report.unclassified)
+                      ✗ kg_facts identity backfill failed: \(error)
+                        Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
                     """)
+                return false
             }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// Populate `kg_facts.searchProjection` and
+    /// `kg_facts.searchProjectionVersion` for rows that the v19 → v20
+    /// migration added those columns to. A fact with an empty
+    /// `searchProjection` is invisible to any consumer that filters on the
+    /// projection (the contract: a row must carry a non-empty, current-version
+    /// projection to participate in fact-search results). `mootx01 upgrade`
+    /// is the ONLY migration vehicle (Bob's ruling) — no detection or
+    /// prompting lives anywhere else.
+    ///
+    /// Idempotent: rows whose searchProjectionVersion already matches are
+    /// skipped. A second run over a fully-projected estate reports scanned: 0
+    /// and changes nothing.
+    /// Returns `true` on success or when there is nothing to backfill, `false` on failure.
+    @discardableResult
+    private func runSearchProjectionBackfill(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        let estateURL = estate.databaseURL
+        // Absent estate means first run — serve creates new estates post-v20;
+        // there is nothing to backfill.
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
+        } catch {
+            print("  ✗ kg_facts search-projection backfill skipped — estate key unavailable: \(error)")
+            return false
+        }
+
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "kg_facts search-projection backfill",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                let report = try await KGFactSearchProjectionBackfillGateway.run(storage: storage)
+                await storage.close()
+                if report.scanned == 0 {
+                    print("  ✓ kg_facts search-projection: nothing to backfill")
+                } else {
+                    print("  ✓ kg_facts search-projection backfill: \(report.scanned) scanned")
+                }
+                return true
+            } catch {
+                print("""
+                      ✗ kg_facts search-projection backfill failed: \(error)
+                        Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// Bring the trainable provider bases a populated estate carries
+    /// (random-indexing and LSA in every build)
+    /// onto the basis format this binary's codec writes. A basis row persisted
+    /// under an earlier format version holds vectors pooled the old way; the
+    /// corpus opens such a slot untrained and its open-time provider reconcile
+    /// retrains it from the estate's content and re-embeds every row. This step
+    /// runs that rebuild here, under the daemon quiesce, so it happens at
+    /// upgrade time and is reported, rather than on the next serve open.
+    ///
+    /// Eligibility is a raw read of `corpus_provider_basis`: any part-0 row
+    /// whose frame version byte differs from `basisFormatVersion`. An estate
+    /// with no such table (it never held a trained basis) or with every row
+    /// current is skipped. Idempotent: after one pass every row carries the
+    /// current version and the step is a no-op. Runs BEFORE the span-encode
+    /// step so that step's open does not absorb the rebuild unreported.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+    /// Returns `true` on success or when there is nothing to converge, `false` on failure.
+    @discardableResult
+    private func runDensePoolingConvergence(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        let estateURL = estate.databaseURL
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
+        } catch {
+            print("  ✗ dense pooling convergence skipped — estate key unavailable: \(error)")
+            return false
+        }
+        let configuration = EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+            encryptionConfig: encryption
+        )
+        // Eligibility: a single read of the basis frames, before any quiesce.
+        let stale: [String]
+        do {
+            let storage = try SQLiteStorage(configuration: configuration)
+            stale = try await Self.staleFormatBasisProviders(storage: storage)
+            await storage.close()
         } catch {
             print("""
-                  ✗ kg_facts identity backfill failed: \(error)
-                    Every row remains findable in its current shape. Run `mootx01 upgrade` to retry.
+                  ✗ dense pooling convergence: could not read corpus_provider_basis: \(error)
+                    Run `mootx01 upgrade` to retry.
                 """)
+            return false
         }
+        if stale.isEmpty {
+            print("  ✓ dense pooling: provider bases already at basis format v\(basisFormatVersion)")
+            return true
+        }
+        // Single-writer discipline: the resident daemon is stopped around
+        // the work only when this is its estate (ResidentDaemonQuiesce
+        // prints why when it is not). A nil result means the daemon would
+        // not stop; the step is skipped and the next upgrade retries.
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "dense pooling convergence",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let storage = try SQLiteStorage(configuration: configuration)
+                let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+                let kit = GeniusLocusKit()
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: Self.identityKeyStore(for: estate)
+                )
+                _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                // Wiring the corpus runs the open-time provider reconcile: every
+                // slot whose persisted basis was refused for format skew opens
+                // untrained, retrains from the estate's content, and re-covers
+                // every row under the new basis before the wire returns.
+                try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+                try await kit.close(handle)
+                let remaining = try await Self.staleFormatBasisProviders(storage: storage)
+                await storage.close()
+                guard remaining.isEmpty else {
+                    print("""
+                          ✗ dense pooling convergence: \(remaining.joined(separator: ", ")) still at an earlier basis format after the rebuild.
+                            Run `mootx01 upgrade` to retry.
+                        """)
+                    return false
+                }
+                print("  ✓ dense pooling convergence: \(stale.joined(separator: ", ")) retrained to basis format v\(basisFormatVersion); dense vectors re-embedded")
+                return true
+            } catch {
+                print("""
+                      ✗ dense pooling convergence failed: \(error)
+                        Recall keeps serving through the lexical and stateless lanes; the stale dense slots stay untrained until the rebuild completes. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// Provider keys (`model_id@model_version`) whose part-0 basis row carries
+    /// a frame version other than `basisFormatVersion`, sorted. Empty when the
+    /// table is absent (an estate that never held a trained basis) or every
+    /// row is current.
+    private static func staleFormatBasisProviders(storage: any Storage) async throws -> [String] {
+        let rows: [StorageRow]
+        do {
+            rows = try await storage.rowStore.query(
+                table: "corpus_provider_basis",
+                where: .eq(Column(table: "corpus_provider_basis", name: "part_index"), .int(0)),
+                orderBy: [], limit: nil, offset: nil)
+        } catch {
+            // No basis table: the estate predates persisted bases, so there is
+            // no dense lane to converge (the same skip the counts migration makes).
+            return []
+        }
+        var stale: [String] = []
+        for row in rows {
+            guard case let .text(modelID)? = row["model_id"],
+                  case let .text(modelVersion)? = row["model_version"],
+                  case let .blob(basis)? = row["basis"] else { continue }
+            if BasisBlobFrame.formatVersion(of: basis) != basisFormatVersion {
+                stale.append("\(modelID)@\(modelVersion)")
+            }
+        }
+        return stale.sorted()
+    }
+
+    /// Span encode (ENCODER_RERANK_CONTRACT §10, §12): encode spans for
+    /// every drawer whose bit 27 is clear under the ACTIVE registry row, so a
+    /// freshly upgraded estate reranks from its first query instead of
+    /// waiting for the REM-ALPHA duty. The estate is opened through
+    /// GeniusLocusKit first so `GLKMigrationCatalog.prepare` runs (it moves
+    /// the vector tier's ledger rows to their SynapseKit ids before any store
+    /// opens under the new id) and the corpus is wired; the batch work then
+    /// runs through `SpanEncodeBackfill`, which is the duty's batch function
+    /// until the NeuronKit duty lands. No active model, or a model whose
+    /// directory or vocab check fails, is a clean skip: recall stays
+    /// lexical-only and the next upgrade retries.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+    /// Upgrade never creates content: spans are derived rows, not drawers.
+    /// Returns `true` on success or when there is nothing to encode.
+    @discardableResult
+    private func runSpanEncodeBackfill(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        let estateURL = estate.databaseURL
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
+        } catch {
+            print("  ✗ span encode skipped — estate key unavailable: \(error)")
+            return false
+        }
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "span encode",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+                let kit = GeniusLocusKit()
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: Self.identityKeyStore(for: estate)
+                )
+                _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                // Migration writes the activation key: a CE 1.0.x estate arrives
+                // at 20 with no `embedding_provider`, and only `provision` and
+                // this upgrade step ever write it (Bob's ruling, 2026-09-06).
+                // Written before wiring so this open already activates the
+                // encoder; the next serve open does the same.
+                if try await kit.provisionDefaultEncoderIfAbsent(for: handle) {
+                    print("  ✓ encoder: span encoder is now the default recall stage (embedding_provider = encoder)")
+                }
+                try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+                // Closing the estate closes its storage connection with it, so
+                // the backfill opens its own connection over the migrated file.
+                // A fresh SQLiteStorage carries no table declarations until a
+                // schema is opened on it, and the row store derives the
+                // primary key of a delete from the declared table: the span
+                // write replaces rows by deleting them first, so the vector
+                // schema is declared here before the backfill touches the
+                // table (the DrawerStore the backfill creates declares the
+                // LocusKit schema itself).
+                try await kit.close(handle)
+                let backfillStorage = try SQLiteStorage(configuration: configuration)
+                try await backfillStorage.open(schema: VectorStore.schemaDeclaration)
+                let report = try await SpanEncodeBackfill.run(
+                    storage: backfillStorage, dataDirectory: EstateCatalog.configurationDirectory, now: Date())
+                await backfillStorage.close()
+                switch report {
+                case .noActiveModel:
+                    print("  ✓ span encode: no active encoder model registered; recall stays lexical-only")
+                case .modelUnavailable(let reason):
+                    print("  ✓ span encode: encoder unavailable (\(reason)); recall stays lexical-only until the model ships")
+                case .encoded(let drawers, let spans, let remaining):
+                    if drawers == 0 && remaining == 0 {
+                        print("  ✓ span encode: every drawer is indexed under the active model")
+                    } else {
+                        print("  ✓ span encode: \(drawers) drawer(s), \(spans) span(s) written; \(remaining) drawer(s) still owed")
+                    }
+                }
+                return true
+            } catch {
+                print("""
+                      ✗ span encode failed: \(error)
+                        Recall keeps serving lexical-only; the duty encodes the remaining drawers. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// Vacuum the whole-record float rows (`vectors` kind 1) and the
+    /// `hnsw_graph` rows nothing serves any more (GENIUSLOCUSKIT_SPEC I-26).
+    /// The 1.6 to 1.7 and 1.7 to 1.8 capsules do the work inside
+    /// `GLKMigrationCatalog.prepare` when the estate opens (the 1.6 to 1.7
+    /// capsule also rebuilds the binary sidecar and releases the float
+    /// representation claim; the 1.7 to 1.8 capsule seeds fact_extraction),
+    /// so this step counts the rows before the open, opens the estate through
+    /// GeniusLocusKit, counts again, and returns the freed pages to the
+    /// filesystem with a VACUUM when anything was deleted. It runs BEFORE the
+    /// shared-content reclaim and before the ssc facts backfill: the first
+    /// estate open of the sequence, so the migration chain runs here and leaves
+    /// the estate reclaim-pending; the shared-content reclaim step that follows
+    /// collects that state. Every later step finds the estate at 1.8. Idempotent: a vacuumed
+    /// estate deletes nothing and skips the VACUUM. Twin of the Rust
+    /// `run_whole_record_vacuum`.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+    /// Returns `true` on success or when there is nothing to vacuum.
+    @discardableResult
+    private func runWholeRecordVacuum(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        let estateURL = estate.databaseURL
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
+        } catch {
+            print("  ✗ whole-record vacuum skipped — estate key unavailable: \(error)")
+            return false
+        }
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "whole-record vacuum",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let before = try await Self.wholeRecordRowCounts(configuration: configuration)
+                let storage = try SQLiteStorage(configuration: configuration)
+                let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+                let kit = GeniusLocusKit()
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: Self.identityKeyStore(for: estate)
+                )
+                // The chain runs the 1.6 to 1.7 and 1.7 to 1.8 capsules on
+                // an estate that has not taken them yet; closing the estate
+                // closes its connection.
+                _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                try await kit.close(handle)
+                let after = try await Self.wholeRecordRowCounts(configuration: configuration)
+                let floatRows = before.floatRows - after.floatRows
+                let graphRows = before.graphRows - after.graphRows
+                var reclaimedBytes: Int64 = 0
+                if floatRows + graphRows > 0 {
+                    let maintenance = try SQLiteStorage(configuration: configuration)
+                    reclaimedBytes = try await maintenance.performMaintenance().reclaimedBytes
+                    await maintenance.close()
+                }
+                if floatRows + graphRows == 0 {
+                    print("  ✓ whole-record vacuum: nothing to reclaim")
+                } else {
+                    print("  ✓ whole-record vacuum: \(floatRows) float row(s), "
+                        + "\(graphRows) graph row(s) deleted; "
+                        + "\(reclaimedBytes) bytes returned to filesystem")
+                }
+                return true
+            } catch {
+                print("""
+                      ✗ whole-record vacuum failed: \(error)
+                        Every serving row is untouched. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    /// The whole-record float (`vectors` kind 1) and `hnsw_graph` row counts
+    /// of an estate, read through a connection of their own that is closed
+    /// before the caller opens the estate. Zero when the vector tier was
+    /// never registered (a Locus-only estate has no `vectors` table).
+    private static func wholeRecordRowCounts(
+        configuration: EstateConfiguration
+    ) async throws -> (floatRows: Int, graphRows: Int) {
+        let storage = try SQLiteStorage(configuration: configuration)
+        do {
+            guard try await storage.currentSchemaVersion(for: VectorStore.kitID) > 0 else {
+                await storage.close()
+                return (0, 0)
+            }
+            let floatRows = try await storage.rowStore.count(
+                table: "vectors",
+                where: .eq(Column(table: "vectors", name: "kind"),
+                           .int(Int64(VectorKind.float32.rawValue))))
+            let graphRows = try await storage.rowStore.count(table: "hnsw_graph", where: nil)
+            await storage.close()
+            return (floatRows, graphRows)
+        } catch {
+            await storage.close()
+            throw error
+        }
+    }
+
+    /// Models whose vector rows `mootx01 upgrade` reclaims: the three retired
+    /// audition families (NMF, PPMI, FDC). Their rows serve nothing at 19 or 20.
+    ///
+    /// `lsa-v1` is NOT in this set: LSA is the second signal of the default
+    /// ensemble (`CorpusEnsemble.defaultEnsemble()`), so every estate carries
+    /// live `lsa-v1` rows and the reclaim must leave them in place.
+    static let retiredDenseFamilyModelIDs = ["nmf-v1", "ppmi-v1", "fdc-v1"]
+
+    /// Reclaim the vector rows nothing serves at schema 20 (ENCODER_RERANK
+    /// CONTRACT §12): every row of the retired dense families and every row
+    /// at a non-serving generation, then a VACUUM when anything was deleted.
+    /// Opened through GeniusLocusKit first for the same ledger-id reason as
+    /// the span-encode step. Idempotent: a reclaimed estate deletes nothing
+    /// and skips the VACUUM.
+    ///
+    /// `mootx01 upgrade` is the ONLY migration vehicle (Bob's ruling).
+    /// Returns `true` on success or when there is nothing to reclaim.
+    @discardableResult
+    /// Write SSC facts for every drawer that owes them and rebuild the BM25
+    /// documents when any were written (Encoder Rerank contract sheet §6).
+    ///
+    /// A live estate never accrues facts debt: the capture path writes a
+    /// drawer's facts before the drawer is encoded. An estate migrated from
+    /// an earlier schema arrives with every `ssc_facts` NULL and with BM25
+    /// documents composed under the earlier scheme, so this step pays the
+    /// debt once (`GeniusLocusKit.backfillSSCFacts`) and, when it wrote
+    /// anything, rebuilds every derived lane (`reindexCorpus`) so the
+    /// supplement reaches the posting lists. A converged estate writes
+    /// nothing and skips the rebuild. In the shared convergence sequence it
+    /// runs after the kg_facts identity backfill and before search projection,
+    /// so every later derived step sees the completed facts.
+    ///
+    /// Returns `true` on success or when there is nothing to write.
+    private func runSSCFactsBackfill(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        let estateURL = estate.databaseURL
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
+        } catch {
+            print("  ✗ ssc facts backfill skipped — estate key unavailable: \(error)")
+            return false
+        }
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "ssc facts backfill",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+                let kit = GeniusLocusKit()
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: Self.identityKeyStore(for: estate)
+                )
+                _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                // The corpus must be wired for the rebuild below; the wire is
+                // idempotent and does not re-stamp the manifest.
+                try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+                // Both run as claimed QueueKit jobs (DutyQueue): the facts pass
+                // and the lane rebuild are resumable if the upgrade dies here.
+                let written = try await kit.payDutyUntilSettled(.factsBackfill, in: handle, now: Date())
+                if written > 0 {
+                    try await kit.payDutyUntilSettled(.retrainBasis, in: handle, now: Date())
+                }
+                try await kit.close(handle)
+                await storage.close()
+                if written == 0 {
+                    print("  ✓ ssc facts: every drawer already carries its facts")
+                } else {
+                    print("  ✓ ssc facts: \(written) drawer(s) written; BM25 and dense lanes rebuilt")
+                }
+                return true
+            } catch {
+                print("""
+                      ✗ ssc facts backfill failed: \(error)
+                        Rows already written keep their facts. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
+        #endif
+    }
+
+    private func runVectorReclaim(estate: EstateRecord, home: URL) async -> Bool {
+        #if os(macOS)
+        let estateURL = estate.databaseURL
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
+        let encryption: EstateEncryptionConfig
+        do {
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
+        } catch {
+            print("  ✗ vector reclaim skipped — estate key unavailable: \(error)")
+            return false
+        }
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "vector reclaim",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                let owner = OwnerCredentials(ownerIdentifier: MootPaths.defaultOwnerIdentifier)
+                let kit = GeniusLocusKit()
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: Self.identityKeyStore(for: estate)
+                )
+                _ = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+                // Closing the estate closes its storage connection with it, so
+                // the reclaim opens its own connection over the migrated file.
+                // The vector schema is declared on the fresh connection before
+                // use: the reclaim deletes by the declared primary key, and a
+                // bare connection has no declaration to derive it from.
+                try await kit.close(handle)
+                let reclaimStorage = try SQLiteStorage(configuration: configuration)
+                try await reclaimStorage.open(schema: VectorStore.schemaDeclaration)
+                let vectors = VectorStore(storage: reclaimStorage)
+                let counts = try await vectors.reclaimRetiredVectorRows(
+                    retiredModelIDs: Self.retiredDenseFamilyModelIDs)
+                var reclaimedBytes: Int64 = 0
+                if counts.retiredModelRows + counts.nonServingRows > 0 {
+                    reclaimedBytes = try await reclaimStorage.performMaintenance().reclaimedBytes
+                }
+                await reclaimStorage.close()
+                if counts.retiredModelRows + counts.nonServingRows == 0 {
+                    print("  ✓ vector reclaim: nothing to reclaim")
+                } else {
+                    print("  ✓ vector reclaim: \(counts.retiredModelRows) retired-family row(s), \(counts.nonServingRows) non-serving row(s) deleted; \(reclaimedBytes) bytes returned to filesystem")
+                }
+                return true
+            } catch {
+                print("""
+                      ✗ vector reclaim failed: \(error)
+                        Every serving row is untouched. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
+            }
+        } ?? false
+        #else
+        return true
         #endif
     }
 
@@ -433,87 +1324,139 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// Opens the estate through GeniusLocusKit rather than raw storage because
     /// `completeSharedContentReclaim` accesses the estate via the GLK
     /// migration-host seam, which requires an open GLK handle.
-    private func runSharedContentReclaimIfPending(home: URL) async {
+    /// Runs after the whole-record vacuum so the reclaim-pending state the
+    /// migration chain leaves is collected in the same upgrade.
+    /// Returns `true` on success or when there is nothing to reclaim, `false` on failure.
+    @discardableResult
+    private func runSharedContentReclaimIfPending(estate: EstateRecord, home: URL) async -> Bool {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
         // Absent estate means first run — serve creates new estates
         // post-cutover; there is nothing to reclaim.
-        guard FileManager.default.fileExists(atPath: estateURL.path) else { return }
+        guard FileManager.default.fileExists(atPath: estateURL.path) else { return true }
 
         // Same key custody as serve's open path: existing key for an
         // encrypted estate, plaintext posture preserved for a plaintext one.
         let encryption: EstateEncryptionConfig
         do {
-            encryption = try EstateKeyProvider.resolveOpenPosture(for: estateURL).encryption
+            encryption = try EstateOpenPosture.resolve(for: estate).encryption
         } catch {
             print("  ✗ shared-content reclaim skipped — estate key unavailable: \(error)")
-            return
+            return false
         }
 
-        // Quiesce before VACUUM (single-writer discipline). The daemon is
-        // restarted by restartAgents(), the very next step in run().
-        if LaunchAgent.isDaemonRunning() && !LaunchAgent.stopDaemon() {
-            print("  ✗ shared-content reclaim skipped — the resident daemon would not stop; run `mootx01 upgrade` again")
-            return
-        }
-
-        do {
-            let configuration = EstateConfiguration(
-                estateID: UUID(),
-                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-                encryptionConfig: encryption
-            )
-            let storage = try SQLiteStorage(configuration: configuration)
-            let kit = GeniusLocusKit()
-            // The upgrade tool is not the estate's real owner; the substrate
-            // validates only that ownerIdentifier is non-empty, so this
-            // sentinel is sufficient.
-            let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
-            // Durable estate: pass nil so LocusKit resolves the backend default
-            // (SQLite -> KeychainEstateIdentityKeyStore). Injecting an in-memory
-            // store here lets Estate.open mint an Ed25519 keypair, persist only
-            // the public half to the manifest, and drop the private half at
-            // process exit -- permanently disabling grant/federation signing for
-            // any estate whose identity had not yet been established.
-            let handle = try await kit.open(
-                storage: storage,
-                owner: owner,
-                identityKeyStore: nil
-            )
-            let report = try await kit.completeSharedContentReclaim(
-                handle: handle, now: Date())
-            try await kit.close(handle)
-            if let report {
-                if report.reclaimedBytes > 0 {
-                    print("  ✓ shared-content reclaim: \(report.reclaimedBytes) bytes returned to filesystem")
+        // Single-writer discipline: the resident daemon is stopped around
+        // the work only when this is its estate (ResidentDaemonQuiesce
+        // prints why when it is not). A nil result means the daemon would
+        // not stop; the step is skipped and the next upgrade retries.
+        return await ResidentDaemonQuiesce.run(
+            estatePIDURL: estate.pidURL,
+            step: "shared-content reclaim",
+            daemon: .launchd(homeDirectory: home)
+        ) { () async -> Bool in
+            do {
+                let configuration = EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                    encryptionConfig: encryption
+                )
+                let storage = try SQLiteStorage(configuration: configuration)
+                // Apply the shared-content migration ledger schema (CREATE TABLE IF NOT EXISTS)
+                // before reading the reclaim record. An estate that never ran the
+                // shared-content migration has no ledger table, and reading it would
+                // throw "no such table: glk_shared_content_migration". Applying the
+                // declaration is a no-op once the table exists.
+                try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
+                let kit = GeniusLocusKit()
+                // The upgrade tool is not the estate's real owner; the substrate
+                // validates only that ownerIdentifier is non-empty, so this
+                // sentinel is sufficient.
+                let owner = OwnerCredentials(ownerIdentifier: "mootx01-upgrade")
+                // Durable estate: pass nil so LocusKit resolves the backend default
+                // (SQLite -> KeychainEstateIdentityKeyStore). Injecting an in-memory
+                // store here lets Estate.open mint an Ed25519 keypair, persist only
+                // the public half to the manifest, and drop the private half at
+                // process exit -- permanently disabling grant/federation signing for
+                // any estate whose identity had not yet been established.
+                //
+                // EXCEPT for a transient estate (`--db <dir>/<name>`): its
+                // identity lives in memory, same contract as ServeCommand. A
+                // bulk upgrade sweep over scratch estates therefore mints no
+                // Keychain identity items (247 had accumulated by 2026-08-26
+                // when the posture was an environment value). Scratch estates
+                // have no federation signing to lose; the catalog's record kind
+                // is the declaration, never inferred.
+                let handle = try await kit.open(
+                    storage: storage,
+                    owner: owner,
+                    identityKeyStore: Self.identityKeyStore(for: estate)
+                )
+                let report = try await kit.completeSharedContentReclaim(
+                    handle: handle, now: Date())
+                try await kit.close(handle)
+                if let report {
+                    if report.reclaimedBytes > 0 {
+                        print("  ✓ shared-content reclaim: \(report.reclaimedBytes) bytes returned to filesystem")
+                    } else {
+                        print("  ✓ shared-content reclaim: complete (maintenance ran, no pages to reclaim)")
+                    }
                 } else {
-                    print("  ✓ shared-content reclaim: complete (maintenance ran, no pages to reclaim)")
+                    print("  ✓ shared-content reclaim: not pending")
                 }
-            } else {
-                print("  ✓ shared-content reclaim: not pending")
+                return true
+            } catch let err as StorageMaintenanceError {
+                // The inventory trim committed before performMaintenance ran — the
+                // estate IS affected: legacyVectorKeys are cleared, the freelist has
+                // grown, but the freed pages are not yet returned to the filesystem.
+                // State remains reclaimPending, so the next `mootx01 upgrade` retries.
+                print("""
+                      ✗ shared-content reclaim: VACUUM failed — \(err)
+                        The inventory trim completed (legacy vector keys cleared).
+                        Freed pages are on the freelist and not yet returned to the filesystem.
+                        Run `mootx01 upgrade` again to retry the VACUUM.
+                    """)
+                return false
+            } catch {
+                // Failure before completeSharedContentReclaim commits the trim —
+                // estate state is unchanged.
+                print("""
+                      ✗ shared-content reclaim failed: \(error)
+                        The estate is unaffected. Run `mootx01 upgrade` to retry.
+                    """)
+                return false
             }
-        } catch let err as StorageMaintenanceError {
-            // The inventory trim committed before performMaintenance ran — the
-            // estate IS affected: legacyVectorKeys are cleared, the freelist has
-            // grown, but the freed pages are not yet returned to the filesystem.
-            // State remains reclaimPending, so the next `mootx01 upgrade` retries.
-            print("""
-                  ✗ shared-content reclaim: VACUUM failed — \(err)
-                    The inventory trim completed (legacy vector keys cleared).
-                    Freed pages are on the freelist and not yet returned to the filesystem.
-                    Run `mootx01 upgrade` again to retry the VACUUM.
-                """)
-        } catch {
-            // Failure before completeSharedContentReclaim commits the trim —
-            // estate state is unchanged.
-            print("""
-                  ✗ shared-content reclaim failed: \(error)
-                    The estate is unaffected. Run `mootx01 upgrade` to retry.
-                """)
-        }
+        } ?? false
+        #else
+        return true
         #endif
+    }
+
+    /// Fold a pre-manifest `no-encrypt` marker into the estate manifest and
+    /// delete it. The manifest's `encryption` field is the only record of the
+    /// posture from here on; a leftover marker would be a second, unread one.
+    private func retireLegacyEncryptionOptOut(estate: EstateRecord) {
+        let marker = estate.legacyEncryptionOptOutURL
+        guard FileManager.default.fileExists(atPath: marker.path) else { return }
+        do {
+            try EstateManifestRefresh.refresh(estate: estate, format: .current, encryption: .plaintext, now: Date())
+            try FileManager.default.removeItem(at: marker)
+            print("  ✓ recorded the --no-encrypt choice in \(EstateCatalogNames.manifest) and removed the legacy marker")
+        } catch {
+            print("  ✗ legacy no-encrypt marker left in place: \(error)")
+        }
+    }
+
+    /// After the schema and format steps, make the manifest say what is on disk.
+    private func refreshManifest(estate: EstateRecord) {
+        let posture: EstateManifest.Encryption =
+            EstateOpenPosture.fileState(at: estate.databaseURL) == .ciphertext ? .encrypted : .plaintext
+        do {
+            if try EstateManifestRefresh.refresh(estate: estate, format: .current, encryption: posture, now: Date()) {
+                print("  ✓ estate manifest refreshed (format \(EstateFormatVersion.current), schema \(GeniusLocusKitSchema.version))")
+            }
+        } catch {
+            print("  ✗ estate manifest not refreshed: \(error)")
+        }
     }
 
     /// CE-1.0.35-08: offer to encrypt an unencrypted default estate.
@@ -525,15 +1468,18 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// non-interactive invocation (launchd, scripts, piped stdin) never
     /// prompts and never migrates. Declining is a clean no-op; users who
     /// stay unencrypted are assumed to have chosen that.
-    private func offerEstateEncryptionIfNeeded(home: URL) {
+    private func offerEstateEncryptionIfNeeded(estate: EstateRecord, home: URL) {
         #if os(macOS)
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment, homeDirectory: home)
-        let estateURL = MootPaths.estateURL(in: dataDir)
+        let estateURL = estate.databaseURL
 
+        // Only a registered estate, owned by this machine, may be encrypted.
+        guard estate.kind == .registered else {
+            print("  estate '\(estate.name)' is transient; only a registered estate can be encrypted")
+            return
+        }
         // Only a readable plaintext estate qualifies. Absent means first run
         // (serve creates new estates encrypted); ciphertext means done.
-        guard EstateKeyProvider.detectEstateFileState(at: estateURL) == .plaintext else { return }
+        guard EstateOpenPosture.fileState(at: estateURL) == .plaintext else { return }
 
         // Non-TTY invocations skip the offer silently and never migrate.
         guard isatty(fileno(stdin)) == 1 else { return }
@@ -551,7 +1497,7 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
 
-        runEstateEncryptionMigration(estateURL: estateURL, home: home)
+        runEstateEncryptionMigration(estate: estate, home: home)
         #endif
     }
 
@@ -560,13 +1506,14 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// → swap → trash through EstateEncryptionMigrator. Every failure path
     /// leaves the plaintext original working at the canonical path; the
     /// messages below say which side of the swap the user is on.
-    private func runEstateEncryptionMigration(estateURL: URL, home: URL) {
+    private func runEstateEncryptionMigration(estate: EstateRecord, home: URL) {
+        let estateURL = estate.databaseURL
         let key: Data
         do {
-            // EstateKeyProvider owns key custody: returns the existing key
+            // EstateOpenPosture owns key custody: returns the existing key
             // for this estate or mints one in the Keychain. On failure
             // nothing has been touched.
-            key = try EstateKeyProvider.provideKey(for: estateURL)
+            key = try EstateOpenPosture.provideKey(for: estate)
         } catch {
             print("""
                 Could not provision an encryption key (\(error)).
@@ -575,12 +1522,21 @@ struct UpgradeCommand: AsyncParsableCommand {
             return
         }
 
+        // The migrator's daemon seam: launchd when a live resident serves THIS
+        // estate (its PID marker names a live process), a no-op otherwise — a
+        // cloned estate is encrypted with the resident daemon left running over
+        // its own estate. SAFETY: the copy+rename never runs under a daemon that
+        // holds this estate open.
+        let resident = ResidentDaemonQuiesce.residentServes(pidURL: estate.pidURL)
+        if !resident {
+            print("  no live resident serves this estate; daemon left running")
+        }
         print("Encrypting the estate\u{2026}")
         do {
             let result = try EstateEncryptionMigrator.migrate(
                 estateURL: estateURL,
                 key: key,
-                daemon: .launchd(homeDirectory: home))
+                daemon: resident ? .launchd(homeDirectory: home) : .none)
             print("  \u{2713} Estate encrypted in place at \(estateURL.path)")
             print("  \u{2713} Verified: \(result.counts)")
             if result.swap.daemonWasRunning {
@@ -632,10 +1588,15 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// daemon from its EXISTING plist via `LaunchAgent.restart`, never
     /// rewriting it).
     private func rematerializePluginDepth(home: URL, binaryPath: String) {
-        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) {
+        refreshInstalledCodexPlugin(home: home, binaryPath: binaryPath)
+        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) where host.id != "codex" {
             do {
+                // preserveRecordedPluginDisable: an upgrade is routine
+                // convergence, not a user request to activate the plugin —
+                // an explicitly recorded disable survives it (Finding #2).
                 _ = try DepthInstaller.apply(
-                    clientID: host.id, depth: .plugin, homeDirectory: home, binaryPath: binaryPath
+                    clientID: host.id, depth: .plugin, homeDirectory: home,
+                    binaryPath: binaryPath, preserveRecordedPluginDisable: true
                 )
                 print("  ✓ \(host.displayName): plugin package rematerialized")
             } catch {
@@ -644,13 +1605,70 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
     }
 
+    /// Refresh the Claude Code plugin cache if the installed plugin version lags the
+    /// current binary version. This targets the case where a prior upgrade placed a
+    /// new binary but left the Claude Code plugin cache stale — causing the
+    /// version_skew advisory to fire on every estate ping until the cache is refreshed.
+    ///
+    /// The plugin ID "mootx01@mootx01" is the Claude Code plugin namespace used in
+    /// installed_plugins.json; it is distinct from the MCP server name. The check
+    /// reads installedVersion from installed_plugins.json; nil means the plugin is
+    /// not registered in any Claude Code client — silently skipped.
+    ///
+    /// Non-fatal: the upgrade continues if the refresh fails (same posture as the
+    /// other convergence steps). Hosts with no plugin directory on disk are silently
+    /// skipped — never creates a plugin-depth install for a host that never had one.
+    ///
+    /// Testing: direct unit tests are architecturally infeasible — `PluginDetector`,
+    /// `DepthInstaller`, and `MootPaths` are all static with no injectable seams,
+    /// matching the constraint that applies to every other private helper in this
+    /// command class. The three helper functions this method calls are independently
+    /// covered in MootInstallerCoreTests (InstallDepthTests, PluginDedupeTests).
+    private func updatePluginManifestIfNeeded(home: URL) {
+        refreshInstalledCodexPlugin(home: home,
+            binaryPath: MootPaths.installedBinaryURL(homeDirectory: home).path)
+        let pluginVersion = PluginDetector.installedVersion(
+            pluginID: "mootx01@mootx01", homeDirectory: home)
+        guard let pluginVersion else { return }
+        guard pluginVersion != Mootx01.currentVersion else {
+            print("  ✓ plugin manifest: already current (\(Mootx01.currentVersion))")
+            return
+        }
+        let binaryPath = MootPaths.installedBinaryURL(homeDirectory: home).path
+        for host in DepthInstaller.hostsWithExistingPluginDirectory(homeDirectory: home) where host.id != "codex" {
+            do {
+                // preserveRecordedPluginDisable: same posture as
+                // rematerializePluginDepth — the cache refresh keeps the
+                // package current without overriding a recorded disable.
+                _ = try DepthInstaller.apply(
+                    clientID: host.id, depth: .plugin, homeDirectory: home,
+                    binaryPath: binaryPath, preserveRecordedPluginDisable: true
+                )
+                print("  ✓ \(host.displayName): plugin manifest updated to \(Mootx01.currentVersion)")
+            } catch {
+                print("  ✗ \(host.displayName): could not update plugin manifest (non-fatal): \(error)")
+            }
+        }
+    }
+
+    /// Consult Codex's registry even when no installer-owned directory exists.
+    /// This also covers installations made directly from the public marketplace.
+    private func refreshInstalledCodexPlugin(home: URL, binaryPath: String) {
+        do {
+            switch try CodexPluginInstaller.apply(homeDirectory: home,
+                binaryPath: binaryPath, upgradeOnly: true) {
+            case .plugin:
+                print("  ✓ Codex: plugin refreshed — start a new session to load it.")
+            case let .pluginFellBackToSkills(_, reason):
+                print("  ⓘ Codex: \(reason)")
+            default: break
+            }
+        } catch {
+            print("  ✗ Codex: could not refresh plugin (non-fatal): \(error)")
+        }
+    }
+
     #if os(macOS)
-    /// The Swift remote upgrade path downloads and extracts with URLSession/tar,
-    /// which does not mark files as internet downloads. Restore the shell
-    /// installer's trust split by setting com.apple.quarantine on remotely
-    /// installed binaries so Gatekeeper assesses Developer ID/notarization on
-    /// first launch. This is best-effort, matching install.sh's non-fatal xattr
-    /// behavior.
     /// The post-install convergence sequence, in order.
     ///
     /// Extracted so it has exactly one definition shared by two callers: the
@@ -662,12 +1680,114 @@ struct UpgradeCommand: AsyncParsableCommand {
     /// reclaim both need a quiesced estate and run BEFORE `restartAgents`, so the
     /// restarted daemon hydrates migrated rows rather than serving the
     /// pre-migration shape from RAM until its next restart.
-    private func runConvergence(home: URL, binaryPath: String) async {
+    private func runConvergence(estate: EstateRecord, home: URL, binaryPath: String) async throws {
         rematerializePluginDepth(home: home, binaryPath: binaryPath)
         migratePermissionTiers(home: home)
-        await runKGFactIdentityBackfill(home: home)
-        await runSharedContentReclaimIfPending(home: home)
+        removeRedundantCodexDirectEntry(home: home)
+        // A refused schema version skips every data step: each of them would
+        // open the LocusKit schema and stamp the estate current.
+        if await runSchemaUpgrade(estate: estate, home: home) {
+            guard await runMatrixRecordsUpgrade(estate: estate, home: home) else { throw ExitCode.failure }
+            retireLegacyEncryptionOptOut(estate: estate)
+            refreshManifest(estate: estate)
+            await runKGFactIdentityBackfill(estate: estate, home: home)
+            await runSSCFactsBackfill(estate: estate, home: home)
+            await runSearchProjectionBackfill(estate: estate, home: home)
+            await runWholeRecordVacuum(estate: estate, home: home)
+            await runSharedContentReclaimIfPending(estate: estate, home: home)
+            await runDensePoolingConvergence(estate: estate, home: home)
+            await runSpanEncodeBackfill(estate: estate, home: home)
+            _ = await runVectorReclaim(estate: estate, home: home)
+        }
+        convergeDaemonBundle(home: home)
         restartAgents(home: home)
+    }
+
+    // MARK: - MACD-2c2 daemon-bundle convergence (macOS)
+
+    /// Converge the daemon provider bundle on upgrade. Once the signed bundle
+    /// is present it supersedes the legacy raw-serve registration; booting the
+    /// legacy job out first prevents concurrent writers during takeover.
+    ///
+    /// Idempotent: re-writing the same plist is the readback contract, and the
+    /// census creates nothing.
+    private func convergeDaemonBundle(home: URL) {
+        #if os(macOS)
+        // Perkins F1 census-site gate: verify the bundle executable's static code
+        // signature BEFORE staging the disabled plist or running census.  The same
+        // BundleSignatureVerifier used by ProviderOwnershipProbe is the single
+        // authority so the three exec sites (owner-status, install-census,
+        // upgrade-census) cannot diverge.
+        //
+        // A same-UID attacker could plant an unsigned binary at the bundle path.
+        // Without this gate a planted binary would reach DaemonBundle.runReadOnlyMode
+        // ("census") after only isExecutableFile — arbitrary code execution as the
+        // census subprocess, with its output printed to the user.
+        switch BundleSignatureVerifier.production.gate(homeDirectory: home) {
+        case .absent:
+            // No bundle in this release payload: nothing to converge.  Silent on
+            // purpose — an upgrade from a payload without the bundle is the ordinary
+            // case and not a fault.
+            return
+        case .unverified(let message):
+            // Present but unverified: do NOT stage a plist or run census.  Skip
+            // convergence and report the issue actionably.
+            print("")
+            print("  \(message)")
+            print("    Daemon bundle convergence skipped until the signature is repaired.")
+            return
+        case .verified:
+            break  // proceed to ownership probe and convergence below
+        }
+
+        // MACD-3B3 C2/C4: probe before registering the bundle DISABLED.
+        // An authenticated healthy bundled owner means upgrade is client-only —
+        // skip bundle re-registration (same gate as install, same mandate).
+        // An incompatible owner surfaces the verdict verbatim and skips
+        // registration; NEVER starts a second provider.
+        // Absent or unauthenticated: normal convergence proceeds.
+        let ownerOutcome = ProviderOwnershipProbe().detect(homeDirectory: home)
+        if ownerOutcome.requiresClientOnlyInstall {
+            print("\n  \u{2713} Using MOOTx01-App resident provider — daemon bundle convergence skipped (C2).")
+            return
+        }
+        if ownerOutcome.blocksInstallByVersionMismatch {
+            if case .incompatible(let verdict) = ownerOutcome {
+                print("\n  \u{26A0} Provider version mismatch: \(verdict.rawValue) — daemon bundle not re-registered. Resolve the mismatch before upgrading.")
+            }
+            return
+        }
+        // .absent or .unauthenticated: converge normally.
+        // For .unauthenticated: any running process is left untouched (C3).
+        if case .unauthenticated = ownerOutcome {
+            print("")
+            print("  \u{26A0} A provider is present but could not be authenticated.")
+            print("    Upgrading normally; the existing process is not stopped (C3).")
+        }
+        print("\nConverging the daemon provider bundle\u{2026}")
+        LaunchAgent.uninstallDaemon(homeDirectory: home)
+        switch LaunchAgent.activateDaemonBundleEnabled(homeDirectory: home) {
+        case let .installed(plistPath, endpointURL):
+            print("  \u{2713} Community daemon provider running (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("    MCP endpoint: \(endpointURL)")
+            print("    LaunchAgent: \(plistPath)")
+        case let .launchctlFailed(message):
+            print("  \u{2717} Could not start the daemon provider bundle: \(message)")
+            return
+        case .binaryNotFound:
+            print("  \u{2717} Daemon provider bundle executable is missing.")
+            return
+        case .installedDisabled:
+            return
+        }
+        let census = DaemonBundle.runReadOnlyMode("census", homeDirectory: home)
+        if let output = census.output, census.code == 0 {
+            print("  Census (read-only, provider-reported):")
+            print("    \(output)")
+        } else {
+            print("  \u{24D8} Census unavailable (provider exit \(census.code)).")
+        }
+        #endif
     }
 
     /// Re-execute the freshly installed binary to run `runConvergence` in the NEW
@@ -681,13 +1801,15 @@ struct UpgradeCommand: AsyncParsableCommand {
     private func runConvergenceInNewBinary(binaryPath: String, home: URL) async -> Bool {
         guard FileManager.default.isExecutableFile(atPath: binaryPath) else { return false }
         var arguments = ["upgrade", "--converge-only", "--yes"]
+        // The re-executed binary converges the same estate this one resolved.
+        if let db { arguments += ["--db", db] }
         if noRestart { arguments.append("--no-restart") }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: binaryPath)
         process.arguments = arguments
-        // A child that inherits this process's environment inherits
-        // MOOTX01_DATA_DIR too, so a redirected data directory keeps applying
-        // across the re-exec.
+        // The child inherits this process's environment (MOOTX01_REPO, the
+        // vault and rider values the steps read) so the re-exec converges
+        // under the same settings.
         process.environment = ProcessInfo.processInfo.environment
         // Flush before handing the fd to the child. `print` writes to a
         // block-buffered stdout whenever it is not a TTY (a redirect, a log file,
@@ -710,6 +1832,13 @@ struct UpgradeCommand: AsyncParsableCommand {
         return true
     }
 
+    /// The Swift remote upgrade path downloads and extracts with URLSession/tar,
+    /// which does not mark files as internet downloads. Setting
+    /// com.apple.quarantine on remotely installed binaries lets Gatekeeper
+    /// assess them on the operator's next launch. This is best-effort
+    /// defense-in-depth, not the verification gate: artifact authentication is
+    /// the fail-closed minisign check inside ReleaseDownloader.download(),
+    /// which has already succeeded before any placed binary reaches this tag.
     private func applyGatekeeperQuarantine(paths: [String]) {
         let qts = String(Int(Date().timeIntervalSince1970), radix: 16)
         let qval = "0083;\(qts);mootx01-upgrade;"
@@ -760,6 +1889,39 @@ struct UpgradeCommand: AsyncParsableCommand {
         }
     }
 
+    /// Remove the redundant direct `[mcp_servers.mootx01]` entry from
+    /// `~/.codex/config.toml` when the MOOT Codex plugin owns the MCP
+    /// connection. Both the plugin and the direct installer use the same
+    /// `"mootx01"` server key, so a user who had both wired ends up with two
+    /// connections to the same estate. This step collapses them to one —
+    /// but ONLY when the entry is confirmed to be the installer's own
+    /// default-database wiring.
+    ///
+    /// The guard, ownership classification, backup, and removal all live in
+    /// `Installer.cleanupRedundantCodexDirectEntry` (MootInstallerCore, where
+    /// they are unit-testable): the plugin must own the connection, AND the
+    /// entry must classify `.oursDefault` via `MCPEntryClassifier` — an
+    /// entry scoped elsewhere (env override, `--db` estate override,
+    /// non-default-port URL) or not shaped like ours is reported here and
+    /// left untouched. This wrapper only prints the outcome.
+    private func removeRedundantCodexDirectEntry(home: URL) {
+        switch Installer.cleanupRedundantCodexDirectEntry(homeDirectory: home) {
+        case .pluginNotOwner, .notPresent:
+            // Nothing to reconcile — idempotent silence, matching the other
+            // convergence steps' no-op posture.
+            break
+        case let .retainedForeign(reason):
+            print("""
+                  \u{24D8} Codex config: [mcp_servers.mootx01] in ~/.codex/config.toml \
+                left untouched — \(reason).
+                """)
+        case let .failed(message):
+            print("  \u{2717} \(message)")
+        case .removed:
+            print("  \u{2713} Removed redundant direct MCP entry from Codex config (plugin owns connection).")
+        }
+    }
+
     /// Restart the installed background agents after a binary replacement.
     ///
     /// macOS: uses launchctl via LaunchAgent.restart().
@@ -773,6 +1935,10 @@ struct UpgradeCommand: AsyncParsableCommand {
         case .installed(_, let dashboardURL):
             print("  \u{2713} Daemon and management console restarted.")
             print("  \u{2713} Dashboard: \(dashboardURL)")
+        case .installedDisabled:
+            // restart() never returns this case (it belongs to the disabled
+            // bundle-form install), but the vocabulary is one enum.
+            print("  \u{24D8} Daemon bundle registration is disabled-install; nothing to restart.")
         case let .launchctlFailed(msg):
             print("  \u{2717} launchctl error: \(msg)")
             print("    Restart manually: launchctl kickstart -k gui/$(id -u)/com.mootx01.daemon")
@@ -807,8 +1973,14 @@ struct UpgradeCommand: AsyncParsableCommand {
             throw ValidationError("resolveSource requires --from (remote path handles the default)")
         }
         let url = URL(fileURLWithPath: explicit, relativeTo: cwd).standardizedFileURL
-        guard FileManager.default.isExecutableFile(atPath: url.path) else {
-            throw ValidationError("Binary not found or not executable: \(url.path)")
+        // `isExecutableFile` is true for any directory (the search bit), so a
+        // directory such as a repository root would pass and be copied whole
+        // over the installed binary; the source must be a regular executable.
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory),
+              !isDirectory.boolValue,
+              FileManager.default.isExecutableFile(atPath: url.path) else {
+            throw ValidationError("Binary not found or not an executable file: \(url.path)")
         }
         return url.path
     }

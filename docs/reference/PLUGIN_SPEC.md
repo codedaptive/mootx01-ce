@@ -1,8 +1,8 @@
 ---
 title: MOOTx01 Plugin Distribution Specification
-version: 0.1.0
+version: 0.1.2
 status: active
-date: 2026-06-23
+date: 2026-09-10
 description: "Behavioral specification for the MOOTx01 plugin packaging and distribution system: the canonical source, the packager, the three install modes, the platform family taxonomy, and conformance requirements for generated packages."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -38,7 +38,7 @@ This specification does NOT define:
 ## § 2 — Position in the system
 
 ```
-Data/canonical/                    ← single source of truth (EE-only)
+Data/canonical/                    ← authoritative source (EE-only)
     capability.json                   capability + marketplace metadata
     platform-matrix.json              one row per host
     skill-mootx01-memory.body.md      skill body
@@ -53,7 +53,7 @@ Data/canonical/                    ← single source of truth (EE-only)
         │
         ▼ EE→CE sync gate
 apps/mootx01/Sources/MootInstallerCore/Generated/
-    EmbeddedArtifacts.swift           serialized install-bundle.json baked into the binary
+    EmbeddedArtifactsV2.swift         serialized install-bundle-v2.json baked into the binary
         │
         ▼ mootx01 install (at user machine)
 ~/<host-config>/                   Mode 1: MCP wired only
@@ -119,7 +119,7 @@ marketplace. Current ideConfig hosts: `xcode` (roadmap 1.1).
 ## § 5 — Three install modes
 
 The installer supports three install depths, selected interactively or via
-`--mode`. The embedded `install-bundle.json` carries the full package tree
+`--mode`. The embedded `install-bundle-v2.json` carries the full package tree
 for every host.
 
 **Mode 1 — `server`:** Wire the MCP server entry into the host's config
@@ -222,6 +222,19 @@ for `manifestBundle` hosts where those fields are non-nil.
   as a gap in `INSTALLER_INTERFACE.md`; out of scope for the packager
 - `moduleCode` native shim generation → future work, tracked in
   `PLUGIN_PACKAGING_SPEC_v0.1.md § 3.3`
+
+## Changelog
+
+### 0.1.2 -- 2026-09-10
+
+The pipeline diagram (§ 2) and § 5 named `EmbeddedArtifacts.swift` and
+`install-bundle.json`, both deleted by the v2 surface migration. Corrected
+to the v2 artifacts the binary actually embeds: `EmbeddedArtifactsV2.swift`
+and `install-bundle-v2.json`. No contract change.
+
+### 0.1.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ---
 

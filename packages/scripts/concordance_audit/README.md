@@ -43,7 +43,7 @@ It does **not** edit any docs. Closing the gaps is per-kit mission work.
 python3 packages/scripts/concordance_audit/concordance_audit.py
 
 # Scope to one or more packages (used by Adams post-flight on changed kits):
-python3 packages/scripts/concordance_audit/concordance_audit.py --package LocusKit --package VectorKit
+python3 packages/scripts/concordance_audit/concordance_audit.py --package LocusKit --package SynapseKit
 
 # CI-gate mode: nonzero exit if any scanned package has gaps or no section:
 python3 packages/scripts/concordance_audit/concordance_audit.py --strict
@@ -85,10 +85,10 @@ The ignore-list is **not** a way to silence real drift. A missing row for a
 genuine cross-port contract type is real work for a per-kit mission, not an
 ignore entry. Keep the list short; every entry must state why no row can exist.
 
-## CI gate
+## Running it before you push
 
-The gate is live. `.github/workflows/concordance.yml` runs
-`concordance_audit.py --strict` on every pull request that touches
-`packages/**`, `docs/reference/*_INTERFACE*.md`, or this script directory.
-A nonzero exit blocks merge. `cd packages && make concordance` runs the
-same check locally before you push.
+`cd packages && make concordance` runs the strict audit locally. It is not
+wired as a pull-request gate: the tree currently carries advisory gaps in
+most kits and four packages without a concordance section, so a strict
+check on every pull request would block unrelated work. Close the gaps
+per kit, then wire the gate.

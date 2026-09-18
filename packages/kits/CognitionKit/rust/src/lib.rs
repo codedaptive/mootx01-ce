@@ -27,9 +27,7 @@
 //!    paired with a Swift version in `Sources/CognitionKit/` (SPEC C-7
 //!    satisfied) and registered in both versions' catalogs with byte-identical
 //!    descriptors.
-//!    All 30 catalog entries are present in both versions; the 3 distillation-
-//!    family entries carry descriptor metadata in Rust but no full Rust recipe
-//!    body in this directory.
+//!    All 29 catalog entries are present in both versions.
 //!
 //! Determinism: the sequencing logic in `migration_orchestration` is a pure
 //! function of its inputs when tested via the `RecipeSubstrate` trait; the
@@ -41,15 +39,18 @@
 //! fixtures as the Swift `*Tests` and asserts identical results.
 
 pub mod anticipate_recipe;
-// distill.rs — DistillInput/Output data types AND run_distill recipe body
-// for the per-item distillation sweep (SPEC_DISTILLATION_STORAGE §3/§7).
-// Rust parity with CognitionKit/Distill.swift. run_distill delegates to
-// EstateCoordinator::distill_items_sweep (parity with Swift's kit.distillItemsSweep).
-pub mod distill;
 // distilled_recall.rs — DistilledRecallInput/Output/DistilledMatch types AND
 // run_distilled_recall recipe body. Rust parity with CognitionKit/DistilledRecall.swift.
-// Exact-search geometry over originals + distilled hydration (§10.3).
+// Exact-search geometry over originals with the hydration selector pinned to
+// `distilled`; every row renders inline via ContextDistillLib at read time.
+// Each match carries token_count and original_token_count; the ARIA surface
+// sums them over the rows it emits.
 pub mod distilled_recall;
+// distilled_savings.rs: DistilledSavings/DistilledSkim types and the
+// measure_distilled_savings factory. Rust parity with
+// CognitionKit/DistilledSavings.swift. Applied by the ARIA v2 surface over the
+// rows it emits, from the per-match counts run_distilled_recall carries.
+pub mod distilled_savings;
 pub mod association_rules_recipe;
 pub mod exploratory_recall_recipe;
 pub mod bias_recipe;
@@ -84,15 +85,19 @@ pub mod precise_recall;
 pub mod rhythm_recipe;
 pub mod session_hybrid_fusion;
 pub mod shaped_recall;
+pub mod transcript_recall;
+pub mod similar_recall;
 pub mod theme_weather_recipe;
 pub mod trust_lens_recipe;
 pub mod tunnel_successor_recipe;
 
 pub use anticipate_recipe::run_anticipate;
-pub use distill::{run_distill, DistillInput, DistillOutput};
 pub use distilled_recall::{
     classify_distilled_discrimination, run_distilled_recall, DistilledDiscriminationLevel,
     DistilledMatch, DistilledRecallInput, DistilledRecallOutput,
+};
+pub use distilled_savings::{
+    distilled_savings_text, measure_distilled_savings, DistilledSavings, DistilledSkim, ESTIMATOR_NAME,
 };
 pub use association_rules_recipe::{
     run_apriori_rules, run_association_rules, AprioriRulesOutput, AssociationRuleResult,
@@ -107,10 +112,16 @@ pub use drift_recipe::{run_drift, DriftOutput};
 pub use error::{AnchorNotInRecalledSetError, RecipeError, RecipeRunError, SubstrateError};
 pub use estate_divergence_recipe::{run_estate_divergence, EstateDivergence};
 pub use feels_like_recipe::{run_partial_cue_recall, CueMatch, CueMode};
-pub use formal_concepts_recipe::{run_formal_concepts, FormalConceptResult, FormalConceptsOutput};
+pub use formal_concepts_recipe::{
+    run_formal_concepts, run_formal_concepts_receipt, FormalConceptResult,
+    FormalConceptsOutput, FormalConceptsReceipt,
+};
 pub use exploratory_recall_recipe::{run_exploratory_recall, ExploratoryRecallOutput, ExploratoryResult};
 pub use free_association_recipe::{run_free_association, Association};
-pub use grounded_synthesis::{run_grounded_synthesis, run_grounded_synthesis_with_provenance_gate, GroundedOutput};
+pub use grounded_synthesis::{
+    run_grounded_synthesis, run_grounded_synthesis_with_provenance_gate,
+    run_grounded_synthesis_with_provenance_gate_and_scoring, GroundedOutput,
+};
 pub use keystones_recipe::run_keystones;
 pub use latent_themes_recipe::run_latent_themes;
 pub use migration_live::{
@@ -132,11 +143,19 @@ pub use dataset_cohesion::{
     run_dataset_cohesion, DatasetCohesionOutput, DatasetColumnValue, RowAnomalyScore, SCAN_CAP,
 };
 pub use mind_overlap_recipe::{run_mind_overlap, MindOverlap};
+pub mod temporal_recall;
+pub use temporal_recall::{run as run_temporal_recall, TemporalGrab, TemporalMatch, TemporalRecallOutcome, TemporalWindowMode, TEMPORAL_DEFAULT_POOL, TEMPORAL_MAX_PAD_DAYS, TEMPORAL_RERANK_CAP};
 pub use precise_recall::{run as run_precise_recall, PreciseMatch, DEFAULT_POOL as PRECISE_DEFAULT_POOL};
 pub use moment_recipe::{run_moment, MomentOutput};
 pub use precedence_recipe::{run_precedence, PrecedenceOutput};
 pub use rhythm_recipe::{run_rhythm, RhythmOutput};
 pub use shaped_recall::{run as run_shaped_recall, ShapedRecallOutput};
+pub use transcript_recall::{run as run_transcript_recall, TranscriptRecallOutput, TRANSCRIPT_HEAD, TRANSCRIPT_POOL, TRANSCRIPT_RRF_K, TRANSCRIPT_SPANS};
+pub use similar_recall::{run as run_similar_recall, SimilarRecallOutput};
 pub use theme_weather_recipe::run_theme_weather;
 pub use trust_lens_recipe::{run_trust_grounded_synthesis, TrustGroundedOutput};
 pub use tunnel_successor_recipe::{run_tunnel_successor, Successor};
+pub mod walk_recall;
+pub use walk_recall::{run as run_walk_recall, WalkRecallOutcome, WalkStage,
+    STAGE1_POOL, STAGE1_PRESET, STAGE2_COMPOSITION, STOP_THRESHOLD,
+    is_confident as walk_recall_is_confident};

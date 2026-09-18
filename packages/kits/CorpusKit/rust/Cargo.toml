@@ -33,7 +33,7 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
 convergence-kit = { path = "../../ConvergenceKit/rust" }
-vectorkit = { path = "../../VectorKit/rust" }
+synapsekit = { path = "../../SynapseKit/rust" }
 # QueueKit: CorpusKit owns its own ingest queue + drain worker pool, so it
 # mounts a QueueKit-backed encode queue (transient in-memory PersistenceKit
 # backend) and drains it directly — the SDK-standalone ingest pipeline (a
@@ -87,4 +87,11 @@ uuid = { version = "1", features = ["v4"] }
 # integration-test binary automatically.
 [[test]]
 name = "corpus_tests"
+required-features = ["test-seams"]
+
+# float_lane_tests.rs is the whole-record float lane half of the legacy Corpus
+# tests (forced store errors, provider opt-out, farthest per signal). It needs
+# the test-seams flag for the forced_float_error seam.
+[[test]]
+name = "float_lane_tests"
 required-features = ["test-seams"]

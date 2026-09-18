@@ -1,0 +1,46 @@
+{
+  "description": "Weekly session with a single active drawer. Section title is 'This week's items'.",
+  "drawers": [
+    {
+      "content": "Confirm the community daemon contract lane before the release cut.",
+      "filedAt": "2026-08-23T08:00:00.000Z",
+      "id": "d1000000-0000-0000-0000-000000000001",
+      "subject": "Community release",
+      "tombstonedAt": null
+    }
+  ],
+  "expectedSession": {
+    "actions": [
+      {
+        "expectedEffect": "Mark 'Community release' as reviewed.",
+        "id": "c84abfa6-eb40-5456-b528-1f924e27118c",
+        "isReversible": true,
+        "reversalAvailable": false
+      }
+    ],
+    "completionStatus": {
+      "state": "inProgress"
+    },
+    "duplicateGroups": [],
+    "generatedAt": "2026-08-23T18:00:00.000Z",
+    "id": "3b3616b1-365a-5722-99a0-df543695840e",
+    "kind": "weekly",
+    "sections": [
+      {
+        "id": "e5761f7d-c7cc-5496-8cd4-28815516fb25",
+        "items": [
+          {
+            "detail": "Confirm the community daemon contract lane before the release cut.",
+            "id": "4edf41b2-65b7-5fec-967b-3cb04744d143",
+            "subject": "Community release"
+          }
+        ],
+        "title": "This week's items"
+      }
+    ],
+    "sourceEstateState": "sha256:88b343f61a9a4ebe4c31e08360ce8521:1"
+  },
+  "kind": "weekly",
+  "now": "2026-08-23T18:00:00.000Z",
+  "vectorID": "weekly-single-drawer"
+}

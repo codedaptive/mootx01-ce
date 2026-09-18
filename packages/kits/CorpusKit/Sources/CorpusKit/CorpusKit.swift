@@ -5,24 +5,18 @@
 // The actor composes BundleStore (chunk persistence), InvertedIndexStore
 // (durable SQLite-backed BM25 keyword recall), VectorStore (vector kNN),
 // and an EmbeddingProvider (text → engram) behind a sealed surface.
-// Callers see only documents and queries — no VectorKit type is exposed
+// Callers see only documents and queries — no SynapseKit type is exposed
 // on the public API.
 //
 // EmbeddingModel is a CorpusKit-owned enum so the host can select an
-// embedding model without importing VectorKit or naming EmbeddingProvider.
-// The deterministic default requires no CoreML model bundle; the named
-// model cases (miniLM, mpNet, embeddingGemma) accept a host-supplied
-// inference closure and handle tokenization + projection internally.
-//
-// CorpusKitProviders ships concrete text providers for production use.
-// The Corpus actor's EmbeddingModel.miniLM / .mpNet / .embeddingGemma
-// cases use the same modelID, projectionSeed, and FNV-1a tokenization
-// parameters as CorpusKitProviders — callers that supply a CoreML
-// inference closure through EmbeddingModel get consistent storage keys
-// and can later switch to CorpusKitProviders directly if preferred.
+// embedding model without importing SynapseKit or naming EmbeddingProvider.
+// The deterministic default requires no CoreML model bundle; distributional
+// providers (RandomIndexing, LSA) capture co-occurrence semantics from the
+// estate's own content during training.
 
 import EngramLib
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import PersistenceKit
@@ -32,131 +26,21 @@ import QueueKit
 import SubstrateLib
 import SubstrateML
 import SubstrateTypes
-import VectorKit
-
-// MARK: - FloatLaneOutcome
-
-/// The observable outcome of a `Corpus.floatNearest` call.
-///
-/// Dark outcomes (`.unavailableProviderOptOut`, `.unavailableNoFloatRows`,
-/// `.emptyQuery`) are EXPECTED degradations — the calling lane degrades
-/// gracefully and emits an explainer marker. `.storeError` is NOT expected:
-/// it is logged via OSLog and emitted as a telemetry counter so that store
-/// failures are never swallowed silently. `.hits` is the happy path.
-///
-/// Callers must never treat a dark outcome as an error — per the softPrior
-/// grammar a dark dense lane means the query runs on the other lanes only,
-/// not that the query failed.
-public enum FloatLaneOutcome: Sendable {
-    /// The lane ran and returned at least one ranked hit.
-    ///
-    /// - Parameter hits: `(itemID, cosineSimilarity)` pairs, nearest first.
-    ///   `itemID` is the `sourceID` the caller ingested under (drawer ID in
-    ///   the GLK context). Similarity ∈ [−1, 1], 1.0 = identical direction.
-    case hits([(itemID: String, similarity: Float)])
-
-    /// Provider opted out of the float lane — expected, not an error.
-    ///
-    /// The configured `EmbeddingProvider` threw `VectorKitError.embeddingFailed`
-    /// on the embed call, indicating it has no float lane at all (structural
-    /// opt-out). This is the normal outcome for the default `.deterministic`
-    /// provider and for any provider that does not override `embedFloat`. The
-    /// dense lane is dark for this corpus; all other lanes are unaffected.
-    ///
-    /// Distinct from `.unavailableNoVocabHit`: that case indicates a TRAINED
-    /// distributional provider where this specific query's tokens are all
-    /// out-of-vocabulary. Both produce no float candidates, but the cause
-    /// differs — a structural opt-out vs a vocabulary coverage gap.
-    case unavailableProviderOptOut
-
-    /// Trained distributional provider returned no float vector because all
-    /// query tokens are out-of-vocabulary (OOV) — expected, not an error.
-    ///
-    /// The provider HAS a trained basis (vocab is non-empty) but none of the
-    /// query's tokens appear in it. This is the normal outcome for a query on
-    /// a thinly-trained estate or a query using vocabulary the corpus never saw.
-    /// The dense lane is dark for this query; recall continues on other lanes.
-    ///
-    /// Distinct from `.unavailableProviderOptOut` (provider has no float lane
-    /// at all) and from `.unavailableNoFloatRows` (provider supports float but
-    /// ingest has not run yet or stored no rows).
-    ///
-    /// Surface string: `dense_lane:dark:vocabMiss`.
-    case unavailableNoVocabHit
-
-    /// No float rows are stored — expected when ingest has not run yet or the
-    /// provider opted out during ingest. Dense lane is dark; other lanes are
-    /// unaffected.
-    case unavailableNoFloatRows
-
-    /// Query was empty or `limit` was zero — the call was a no-op.
-    ///
-    /// Not a store error; the caller supplied a query that cannot produce
-    /// results. No telemetry emitted for this case beyond the outcome itself.
-    case emptyQuery
-
-    /// The vector store threw an error during `findNearestFloat`.
-    ///
-    /// This is NOT an expected degradation. CorpusKit logs the error via OSLog
-    /// (category "CorpusKit") and emits a `corpus.float_lane.store_error`
-    /// telemetry counter so the failure is observable. The query still succeeds
-    /// on the other lanes — this outcome degrades, not fails.
-    ///
-    /// - Parameter error: The underlying store error. Included for logging at
-    ///   the call site; not propagated to the caller as a thrown error.
-    case storeError(Error)
-}
-
-// MARK: - FloatDiscriminationSignal
-
-/// Per-query discrimination signal from the dense float lane.
-///
-/// Measures how spread the top-K cosine similarity scores are, distinguishing
-/// a contrastive regime (clear semantic winner) from a saturated regime (all
-/// scores near-uniform, as observed with short chat turns dominated by stopword
-/// mass — pairwise document cosines 0.93–0.98 collapse query-to-document cosines
-/// to a similarly narrow band).
-///
-/// **Statistic choice — relative spread:**
-/// `relativeSpread = (maxSim − minSim) / max(maxSim, 0.001)`
-/// - Saturated regime (short-text RI vectors): spread ≈ 0.05 (no clear winner).
-/// - Contrastive regime (meaningful semantic hit): spread ≥ 0.15.
-/// - Only two values needed: the first and last of the already-sorted `.hits`
-///   list — O(1) cost with zero extra store access or embed calls.
-/// - Degrades safely when `maxSim ≤ 0`: returns 0.0 (treat as saturated).
-///
-/// **Design boundary:** CorpusKit computes and reports; GLK (RecallDirector)
-/// decides what to do with the signal. CorpusKit never changes behaviour based
-/// on it — measurement only. Standalone CorpusKit consumers receive the raw
-/// signal for their own fusion decisions.
-public struct FloatDiscriminationSignal: Sendable {
-    /// Relative spread of top-K hit cosines: (max − min) / max (or 0 when max ≤ 0).
-    ///
-    /// 0.0 = perfectly saturated (all scores identical, or max cosine non-positive);
-    /// 1.0 = maximally discriminating (best score, worst near 0).
-    ///
-    /// Threshold guidance for GLK consumers (defined in RecallDirector):
-    ///   < 0.10 → clearly saturated regime — strong discount.
-    ///   0.10–0.15 → transition band — partial discount.
-    ///   ≥ 0.15 → contrastive — no discount (discriminationFactor = 1.0).
-    public let relativeSpread: Float
-
-    /// Hit count K used to compute the spread (top-K hits, after limit truncation).
-    public let hitCount: Int
-}
+import SynapseKit
 
 /// CorpusKit OSLog logger (category "CorpusKit").
 ///
-/// Used by `floatNearest` to log store errors so they are never swallowed.
+/// Logs store errors so they are never swallowed; in the default build the
+/// callers are the content engine, the span stage, and the sidecar's `floatNearest`.
 /// Declared at file scope to avoid repeated Logger construction on the hot path
 /// (Logger init is not free on older OS versions).
-private let corpusLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let corpusLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 // MARK: - EmbeddingModel
 
 /// Selects the embedding model the Corpus actor uses internally.
 ///
-/// The caller names a CorpusKit case; no VectorKit type is required
+/// The caller names a CorpusKit case; no SynapseKit type is required
 /// at the call site.
 ///
 /// `.deterministic` is the permanent, federation-grade vector provider
@@ -166,11 +50,11 @@ private let corpusLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKi
 /// federation requires. It captures surface/lexical signal, not learned
 /// semantic meaning.
 ///
-/// The named model cases (`.miniLM`, `.mpNet`, `.embeddingGemma`) are the
-/// ADDITIVE v1.1 on-device learned semantic lane. They produce richer,
-/// model-dependent vectors for enhanced on-device search but cannot serve
-/// as the federation vector (model weights differ across devices). They do
-/// not replace the deterministic lane; both lanes coexist.
+/// The distributional provider cases (`.randomIndexing`, `.lsa`) are the
+/// ADDITIVE on-device learned semantic lane. They capture co-occurrence
+/// semantics from the estate's own content during training. The MiniLM
+/// encoder lane feeds the span re-rank stage via `CorpusKitProviders`
+/// without a corresponding enum case on this surface.
 public enum EmbeddingModel: Sendable {
 
     /// Permanent, federation-grade deterministic vector provider.
@@ -185,36 +69,6 @@ public enum EmbeddingModel: Sendable {
     /// representation that every version of the system (v1.0 through
     /// any future version) uses for the federation-synchronized lane.
     case deterministic
-
-    /// MiniLM v6 text embedding (384-dim pooled output).
-    ///
-    /// CorpusKit handles FNV-1a tokenization (vocab 30522, max 128
-    /// tokens) and FloatSimHash projection with the canonical MiniLM
-    /// seed. The caller supplies the CoreML inference closure.
-    ///
-    /// - Parameter inference: Takes FNV-1a token ids and returns a
-    ///   pooled 384-element float vector.
-    case miniLM(inference: @Sendable ([Int32]) async throws -> [Float])
-
-    /// MPNet base v2 text embedding (768-dim pooled output).
-    ///
-    /// CorpusKit handles FNV-1a tokenization (vocab 30522, max 128
-    /// tokens) and FloatSimHash projection with the canonical MPNet
-    /// seed.
-    ///
-    /// - Parameter inference: Takes FNV-1a token ids and returns a
-    ///   pooled 768-element float vector.
-    case mpNet(inference: @Sendable ([Int32]) async throws -> [Float])
-
-    /// Embedding-Gemma 300M (768-dim pooled output).
-    ///
-    /// CorpusKit handles FNV-1a tokenization (vocab 256000, max 2048
-    /// tokens) and FloatSimHash projection with the canonical
-    /// EmbeddingGemma seed.
-    ///
-    /// - Parameter inference: Takes FNV-1a token ids and returns a
-    ///   pooled 768-element float vector.
-    case embeddingGemma(inference: @Sendable ([Int32]) async throws -> [Float])
 
     /// Random Indexing distributional-semantics provider.
     ///
@@ -233,23 +87,6 @@ public enum EmbeddingModel: Sendable {
     /// in `CorpusKitProviders` for the full training API.
     case randomIndexing(provider: any EmbeddingProvider & Sendable)
 
-    /// PPMI distributional-semantics provider.
-    ///
-    /// The caller constructs, trains, and finalizes a `PpmiProvider` from
-    /// `CorpusKitProviders`, then passes it here.  Unlike RI, PPMI accumulates
-    /// co-occurrence counts in a first pass and then computes PPMI-weighted
-    /// context sums in a second pass (via `PpmiProvider.finalize()`).
-    ///
-    /// PPMI differs from RI in that each context term's contribution is
-    /// weighted by its PPMI score (max(0, log(P(t,c)/(P(t)·P(c))))).
-    /// Stopword-like co-occurrences are down-weighted toward zero; genuinely
-    /// informative associations dominate.  The distinction is real: it is not
-    /// an alias for `.randomIndexing`.
-    ///
-    /// See honest semantic fusion for the rationale and `PpmiProvider`
-    /// in `CorpusKitProviders` for the full training API.
-    case ppmi(provider: any EmbeddingProvider & Sendable)
-
     /// LSA (Latent Semantic Analysis) distributional-semantics provider.
     ///
     /// The caller constructs and trains an `LsaProvider` (term-document matrix +
@@ -258,40 +95,6 @@ public enum EmbeddingModel: Sendable {
     /// See honest semantic fusion for the rationale and `LsaProvider` in
     /// `CorpusKitProviders` for the full training API.
     case lsa(provider: any EmbeddingProvider & Sendable)
-
-    /// NMF (Non-Negative Matrix Factorization) distributional-semantics provider.
-    ///
-    /// The caller constructs, trains, and finalizes an `NmfProvider` (TF-weighted
-    /// term-document matrix factorized via SubstrateML's NMFAlternatingLeastSquares
-    /// with fixed iteration count for determinism) and passes it here.
-    ///
-    /// Document embeddings are the L2-normalised column vectors of the H factor;
-    /// query embeddings use the pseudo-inverse fold-in formula on W.
-    ///
-    /// See honest semantic fusion for the rationale and `NmfProvider` in
-    /// `CorpusKitProviders` for the full training API.
-    case nmf(provider: any EmbeddingProvider & Sendable)
-
-    /// FDC (Frame Decimal Classification) co-classification provider.
-    ///
-    /// The caller constructs an `FDCProvider` from `CorpusKitProviders` and
-    /// passes it here. The provider is stateless — no training step is required.
-    /// It encodes text to a deterministic float vector derived from the text's
-    /// FDC classification code, such that codes sharing a longer prefix (more
-    /// common ancestors in the FDC taxonomy) have higher cosine similarity.
-    ///
-    /// Unlike the distributional providers (RI/PPMI/LSA/NMF), FDCProvider
-    /// requires no corpus training — it is ready to use immediately. Its recall
-    /// signal reflects taxonomic proximity (class co-membership), not
-    /// co-occurrence. The two signal types complement each other: distributional
-    /// methods are strong on topical neighbours; FDC is strong on categorical siblings.
-    ///
-    /// The float lane is dark (returns `[]`) for texts the FDC engine cannot
-    /// classify (UNRESOLVED). This is the expected opt-out, not an error.
-    ///
-    /// See honest semantic fusion (FDC lattice co-classification) and `FDCProvider`
-    /// in `CorpusKitProviders` for the encoding details.
-    case fdc(provider: any EmbeddingProvider & Sendable)
 
 #if canImport(NaturalLanguage)
     /// Apple NaturalLanguage sentence embedding provider (Swift-only).
@@ -336,11 +139,11 @@ public enum EmbeddingModel: Sendable {
     /// Default: deterministic (no CoreML required).
     public static let `default`: EmbeddingModel = .deterministic
 
-    // MARK: - Trainable-basis seam (mission 6a-ii-α)
+    // MARK: - Trainable-basis seam
 
     /// The provider this model carries, if the case carries one.
     ///
-    /// The distributional and FDC cases carry an externally-built provider;
+    /// The distributional cases carry an externally-built provider;
     /// the deterministic and named-model cases carry an inference closure (or
     /// nothing) and construct their provider lazily in `makeProvider()`. This
     /// accessor is the join point for the trainable-basis seam: it returns the
@@ -348,18 +151,18 @@ public enum EmbeddingModel: Sendable {
     /// `TrainableEmbeddingBasis` conformance without re-running construction.
     private var carriedProvider: (any EmbeddingProvider & Sendable)? {
         switch self {
-        case .randomIndexing(let p), .ppmi(let p), .lsa(let p), .nmf(let p), .fdc(let p):
+        case .randomIndexing(let p), .lsa(let p):
             return p
-        // The Apple NL cases carry a provider (EmbeddingProvider & Sendable), but like FDC
+        // The Apple NL cases carry a provider (EmbeddingProvider & Sendable), but
         // they are stateless — no TrainableEmbeddingBasis conformance. We return the carried
         // provider here so callers that need the provider instance (e.g. direct inspection)
-        // can obtain it, mirroring the FDC pattern. `isTrainable` will still be false
+        // can obtain it. `isTrainable` will still be false
         // because neither NL provider conforms to TrainableEmbeddingBasis.
 #if canImport(NaturalLanguage)
         case .nlEmbedding(let p), .nlContextualEmbedding(let p):
             return p
 #endif
-        case .deterministic, .miniLM, .mpNet, .embeddingGemma:
+        case .deterministic:
             return nil
         }
     }
@@ -368,10 +171,10 @@ public enum EmbeddingModel: Sendable {
     /// reconstructed from a serialized basis.
     ///
     /// True only when the carried provider conforms to
-    /// `TrainableEmbeddingBasis` (the RI/PPMI/LSA/NMF distributional
-    /// providers). FDC carries a provider but is stateless and does NOT
-    /// conform, so it reports `false`. The deterministic and named-model
-    /// cases carry no provider and report `false`.
+    /// `TrainableEmbeddingBasis` (the RI and LSA distributional providers).
+    /// The Apple NL cases carry a provider that does NOT conform, so they
+    /// report `false`. The deterministic case carries no provider and reports
+    /// `false`.
     ///
     /// This is the capability-detection helper `Corpus` will use (β mission)
     /// before attempting to drive training/serialization through the seam. It
@@ -390,7 +193,7 @@ public enum EmbeddingModel: Sendable {
     /// type's `init(deserializing:)`. CorpusKit core never names the concrete
     /// provider type, so layering (providers → core) is preserved.
     ///
-    /// The deterministic and named-model cases, and the stateless FDC case,
+    /// The deterministic case and the stateless Apple NL cases
     /// have no trained basis to restore and throw `CorpusKitError.notTrainable`
     /// rather than crashing or returning a wrong provider.
     ///
@@ -404,9 +207,21 @@ public enum EmbeddingModel: Sendable {
         guard let trainable = carriedProvider as? TrainableEmbeddingBasis else {
             throw CorpusKitError.notTrainable(
                 "embedding model is not a trainable-basis provider; reconstruction "
-                + "from a serialized basis is only supported for RI/PPMI/LSA/NMF")
+                + "from a serialized basis is only supported for RI/LSA")
         }
         return try trainable.reconstructBasis(from: basis)
+    }
+}
+
+public struct CorpusRetrainingReport: Sendable, Equatable {
+    public let completedModelIDs: [String]
+    public let skippedModelIDs: [String: RetrainingSkipReason]
+
+    public init(
+        completedModelIDs: [String], skippedModelIDs: [String: RetrainingSkipReason] = [:]
+    ) {
+        self.completedModelIDs = completedModelIDs
+        self.skippedModelIDs = skippedModelIDs
     }
 }
 
@@ -416,7 +231,7 @@ public enum EmbeddingModel: Sendable {
 ///
 /// Corpus composes BundleStore, InvertedIndexStore, VectorStore, and one OR MORE
 /// EmbeddingProviders internally. The public surface exposes only
-/// `ingest`, `recall`, `remove`, and `count`. No VectorKit type
+/// `ingest`, `recall`, `remove`, and `count`. No SynapseKit type
 /// appears in any public signature — the sealed-vector principle is
 /// enforced here, not by the caller.
 ///
@@ -437,19 +252,19 @@ public enum EmbeddingModel: Sendable {
 /// `remove(sourceID:)` clears the recall index (BM25 + vectors) without
 /// deleting content rows. `expunge(sourceID:)` additionally zeroes chunk text.
 ///
-/// ## N-provider capability (mission 6a-iii-core)
+/// ## N-provider capability
 ///
 /// Corpus holds an ORDERED collection of provider slots, one per held
 /// `EmbeddingModel`, each keyed by its `modelID`. The single-provider
 /// `init(storage:model:)` is the N=1 special case: it builds a one-slot
-/// corpus that behaves byte-identically to the pre-6a-iii single-provider
+/// corpus that behaves byte-identically to the single-provider
 /// implementation. Multi-provider `init(storage:models:)` fans every
 /// operation (ingest embed, reindex train, remove, destroy) across all slots,
 /// each under its own `modelID`, so the VectorStore/BasisStore — already keyed
 /// by (modelID, modelVersion) — hold the N providers' rows side by side with
 /// no schema change.
 ///
-/// The single-signal entry points (`recall`, `floatNearest`, `embed`,
+/// The single-signal entry points (`recall`, `embed`, and `floatNearest`,
 /// `embedFloat`, `modelID`, `supportsFloat`) delegate to the DEFAULT signal —
 /// the first held slot — so existing callers are unaffected. The per-signal
 /// fan-out for recall is exposed additively via `floatNearestPerSignal`, the
@@ -557,17 +372,17 @@ public actor Corpus {
     /// the EMPTY (untrained) serialized basis captured ONLY for a fresh
     /// trainable provider with no persisted basis (see the field doc below).
     /// For N=1 the corpus holds exactly one slot, and every fan-out loop runs
-    /// once — byte-identical to the pre-6a-iii single-provider path.
-    private struct ProviderSlot {
+    /// once — byte-identical to the single-provider path.
+    package struct ProviderSlot {
         /// The serving provider for this signal. `var` because the load-on-open
         /// path and each training pass install a replacement. Never exposed on
         /// the public surface (sealed-vector principle).
-        var provider: any EmbeddingProvider
+        package var provider: any EmbeddingProvider
         /// The serialized EMPTY (untrained) basis of a trainable provider — the
-        /// from-scratch factory. Non-nil for EVERY trainable slot (RI/PPMI/LSA/
-        /// NMF), whether the slot was built fresh OR restored from a persisted
-        /// basis on open; nil only for non-trainable slots (deterministic / named
-        /// / FDC / NL).
+        /// from-scratch factory. Non-nil for EVERY trainable slot (RI/LSA),
+        /// whether the slot was built fresh OR restored from a persisted
+        /// basis on open; nil only for non-trainable slots (deterministic /
+        /// NL).
         ///
         /// Each training pass (`reindex` and the first-ingest auto-train)
         /// reconstructs a FRESH provider from this empty-basis blob, trains it on
@@ -590,14 +405,14 @@ public actor Corpus {
         /// a fresh trainable provider held SEPARATELY from `provider`. The counts
         /// table is grown by folding each written chunk into this accumulator
         /// (`addToCounts`) and persisted at batch boundaries. It must NOT be the
-        /// serving `provider`: for LSA/NMF, growing the maintained vocabulary
+        /// serving `provider`: for LSA, growing the maintained vocabulary
         /// would desync the serving provider's basis-aligned vocab from its
-        /// frozen SVD/NMF factors. nil for non-trainable slots. `var` because the
+        /// frozen SVD factors. nil for non-trainable slots. `var` because the
         /// on-open path restores persisted counts into it.
         var countsAccumulator: (any TrainableEmbeddingBasis)?
         /// Documents (chunks) folded into `countsAccumulator` — the doc-count
         /// growth anchor persisted alongside the counts blob. Tracked here (not
-        /// read off the provider) so it is uniform across RI/PPMI/LSA/NMF whose
+        /// read off the provider) so it is uniform across RI/LSA whose
         /// providers track document count inconsistently. Restored from the
         /// persisted anchor on open, incremented per folded chunk.
         var countsDocumentCount: Int
@@ -614,7 +429,7 @@ public actor Corpus {
     /// so BM25 keyword state persists across process restarts. Loaded into RAM on open
     /// via `open()` (reads iix_termfreqs + iix_doclens rows; no chunk bodies touched).
     private let invertedIndex: InvertedIndexStore
-    private let vectorStore: VectorStore
+    package let vectorStore: VectorStore
     private let basisStore: BasisStore
     /// Persisted, incrementally-maintained per-provider statistics (the counts
     /// table). Holds each trainable provider's additive state so it is grown on
@@ -633,21 +448,37 @@ public actor Corpus {
     /// construction order. `slots[0]` is the DEFAULT signal that the
     /// single-signal entry points delegate to. Never empty: every init builds
     /// at least one slot. For N=1 this holds exactly one slot.
-    private var slots: [ProviderSlot]
+    package var slots: [ProviderSlot]
     private var hlcGenerator: HLCGenerator
-    /// Maps chunk UUID → sourceID for the `bm25TopKBySource` and `floatNearest` joins.
+    /// Maps chunk UUID → sourceID for the `bm25TopKBySource` join (and the sidecar `floatNearest` join).
     ///
     /// Populated on `init` via a compact `(id, source_id)` projection from the chunks
     /// table (no body text loaded — O(N) row count only). Updated on each `ingest`
     /// call. Cleared per-source on `remove(sourceID:)`. In-memory only; warm-loaded
     /// on every open alongside `InvertedIndexStore.open()` so both stay in sync.
-    private var chunkSourceMap: [UUID: String] = [:]
+    package private(set) var chunkSourceMap: [UUID: String] = [:]
 
     /// Test-only: when non-nil, `floatNearest` returns `.storeError(this)` immediately,
     /// bypassing the real vector store. Set via `_testForceFloatStoreError(_:)`.
     /// Never set in production code; documented here so future agents do not mistake
     /// this property for production logic.
-    var _forcedFloatError: Error? = nil
+    package var _forcedFloatError: Error? = nil
+
+    // MARK: - Training path decision seam (Part 3, standalone reindex)
+
+    /// Per-modelID training decisions from the most recent `reindex` call.
+    /// Reset at the start of each `reindex`. Test seam exposed via
+    /// `_trainingPathDecision(for:)`.
+    ///
+    /// Uses the same `TrainingPathDecision`/`CorpusPathReason` types as
+    /// `CorpusContentEngine` (both are in the CorpusKit module).
+    var _trainingPathDecisions: [String: TrainingPathDecision] = [:]
+
+    /// Read the training decision recorded for `modelID` during the most recent
+    /// `reindex` pass. Returns nil for non-trainable slots. Test seam.
+    public func _trainingPathDecision(for modelID: String) -> TrainingPathDecision? {
+        _trainingPathDecisions[modelID]
+    }
 
     // MARK: - Ingest queue (the Corpus-owned encode pipeline)
     //
@@ -741,10 +572,10 @@ public actor Corpus {
     /// This is the N=1 entry point. It delegates to `init(storage:models:)`
     /// with a one-element model set, so a single-provider corpus is just the
     /// degenerate case of the N-provider corpus — ONE code path, not two — and
-    /// behaves byte-identically to the pre-6a-iii single-provider
+    /// behaves byte-identically to the single-provider
     /// implementation. The production default remains a single provider; this
     /// init's signature is PRESERVED so every existing call site compiles
-    /// unchanged (mission 6a-iii-core back-compat mandate).
+    /// unchanged (the N-provider back-compat mandate).
     ///
     /// - Parameters:
     ///   - storage: A PersistenceKit Storage instance. Both the
@@ -793,8 +624,16 @@ public actor Corpus {
         // the gate and ensures all tables are created regardless of which
         // schema was applied first.
         try await storage.migrate(to: BundleStore.schemaDeclaration)
+        // SECURITY: a populated estate opened before the VectorKit → SynapseKit
+        // rename keys its vector ledger row by the old id; migrating under the
+        // new id without moving that row replays the ladder from version 0
+        // and folds every row's generation to 0. The rename runs first; a
+        // conflicted ledger (rows under both ids) is left as it is with one
+        // warning and the estate still opens — the migrate below reads its
+        // ladder position from the current-id row, so nothing replays.
+        try await VectorStore.prepareSchemaLedger(storage: storage)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
-        // Additive basis-persistence table (mission 6a-ii-β). A separate
+        // Additive basis-persistence table. A separate
         // schema declaration applied via migrate(to:) so the table is created
         // regardless of the other schemas' version gates, exactly like the
         // BundleStore/VectorStore pair above.
@@ -894,6 +733,10 @@ public actor Corpus {
     /// already dropped via an explicit teardown call (the normal path for
     /// orchestrated estates).
     ///
+    /// Reachable while the queue is mounted because the drain workers resolve
+    /// the corpus for one pass at a time (see `mountIngestQueue`) and never
+    /// own it across the loop.
+    ///
     /// Rust twin: `impl Drop for Corpus { fn drop(&mut self) { self.drop_ingest_queue(); } }`
     deinit {
         ingestDrainWorker?.cancel()
@@ -906,9 +749,9 @@ public actor Corpus {
     ///
     /// The single-signal entry points read through this accessor so existing
     /// callers see exactly the first held provider, identical to the
-    /// pre-6a-iii single-provider behaviour. `slots` is never empty (every init
+    /// single-provider behaviour. `slots` is never empty (every init
     /// builds at least one slot), so the force-unwrap of `first` cannot trap.
-    private var defaultProvider: any EmbeddingProvider {
+    package var defaultProvider: any EmbeddingProvider {
         // swiftlint:disable:next force_unwrapping — slots is never empty (init invariant)
         slots.first!.provider
     }
@@ -928,13 +771,26 @@ public actor Corpus {
     /// restart (the frozen-after-restart fix). The dedicated counts accumulator is
     /// a SEPARATE fresh trainable provider, restored from the persisted counts
     /// table if a row exists; it is held apart from the serving provider so
-    /// growing the maintained vocabulary never desyncs an LSA/NMF serving basis.
+    /// growing the maintained vocabulary never desyncs an LSA serving basis.
     ///
     /// Reconstruction routes through the carried provider's
     /// `TrainableEmbeddingBasis.reconstructBasis(from:)` witness — CorpusKit core
     /// never names the concrete provider type, so layering (providers → core) is
-    /// preserved. A corrupt/version-mismatched blob throws `decodingFailure`
-    /// rather than silently serving an untrained provider.
+    /// preserved. A corrupt blob throws `decodingFailure` rather than silently
+    /// serving an untrained provider.
+    ///
+    /// Format-version skew is the one exception, handled BEFORE decoding: when
+    /// the persisted blob carries this provider's magic under another format
+    /// version (`BasisBlobFrame.isStaleVersion`), the estate was written by an
+    /// earlier codec. That basis is neither decoded nor served — the slot opens
+    /// UNTRAINED (`servedBasis == nil`, an error-level log names both versions)
+    /// so the ordinary open-time reconcile and `mootx01 upgrade` retrain publish
+    /// a current basis over it. The stale-basis vectors are never matched
+    /// against queries pooled the new way.
+    ///
+    /// Returns, besides the slot fields, `servedBasis`: the persisted blob the
+    /// serving provider was reconstructed from (nil when untrained), so the
+    /// caller can derive the basis-generation digest without a second load.
     // Internal — not private — so the shared-content `CorpusContentEngine`
     // resolves providers through the SAME open-time logic (one engine, not
     // a fork; GLK shared-content 1.1 P2).
@@ -947,10 +803,11 @@ public actor Corpus {
         provider: any EmbeddingProvider,
         freshBasisBlob: Data?,
         countsAccumulator: (any TrainableEmbeddingBasis)?,
-        countsDocumentCount: Int
+        countsDocumentCount: Int,
+        servedBasis: Data?
     ) {
         guard isTrainable, let trainable = freshProvider as? any TrainableEmbeddingBasis else {
-            return (freshProvider, nil, nil, 0)
+            return (freshProvider, nil, nil, 0, nil)
         }
         // The empty-basis factory: the untrained fresh provider's serialized
         // basis, captured for every trainable slot so reindex can always train
@@ -959,7 +816,7 @@ public actor Corpus {
 
         // The maintained-counts accumulator: a distinct fresh trainable provider,
         // reconstructed from the empty factory, restored from the counts table if
-        // a row exists. Distinct from the serving provider (LSA/NMF desync rule).
+        // a row exists. Distinct from the serving provider (LSA desync rule).
         guard let accumulator = try trainable.reconstructBasis(from: factoryBlob)
             as? any TrainableEmbeddingBasis else {
             throw CorpusKitError.notTrainable(
@@ -982,16 +839,23 @@ public actor Corpus {
             accumulatorDocCount = counts.documentCount
         }
 
-        // Serving provider: the trained provider when a basis is persisted, else
-        // the untrained fresh provider.
+        // Serving provider: the trained provider when a CURRENT basis is
+        // persisted, else the untrained fresh provider.
         if let persisted = try await basisStore.load(
             modelID: freshProvider.modelID,
             modelVersion: freshProvider.modelVersion
         ) {
+            if BasisBlobFrame.isStaleVersion(persisted: persisted.basis, current: factoryBlob) {
+                let persistedVersion = BasisBlobFrame.formatVersion(of: persisted.basis) ?? 0
+                let currentVersion = BasisBlobFrame.formatVersion(of: factoryBlob) ?? 0
+                corpusLog.error(
+                    "basis for \(freshProvider.modelID, privacy: .public)@\(freshProvider.modelVersion, privacy: .public) is format v\(persistedVersion, privacy: .public); this build writes v\(currentVersion, privacy: .public). Serving the slot untrained until a retrain publishes a current basis.")
+                return (freshProvider, factoryBlob, accumulator, accumulatorDocCount, nil)
+            }
             let restored = try trainable.reconstructBasis(from: persisted.basis)
-            return (restored, factoryBlob, accumulator, accumulatorDocCount)
+            return (restored, factoryBlob, accumulator, accumulatorDocCount, persisted.basis)
         }
-        return (freshProvider, factoryBlob, accumulator, accumulatorDocCount)
+        return (freshProvider, factoryBlob, accumulator, accumulatorDocCount, nil)
     }
 
     // MARK: - Test seams (internal — not part of the public surface)
@@ -1011,6 +875,9 @@ public actor Corpus {
     ///     are consistent with any pre-existing vectors in `storage`.
     init(storage: any Storage, provider: any EmbeddingProvider) async throws {
         try await storage.migrate(to: BundleStore.schemaDeclaration)
+        // SECURITY: same ledger rename as the production init — the legacy
+        // VectorKit row moves to SynapseKit before the vector ladder runs.
+        try await VectorStore.prepareSchemaLedger(storage: storage)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
         try await storage.migrate(to: BasisStore.schemaDeclaration)
         // Additive maintained-counts table (P3): created via migrate like the
@@ -1065,18 +932,6 @@ public actor Corpus {
         // WS2-F3: backfill corpus_metadata rows for any existing chunks (same
         // as production init — idempotent upsert).
         try await bundleStore.recomputeAllCorpusMerkleRoots()
-    }
-
-    /// Test-only: force `floatNearest` to return `.storeError(error)` on the next call.
-    ///
-    /// Intended for tests that need to verify the store-error code path (observable
-    /// degradation contract §4). The error is consumed on the first `floatNearest`
-    /// call after this is set; subsequent calls behave normally.
-    ///
-    /// Never call this in production code. Marked `internal` so it is visible to
-    /// `@testable import CorpusKit` test suites and invisible to callers outside the module.
-    func _testForceFloatStoreError(_ error: Error) {
-        _forcedFloatError = error
     }
 
     // MARK: - Public API
@@ -1618,7 +1473,7 @@ public actor Corpus {
         }
 
         // Phase 1b — batch-aware first-basis bootstrap. When a trainable slot
-        // (RI/PPMI/LSA/NMF) still has no persisted basis, train it ONCE on the
+        // (RI/LSA) still has no persisted basis, train it ONCE on the
         // FULL corpus now in the bundle store — every chunk just inserted, not
         // the first item alone. The prior per-item serial fallback trained on
         // item 1's chunks (often a single document), producing a degenerate
@@ -1843,18 +1698,18 @@ public actor Corpus {
 
     /// Retrain the embedding basis on the full corpus and re-embed every chunk.
     ///
-    /// When the configured provider is trainable (RI/PPMI/LSA/NMF), this:
+    /// When the configured provider is trainable (RI/LSA), this:
     ///   1. gathers ALL chunk texts from the BundleStore,
     ///   2. trains the basis on them through the `TrainableEmbeddingBasis` seam
     ///      (`trainOnCorpus(texts:)`, which runs the provider's own
-    ///      train+finalize sequence — RI no finalize, PPMI/LSA/NMF finalize),
+    ///      train+finalize sequence — RI no finalize, LSA finalize),
     ///   3. persists the serialized basis blob (UPSERT, one row per provider
     ///      key) with `now` and the trained chunk count, and
     ///   4. re-embeds every chunk (binary lane v0 + float lane v1) under the
     ///      provider's modelID, REPLACING stale vectors in place (delete-all
     ///      then re-add per chunk — no duplicate rows).
     ///
-    /// When the provider is NOT trainable (deterministic / named-model / FDC),
+    /// When the provider is NOT trainable (deterministic / NL),
     /// no basis is persisted; the chunks are simply (re)embedded so the call is
     /// still a well-defined "refresh the vectors" operation.
     ///
@@ -1879,9 +1734,31 @@ public actor Corpus {
     ///   re-embedded vectors' filing timestamps. Pass `now` from the caller;
     ///   never call `Date()` inside the engine.
     public func reindex(now: Date) async throws {
+        _ = try await reindex(now: now, budget: .unbounded)
+    }
+
+    /// Retrain within an explicit work budget. Each provider trains on a fresh
+    /// instance; a skipped provider is never installed or persisted, so its
+    /// previously serving model remains intact.
+    @discardableResult
+    public func reindex(
+        now: Date, budget: RetrainingBudget
+    ) async throws -> CorpusRetrainingReport {
+        var completedModelIDs: [String] = []
+        var skippedModelIDs: [String: RetrainingSkipReason] = [:]
+        // Reset the per-pass decision seam before any path is chosen.
+        _trainingPathDecisions.removeAll()
+
         // Active chunks only: a source cleared by `remove(sourceID:)` must NOT be
         // re-embedded back into recall by a (possibly auto-triggered) reindex.
-        let chunks = try await activeChunks()
+        let chunks: [Chunk]
+        if budget.maxDocuments == Int.max {
+            chunks = try await activeChunks()
+        } else {
+            let removed = try await removedSourceStore.removedIDs()
+            chunks = try await bundleStore.activeChunks(
+                limit: budget.maxDocuments + 1, excludingSourceIDs: removed)
+        }
 
         // Phase logging throughout: on a large corpus this call legitimately
         // runs tens of minutes (full basis retrain + full re-embed); without
@@ -1890,32 +1767,137 @@ public actor Corpus {
         corpusLog.info(
             "reindex: start — \(chunks.count, privacy: .public) active chunks, \(self.slots.count, privacy: .public) provider slots")
 
-        // Phase 1 — train every trainable slot CONCURRENTLY. The five-signal
-        // default carries FOUR trainable providers (RI / PPMI / LSA / NMF) whose
-        // trainings are independent computations over the same chunk snapshot.
-        // Running them serially made a large reindex wait ΣT(train) on one core
-        // with LSA's SVD + NMF's ALS dominating; concurrent slots wait max(T)
-        // instead. The heavy compute (reconstructBasis + trainOnCorpus) is a pure
-        // function of (freshBlob, texts) — hoisted OFF the actor into a task
-        // group; install + persist stay serial on the actor. Per-slot output is
-        // byte-identical to the serial loop (kernels untouched, shared reduced embedding vocabulary). LSA and
-        // NMF each derive the shared reduced embedding vocabulary reduced vocabulary with the same pure
-        // deterministic selection, so concurrent duplicate computation of it is
-        // benign (identical artifact). For N=1 this runs one task — same result.
+        // Phase 1 — train every trainable slot. A slot meets the counts-path
+        // guard when finalizeFromCounts == true AND countsDeltaFoldSafe == true
+        // AND the population guard passes; such a slot is handled serially here
+        // from the persisted counts snapshot — NO corpus text paged. Neither
+        // default provider opts in (RI: float accumulation is order-sensitive;
+        // LSA: the counts blob holds no TF rows), so every slot goes to a
+        // concurrent task group (corpus path): trainOnCorpus over all chunk texts.
+        //
+        // The task group is concurrent because LSA's SVD dominates wall time;
+        // running slots in parallel prevents waiting ΣT(train) on one core.
         // Rust twin: the scoped-thread Phase 1 in `Corpus::reindex`.
         let texts = chunks.map(\.text)
+        // Slots that did NOT take the counts path go to the corpus-path task group.
         var trainInputs: [(index: Int, blob: Data, fresh: any TrainableEmbeddingBasis)] = []
+
         for index in slots.indices {
-            if let blob = slots[index].freshBasisBlob,
-               let fresh = slots[index].provider as? any TrainableEmbeddingBasis {
+            guard let blob = slots[index].freshBasisBlob,
+                  let fresh = slots[index].provider as? any TrainableEmbeddingBasis
+            else { continue }
+            let modelID = slots[index].provider.modelID
+            let modelVersion = slots[index].provider.modelVersion
+
+            // Probe capability and fold-safety on a fresh (throwaway) instance.
+            let probe = try fresh.reconstructBasis(from: blob)
+            guard let probeTrainable = probe as? any TrainableEmbeddingBasis else {
+                _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
                 trainInputs.append((index, blob, fresh))
+                continue
             }
+            let capable = probeTrainable.finalizeFromCounts()
+            // countsDeltaFoldSafe == false for RI: float accumulation is
+            // order-sensitive, so the live fold order (ingest arrival) cannot be
+            // proven equal to activeChunks() order. RI standalone stays corpus path.
+            let foldSafe = fresh.countsDeltaFoldSafe
+
+            guard capable else {
+                // LSA: finalizeFromCounts() == false; corpus re-tokenize required.
+                _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+            guard foldSafe else {
+                // Standalone RI rejection: the live accumulator folds counts in
+                // ingest-arrival order; a from-scratch train would fold in
+                // activeChunks() order. RI is float-order-sensitive, so the two
+                // fold sequences cannot be proven equal. This is NOT a pending-delta
+                // issue (no delta exists in standalone) — it is a fold-order
+                // provenance issue: we cannot verify the maintained counts match
+                // what a canonical from-scratch train would produce.
+                _trainingPathDecisions[modelID] = .corpus(.foldOrderProvenanceUnknown)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+
+            // Population guard.
+            // LHS: slots[index].countsDocumentCount — monotonic, incremented by
+            //   +=chunks.count per ingest fold (CorpusKit.swift:1772,
+            //   foldChunksIntoCounts); restored across reopen at :982 from the
+            //   persisted row written at :1819 (persistMaintainedCounts).
+            // RHS: chunks.count — activeChunks() excludes removed sources (:1783-1784).
+            // These are DIFFERENT populations whose every divergence is reject-safe:
+            //   - removed-after-fold: LHS > RHS → corpus path (correct: removed content
+            //     was in the counts but is not in activeChunks)
+            //   - removed-then-reingested: LHS > RHS → corpus path (count doubled on
+            //     the re-ingest fold).
+            // Do NOT describe them as the same population — they are not; every
+            // divergence drives LHS > RHS and the corpus path heals correctly.
+            guard slots[index].countsDocumentCount == chunks.count else {
+                _trainingPathDecisions[modelID] = .corpus(.populationMismatch)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+
+            // Counts path eligible — a counts-capable slot whose population guard passed.
+            // Flush live accumulators to storage BEFORE restoring so the store reflects
+            // the latest state (including any ingest folds since the last batch persist).
+            corpusLog.info(
+                "reindex: counts path for \(modelID, privacy: .public) — population consistent")
+            try await persistMaintainedCounts(now: now)
+
+            // Reconstruct a fresh instance and restore from the store. The store
+            // prefers v4 integer-keyed term rows and falls back to the legacy blob —
+            // the same decision as the on-open restore path, exercising v4 rows
+            // end-to-end.
+            let countsFresh = try fresh.reconstructBasis(from: blob)
+            guard let countsTrainable = countsFresh as? any TrainableEmbeddingBasis else {
+                _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+            let restoredFromCounts = try await countsStore.restoreCounts(
+                into: countsTrainable, modelID: modelID, modelVersion: modelVersion)
+            guard restoredFromCounts else {
+                // false means either the counts row was deleted between the flush above
+                // and this restore, or the row carries the migration invalidation sentinel
+                // (an empty blob written by `mootx01 upgrade` to signal "rebuild from zero").
+                // Either way the counts path cannot proceed — fall back to the corpus path
+                // so the provider retrains from scratch on the full corpus.
+                _trainingPathDecisions[modelID] = .corpus(.noCountsRow)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+
+            guard countsTrainable.finalizeFromCounts() else {
+                // Defensive: guaranteed by the probe above; treat false as
+                // notCountsCapable to avoid serving a partially-finalized basis.
+                _trainingPathDecisions[modelID] = .corpus(.notCountsCapable)
+                trainInputs.append((index, blob, fresh))
+                continue
+            }
+
+            // Install the counts-path provider and persist the basis. trainedChunkCount
+            // anchors the population guard on the NEXT reindex call.
+            slots[index].provider = countsFresh
+            try await basisStore.upsert(PersistedBasis(
+                modelID: modelID, modelVersion: modelVersion,
+                basis: countsTrainable.serializeBasis(),
+                trainedAt: now, trainedChunkCount: chunks.count))
+            _trainingPathDecisions[modelID] = .countsRestore
+            completedModelIDs.append(modelID)
+            corpusLog.info(
+                "reindex: counts path complete for \(modelID, privacy: .public)")
         }
+
         if !trainInputs.isEmpty {
             corpusLog.info(
-                "reindex: training \(trainInputs.count, privacy: .public) trainable slots concurrently over \(texts.count, privacy: .public) texts")
-            let trained: [(Int, any EmbeddingProvider)] =
-                try await withThrowingTaskGroup(of: (Int, any EmbeddingProvider).self) { group in
+                "reindex: training \(trainInputs.count, privacy: .public) corpus-path slots concurrently over \(texts.count, privacy: .public) texts")
+            let attempts: [(Int, any EmbeddingProvider, RetrainingOutcome)] =
+                try await withThrowingTaskGroup(
+                    of: (Int, any EmbeddingProvider, RetrainingOutcome).self
+                ) { group in
                     for input in trainInputs {
                         group.addTask {
                             // Reconstruct a fresh untrained provider from the
@@ -1927,16 +1909,28 @@ public actor Corpus {
                                 throw CorpusKitError.notTrainable(
                                     "reconstructed provider is not trainable — basis seam invariant violated")
                             }
-                            trainable.trainOnCorpus(texts: texts)
-                            corpusLog.info(
-                                "reindex: trained \(provider.modelID, privacy: .public)")
-                            return (input.index, provider)
+                            let outcome = trainable.trainOnCorpus(texts: texts, budget: budget)
+                            if outcome == .completed {
+                                corpusLog.info(
+                                    "reindex: trained \(provider.modelID, privacy: .public)")
+                            }
+                            return (input.index, provider, outcome)
                         }
                     }
-                    var out: [(Int, any EmbeddingProvider)] = []
+                    var out: [(Int, any EmbeddingProvider, RetrainingOutcome)] = []
                     for try await result in group { out.append(result) }
                     return out
                 }
+            let trained = attempts.compactMap { attempt
+                -> (Int, any EmbeddingProvider)? in
+                let (index, provider, outcome) = attempt
+                if case .skipped(let reason) = outcome {
+                    skippedModelIDs[provider.modelID] = reason
+                    return nil
+                }
+                completedModelIDs.append(provider.modelID)
+                return (index, provider)
+            }
             // Install + persist serially on the actor (cheap; the compute is done).
             for (index, provider) in trained.sorted(by: { $0.0 < $1.0 }) {
                 guard let trainable = provider as? any TrainableEmbeddingBasis else { continue }
@@ -1948,17 +1942,77 @@ public actor Corpus {
                     trainedAt: now,
                     trainedChunkCount: chunks.count
                 ))
+                // F-2 heal (design doc §2 "delete/mutate re-applies"): rebuild a FRESH
+                // counts accumulator by folding the SAME texts in the SAME order as
+                // trainOnCorpus just used. This replaces the slot accumulator with an
+                // exact snapshot matching the just-published basis so that on the next
+                // reindex call the population guard sees countsDocumentCount == chunks.count
+                // (when no sources changed) and the counts path is eligible again.
+                //
+                // Uses the freshBasisBlob (empty factory) not the trained blob so the
+                // healed accumulator must begin empty.
+                if let freshBlob = slots[index].freshBasisBlob,
+                   let healed = try trainable.reconstructBasis(from: freshBlob)
+                     as? any TrainableEmbeddingBasis
+                {
+                    for text in texts { healed.addToCounts(text: text) }
+                    slots[index].countsAccumulator = healed
+                    slots[index].countsDocumentCount = chunks.count
+                }
             }
-            corpusLog.info("reindex: training complete — bases persisted")
+            corpusLog.info("reindex: corpus-path training complete — bases persisted")
         }
 
-        // Phase 2 — re-embed every chunk under each slot's (now possibly
-        // retrained) provider, replacing stale vectors. Done whether or not a
-        // retrain occurred: for a non-trainable slot (no factory blob) reindex is
-        // a pure vector refresh under the current basis, with no basis row
-        // written. Serial per slot: each re-embed already fans its embed compute
-        // across all cores and funnels one bulk single-writer transaction.
+        // Phase 2 — re-embed every TRAINABLE slot's chunks under the just-retrained
+        // provider. Non-trainable providers (deterministic, NL) skip re-embedding:
+        // their vectors are item-local and invariant to basis retraining — the same
+        // embedding function applied to the same text always produces the same vector
+        // regardless of which distributional basis the trainable slots carry. Serial
+        // per slot: each re-embed already fans its embed compute across all cores and
+        // funnels one bulk single-writer transaction.
+        //
+        // NON-TRAINABLE CLEANUP: although non-trainable slots skip re-embedding,
+        // they MUST still prune vector rows that belong to removed sources. The
+        // estate's deleted-content contract (no removed content is retrievable through
+        // any derived structure) applies to every slot regardless of trainability.
+        // Trainable slots satisfy this contract through replaceModelVectors, which
+        // rebuilds the vector set from activeChunks() only. Non-trainable slots have
+        // no such replacement step, so explicit cleanup is required here.
+        //
+        // The chunk ID inventory is computed ONCE outside the slot loop — it is a
+        // storage scan and there may be several non-trainable slots. The scan is
+        // skipped entirely when all slots are trainable (common case pays nothing).
+        let hasNonTrainableSlot = slots.contains { $0.freshBasisBlob == nil }
+        let removedSourceChunkIDs: [String]
+        if hasNonTrainableSlot {
+            let removedIDs = try await removedSourceStore.removedIDs()
+            var chunkIDs: [String] = []
+            for sourceID in removedIDs {
+                let sourceChunks = try await bundleStore.chunksForSource(sourceID)
+                chunkIDs.append(contentsOf: sourceChunks.map { $0.id.uuidString })
+            }
+            removedSourceChunkIDs = chunkIDs
+        } else {
+            removedSourceChunkIDs = []
+        }
+
         for index in slots.indices {
+            if skippedModelIDs[slots[index].provider.modelID] != nil { continue }
+            // Non-trainable providers: vectors are item-local and basis-invariant;
+            // re-embedding is wasted work (~20% of per-chunk embed cost in the
+            // 5-provider default ensemble). However, stale vectors for removed
+            // sources must be pruned to satisfy the deleted-content contract.
+            guard slots[index].freshBasisBlob != nil else {
+                let modelID = slots[index].provider.modelID
+                var pruned = 0
+                for chunkID in removedSourceChunkIDs {
+                    try await vectorStore.deleteAllVectors(itemID: chunkID, modelID: modelID)
+                    pruned += 1
+                }
+                corpusLog.info(
+                    "reindex: slot \(modelID, privacy: .public) — basis-invariant, no re-embed needed; pruned \(pruned, privacy: .public) stale vector candidate(s) from removed sources")
+                continue
+            }
             corpusLog.info(
                 "reindex: re-embedding \(chunks.count, privacy: .public) chunks under \(self.slots[index].provider.modelID, privacy: .public) (slot \(index + 1, privacy: .public)/\(self.slots.count, privacy: .public))")
             try await reembedChunks(slotIndex: index, chunks, now: now)
@@ -1969,19 +2023,21 @@ public actor Corpus {
         // re-anchors the growth trigger to the just-reindexed state.
         try await persistMaintainedCounts(now: now)
 
-        // disk-default storage residency NOTE: releaseBasis was here but is REMOVED because the
-        // serving providers have no on-demand reconstruction path. Calling
-        // releaseBasis() clears the live vocab, making subsequent embeds
-        // return Engram.zero until the next full reindex or process restart.
-        // The ~2GB vocab RAM stays resident until a proper lazy-load-from-
-        // BasisStore mechanism is implemented. The diskBacked BM25 pattern
-        // (load from SQLite on demand) is the model — the embedding providers
-        // need the same treatment, but it's a larger refactor (each provider's
-        // embed path must check for empty vocab and reconstruct from the
-        // persisted basis blob before embedding).
+        // NOTE: releaseBasis was here but is REMOVED because the serving providers
+        // have no on-demand reconstruction path. Calling releaseBasis() clears
+        // the live vocab, making subsequent embeds return Engram.zero until the
+        // next full reindex or process restart. The ~2GB vocab RAM stays resident
+        // until a proper lazy-load-from-BasisStore mechanism is implemented. The
+        // diskBacked BM25 pattern (load from SQLite on demand) is the model —
+        // the embedding providers need the same treatment, but it's a larger
+        // refactor (each provider's embed path must check for empty vocab and
+        // reconstruct from the persisted basis blob before embedding).
 
         corpusLog.info(
             "reindex: complete — \(chunks.count, privacy: .public) chunks re-embedded across \(self.slots.count, privacy: .public) slots")
+        return CorpusRetrainingReport(
+            completedModelIDs: completedModelIDs.sorted(),
+            skippedModelIDs: skippedModelIDs)
     }
 
     /// Train a FRESH provider on the given chunks' texts and persist the
@@ -2283,7 +2339,7 @@ public actor Corpus {
             }
         }
 
-        // 3. Wipe the persisted trained basis (mission 6a-ii-β). A destroyed
+        // 3. Wipe the persisted trained basis. A destroyed
         //    corpus must leave no orphaned basis row FOR ANY held modelID: the
         //    next open would otherwise reconstruct a trained provider whose
         //    basis no longer matches any stored vectors. basisStore.deleteAll()
@@ -2388,490 +2444,64 @@ public actor Corpus {
     /// `.deterministic` provider DOES implement `embedFloat` (FNV-1a + FloatSimHash),
     /// so Lane D is live from the first capture under the default. Providers that
     /// choose not to produce a dense float vector throw
-    /// `VectorKitError.embeddingFailed`; the caller treats a throw as "this
+    /// `SynapseKitError.embeddingFailed`; the caller treats a throw as "this
     /// corpus has no float lane" and skips the dense lane rather than failing
     /// the whole recall. Empty input returns `[]` (no dense direction for the
     /// empty string), matching the storage-side contract in `ingest`.
     ///
     /// - Parameter text: the query text to embed.
     /// - Returns: the pooled float vector, or `[]` for empty input.
-    /// - Throws: `VectorKitError.embeddingFailed` when the provider opts out.
+    /// - Throws: `SynapseKitError.embeddingFailed` when the provider opts out.
     public func embedFloat(_ text: String) async throws -> [Float] {
         // Single-signal entry point: embeds on the DEFAULT signal.
         try await defaultProvider.embedFloat(text)
     }
 
-    /// Dense float nearest-neighbour recall (Lane D): embed `query` to its
-    /// pooled float vector and rank stored chunks by cosine over the in-house
-    /// `FloatBruteForceIndex`. Returns a `FloatLaneOutcome` that is always
-    /// observable — dark lanes carry a typed reason, store errors are logged
-    /// and counted, never swallowed.
-    ///
-    /// This is the cosine path the 256-bit SimHash-Hamming lane could not
-    /// serve: cosine is scale-invariant, so an answer statement ranks above a
-    /// near-duplicate of the question.
-    ///
-    /// **Degradation contract:** this method never throws. A dark lane is
-    /// represented as `.unavailableProviderOptOut`, `.unavailableNoFloatRows`,
-    /// or `.emptyQuery` — all expected outcomes. `.storeError` is NOT expected:
-    /// the error is logged (OSLog "CorpusKit") and emitted as
-    /// `corpus.float_lane.store_error` telemetry before returning so the
-    /// failure is always observable. The query continues on other lanes.
-    ///
-    /// **Telemetry** (off by default — single `Atomic<Bool>` load when disabled):
-    /// - `corpus.float_lane.hit`           — lane ran and returned ≥1 result.
-    /// - `corpus.float_lane.dark_provider` — provider opted out.
-    /// - `corpus.float_lane.dark_no_rows`  — no float rows stored.
-    /// - `corpus.float_lane.store_error`   — unexpected store failure.
-    ///
-    /// - Parameters:
-    ///   - query: the query text.
-    ///   - limit: maximum number of matches.
-    /// - Returns: a `FloatLaneOutcome` describing the result.
-    public func floatNearest(query: String, limit: Int) async -> FloatLaneOutcome {
-        guard limit > 0, !query.isEmpty else {
-            // Empty query or zero limit — no telemetry: this is a no-op call.
-            return .emptyQuery
-        }
-
-        // Test-only hook: if a forced error is installed, consume it and return
-        // .storeError immediately. This exercises the observable store-error code
-        // path without requiring production modifications to the vector store.
-        // Both entry points consult the hook: this single-signal path, and the
-        // per-signal `floatNearestPerSignal` for its DEFAULT slot (slot 0), so the
-        // store-error dark contract is observable through whichever path GLK uses.
-        if let forced = _forcedFloatError {
-            _forcedFloatError = nil
-            corpusLog.error("floatNearest: findNearestFloat failed — \(forced, privacy: .public)")
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.store_error",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .storeError(forced)
-        }
-
-        // Single-signal entry point: run the dense float lane on the DEFAULT
-        // signal. The per-provider mechanics live in `floatNearest(provider:…)`
-        // so `floatNearestPerSignal` can reuse them unchanged.
-        return await floatNearest(provider: defaultProvider, query: query, limit: limit)
-    }
-
-    /// Dense float recall for ONE provider — the per-signal mechanics shared by
-    /// `floatNearest`/`floatNearestPerSignal` (nearest) and
-    /// `floatFarthestPerSignal` (farthest, anti-similarity).
-    ///
-    /// Embeds `query` via `provider.embedFloat`, ranks stored chunks for that
-    /// provider's modelID by cosine over the in-house `FloatBruteForceIndex`,
-    /// aggregates chunk hits to source (drawer) level, and returns an observable
-    /// `FloatLaneOutcome`. The telemetry counters and the degradation contract
-    /// are identical regardless of direction.
-    ///
-    /// `direction` selects the objective (mission 6b-modifiers-antisim):
-    ///   - `.nearest`  — surface the most SIMILAR sources. The store returns the
-    ///     nearest chunks (`findNearestFloat`); a source's similarity is its
-    ///     BEST (max) chunk cosine; sources rank similarity DESCENDING. This is
-    ///     byte-identical to the pre-antisim behaviour (default).
-    ///   - `.farthest` — surface the most DISSIMILAR sources ("find things
-    ///     UNLIKE this"). The store returns the farthest chunks
-    ///     (`findFarthestFloat`); a source's dissimilarity is its WORST (min)
-    ///     chunk cosine; sources rank similarity ASCENDING. The max→min
-    ///     inversion is required: a source's anti-similarity is governed by its
-    ///     LEAST-similar chunk, the mirror of nearest's best-chunk rule.
-    private func floatNearest(
-        provider: any EmbeddingProvider,
-        query: String,
-        limit: Int,
-        direction: SearchDirection = .nearest
-    ) async -> FloatLaneOutcome {
-        // Attempt to embed the query text via the float lane.
-        //
-        // Three distinct paths:
-        //   1. Result is non-empty → proceed with the probe vector.
-        //   2. Result is empty ([] from an untrained provider, or text that
-        //      tokenises to nothing) → structural opt-out. Emit the
-        //      dark_provider counter and return .unavailableProviderOptOut.
-        //   3. Throw VectorKitError.embedFloatVocabMiss → the provider HAS a
-        //      trained basis but all query tokens are OOV. This is a vocabulary
-        //      coverage miss, not a structural opt-out. Return
-        //      .unavailableNoVocabHit with its own counter so callers observe
-        //      the correct dark-lane reason.
-        //   4. Any other throw → structural opt-out (same as path 2).
-        //
-        // Path 2 and 4 share the dark_provider counter. Path 3 has its own
-        // dark_vocabMiss counter (corpus.float_lane.dark_vocab_miss).
-        let probe: [Float]
-        do {
-            let result = try await provider.embedFloat(query)
-            guard !result.isEmpty else {
-                // Provider returned an empty vector (untrained distributional
-                // provider, or text that produces no tokens). Classify as
-                // structural opt-out: the provider cannot produce a float vector
-                // for structural reasons, not because of vocabulary coverage.
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_provider",
-                    value: 1.0,
-                    tags: ["kit": "CorpusKit"],
-                    ts: Date().timeIntervalSince1970
-                ))
-                return .unavailableProviderOptOut
-            }
-            probe = result
-        } catch VectorKitError.embedFloatVocabMiss {
-            // Trained distributional provider: basis exists but query tokens
-            // are all OOV. This is a vocabulary coverage miss — truthfully
-            // distinct from a structural opt-out. Emit a separate counter
-            // so telemetry surfaces vocabulary coverage vs. lane availability.
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.dark_vocab_miss",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .unavailableNoVocabHit
-        } catch {
-            // Provider threw a non-vocabMiss error — structural opt-out (e.g.
-            // the deterministic provider, or any provider without a float lane).
-            // Log nothing; emit the dark_provider counter only.
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.dark_provider",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .unavailableProviderOptOut
-        }
-
-        // Over-fetch 4× at the CHUNK granularity so that after source-level
-        // aggregation we still have at least `limit` sources, mirroring
-        // bm25TopKBySource's over-fetch discipline. The float index keys rows by
-        // chunk.id (the vector item_id); we aggregate to sourceID below.
-        let matches: [VectorMatch]
-        do {
-            // Direction selects which end of the cosine ranking the store
-            // returns. Farthest is NOT a reordering of nearest results — the
-            // dissimilar chunks are not in the nearest top-K, so the store must
-            // run the farthest scan (mission 6b-modifiers-antisim).
-            switch direction {
-            case .nearest:
-                matches = try await vectorStore.findNearestFloat(
-                    probe: probe, modelID: provider.modelID, limit: limit * 4)
-            case .farthest:
-                matches = try await vectorStore.findFarthestFloat(
-                    probe: probe, modelID: provider.modelID, limit: limit * 4)
-            }
-        } catch {
-            // Store threw — this is NOT expected. Log it via OSLog so it is
-            // never silent, then emit the store_error counter for telemetry
-            // dashboards and alerts.
-            corpusLog.error("floatNearest: findNearestFloat failed — \(error, privacy: .public)")
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.store_error",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .storeError(error)
-        }
-
-        // Empty matches means no float rows are stored — expected dark outcome.
-        guard !matches.isEmpty else {
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.dark_no_rows",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .unavailableNoFloatRows
-        }
-
-        // Aggregate chunk-level cosine to SOURCE (drawer) level. The vector
-        // item_id is the chunk uuid string; chunkSourceMap resolves it to the
-        // sourceID the caller ingested under (the drawer id in the GLK context),
-        // exactly as bm25TopKBySource does, so float hits hydrate back to the
-        // real Drawer row.
-        //   .nearest  — a source's similarity is its BEST (max) chunk cosine.
-        //   .farthest — a source's anti-similarity is governed by its WORST
-        //               (min) chunk cosine: a source is "unlike the query" only
-        //               if even its closest chunk is far. Picking max here would
-        //               surface sources that happen to have one near chunk, the
-        //               opposite of the anti-similarity objective.
-        // VectorMatch.distance is the cosine DISTANCE (1 − sim) quantised
-        // ×10_000 (FloatBruteForceIndex convention); recover sim = 1 − dist/1e4.
-        var bySource: [String: Float] = [:]
-        for m in matches {
-            guard let chunkUUID = UUID(uuidString: m.itemID),
-                  let sourceID = chunkSourceMap[chunkUUID] else { continue }
-            let similarity = 1.0 - Float(m.distance) / 10_000.0
-            switch direction {
-            case .nearest:
-                bySource[sourceID] = max(bySource[sourceID] ?? -Float.greatestFiniteMagnitude, similarity)
-            case .farthest:
-                bySource[sourceID] = min(bySource[sourceID] ?? Float.greatestFiniteMagnitude, similarity)
-            }
-        }
-
-        // After source aggregation, no results means no chunks are in the
-        // chunk→source map (all chunks were removed). Treat as no-rows dark.
-        guard !bySource.isEmpty else {
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.dark_no_rows",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            return .unavailableNoFloatRows
-        }
-
-        // Sort by similarity, sourceID ascending on tie (the universal
-        // deterministic tie-break), and return the top `limit`.
-        //   .nearest  — similarity DESCENDING (most similar first).
-        //   .farthest — similarity ASCENDING (most dissimilar first).
-        // The tie-break (sourceID ascending) is identical in both directions.
-        var ranked = bySource.map { (itemID: $0.key, similarity: $0.value) }
-        ranked.sort { a, b in
-            if a.similarity != b.similarity {
-                switch direction {
-                case .nearest:  return a.similarity > b.similarity
-                case .farthest: return a.similarity < b.similarity
-                }
-            }
-            return a.itemID < b.itemID
-        }
-        let result = Array(ranked.prefix(limit))
-
-        // Happy path — lane ran. Emit hit counter (count = result size so
-        // dashboards can see both that the lane ran and how many hits emerged).
-        Intellectus.report(.metric(
-            name: "corpus.float_lane.hit",
-            value: Double(result.count),
-            tags: ["kit": "CorpusKit"],
-            ts: Date().timeIntervalSince1970
-        ))
-        return .hits(result)
-    }
-
-    /// Compute a `FloatDiscriminationSignal` from a `FloatLaneOutcome`.
-    ///
-    /// Returns non-nil only for `.hits` with at least one result. The relative spread
-    /// `(maxSim − minSim) / max(maxSim, 0.001)` is computed from the FIRST and LAST
-    /// elements of the already-sorted similarity list — O(1), zero extra I/O.
-    ///
-    /// This helper is shared by `floatNearestPerSignalWithDiscrimination` on both
-    /// `Corpus` and `CorpusContentEngine` so the measurement is defined once.
-    nonisolated internal static func discriminationSignal(
-        from outcome: FloatLaneOutcome
-    ) -> FloatDiscriminationSignal? {
-        guard case .hits(let hits) = outcome, !hits.isEmpty else { return nil }
-        // `.hits` is sorted nearest-first (highest cosine first) for nearest recall.
-        // maxSim is hits[0].similarity; minSim is hits.last!.similarity.
-        let maxSim = hits[0].similarity
-        let minSim = hits[hits.endIndex - 1].similarity
-        // Guard against non-positive maxSim: cosines can be negative on an
-        // insufficiently trained basis; treat that regime as saturated (spread = 0).
-        let spread = maxSim > 0.001 ? (maxSim - minSim) / maxSim : 0.0
-        return FloatDiscriminationSignal(
-            relativeSpread: max(0.0, spread),
-            hitCount: hits.count)
-    }
-
-    /// Per-signal dense float nearest-neighbour recall (the 6b RRF-fusion seam).
-    ///
-    /// Runs the dense float lane independently for EVERY held provider slot,
-    /// each queried against its own modelID float index, and returns one ranked
-    /// `FloatLaneOutcome` per signal tagged by that signal's `modelID`. The
-    /// outcome ordering follows slot (construction) order, so `[0]` is always
-    /// the default signal.
-    ///
-    /// This is the seam the 6b mission's RRF/consensus fusion consumes: each
-    /// signal's per-source similarity ranking is exposed separately, preserving
-    /// the `FloatLaneOutcome` dark-lane observability per signal (a signal whose
-    /// provider opted out reports `.unavailableProviderOptOut`; one with no rows
-    /// reports `.unavailableNoFloatRows`; and so on). NO fusion happens here —
-    /// the caller (6b) decides how to combine the per-signal lists.
-    ///
-    /// For N=1 this returns a single-element array whose only outcome equals what
-    /// `floatNearest(query:limit:)` would return — same default-signal mechanics.
-    ///
-    /// - Parameters:
-    ///   - query: the query text.
-    ///   - limit: maximum number of matches per signal.
-    /// - Returns: `(modelID, outcome)` pairs, one per held signal, in slot order.
-    ///   An empty query or zero limit returns one `.emptyQuery` outcome per
-    ///   signal (no store access), mirroring the single-signal no-op guard.
-    public func floatNearestPerSignal(
-        query: String,
-        limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        // No-op guard mirrors floatNearest: an empty query / zero limit yields a
-        // per-signal .emptyQuery without touching the store. Returning one entry
-        // per signal keeps the result shape stable (the caller can still see
-        // every signal's modelID).
-        guard limit > 0, !query.isEmpty else {
-            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
-        }
-
-        // Test-only hook: a forced store error is consumed for the DEFAULT slot
-        // (slot 0), mirroring the single-signal `floatNearest(query:limit:)`
-        // contract. GLK's dense lane consumes this method, so the store-error dark
-        // contract must remain observable through the per-signal path: the default
-        // signal reports `.storeError`, other slots run normally. The seam is
-        // single-use and consumed here exactly as the single-signal entry does.
-        var forcedDefaultStoreError: FloatLaneOutcome? = nil
-        if let forced = _forcedFloatError {
-            _forcedFloatError = nil
-            corpusLog.error("floatNearestPerSignal: findNearestFloat failed (default signal) — \(forced, privacy: .public)")
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.store_error",
-                value: 1.0,
-                tags: ["kit": "CorpusKit"],
-                ts: Date().timeIntervalSince1970
-            ))
-            forcedDefaultStoreError = .storeError(forced)
-        }
-
-        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
-        results.reserveCapacity(slots.count)
-        for (index, slot) in slots.enumerated() {
-            let provider = slot.provider
-            // Slot 0 (default signal) honours the forced-error seam if installed;
-            // all other slots — and slot 0 when no seam is set — run the real lane.
-            let outcome: FloatLaneOutcome
-            if index == 0, let forced = forcedDefaultStoreError {
-                outcome = forced
-            } else {
-                outcome = await floatNearest(provider: provider, query: query, limit: limit)
-            }
-            results.append((modelID: provider.modelID, outcome: outcome))
-        }
-        return results
-    }
-
-    /// Per-signal dense float FARTHEST recall — the anti-similarity sibling of
-    /// `floatNearestPerSignal` (mission 6b-modifiers-antisim).
-    ///
-    /// Runs the dense float lane in the FARTHEST direction independently for
-    /// EVERY held provider slot: each signal surfaces the most DISSIMILAR
-    /// sources for its modelID ("find things UNLIKE this"), ranked least-similar
-    /// first. The outcome shape, dark-lane observability, telemetry counters,
-    /// and slot ordering are identical to `floatNearestPerSignal`; only the
-    /// ranking objective differs (the store returns the farthest chunks, and a
-    /// source's score is its WORST chunk cosine — see `floatNearest(provider:…)`).
-    ///
-    /// This is the seam GLK's RecallShape `antiSimilarLanes` consumes: a dense
-    /// lane marked anti-similar queries THIS method for its per-signal list
-    /// instead of `floatNearestPerSignal`, so the dissimilar candidates flow
-    /// into the same RRF/consensus fold.
-    ///
-    /// The forced-error test seam is NOT consulted here — it is nearest-path
-    /// test infrastructure (`floatNearest`/`floatNearestPerSignal` only), so the
-    /// farthest path always runs the real lane.
-    ///
-    /// - Parameters:
-    ///   - query: the query text.
-    ///   - limit: maximum number of matches per signal.
-    /// - Returns: `(modelID, outcome)` pairs, one per held signal, in slot
-    ///   order. An empty query or zero limit returns one `.emptyQuery` outcome
-    ///   per signal (no store access), mirroring the nearest no-op guard.
-    public func floatFarthestPerSignal(
-        query: String,
-        limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        guard limit > 0, !query.isEmpty else {
-            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
-        }
-
-        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
-        results.reserveCapacity(slots.count)
-        for slot in slots {
-            let provider = slot.provider
-            let outcome = await floatNearest(
-                provider: provider, query: query, limit: limit, direction: .farthest)
-            results.append((modelID: provider.modelID, outcome: outcome))
-        }
-        return results
-    }
-
-    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
-    ///
-    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
-    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
-    /// The discrimination signal is non-nil exactly when the outcome is `.hits` with
-    /// at least one result; it is `nil` for all dark-lane outcomes.
-    ///
-    /// **Discrimination computation:**
-    /// For each `.hits` outcome, `relativeSpread = (maxSim − minSim) / max(maxSim, 0.001)`
-    /// where `maxSim` and `minSim` are the first and last cosines of the already-sorted
-    /// ranked list. This is O(1) and adds no store access or embed calls.
-    ///
-    /// **Policy boundary:** CorpusKit computes and exposes; calling code decides.
-    /// No behaviour change inside this method or anywhere in CorpusKit — measurement only.
-    /// RecallDirector (GLK) is the policy consumer: it discounts the dense contribution
-    /// when the lane self-reports degeneracy. Standalone CorpusKit consumers may use
-    /// the signal for their own fusion decisions.
-    ///
-    /// - Parameters:
-    ///   - query: the query text.
-    ///   - limit: maximum number of matches per signal.
-    /// - Returns: `(modelID, outcome, discrimination)` triples, one per held signal,
-    ///   in slot order. `discrimination` is nil for non-`.hits` outcomes.
-    public func floatNearestPerSignalWithDiscrimination(
-        query: String,
-        limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
-        // Delegate to the existing per-signal call, then compute discrimination from
-        // each `.hits` outcome's already-sorted similarity list. The existing function
-        // handles the forced-error test seam and all dark-lane paths, so this wrapper
-        // stays thin and does not duplicate that logic.
-        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
-        return perSignal.map { entry in
-            let discrimination: FloatDiscriminationSignal? = Self.discriminationSignal(from: entry.outcome)
-            return (modelID: entry.modelID, outcome: entry.outcome, discrimination: discrimination)
-        }
-    }
-
     // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
 
-    /// Score a bounded candidate set at sub-span granularity (transient).
+    /// Compute sub-span max-cosine scores for a source ID set under a budget.
     ///
-    /// For each source ID in `sourceIDs`, retrieves the ingested chunk text
-    /// via `BundleStore.chunksForSource`, concatenates chunks into a single
-    /// text body, segments it into token-window sub-spans (alphanumeric-run
-    /// rule, cross-port identical), and returns the max-cosine ∈ [0,1] across
-    /// all sub-spans for each source.
+    /// Fetches every chunk of each source via `BundleStore.chunksForSource`,
+    /// concatenates them into a single body, cuts the body at
+    /// `budget.maxRecordBytes` on a scalar boundary, segments it into
+    /// token-window sub-spans (alphanumeric-run rule, cross-port identical),
+    /// and scores the sub-spans while the aggregate window budget lasts
+    /// (`SubSpanBudget`). Sources are visited in the caller's order.
     ///
     /// Uses the DEFAULT slot's provider. Sub-span vectors are computed on the
     /// fly and DISCARDED — zero persistence.
     ///
     /// For the `CorpusContentEngine` surface (GLK's path), use
-    /// `CorpusContentEngine.scoreSubSpans(query:candidateIDs:)` which resolves
-    /// `effectiveDenseText` via the canonical `CorpusContentSource` protocol
-    /// (supports both standalone and attached modes, including the dual-text
-    /// dense-composition capability from Stream A).
+    /// `CorpusContentEngine.scoreSubSpans(query:candidateIDs:budget:)` which
+    /// resolves `effectiveDenseText` via the canonical `CorpusContentSource`
+    /// protocol (supports both standalone and attached modes, including the
+    /// dual-text dense-composition capability from Stream A).
     ///
     /// - Parameters:
     ///   - query: The query text.
-    ///   - sourceIDs: Bounded candidate source IDs (typically ~40).
-    /// - Returns: Max-cosine ∈ [0,1] per source ID. Missing keys → 0.0.
+    ///   - sourceIDs: Source IDs in priority order.
+    ///   - budget: The work bound (default `SubSpanBudget.default`).
+    /// - Returns: The scores (max-cosine ∈ [0,1] per scored source), the
+    ///   truncation flag, the unscored ids and the window count.
     public func scoreSubSpans(
         query: String,
-        sourceIDs: [String]
-    ) async -> [String: Float] {
-        guard !query.isEmpty, !sourceIDs.isEmpty else { return [:] }
+        sourceIDs: [String],
+        budget: SubSpanBudget = .default
+    ) async -> SubSpanScoringOutcome {
+        guard !query.isEmpty, !sourceIDs.isEmpty else { return .empty }
 
         // Embed the query once via the default provider.
         let queryVec: [Float]
         do {
             let result = try await defaultProvider.embedFloat(query)
-            guard !result.isEmpty else { return [:] }
+            guard !result.isEmpty else { return .empty }
             queryVec = result
         } catch {
-            return [:]
+            return .empty
         }
 
-        var out: [String: Float] = [:]
-        out.reserveCapacity(sourceIDs.count)
+        var outcome = SubSpanScoringOutcome()
+        outcome.scores.reserveCapacity(sourceIDs.count)
         for sourceID in sourceIDs {
             // Retrieve all chunks for this source and concatenate into one body.
             let chunks: [Chunk]
@@ -2884,11 +2514,20 @@ public actor Corpus {
             // Concatenate chunk text in chunk order (start-offset ascending).
             // The full concatenated text is the scoring surface, mirroring what
             // the ingest path stored.
-            let body = chunks
-                .sorted { $0.startOffset < $1.startOffset }
-                .map(\.text)
-                .joined(separator: " ")
+            let body = SubSpanScoring.cappedText(
+                chunks
+                    .sorted { $0.startOffset < $1.startOffset }
+                    .map(\.text)
+                    .joined(separator: " "),
+                maxBytes: budget.maxRecordBytes)
             guard !body.isEmpty else { continue }
+            if outcome.windowsEmbedded >= budget.maxWindows {
+                // Budget exhausted by an earlier source: this one keeps its
+                // stored signals.
+                outcome.truncated = true
+                outcome.unscoredIDs.append(sourceID)
+                continue
+            }
 
             let ranges = SubSpanScoring.subSpanRanges(
                 text: body,
@@ -2897,12 +2536,19 @@ public actor Corpus {
             guard !ranges.isEmpty else { continue }
 
             var maxNorm: Float = 0.0
+            var embeddedHere = 0
             let utf8 = body.utf8
             for (spanStart, spanLength) in ranges {
+                if outcome.windowsEmbedded >= budget.maxWindows {
+                    outcome.truncated = true
+                    break
+                }
                 guard spanStart >= 0, spanStart + spanLength <= utf8.count else { continue }
                 let lo = utf8.index(utf8.startIndex, offsetBy: spanStart)
                 let hi = utf8.index(lo, offsetBy: spanLength)
                 guard let spanText = String(utf8[lo..<hi]) else { continue }
+                outcome.windowsEmbedded += 1
+                embeddedHere += 1
                 let spanVec: [Float]
                 do {
                     let result = try await defaultProvider.embedFloat(spanText)
@@ -2915,9 +2561,13 @@ public actor Corpus {
                 let norm = max(0, min(1, (cosine + 1) / 2))
                 if norm > maxNorm { maxNorm = norm }
             }
-            if maxNorm > 0 { out[sourceID] = maxNorm }
+            if embeddedHere == 0 {
+                outcome.unscoredIDs.append(sourceID)
+                continue
+            }
+            if maxNorm > 0 { outcome.scores[sourceID] = maxNorm }
         }
-        return out
+        return outcome
     }
 
     /// Whether this corpus's DEFAULT signal supports the dense float lane
@@ -2995,12 +2645,6 @@ public actor Corpus {
 // MARK: - EmbeddingModel → provider construction
 
 extension EmbeddingModel {
-    // Projection seeds match CorpusKitProviders' model-specific seeds so
-    // storage keys are consistent regardless of which surface is used.
-    // Changing a seed re-keys all stored vectors for that model.
-    private static let miniLMSeed: UInt64 = 0x4D49_4E4C_4D5F_7631       // "MINLM_v1"
-    private static let mpNetSeed: UInt64 = 0x4D50_4E45_545F_7631        // "MPNET_v1"
-    private static let embeddingGemmaSeed: UInt64 = 0x454D_4247_4D5F_7631 // "EMBGM_v1"
     // Deterministic seed is CorpusKit-specific; distinct from all model seeds.
     private static let deterministicSeed: UInt64 = 0xC05B_D15C_A15D_1B00
 
@@ -3017,27 +2661,9 @@ extension EmbeddingModel {
             // through unchanged — no further construction needed here.
             return provider
 
-        case .ppmi(let provider):
-            // The caller built, trained, and finalized the PpmiProvider
-            // externally. Pass through unchanged — no further construction
-            // needed here. The finalization step (count → PPMI vectors) must
-            // already have happened before this Corpus is used for recall.
-            return provider
-
         case .lsa(let provider):
             // The caller built and trained the LsaProvider externally (term-
             // document matrix + SVD). Pass through unchanged.
-            return provider
-
-        case .nmf(let provider):
-            // The caller built, trained, and finalized the NmfProvider externally
-            // (TF matrix + NMF factorization via SubstrateML). Pass through unchanged.
-            return provider
-
-        case .fdc(let provider):
-            // The caller constructed an FDCProvider externally. FDCProvider is
-            // stateless (no training required) — the caller just passes it through
-            // to register it as the fusion voter. Pass through unchanged.
             return provider
 
         case .deterministic:
@@ -3065,41 +2691,11 @@ extension EmbeddingModel {
                 }
             )
 
-        case .miniLM(let inference):
-            return CorpusTextProvider(
-                modelID: "minilm-v6",
-                modelVersion: "1.0.0",
-                projectionSeed: EmbeddingModel.miniLMSeed,
-                vocabSize: 30522,
-                maxTokenLen: 128,
-                inference: inference
-            )
-
-        case .mpNet(let inference):
-            return CorpusTextProvider(
-                modelID: "mpnet-base-v2",
-                modelVersion: "1.0.0",
-                projectionSeed: EmbeddingModel.mpNetSeed,
-                vocabSize: 30522,
-                maxTokenLen: 128,
-                inference: inference
-            )
-
-        case .embeddingGemma(let inference):
-            return CorpusTextProvider(
-                modelID: "embedding-gemma-300m",
-                modelVersion: "1.0.0",
-                projectionSeed: EmbeddingModel.embeddingGemmaSeed,
-                vocabSize: 256_000,
-                maxTokenLen: 2048,
-                inference: inference
-            )
-
 #if canImport(NaturalLanguage)
         case .nlEmbedding(let provider):
             // The caller constructed an NLEmbeddingProvider (or a compatible
             // EmbeddingProvider) externally and passes it through here — same
-            // pattern as .fdc(provider:). No further construction needed.
+            // pattern as .randomIndexing(provider:). No further construction needed.
             return provider
 
         case .nlContextualEmbedding(let provider):
@@ -3144,75 +2740,6 @@ struct CorpusDefaultTokenizer: Tokenizer {
             let h = word.utf8.reduce(UInt32(2_166_136_261)) { ($0 ^ UInt32($1)) &* 1_677_619 }
             return Int32(2 + Int(h % vocabRange))
         }
-    }
-}
-
-/// EmbeddingProvider adapter for named model cases (miniLM, mpNet,
-/// embeddingGemma). Tokenizes text using CorpusDefaultTokenizer's FNV-1a
-/// fold, calls the host-supplied CoreML inference closure, and projects
-/// the resulting float vector through FloatSimHash with the model's
-/// canonical seed.
-///
-/// This type is private to CorpusKit; it does not appear on any public
-/// signature. Callers interact only through `EmbeddingModel` cases.
-private struct CorpusTextProvider: EmbeddingProvider {
-    let modelID: String
-    let modelVersion: String
-    let projectionSeed: UInt64
-    private let tokenizer: CorpusDefaultTokenizer
-    let inference: @Sendable ([Int32]) async throws -> [Float]
-
-    init(modelID: String,
-         modelVersion: String,
-         projectionSeed: UInt64,
-         vocabSize: UInt32,
-         maxTokenLen: Int,
-         inference: @escaping @Sendable ([Int32]) async throws -> [Float]) {
-        self.modelID = modelID
-        self.modelVersion = modelVersion
-        self.projectionSeed = projectionSeed
-        self.tokenizer = CorpusDefaultTokenizer(
-            vocabID: modelID,
-            maxTokens: maxTokenLen,
-            vocabSize: vocabSize
-        )
-        self.inference = inference
-    }
-
-    func embed(_ text: String) async throws -> Engram {
-        guard !text.isEmpty else { return Engram.zero }
-        let tokens = tokenizer.tokenize(text)
-        let floats = try await inference(tokens)
-        return FloatSimHash.project(vector: floats, seed: projectionSeed)
-    }
-
-    /// Float lane source (Lane D): the pooled vector this provider's `embed`
-    /// already computes before projecting it to the 256-bit engram. Returning
-    /// it directly feeds the dense float lane's cosine ranking — one inference
-    /// pass, two stored rows. Empty input returns `[]` (no dense direction for
-    /// the empty string), matching the `EmbeddingProvider.embedFloat` contract.
-    /// This is the production float-lane path for the `.miniLM`/`.mpNet`/
-    /// `.embeddingGemma` models; without it those models would have NO float
-    /// lane (the protocol default opts out by throwing).
-    func embedFloat(_ text: String) async throws -> [Float] {
-        guard !text.isEmpty else { return [] }
-        let tokens = tokenizer.tokenize(text)
-        return try await inference(tokens)
-    }
-
-    /// Single-inference override: `embed` and `embedFloat` both tokenize and
-    /// run the same inference pass — `embed` projects the pooled vector to the
-    /// 256-bit engram, `embedFloat` returns it raw. Running both separately
-    /// pays for two inference passes over identical tokens. This computes the
-    /// pooled vector ONCE and returns both the projected engram and the floats,
-    /// halving inference cost on the capture/reembed path. Output is identical
-    /// to calling `embed` and `embedFloat` separately: empty input opts out of
-    /// the float lane (`[]`) and yields `Engram.zero`, matching both methods.
-    func embedPair(_ text: String) async throws -> (engram: Engram, floats: [Float]) {
-        guard !text.isEmpty else { return (.zero, []) }
-        let tokens = tokenizer.tokenize(text)
-        let floats = try await inference(tokens)
-        return (FloatSimHash.project(vector: floats, seed: projectionSeed), floats)
     }
 }
 

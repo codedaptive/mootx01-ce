@@ -86,11 +86,19 @@ struct TunnelRecallTests {
     }
 
     /// Link two memories and return the raw result.
+    ///
+    /// v2 reshape: `moot_link_memories` requires `relationship` (an enum of
+    /// named relationship kinds) in place of v1's `kind` argument — the
+    /// argument decoder rejects unknown keys (AriaV2MemoryMutations.swift:154-156,
+    /// `AriaV2LinkMemoriesRequest.init`'s `allowedKeys`), so `kind` is renamed
+    /// to `relationship` here to match the current schema; "relates" is a
+    /// member of both the v1 kind vocabulary and the v2 relationship enum
+    /// (AriaV2SelectedCatalog.swift:828-832).
     private func link(
         dispatcher: ARIA_MCPDispatcher,
         from fromID: String,
         to toID: String,
-        kind: String = "relates"
+        relationship: String = "relates"
     ) async throws -> JSONValue {
         let request = JSONRPCRequest(
             id: .integer(0),
@@ -100,7 +108,7 @@ struct TunnelRecallTests {
                 "arguments": .object([
                     "from_id": .string(fromID),
                     "to_id": .string(toID),
-                    "kind": .string(kind),
+                    "relationship": .string(relationship),
                 ]),
             ])
         )
@@ -116,13 +124,19 @@ struct TunnelRecallTests {
     }
 
     // MARK: - Happy path: full round-trip via moot_link_memories + moot_connection_search
+    //
+    // v2 reshape: `moot_connection_search` takes `memory_id` (UUID, required)
+    // and `direction` (outgoing|incoming|both) in place of v1's `from_id`;
+    // response text is "Found N authorized connections." in place of v1's
+    // "found N outgoing connection(s)" — see
+    // Sources/AriaMCP/AriaV2KnowledgeJournal.swift:473-477.
 
     /// A connection created through moot_link_memories is returned by
     /// moot_connection_search for the source memory.
     ///
     /// Mirrors Rust: `tunnel_recall_returns_outgoing_tunnels_for_wing` —
     /// result is a success (isError false), text contains the count line.
-    @Test("moot_connection_search returns connections for the source memory (full round-trip)")
+    @Test("moot_connection_search returns connections for the source memory (full round-trip, v2 memory_id/direction shape)")
     func connectionSearchReturnsCapturedConnection() async throws {
         let dispatcher = try await makeDispatcher()
 
@@ -131,7 +145,7 @@ struct TunnelRecallTests {
         let toID = try await fileMemory(dispatcher: dispatcher, content: "target memory")
 
         // Link them through moot_link_memories.
-        let linkResult = try await link(dispatcher: dispatcher, from: fromID, to: toID, kind: "relates")
+        let linkResult = try await link(dispatcher: dispatcher, from: fromID, to: toID, relationship: "relates")
         let linkObj = try #require(linkResult.objectValue)
         #expect(linkObj["isError"] == .bool(false), "link must succeed")
 
@@ -141,7 +155,7 @@ struct TunnelRecallTests {
             method: "tools/call",
             params: .object([
                 "name": .string("moot_connection_search"),
-                "arguments": .object(["from_id": .string(fromID)]),
+                "arguments": .object(["memory_id": .string(fromID), "direction": .string("outgoing")]),
             ])
         )
         let rawResponse = await dispatcher.handle(request)
@@ -157,8 +171,8 @@ struct TunnelRecallTests {
             "content[0].text must be present"
         )
         #expect(
-            text.hasPrefix("connections from \(fromID): 1"),
-            "result must report one connection; got: \(text)"
+            text == "Found 1 authorized connections.",
+            "result must report one authorized connection; got: \(text)"
         )
     }
 
@@ -168,7 +182,7 @@ struct TunnelRecallTests {
     /// returns a zero-count success result, not an error.
     ///
     /// Mirrors Rust: `tunnel_recall_empty_wing_returns_zero_tunnels`.
-    @Test("moot_connection_search returns zero connections for a memory with no outgoing edges")
+    @Test("moot_connection_search returns zero connections for a memory with no outgoing edges (v2 memory_id/direction shape)")
     func connectionSearchForIsolatedMemoryReturnsZero() async throws {
         let dispatcher = try await makeDispatcher()
 
@@ -180,7 +194,7 @@ struct TunnelRecallTests {
             method: "tools/call",
             params: .object([
                 "name": .string("moot_connection_search"),
-                "arguments": .object(["from_id": .string(isolatedID)]),
+                "arguments": .object(["memory_id": .string(isolatedID), "direction": .string("outgoing")]),
             ])
         )
         let rawResponse = await dispatcher.handle(request)
@@ -196,8 +210,8 @@ struct TunnelRecallTests {
             "content[0].text must be present"
         )
         #expect(
-            text.hasPrefix("connections from \(isolatedID): 0"),
-            "isolated memory must report zero connections; got: \(text)"
+            text == "Found 0 authorized connections.",
+            "isolated memory must report zero authorized connections; got: \(text)"
         )
     }
 
@@ -233,9 +247,19 @@ struct TunnelRecallTests {
 
     // MARK: - Schema assertions
 
-    /// `moot_connection_search` must carry `from_id` as a required field and
-    /// `estateID` as an optional property.
-    @Test("moot_connection_search schema lists from_id as required and estateID as optional")
+    /// `moot_connection_search` must carry `memory_id` as a required field
+    /// and `estate_id` as an optional property.
+    ///
+    /// v2 reshape: v1 asserted `from_id` required / `estateID` optional;
+    /// the descriptor now declares `required: ["memory_id"]` with
+    /// `estate_id` (snake_case) as an optional property
+    /// (AriaV2SelectedCatalog.swift:474-485) — `from_id` no longer exists
+    /// on this tool at all, and `ToolProjection.tools()` delegates to
+    /// `AriaV2SelectedCatalog.registry(...).projectedTools`
+    /// (ToolProjection.swift:171), so the old `from_id`/`estateID`-shaped
+    /// descriptor at ToolProjection.swift:352 is dead and not what this
+    /// assertion reaches.
+    @Test("moot_connection_search schema lists memory_id as required and estate_id as optional (v2 reshape: from_id -> memory_id)")
     func connectionSearchSchemaHasFromIDRequiredAndEstateIDOptional() {
         guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_connection_search" }) else {
             Issue.record("moot_connection_search must appear in the projected tool list")
@@ -249,14 +273,20 @@ struct TunnelRecallTests {
         let properties = schema?["properties"]?.objectValue ?? [:]
         let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
 
-        #expect(required.contains("from_id"), "from_id must be required; got: \(required)")
-        #expect(properties["estateID"] != nil, "estateID must be an optional property")
-        #expect(!required.contains("estateID"), "estateID must not be required")
+        #expect(Set(required) == Set(["memory_id"]), "required must be exactly memory_id; got: \(required)")
+        #expect(properties["estate_id"] != nil, "estate_id must be an optional property")
+        #expect(!required.contains("estate_id"), "estate_id must not be required")
     }
 
-    /// `moot_link_memories` must carry `from_id`, `to_id`, and `kind` as
-    /// required fields and `estateID` as an optional property.
-    @Test("moot_link_memories schema lists from_id, to_id, kind as required")
+    /// `moot_link_memories` must carry `from_id`, `to_id`, and `relationship`
+    /// as required fields and `estate_id` as an optional property.
+    ///
+    /// v2 reshape: v1 asserted `kind` as a required field alongside
+    /// `from_id`/`to_id`; the current descriptor drops `kind` entirely and
+    /// requires `relationship` instead (AriaV2SelectedCatalog.swift:821-836,
+    /// `AriaV2LinkMemoriesRequest.init`'s `allowedKeys`,
+    /// AriaV2MemoryMutations.swift:154-156).
+    @Test("moot_link_memories schema lists from_id, to_id, relationship as required")
     func linkMemoriesSchemaHasRequiredFields() {
         guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_link_memories" }) else {
             Issue.record("moot_link_memories must appear in the projected tool list")
@@ -265,9 +295,10 @@ struct TunnelRecallTests {
         let schema = tool.inputSchema.objectValue
         let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
 
-        #expect(required.contains("from_id"), "from_id must be required")
-        #expect(required.contains("to_id"), "to_id must be required")
-        #expect(required.contains("kind"), "kind must be required")
-        #expect(!required.contains("estateID"), "estateID must not be required")
+        #expect(
+            Set(required) == Set(["from_id", "to_id", "relationship"]),
+            "required must be exactly from_id, to_id, relationship (v2 dropped kind); got: \(required)"
+        )
+        #expect(!required.contains("estate_id"), "estate_id must not be required")
     }
 }

@@ -50,7 +50,8 @@ struct EstateIdentityKeyStoreTests {
         let estate = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await estate.close() } }
 
@@ -77,7 +78,8 @@ struct EstateIdentityKeyStoreTests {
         let estate = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         let estateID = await estate.estateUUID
         defer { Task { try? await estate.close() } }
@@ -102,7 +104,8 @@ struct EstateIdentityKeyStoreTests {
         let estate = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await estate.close() } }
 
@@ -125,7 +128,8 @@ struct EstateIdentityKeyStoreTests {
         let estate = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await estate.close() } }
 
@@ -162,7 +166,8 @@ struct EstateIdentityKeyStoreTests {
         let first = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         let pubKeyFirst = try await first.manifest.ed25519PublicKey
         let rawFirst = await first.retrievePrivateSigningKeyData()
@@ -172,7 +177,8 @@ struct EstateIdentityKeyStoreTests {
         let second = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: keyStore
+            identityKeyStore: keyStore,
+            federate: true
         )
         defer { Task { try? await second.close() } }
 
@@ -203,7 +209,8 @@ struct EstateIdentityKeyStoreTests {
         let first = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: firstKeyStore
+            identityKeyStore: firstKeyStore,
+            federate: true
         )
         try await first.close()
 
@@ -213,11 +220,84 @@ struct EstateIdentityKeyStoreTests {
         let second = try await Estate.open(
             storage: storage,
             owner: testOwner,
-            identityKeyStore: emptyStore
+            identityKeyStore: emptyStore,
+            federate: true
         )
         defer { Task { try? await second.close() } }
 
         let raw = await second.retrievePrivateSigningKeyData()
         #expect(raw == nil, "private key must be nil when the key store does not contain it")
+    }
+
+    // MARK: - 7. federate:false skips the identity step entirely
+
+    /// A non-federating open (`federate: false`, the default) skips the whole
+    /// identity-establishment step:
+    /// no keypair is minted, nothing is written to the identity key store, no
+    /// public key lands in the manifest, and no in-memory signing key exists.
+    @Test("federate:false mints nothing and touches no key store")
+    func federateFalseSkipsIdentityMint() async throws {
+        let storage = makeStorage()
+        let keyStore = InMemoryEstateIdentityKeyStore()
+
+        _ = try await Estate.create(storage: storage, owner: testOwner)
+        let estate = try await Estate.open(
+            storage: storage,
+            owner: testOwner,
+            identityKeyStore: keyStore,
+            federate: false
+        )
+        let estateID = await estate.estateUUID
+        defer { Task { try? await estate.close() } }
+
+        #expect(
+            try await estate.manifest.ed25519PublicKey == nil,
+            "non-federating open must not write a public key to the manifest"
+        )
+        #expect(
+            keyStore._storedPrivateKey(forEstateID: estateID) == nil,
+            "non-federating open must not store a private key"
+        )
+        #expect(
+            await estate.retrievePrivateSigningKeyData() == nil,
+            "non-federating open must not cache a signing key"
+        )
+    }
+
+    // MARK: - 8. federate is per-open, not a persistent estate property
+
+    /// An estate first opened with `federate: false` and later reopened with
+    /// the default posture mints then — the declaration governs only the open
+    /// it is passed to.
+    @Test("federating reopen after a federate:false open mints the identity")
+    func federatingReopenMintsAfterNonFederatingOpen() async throws {
+        let storage = makeStorage()
+        let keyStore = InMemoryEstateIdentityKeyStore()
+
+        _ = try await Estate.create(storage: storage, owner: testOwner)
+        let first = try await Estate.open(
+            storage: storage,
+            owner: testOwner,
+            identityKeyStore: keyStore,
+            federate: false
+        )
+        try await first.close()
+
+        let second = try await Estate.open(
+            storage: storage,
+            owner: testOwner,
+            identityKeyStore: keyStore,
+            federate: true
+        )
+        defer { Task { try? await second.close() } }
+
+        #expect(
+            try await second.manifest.ed25519PublicKey != nil,
+            "federating reopen must mint the identity"
+        )
+        #expect(
+            await second.retrievePrivateSigningKeyData()?.count == 32,
+            "federating reopen must cache the freshly-minted signing key"
+        )
     }
 }

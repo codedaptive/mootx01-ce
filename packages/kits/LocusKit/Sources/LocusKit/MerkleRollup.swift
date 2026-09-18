@@ -18,13 +18,14 @@
 // a leaf hash is computed on-demand from the drawer's content.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import SubstrateLib
 import SubstrateTypes
 import SubstrateKernel
 
-private let rollupLog = Logger(subsystem: "com.mootx01.kit", category: "LocusKit.MerkleRollup")
+private let rollupLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "LocusKit.MerkleRollup")
 
 // MARK: - Incremental rollup (Parts 1–2)
 

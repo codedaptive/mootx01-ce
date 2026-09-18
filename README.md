@@ -30,19 +30,20 @@ Recall arrives distilled: compact, ranked memory in place of pages of pasted con
 [![downloads](https://img.shields.io/github/downloads/codedaptive/mootx01-ce/total?color=blue)](https://github.com/codedaptive/mootx01-ce/releases)
 ![signed](https://img.shields.io/badge/releases-minisign%20signed-success)
 ![platforms](https://img.shields.io/badge/platforms-Apple%20Silicon%20·%20PC%2FLinux-blue)
-![license](https://img.shields.io/badge/license-open%20core-lightgrey)
+![license](https://img.shields.io/badge/license-Apache--2.0-success)
 
 > Every release asset ships with a minisign-signed `checksums.txt` so you can
 > verify what you install.
 
-## Personal MOOTs are always free
+## MOOTx01 is open source
 
-Personal MOOTs are free for personal and professional use. A personal MOOT may
-run on one computer or synchronize across multiple computers used by one
-person, including local AI clients and agents. Shared systems and systems
-provided to paying clients require a commercial license. See the
-[plain-language licensing guide](LICENSING.md), [`EDITIONS.md`](EDITIONS.md),
-and the binding [`LICENSE`](LICENSE).
+Everything here is Apache-2.0 — retroactively, over every prior release
+([`RELICENSE.md`](RELICENSE.md)). Personal, corporate, embedded, hosted:
+all free, no meter, no timer. Commercial offerings are separate products
+and promises (MOOTx01 Pro, MOOTx01 Enterprise, supported builds,
+compliance programs) — see the [plain-language licensing
+guide](LICENSING.md), [`EDITIONS.md`](EDITIONS.md), and the binding
+[`LICENSE`](LICENSE).
 
 > **Development branch:** this branch carries the active 1.1 beta
 > (`1.1.0-beta-05`). The public release links below install stable 1.0. To

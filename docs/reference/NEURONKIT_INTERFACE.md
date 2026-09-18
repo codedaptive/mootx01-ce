@@ -1,11 +1,11 @@
 ---
 title: NeuronKit Interface
 status: active
-version: 1.8.1
+version: 1.26.0
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-08-06
-description: Public API surface for NeuronKit in both the Swift and Rust ports.
+date: 2026-09-15
+description: "Interface contract for NEURONKIT. 1.23.0: gated_compositions() always returns an empty list; dense-fused composition is always active. 1.24.0: MaintenanceCategories and the category-scoped cycle entry (triggerMaintenanceCycle(now:categories:) / run_cycle_scoped) in both ports; GovernorReport.maintenanceFired and the fingerprint-drift fields are gone. 1.25.0: manifest-backed policy stores use GLK handle-scoped meta verbs."
 package: NeuronKit
 languages: [swift, rust]
 relates_to:
@@ -268,7 +268,7 @@ impl RecallFrameTuning { pub const fn default_tuning() -> Self; }   // also impl
 **Swift:**
 
 ```swift
-public typealias Drawer = LocusKit.Drawer   // cosmetic alias; storage truth stays LocusKit.Drawer
+public typealias Drawer = LocusKit.Drawer   // cosmetic alias; the stored type stays LocusKit.Drawer
 
 public struct RecallStream: AsyncSequence, Sendable {
     public typealias Element = Page
@@ -319,7 +319,13 @@ no `Drawer`)
 ```rust
 pub struct ContextDocument { /* same fields: summary, patterns, success_rate,
                                 average_reward, recommendations, key_insights */ }
-pub struct DrawerRowMeta { pub wing: String, pub room: String, pub is_currently_believed: bool }
+pub struct DrawerRowMeta {
+    pub parent_node_id: String,
+    pub wing: String,
+    pub room: String,
+    pub is_currently_believed: bool,
+    pub provenance: i64,
+}
 ```
 
 ### `ScenarioProfile`
@@ -617,7 +623,8 @@ public protocol DreamingPolicyStore: Sendable {
 }
 public actor InMemoryDreamingPolicyStore: DreamingPolicyStore { public init(_ initial: DreamingPolicy? = nil) }
 // Manifest-backed store (F6 / the daemon-state persistence contract): persists policy, bandit, and daemon cycle
-// state to the estate manifest through kit.estate(for:) -> Estate.meta/setMeta.
+// state to the estate manifest through kit.meta(in:key:) and
+// kit.setMeta(in:key:value:).
 public struct EstateManifestDreamingPolicyStore: DreamingPolicyStore {
     public init(handle: EstateHandle, kit: GeniusLocusKit)
 }
@@ -731,6 +738,144 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
     public func reindex(now: Date) async throws
 }
 ```
+
+### `PerformanceHealthDuty` / `EstatePerformanceHealthDuty` (v1.12.0)
+
+Seam for the maintenance daemon's daily timing-derivation performance-health
+duty (NEURONKIT_SPEC § 12.6.2). Injected into `MaintenanceDaemon` as a
+nil-defaulted optional parameter. The daemon calls `runHealthDuty(watermarkMs:now:)`
+once per 24 h (gated on `lastPerformanceHealthAt`). Failures are caught and
+logged by the daemon (non-fatal); the watermark is not advanced on failure.
+
+Mirrors the `ThetaBasisRetrainHook` seam pattern: the protocol is pure (no GLK
+import in the daemon); `EstatePerformanceHealthDuty` imports GeniusLocusKit and
+pages `GeniusLocusKit.auditEvents(_:after:limit:)`.
+
+**Swift (both protocol and adapter in NeuronKit):**
+
+```swift
+public protocol PerformanceHealthDuty: Sendable {
+    /// Run the daily timing-derivation health duty.
+    /// - `watermarkMs`: HLC physical-time watermark (epoch ms). 0 = start of log.
+    /// - `now`: deterministic timestamp from the caller.
+    /// - Returns: new watermark (physical-time ms of the last event consumed).
+    func runHealthDuty(watermarkMs: Int64, now: Date) async throws -> Int64
+}
+
+public struct EstatePerformanceHealthDuty: PerformanceHealthDuty {
+    public static let pageSize = 2_000
+    public static let maxPages = 10
+    public init(handle: EstateHandle, kit: GeniusLocusKit)
+    public func runHealthDuty(watermarkMs: Int64, now: Date) async throws -> Int64
+}
+```
+
+**Rust (trait in `maintenance_cycle.rs`):**
+
+```rust
+pub trait PerformanceHealthDuty {
+    fn run_health_duty(
+        &mut self,
+        watermark_ms: i64,
+        now_epoch_secs: f64,
+    ) -> Result<i64, Box<dyn std::error::Error>>;
+}
+```
+
+**`MaintenanceDaemon` wiring (Swift) — new parameter:**
+
+```swift
+public init(reader: MaintenanceSubstrateReader, sink: MaintenanceProposalSink,
+            policyStore: MaintenancePolicyStore,
+            performanceHealthDuty: (any PerformanceHealthDuty)? = nil)
+```
+
+**`MaintenanceDaemon` wiring (Rust) — builder method:**
+
+```rust
+impl MaintenanceDaemon {
+    pub fn with_duty(mut self, duty: Box<dyn PerformanceHealthDuty>) -> Self
+}
+```
+
+`performanceHealthDuty` / `with_duty` defaults to nil/None so all existing call
+sites are unaffected. `AutonomicGovernor` passes
+`EstatePerformanceHealthDuty(handle:kit:)` at production construction time.
+
+**`MaintenanceDaemonState` additions:**
+
+```swift
+public var lastPerformanceHealthAt: Date?             // decodeIfPresent: nil
+public var performanceHealthWatermarkMs: Int64         // decodeIfPresent: 0
+```
+
+```rust
+#[serde(default)]
+pub last_performance_health_epoch_secs: Option<f64>,  // absent → None
+#[serde(default)]
+pub performance_health_watermark_ms: i64,             // absent → 0
+```
+
+Both fields use backward-compat decode so states persisted before A7 load
+cleanly without migration.
+
+### `ThetaBasisRetrainHook` / `EstateThetaBasisRetrainHook` (v1.11.0)
+
+Seam for the THETA-gate daily corpus basis retrain (NEURONKIT_SPEC § 12.6.1).
+Injected into `DreamingDaemon` as a nil-defaulted optional parameter. The
+daemon calls `retrain(now:)` once per THETA gate invocation — on BOTH the
+consolidation path AND the early-return / no-data path. Failures are caught
+and logged by the daemon (non-fatal). A nil hook silently disables the duty
+(correct for LocusOnly estates and tests that don't wire a Corpus).
+
+Mirrors the `CorpusGrowthProbe` seam idiom: the protocol is pure (no GLK
+import in the daemon); `EstateThetaBasisRetrainHook` imports GeniusLocusKit and
+delegates through `GeniusLocusKit.reindexCorpus(handle:now:)`.
+
+**Swift (both protocol and adapter in NeuronKit):**
+
+```swift
+public protocol ThetaBasisRetrainHook: Sendable {
+    /// Trigger a full corpus basis retrain. Called once per THETA cycle.
+    /// Failures are caught by the daemon (non-fatal).
+    /// `now` is the injected cycle timestamp — the hook MUST NOT read Date() internally.
+    func retrain(now: Date) async throws
+}
+
+public struct EstateThetaBasisRetrainHook: ThetaBasisRetrainHook {
+    public init(handle: EstateHandle, kit: GeniusLocusKit)
+    public func retrain(now: Date) async throws
+}
+```
+
+**Rust (trait + in-memory fake in `dreaming_cycle.rs`):**
+
+```rust
+pub trait ThetaBasisRetrainHook {
+    fn retrain(&mut self, now_epoch_secs: f64) -> bool;  // true = ok, false = failure
+}
+pub struct InMemoryThetaBasisRetrainHook { /* records calls; test-only */ }
+```
+
+The Rust governor wires the retrain inline (using the already-held
+`MutexGuard<EstateCoordinator>`) rather than through the trait, so there is no
+`EstateThetaBasisRetrainHook` in Rust. The `run_theta_cycle_with_hook` method
+accepts any `ThetaBasisRetrainHook` impl; `InMemoryThetaBasisRetrainHook` is
+the test fake.
+
+**`DreamingDaemon` init (Swift) — new parameter:**
+
+```swift
+public init(reader: DreamingSubstrateReader, sink: DreamingProposalSink,
+            rewardSource: RewardSource = RecallTraceRewardSource(),
+            policyStore: DreamingPolicyStore,
+            growthProbe: (any CorpusGrowthProbe)? = nil,
+            thetaRetrainHook: (any ThetaBasisRetrainHook)? = nil)
+```
+
+`thetaRetrainHook` defaults to nil so all existing call sites are unaffected.
+`AutonomicGovernor` passes `EstateThetaBasisRetrainHook(handle:kit:)` at
+production construction time.
 
 ### Node-motion / diffusion types (SPEC § 11 diffusion)
 
@@ -893,6 +1038,13 @@ public enum CompositionGrid {
     public static let defaultName: String       // "text"
     public static let all: [ReductionComposition]
     public static func named(_ name: String?) -> ReductionComposition
+    /// W4: apply optimizer-owned recall tuning. Overrides mmrLambda on MMR
+    /// compositions; non-MMR compositions returned unchanged. Pass .default
+    /// to preserve spec-constant behavior (identical to named(_:)).
+    public static func named(
+        _ name: String?,
+        applyingTuning tuning: RecallTuningManifest
+    ) -> ReductionComposition
     public static var names: [String]
 }
 ```
@@ -903,6 +1055,11 @@ public enum CompositionGrid {
 pub const DEFAULT_NAME: &str;                         // "text"
 pub fn all() -> Vec<ReductionComposition>;
 pub fn named(name: Option<&str>) -> ReductionComposition;
+/// W4: apply optimizer-owned recall tuning. Mirrors Swift named(_:applyingTuning:).
+pub fn named_with_tuning(
+    name: Option<&str>,
+    tuning: &genius_locus_kit::RecallTuningManifest,
+) -> ReductionComposition;
 pub fn names() -> Vec<String>;
 pub fn is_known(name: &str) -> bool;                  // Rust-only convenience predicate
 ```
@@ -910,9 +1067,13 @@ pub fn is_known(name: &str) -> bool;                  // Rust-only convenience p
 ### Governor types
 
 The `AutonomicGovernor` is the production wiring that sequences all
-background autonomic duties — dreaming, maintenance, graph-centrality cache
+background autonomic duties — dreaming, graph-centrality cache
 updates, preference score updates, topology snapshots, GC sweeps, and the
-bounded pool-reduce pass. Both ports have an `AutonomicGovernor`; the Rust
+bounded pool-reduce pass. It constructs the estate's `MaintenanceDaemon`
+(`governor.maintenance`) but its tick does not pump it: the GeniusLocusKit
+maintenance-family standing signals call
+`triggerMaintenanceCycle(now:categories:)` / `run_cycle_scoped` on that
+daemon, one category each, on their own cadences. Both ports have an `AutonomicGovernor`; the Rust
 governor is a struct (sync; no async actor isolation). `TopologyInputsToken`
 and the producer cache types (`GraphCentralityCache`, `PreferenceCache`) are
 part of the governor surface.
@@ -927,7 +1088,6 @@ public actor AutonomicGovernor {
     public init(kit: GeniusLocusKit, handles: [EstateHandle], …)
     public struct GovernorReport: Sendable {
         public let dreamingFired: Bool
-        public let maintenanceFired: Bool
         public let signalsTicked: Bool
         public let graphAnalyticsFired: Bool
         public let graphCentralityFired: Bool
@@ -1042,7 +1202,8 @@ public protocol MaintenancePolicyStore: Sendable {
 }
 public actor InMemoryMaintenancePolicyStore: MaintenancePolicyStore { public init(_ initial: MaintenancePolicy? = nil) }
 // Manifest-backed store (F6 / the daemon-state persistence contract): persists policy + daemon cycle state to
-// the estate manifest through kit.estate(for:) -> Estate.meta/setMeta.
+// the estate manifest through kit.meta(in:key:) and
+// kit.setMeta(in:key:value:).
 public struct EstateManifestMaintenancePolicyStore: MaintenancePolicyStore {
     public init(handle: EstateHandle, kit: GeniusLocusKit)
 }
@@ -1054,8 +1215,8 @@ public protocol MaintenanceSubstrateReader: Sendable {
     func activeDrawers() async throws -> [Drawer]
     func tombstonedDrawers() async throws -> [Drawer]
     func learnedReferences() async throws -> [LearnedReferenceObservation]
-    func fingerprintBaselines() async throws -> [FingerprintDriftObservation]
     func currentAuditLog() async throws -> UnifiedAuditLog
+    func qidPendingDrawers(limit: Int) async throws -> [Drawer]   // the Q-ID-pending retry batch
 }
 public protocol MaintenanceProposalSink: Sendable {
     func propose(_ frame: ProposeFrame) async throws       // no remediation method (B-2)
@@ -1065,10 +1226,6 @@ public struct LearnedReferenceObservation: Sendable, Equatable {
     public let referenceRowID: RowID, sourceDriftFraction: Float
     public init(...)
 }
-public struct FingerprintDriftObservation: Sendable, Equatable {
-    public let scopeKey: String, driftFraction: Float
-    public init(...)
-}
 public struct MaintenanceCycleReport: Sendable, Equatable {
     public let tickedAt: Date
     public let auditChecked: Bool
@@ -1076,8 +1233,6 @@ public struct MaintenanceCycleReport: Sendable, Equatable {
     public let proposalsEmitted: [ProposeFrame]
     public let decayCandidates: Int
     public let tombstoneCandidates: Int
-    public let forbiddenCombinations: Int
-    public let fingerprintDrifts: Int
     public let byReferenceDrifts: Int
     public let suppressedDuplicates: Int
     public let diaryEntry: DiaryEntry
@@ -1147,15 +1302,21 @@ pub fn shingle_similarity(a: &str, b: &str) -> f32;                 // Jaccard
 public enum ContextSynthesizer {
     // estate is reserved and untouched (C-9): present only for shape parity.
     public static func synthesize(from page: RecallStream.Page,
-                                  estate: EstateHandle) async throws -> ContextDocument
+                                  estate: EstateHandle,
+                                  maxKeyInsights: Int = 3) async throws -> ContextDocument
 }
 ```
 
 **Rust:**
 
 ```rust
-pub fn synthesize(page: &RecallPage, meta: &[DrawerRowMeta]) -> ContextDocument;
-// empty meta => every row treated as DrawerRowMeta::default()
+pub fn synthesize(page: &RecallPage, meta: &[DrawerRowMeta], max_key_insights: usize) -> ContextDocument;
+
+/// First-line excerpts from up to `max_count` provenance-admissible rows.
+/// Missing meta entries (short or absent vector at index `i`) contribute
+/// nothing — fail closed. `make_summary` and `currently_believed_rate`
+/// continue to treat absent entries as default (via `meta_or_default`).
+pub fn make_key_insights(rows: &[DrawerRow], meta: &[DrawerRowMeta], max_count: usize) -> Vec<String>;
 ```
 
 ### Branch operations (SPEC § 4.3, I-15)
@@ -1251,13 +1412,41 @@ public actor MaintenanceDaemon {
     public func registerMaintenancePolicy(tickIntervalMs: Int = 300_000, auditCheckIntervalMs: Int = 300_000,
                                           decayWindowSeconds: Double = 2_592_000,
                                           tombstoneGraceSeconds: Double = 604_800,
-                                          fingerprintDriftThreshold: Float = 0.25,
                                           byReferenceDriftThreshold: Float = 0.25) async throws
     public func loadPersistedPolicy() async throws
     public func currentPolicy() -> MaintenancePolicy
-    public func pump(now: Date) async throws -> MaintenanceCycleReport?
+    public func due(now: Date) -> Bool                                      // interval elapsed; no state change
+    public func pump(now: Date) async throws -> MaintenanceCycleReport?       // all three categories, iff interval elapsed
     @discardableResult
-    public func triggerMaintenanceCycle(now: Date) async throws -> MaintenanceCycleReport
+    public func triggerMaintenanceCycle(now: Date) async throws -> MaintenanceCycleReport   // all three categories
+    @discardableResult
+    public func triggerMaintenanceCycle(now: Date, categories: MaintenanceCategories) async throws -> MaintenanceCycleReport
+}
+
+/// The three maintenance checks. The standing signals pass one each
+/// (`maintenance-daemon` → .tombstone, `decay-sweep` → .decay,
+/// `by-reference-validity` → .byReference); an unselected category reads no
+/// seam and contributes no candidates. The audit-chain monitor, the Q-ID
+/// retry and the diary entry run on every call.
+public struct MaintenanceCategories: OptionSet, Sendable {
+    public static let tombstone: MaintenanceCategories     // tombstoned rows past the grace window
+    public static let decay: MaintenanceCategories         // active rows past the decay window
+    public static let byReference: MaintenanceCategories   // LearnedReference rows at or above the drift threshold
+    public static let all: MaintenanceCategories           // what pump(now:) and triggerMaintenanceCycle(now:) run
+}
+```
+
+**Rust (`maintenance_cycle.rs`):**
+
+```rust
+pub struct MaintenanceCategories { pub tombstone: bool, pub decay: bool, pub by_reference: bool }
+impl MaintenanceCategories { pub const ALL: Self; }
+impl MaintenanceDaemon {
+    pub fn run_cycle<R, S>(&mut self, now_epoch_secs: f64, reader: &R, sink: &mut S) -> MaintenanceCycleReport
+        where R: MaintenanceSubstrateReader, S: MaintenanceProposalSink;            // == run_cycle_scoped(…, ALL)
+    pub fn run_cycle_scoped<R, S>(&mut self, now_epoch_secs: f64, reader: &R, sink: &mut S,
+                                  categories: MaintenanceCategories) -> MaintenanceCycleReport
+        where R: MaintenanceSubstrateReader, S: MaintenanceProposalSink;            // twin of triggerMaintenanceCycle(now:categories:)
 }
 ```
 
@@ -1616,7 +1805,7 @@ shape deltas.
 | Anchor confidence band | `AnchorConfidence` `LatticeAnchorInference.swift:70` | `AnchorConfidence` `lattice_anchor.rs:74` | `public` / `pub` | identical `u8`-raw enum | `LatticeAnchorInferenceTests.swift` | Confirmed |
 | Enrichment status | `EnrichmentStatus` `LatticeAnchorInference.swift:80` | `EnrichmentStatus` `lattice_anchor.rs:92` | `public` / `pub` | identical `u8`-raw enum | `LatticeAnchorInferenceTests.swift` | Confirmed |
 | Recall fusion tuning | `RecallFrameTuning` `HybridRecall.swift:94` | `RecallFrameTuning` `hybrid_recall.rs:31` | `public` / `pub` | identical (Swift `Int`/`Float`, Rust `i32`/`f32` idiom) | `HybridRecallTests.swift` ; `hybrid_recall.rs` tests | Confirmed |
-| Drawer row alias | `Drawer` typealias `HybridRecall.swift:53` | `DrawerRow` `hybrid_recall.rs:22` | `public` / `pub` | Swift aliases `LocusKit.Drawer` (storage truth); Rust has no estate dep so `DrawerRow` is a flat `{id, content}` projection — sanctioned (Rust: no LocusKit/EngramLib dep, SPEC I-17/I-18) | `HybridRecallTests.swift` ; `hybrid_recall.rs` rerank tests | Confirmed |
+| Drawer row alias | `Drawer` typealias `HybridRecall.swift:53` | `DrawerRow` `hybrid_recall.rs:22` | `public` / `pub` | Swift aliases `LocusKit.Drawer` (the stored type); Rust has no estate dep so `DrawerRow` is a flat `{id, content}` projection — sanctioned (Rust: no LocusKit/EngramLib dep, SPEC I-17/I-18) | `HybridRecallTests.swift` ; `hybrid_recall.rs` rerank tests | Confirmed |
 | Recall page / stream | `RecallStream` (+ nested `Page`) `HybridRecall.swift:140` | `RecallPage` `hybrid_recall.rs:63` | `public` / `pub` | Swift `AsyncSequence` of `Page`; Rust sync `Vec<RecallPage>` (no async runtime — sanctioned, cf. policy-store seam) | `HybridRecallTests.swift` ; `hybrid_recall.rs` paging tests | Confirmed |
 | Context document | `ContextDocument` `ContextSynthesizer.swift:23` | `ContextDocument` `context_synthesizer.rs:16` | `public` / `pub` | identical fields | `ContextSynthesizerTests.swift` ; `context_synthesizer.rs` tests | Confirmed |
 | Context synthesizer | `ContextSynthesizer` (enum) `ContextSynthesizer.swift:77` | free fn `synthesize` `context_synthesizer.rs` | `public` / `pub` | Swift caseless-enum namespace `async` taking `EstateHandle`; Rust free `synthesize` takes explicit `&[DrawerRowMeta]` (no estate) — sanctioned (Rust: no estate dep) | `ContextSynthesizerTests.swift` ; `context_synthesizer.rs` tests | Confirmed |
@@ -1671,9 +1860,9 @@ shape deltas.
 | Maintenance substrate reader | `MaintenanceSubstrateReader` `Maintenance/MaintenanceSeams.swift:87` | `MaintenanceSubstrateReader` `maintenance_cycle.rs:163` | `public` / `pub` | Swift `async` protocol returning substrate types / Rust sync trait returning `MaintenanceScan` (no estate dep — sanctioned) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
 | Maintenance proposal sink | `MaintenanceProposalSink` `Maintenance/MaintenanceSeams.swift:125` | `MaintenanceProposalSink` `maintenance_cycle.rs:169` | `public` / `pub` | Swift `async` protocol / Rust sync trait (sanctioned seam) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
 | Learned-reference observation | `LearnedReferenceObservation` `Maintenance/MaintenanceSeams.swift:38` | (folded into `MaintenanceScan.reference_drift` `DriftRow`) | `public` / `pub` | Swift seam value type read async; Rust folds it into the gathered `MaintenanceScan` (`DriftRow` rows) since it has no estate dep — sanctioned shape idiom | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
-| Fingerprint-drift observation | `FingerprintDriftObservation` `Maintenance/MaintenanceSeams.swift:64` | (folded into `MaintenanceScan.fingerprint_drift` `DriftRow`) | `public` / `pub` | Swift seam value type; Rust folds into `MaintenanceScan` `DriftRow` rows — sanctioned shape idiom | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
 | Maintenance cycle report | `MaintenanceCycleReport` `Maintenance/MaintenanceSeams.swift:141` | `MaintenanceCycleReport` `maintenance_cycle.rs:51` | `public` / `pub` | identical | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
 | Maintenance daemon | `MaintenanceDaemon` (actor) `Maintenance/MaintenanceDaemon.swift:48` | `MaintenanceDaemon` (struct) `maintenance_cycle.rs:194` | `public` / `pub` | Swift actor / Rust struct (sync seam — sanctioned) | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
+| Maintenance categories | `MaintenanceCategories` (OptionSet) `Maintenance/MaintenanceSeams.swift:177` | `MaintenanceCategories` (struct of three bools) `maintenance_cycle.rs:381` | `public` / `pub` | Swift OptionSet / Rust bool struct; `.all` / `ALL`; one category per maintenance-family standing signal | `MaintenanceDaemonTests.swift` ; `maintenance_cycle.rs` tests | Confirmed |
 | Estate maintenance reader | `EstateMaintenanceReader` `Maintenance/EstateMaintenanceReader.swift:33` | `EstateMaintenanceReader` `estate_maintenance_reader.rs:59` | `public` / `pub` | Swift binds GLK verbs / Rust gathers `MaintenanceScan` (no estate dep — sanctioned) | `EstateMaintenanceReaderTests.swift` ; `estate_maintenance_reader.rs` tests | Confirmed |
 | Estate maintenance sink | `EstateMaintenanceSink` `Maintenance/EstateMaintenanceSink.swift:43` | `EstateMaintenanceSink<S>` `estate_maintenance_sink.rs:52` | `public` / `pub` | Swift binds GLK verbs / Rust generic over `DrawerStore` (sanctioned) | `EstateMaintenanceSinkTests.swift` ; `estate_maintenance_sink.rs` tests | Confirmed |
 | Maintenance gathered scan | (read via `MaintenanceSubstrateReader` async methods, Swift) | `MaintenanceScan` `maintenance_cycle.rs:147` | — / `pub` | Swift gathers scan inputs across async reader methods returning substrate types; Rust groups them into one `MaintenanceScan` struct (no estate dep) — sanctioned shape idiom | `maintenance_cycle.rs` tests | Confirmed |
@@ -1717,6 +1906,7 @@ shape deltas.
 | Node-anomaly classify (pure, both ports) | `NodeMotionLens.classify` `Lenses/NodeMotion.swift` | `classify` `diffusion/node_anomaly.rs` | `public` / `pub fn` | Pure: classify a `NodeMotion` as churning/reanchored/stable given `churnThreshold`. Identical both ports. | `NodeMotionTests.swift` / `diffusion/node_anomaly.rs` | Confirmed |
 | Node-motion estate reader (Swift-only) | `NodeMotionLens.run` / `NodeMotionLens.anomaly` `Lenses/NodeMotion.swift` | — | `public` / — | GLK-bound estate-reading entry points. `run(kit:handle:rowID:now:lambdaPerDay:)` calls `kit.nodeAuditEntries` then `fold`; `anomaly(…)` adds `classify`. Rust has no GLK estate dependency for this module — the pure `fold`/`classify` fns are the Rust surface. | `NodeMotionTests.swift` | Confirmed (Swift-only GLK entry points) |
 | Corpus growth probe | `CorpusGrowthProbe` / `EstateCorpusGrowthProbe` `Dreaming/CorpusGrowthProbe.swift` | — | `public` / — | Swift-only: protocol seam + production GLK adapter for dreaming auto-reindex. Rust dreaming daemon has no corpus-reindex seam. `autoReindexVocabGrowthFraction = 0.10`; `autoReindexVocabGrowthFloor = 25`. | `DreamingDaemonTests.swift` | Confirmed (Swift-only) |
+| THETA basis-retrain hook | `ThetaBasisRetrainHook` / `EstateThetaBasisRetrainHook` `Dreaming/ThetaBasisRetrainHook.swift` | `ThetaBasisRetrainHook` / `InMemoryThetaBasisRetrainHook` `dreaming_cycle.rs` | `public` / `pub` | Both ports have the protocol/trait and in-memory fake. Swift has `EstateThetaBasisRetrainHook` (GLK-bound); Rust governor wires retrain inline via coordinator guard. Called once per THETA gate (both paths). Non-fatal. nil/None default on `DreamingDaemon`. | `ThetaRetrainHookTests.swift` / `dreaming_cycle.rs::tests::tr1..tr5` | Confirmed |
 | Autonomic governor | `AutonomicGovernor` (actor) `Governor/AutonomicGovernor.swift` | `AutonomicGovernor` (struct) `autonomic_governor.rs` | `public` / `pub` | Swift actor / Rust struct (sync, no async runtime — sanctioned). Both sequence background duties: dreaming, maintenance, graph-centrality, preference, topology snapshots, GC sweeps, pool-reduce. | `AutonomicGovernorTests.swift` / `autonomic_governor.rs #[cfg(test)]` | Confirmed |
 | Governor report | `AutonomicGovernor.GovernorReport` `Governor/AutonomicGovernor.swift` | `GovernorReport` `autonomic_governor.rs` | `public` / `pub struct` | Boolean tick-result summary. Swift nests it under `AutonomicGovernor`; Rust declares it flat. Same fields both ports (snake/camel idiom). | `AutonomicGovernorTests.swift` / `autonomic_governor.rs #[cfg(test)]` | Confirmed |
 | Topology inputs token (Swift-only) | `TopologyInputsToken` `Governor/AutonomicGovernor.swift` | — | `public` / — | Stable change-detection token: digest over drawer/tunnel/fact counts and max timestamps. Avoids redundant topology recomputes. Swift-only governor surface; Rust governor does not use a token. | `AutonomicGovernorTests.swift` | Confirmed (Swift-only) |
@@ -1892,9 +2082,9 @@ legs ship; the aria-mcp handler computes real Louvain/centrality.
 
 ## § Distillation lens
 
-NeuronKit owns the production feature extractor and the thin lens projection
-over `DistillationPipeline`. All production callers reach distillation through
-these two entry points.
+NeuronKit retains a feature extractor and a thin lens projection over
+`DistillationPipeline` for mathematical callers. Inline recall hydration
+uses ContextDistillLib. These lens APIs do not run a stored-text sweep.
 
 ### `hmmFeatureExtractor`
 
@@ -1985,7 +2175,169 @@ Three cases keyed on `confidence`:
 
 *End of NeuronKit Interface.*
 
+## Security repair contract
+
+### Before-tick signal reconciliation
+
+Rust `AutonomicGovernor::run_loop_with_before_tick` accepts a host callback
+`FnMut(&mut Self, SystemTime) -> Result<(), String>`. It runs before each tick
+using the same injected time. A failed reconciliation logs its error and skips
+the tick. `unregister_standing_signal(&SchedulerSignalID) -> bool` is
+idempotent and does not allocate a scheduler.
+
 ## Changelog
+
+### 1.26.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 1.25.0 -- 2026-09-15
+
+Corrected the two manifest-backed policy-store comments: they use
+`kit.meta(in:key:)` and `kit.setMeta(in:key:value:)` with an
+`EstateHandle`; they do not obtain a raw estate accessor.
+
+### 1.24.0 -- 2026-09-14
+
+Maintenance engine surface as shipped in both ports: `MaintenanceCategories`
+(`.tombstone` / `.decay` / `.byReference` / `.all`; Rust bool struct with
+`ALL`), `MaintenanceDaemon.due(now:)`,
+`triggerMaintenanceCycle(now:categories:)` and the Rust `run_cycle` /
+`run_cycle_scoped` pair. `registerMaintenancePolicy` and
+`MaintenanceCycleReport` drop the fingerprint-drift and forbidden-combination
+fields; `MaintenanceSubstrateReader` reads `qidPendingDrawers(limit:)` and has
+no fingerprint-baseline read; the fingerprint-drift observation type and its
+concordance row are gone and a categories row is added. `GovernorReport.maintenanceFired` is gone: the governor
+constructs the daemon but its tick does not pump it; the GeniusLocusKit
+maintenance-family standing signals drive one category each.
+
+### 1.22.0 -- 2026-09-13
+
+`DrawerRowMeta` (Rust): added `parent_node_id: String` and `provenance: i64`
+fields; the three-field form in 1.21.0 was drift. `synthesize` (Swift):
+`maxKeyInsights: Int = 3` parameter documented; was missing. `synthesize`
+(Rust): `max_key_insights: usize` parameter documented; was missing. Added
+`make_key_insights` to the Rust interface block: `pub fn
+make_key_insights(rows, meta, max_count)` — first-line excerpts from
+provenance-admissible rows; missing meta entries fail closed. The comment
+"empty meta => every row treated as DrawerRowMeta::default()" removed;
+accurate only for `make_summary` and `currently_believed_rate`, never for
+`make_key_insights`.
+
+### 1.21.0 -- 2026-09-07
+
+`HNSWGraphMaintenance` (Swift protocol / Rust trait): `rebuildFloatIndex(now:)`
+/ `rebuild_float_index` and `compactFloatIndexTombstones(now:)` /
+`compact_float_index_tombstones` are requirements only under the
+`WholeRecordDense` trait (`MOOTX01_WHOLE_RECORD_DENSE`) / the
+`whole-record-dense` cargo feature; `reclaimSupersededGenerations(now:)` /
+`reclaim_superseded_generations` stays in every build.
+`InMemoryHNSWGraphMaintenance.rebuild_calls` / `compact_calls` follow the
+feature. `CompositionGrid.all` / `composition_grid::all()` list `dense-fused`
+only in that build; `CompositionGrid.named("dense-fused")` resolves to the
+default composition otherwise. The NeuronKit package declares the
+`WholeRecordDense` trait.
+
+### 1.20.0 -- 2026-09-05
+
+Encoder Rerank Program — adornments dark. `ContextSynthesizer.synthesize`
+loses the `activeAdornments` parameter both ports. Swift signature:
+`synthesize(from:estate:maxKeyInsights:)`. Rust signature:
+`synthesize(page, meta, max_key_insights)` (3 args, no adornment map).
+`autonomic_governor::register_default_standing_signals` loses
+`adornment_cycle` parameter (passes `None` to downstream). `HybridRecall`
+`DrawerRow` doc updated: adornments dark, synthesis uses first-line excerpts.
+
+### 1.19.0 -- 2026-09-04
+Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
+
+### 1.18.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 1.18.0 -- 2026-08-23
+
+ADORNMENT mission — validators moved to AdornmentLib.
+
+**Removed:** `MarkerValidators` enum (previously Swift-only in NeuronKit),
+`MarkerValidationFunctions` struct, and all `MV-*` public constants. These
+were renamed `AdornmentValidators` / `AV-*` and moved to the new
+`AdornmentLib` package. Callers that previously imported NeuronKit for
+validators must import AdornmentLib instead.
+
+**Rust:** `marker_validators` module removed from NeuronKit rust crate;
+moved to `adornment_lib` crate as `adornment_validators` module.
+
+### 1.17.0 -- 2026-08-20
+
+W4 optimizer-owned recall tuning surface in NeuronKit (both ports).
+
+**Swift additions:**
+
+- `NeuronKit.CompositionGrid.named(_:applyingTuning:)` — new overload of the
+  existing `named(_:)` function. Accepts a `RecallTuningManifest` (from
+  `GeniusLocusKit`) and overrides `mmrLambda` on MMR compositions when the
+  manifest is non-default. Non-MMR compositions are returned unchanged.
+  Spec-default tuning returns the same composition as `named(_:)` exactly.
+
+- `NeuronKit.HybridRecall` (hybridRecall function) — now reads the estate's
+  `"recall_tuning"` manifest key when the caller passes `.default` tuning.
+  If the manifest is non-default, a `RecallFrameTuning` is constructed from
+  the manifest's four fields and used for the recall frame. Explicit
+  (non-default) caller tuning bypasses the manifest read entirely (caller-
+  explicit > provisioned > spec-default precedence, mirroring lane weights).
+
+**Rust additions:**
+
+- `composition_grid::named_with_tuning(name: Option<&str>, tuning: &RecallTuningManifest) -> ReductionComposition` — mirrors Swift `named(_:applyingTuning:)`.
+
+No existing public signatures change; all additions are purely additive.
+
+### 1.12.0 -- 2026-08-14
+
+- `PerformanceHealthDuty` protocol (Swift) / trait (Rust) — 24 h
+  timing-derivation health duty seam for `MaintenanceDaemon`. Injected via
+  nil-defaulted `performanceHealthDuty` parameter (Swift) / `with_duty()`
+  builder (Rust). `EstatePerformanceHealthDuty` production adapter (Swift,
+  pages `GeniusLocusKit.auditEvents`, pageSize=2 000, maxPages=10).
+  `MaintenanceDaemonState` gains `lastPerformanceHealthAt` /
+  `performanceHealthWatermarkMs` (Swift: `decodeIfPresent` backward compat;
+  Rust: `#[serde(default)]`). `AutonomicGovernor` wired.
+  See NEURONKIT_SPEC § 12.6.2 and
+  `docs/decisions/DECISION_OBSERVER_AGGREGATION_2026-08-14.md`.
+
+### 1.11.0 -- 2026-08-13
+
+- `ThetaBasisRetrainHook` protocol (Swift) + trait (Rust) — THETA-gate daily
+  corpus basis-retrain seam. `EstateThetaBasisRetrainHook` production adapter
+  (Swift, GLK-bound). `DreamingDaemon.init` gains `thetaRetrainHook: (any
+  ThetaBasisRetrainHook)? = nil` (nil-default; all existing callers unaffected).
+  Rust: `InMemoryThetaBasisRetrainHook` test fake + `run_theta_cycle_with_hook`
+  method. See NEURONKIT_SPEC § 12.6.1.
+
+### 1.10.0 -- 2026-08-13
+
+- Timing derivation (C3+A6): Swift `TimingAuditEvent` (verb,
+  `physicalTimeMs`, `rowID: UUID`, `reason?`) and
+  `deriveTimings(events:sinceExclusiveMs:) -> TimingDerivation`
+  (`ingestExactMs`, `ingestBulk`, `cycleVectorMs`, `cycleNovelMs` +
+  `cycleNovelUnbounded`, `cycleDreamtMs` + `cycleDreamtUnbounded`,
+  `watermarkMs`); Rust twin `timing_derivation::{TimingAuditEvent,
+  TimingDerivation, derive_timings}` (`row_id: String`). Pure engine, no
+  storage deps — callers map their port's audit-event type and keep the
+  watermark. Tests: Swift `TimingDerivationTests` (5) and the mirrored
+  Rust module tests (5).
+
+### 1.9.0 -- 2026-08-13
+
+- `DreamingProposalSink` gains A3 lifecycle hooks with default no-ops:
+  `dreamCycleWillStart(sessionID:now:)` / `dreamCycleDidEnd(sessionID:now:)`
+  (Rust: `dream_cycle_will_start` / `dream_cycle_did_end`, infallible per
+  the sync-port convention). The daemon mints one session id per cycle
+  and calls start before step 1 and end after the cycle's last write.
+  `EstateDreamingSink` overrides both to seal `dreamStart`/`dreamEnd`
+  audit markers through the GLK seam; test fakes compile unchanged.
 
 ### 1.8.0 -- 2026-08-06
 
@@ -2011,6 +2363,14 @@ empty `cueTerms` is bit-identical to the previous output. Rust port mirrors Swif
 ### 1.5.0 -- 2026-07-16
 Audit pass: added all surface items shipped since 1.4.0 that were absent
 from the doc. Additions:
+
+- **1.16.0 (2026-08-20)** — ReductionQuery.init(text:udcCode:qid:) and ReductionCandidate `qid` field (additive, default unanchored); latticeAnchorSimilarity replaces latticeProximity; QIDClosureAdjacency provider (Rust twins: lattice_anchor_similarity, QIDClosureAdjacency).
+
+- **v1.15.0 (2026-08-20)** — `isDateSeekingQuery(_:) -> Bool` (Rust `is_date_seeking_query`); `ReductionCandidate.filedAt: Date?` (Rust `filed_at: Option<i64>`, epoch ms), populated body-free from the hit drawer.
+
+- **v1.14.0 (2026-08-19)** — `paddedWindow(_:days:) -> QueryDateWindow` (days <= 0 returns the window unchanged); Rust `padded_window(&QueryDateWindow, i64)` and `shift_iso_day(&str, i64)`.
+
+- **v1.13.0 (2026-08-19)** — QueryDateWindow surface: `parseQueryDateExpression(_:) -> QueryDateParse` (.none/.anchored([QueryDateWindow])/.monthOnly), `expandMonthOnly(month:matchedText:years:)`, `windowContains(_:eventTime:)`; Rust twins in neuron_kit::query_date_window.
 
 - **§ 1 layout** — added `BenchmarkScoring.swift`, `Lenses/NodeMotion.swift`,
   `Lenses/QueryPrecision.swift`, `Dreaming/CorpusGrowthProbe.swift`,
@@ -2083,3 +2443,8 @@ Annotation: `hybridRecall(_:handle:on:tuning:cueTerms:scoredLane:)` — the
 `scoredLane: ScoredLane?` parameter is now documented as the public composition
 seam for caller-supplied secondary scoring passes. First consumer: the
 `session_hybrid` ShapedRecall path in CognitionKit (W1-session-hybrid).
+
+### 1.20.1 -- 2026-09-06
+
+Corrected the distillation lens consumer description. Inline text hydration
+uses the separate compression library.

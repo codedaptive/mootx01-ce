@@ -37,7 +37,7 @@ struct MutateMutationKindTests {
 
     /// Read back a drawer via the internal peek helper.
     private func peek(_ estate: Estate, id: String) async throws -> Drawer {
-        try await #require(try await estate._peekDrawer(id: id))
+        try #require(try await estate._peekDrawer(id: id))
     }
 
     // MARK: - §9.2 contest: active → contested

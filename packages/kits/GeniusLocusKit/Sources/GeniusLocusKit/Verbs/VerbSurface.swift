@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import CryptoKit
@@ -6,7 +7,7 @@ import CorpusKit
 import EngramLib
 import LocusKit
 import PersistenceKit
-import VectorKit
+import SynapseKit
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
 //
@@ -98,7 +99,7 @@ public extension GeniusLocusKit {
     /// actor is private; declaring a local computed accessor keeps the
     /// fleet-standard subsystem/category in one place per CLAUDE.md.
     private static var verbLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - Mount-state gate
@@ -147,10 +148,102 @@ public extension GeniusLocusKit {
     func capture(_ handle: EstateHandle, _ frame: CaptureFrame) async throws -> Drawer {
         try requireMounted(handle, verb: "capture")
         let estate = try estate(for: handle)
+        let drawer: Drawer
+        do {
+            drawer = try await estate.capture(frame)
+        } catch {
+            throw remap(verb: "capture", estateID: handle.estateUUID.uuidString, error: error)
+        }
+        // SSC facts (contract sheet §6) ride every content write: written
+        // right after the row lands and before any encode reads the column,
+        // because the corpus adapter composes the BM25 document from it.
+        // Every capture path (mode-aware, importers, seeding) funnels through
+        // this verb, so this is the one door for the facts write.
+        await writeSSCFacts(handle: handle, drawer: drawer)
+        return drawer
+    }
+
+    // MARK: - typed tunnel capture and settlement
+
+    /// File one typed tunnel through the mounted estate addressed by `handle`.
+    /// Tunnel timestamping remains owned by LocusKit's existing capture
+    /// boundary; GLK contributes the stale/quiesced handle gate only.
+    @discardableResult
+    func captureTunnel(_ handle: EstateHandle, _ frame: TunnelCaptureFrame) async throws -> Tunnel {
+        try requireMounted(handle, verb: "captureTunnel")
+        let estate = try estate(for: handle)
         do {
             return try await estate.capture(frame)
         } catch {
-            throw remap(verb: "capture", estateID: handle.estateUUID.uuidString, error: error)
+            throw remap(verb: "captureTunnel", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Settle a proposed tunnel through the mounted estate addressed by `handle`.
+    /// Accept selects `.active`; reject selects `.withdrawn`. The existing
+    /// LocusKit transaction updates lifecycle and the canonical `reviewedBy`
+    /// ledger entry together. `reason` and `now` are forwarded unchanged;
+    /// current LocusKit deliberately does not persist either value in tunnel ext.
+    func settleTunnel(
+        _ handle: EstateHandle,
+        tunnelID: String,
+        accept: Bool,
+        changedBy: String,
+        reason: String? = nil,
+        now: Date = Date()
+    ) async throws {
+        try requireMounted(handle, verb: "settleTunnel")
+        let estate = try estate(for: handle)
+        do {
+            try await estate.respondToTunnel(
+                id: tunnelID, accept: accept, changedBy: changedBy, reason: reason, now: now)
+        } catch {
+            throw remap(verb: "settleTunnel", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Capture a typed dataset handle through the mounted estate addressed by
+    /// `handle`. The common Swift/Rust contract takes only a UDC code because
+    /// the current Rust lower primitive cannot retain facets or QIDs; LocusKit
+    /// owns dataset payload, bitmap, and capture timestamp construction.
+    @discardableResult
+    func captureDatasetHandle(
+        _ handle: EstateHandle,
+        datasetId: UUID,
+        columns: [DatasetColumnSummary],
+        rowCount: Int,
+        sourceDescription: String,
+        wing: String? = nil,
+        room: String,
+        addedBy: String,
+        sensitivity: AdjectiveSensitivity = .normal,
+        udcCode: String
+    ) async throws -> Drawer {
+        try requireMounted(handle, verb: "captureDatasetHandle")
+        let estate = try estate(for: handle)
+        do {
+            return try await estate.captureDatasetHandle(
+                datasetId: datasetId, columns: columns, rowCount: rowCount,
+                sourceDescription: sourceDescription, wing: wing, room: room,
+                addedBy: addedBy, sensitivity: sensitivity, latticeAnchor: .udc(udcCode))
+        } catch {
+            throw remap(verb: "captureDatasetHandle", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Stamp the one FDC estate-wide recalculation floor. The key is fixed at
+    /// this typed boundary: callers cannot turn GLK into a general metadata
+    /// broker.
+    func stampFDCRecalculationFloor(
+        _ handle: EstateHandle,
+        value: String
+    ) async throws {
+        try requireMounted(handle, verb: "stampFDCRecalculationFloor")
+        let estate = try estate(for: handle)
+        do {
+            try await estate.setMeta(key: "aria.fdc.recalced_data_version", value: value)
+        } catch {
+            throw remap(verb: "stampFDCRecalculationFloor", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -184,7 +277,10 @@ public extension GeniusLocusKit {
             scoring: .raw,
             limit: frame.limit ?? 50,
             fallback: .failClosed,
-            origin: .internal
+            origin: .internal,
+            // Sub-span scoring is a matrixAware stage; this raw locus read
+            // names the switch off like every other caller (ruling 2026-09-07).
+            subSpanScoring: .off
         ))
         return result.drawers
     }
@@ -202,10 +298,13 @@ public extension GeniusLocusKit {
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     func resolveNodeNames(
         _ handle: EstateHandle,
-        parentNodeIds: [String]
+        parentNodeIds: [String],
+        preservePhysicalUUIDSpellings: Bool = false
     ) async throws -> [String: (wing: String, room: String)] {
         let estate = try estate(for: handle)
-        return try await estate.resolveNodeNames(parentNodeIds: parentNodeIds)
+        return try await estate.resolveNodeNames(
+            parentNodeIds: parentNodeIds,
+            preservePhysicalUUIDSpellings: preservePhysicalUUIDSpellings)
     }
 
     // MARK: - recallTunnels
@@ -363,7 +462,7 @@ public extension GeniusLocusKit {
     ///   - `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
     ///   - `VerbError.notSupportedByEstate` if no VectorStore is registered
     ///     for this estate.
-    ///   - `VerbError.underlyingEstateFailure` wrapping any `VectorKitError`
+    ///   - `VerbError.underlyingEstateFailure` wrapping any `SynapseKitError`
     ///     surfaced by `VectorStore.findNearest`.
     func findNearestDistilled(
         _ handle: EstateHandle,
@@ -383,7 +482,7 @@ public extension GeniusLocusKit {
         // Dispatch to the distillation lane. modelID is the fixed string for the
         // structural fingerprint lane — no semantic embedding model is involved.
         // limit: 0 returns [] without error (VectorStore.findNearest guards
-        // limit > 0 internally). VectorKitError is caught and re-raised as
+        // limit > 0 internally). SynapseKitError is caught and re-raised as
         // VerbError.underlyingEstateFailure so callers see a unified error type —
         // parity of the Rust port's `.map_err` wrapper.
         do {
@@ -476,6 +575,7 @@ public extension GeniusLocusKit {
         addedBy: String = "",
         foreignSourceKey: String = "",
         foreignRecordID: String = "",
+        extraction: KGFactExtractionMetadata = .empty,
         now: Date
     ) async throws -> KGFact {
         let store = try await ensureKGStore(for: handle)
@@ -490,7 +590,7 @@ public extension GeniusLocusKit {
         var adjectiveBitmap: Int64 = 0
         var provenanceBitmap: Int64 = 0
         if !sourceDrawerID.isEmpty {
-            let estate = try await estate(for: handle)
+            let estate = try estate(for: handle)
             guard let source = try await estate.getDrawers(
                 ids: [sourceDrawerID],
                 hydrationLevel: .structured
@@ -509,7 +609,20 @@ public extension GeniusLocusKit {
             addedBy: addedBy,
             foreignSourceKey: foreignSourceKey,
             foreignRecordID: foreignRecordID,
+            evidenceQuote: extraction.evidenceQuote,
+            evidenceStart: extraction.evidenceStart,
+            evidenceEnd: extraction.evidenceEnd,
+            evidenceStartUTF8Byte: extraction.evidenceStartUTF8Byte,
+            evidenceEndUTF8Byte: extraction.evidenceEndUTF8Byte,
+            sourceDigest: extraction.sourceDigest,
+            extractorProviderID: extraction.extractorProviderID,
+            extractorModelID: extraction.extractorModelID,
+            extractorModelVersion: extraction.extractorModelVersion,
+            extractionSchemaVersion: extraction.extractionSchemaVersion,
+            searchProjection: extraction.searchProjection,
+            searchProjectionVersion: extraction.searchProjectionVersion,
             adjectiveBitmap: adjectiveBitmap,
+            operationalBitmap: extraction.operationalBitmap,
             provenanceBitmap: provenanceBitmap,
             filedAt: now
         )
@@ -530,14 +643,46 @@ public extension GeniusLocusKit {
     /// `Estate.withdraw` is Drawer-specific and does not handle KGFact rowIDs.
     ///
     /// - Throws: `GeniusLocusKitError.estateNotOpen`, or
-    ///   `VerbError.underlyingEstateFailure` if the row is not found.
+    ///   `VerbError.underlyingEstateFailure` if the row is not found or if the
+    ///   store cannot be read.
     func retireKGFact(
         _ handle: EstateHandle,
-        rowID: String
+        rowID: String,
+        changedBy: String,
+        reason: String? = nil,
+        now: Date
     ) async throws {
         let store = try await ensureKGStore(for: handle)
+
+        // Sensitivity ceiling (GLK-CEILING): refuse .restricted/.secret targets
+        // by producing the same error the absent-fact path produces through
+        // remap. Explicit switch (not isBulkExportable) so a future change to
+        // the bulk-export tier cannot silently shift this security boundary.
+        // The ceiling check precedes the do-catch block so the VerbError is
+        // thrown directly without double-wrapping. A genuine read ERROR from the
+        // store must propagate (fail-closed) rather than being swallowed; only
+        // a nil return (absent row) is tolerated.
+        let existingFactForCeiling: KGFact?
         do {
-            try await store.withdrawKGFact(id: rowID)
+            existingFactForCeiling = try await store.getKGFact(id: rowID)
+        } catch {
+            throw remap(verb: "retireKGFact", estateID: handle.estateUUID.uuidString, error: error)
+        }
+        if let existingFact = existingFactForCeiling {
+            switch existingFact.adjectiveSensitivity {
+            case .restricted, .secret:
+                throw remap(
+                    verb: "retireKGFact",
+                    estateID: handle.estateUUID.uuidString,
+                    error: LocusKitError.invalidContent("kgFact not found: \(rowID)")
+                )
+            case .normal, .elevated:
+                break
+            }
+        }
+
+        do {
+            try await store.withdrawKGFact(id: rowID, changedBy: changedBy, reason: reason, now: now)
         } catch {
             throw remap(verb: "retireKGFact", estateID: handle.estateUUID.uuidString, error: error)
         }
@@ -686,7 +831,7 @@ public extension GeniusLocusKit {
     // MARK: - expunge
 
     /// Tombstone a drawer in the estate addressed by `handle`, zeroize its
-    /// content blob, and purge its vector embedding(s) from VectorKit/CorpusKit.
+    /// content blob, and purge its vector embedding(s) from SynapseKit/CorpusKit.
     ///
     /// Raises `VerbError.expungeNotConfirmed` at the GLK boundary when
     /// `frame.confirmation` is false; the substrate is not reached.
@@ -708,12 +853,18 @@ public extension GeniusLocusKit {
     /// when an engine is registered, calls `corpus.removeContent(id:)` to purge
     /// BM25 index entries and Drawer-keyed vector embeddings by exact key
     /// (shared-content 1.1: no second text copy exists to scrub). When a standalone
-    /// `VectorStore` is also registered (`.glk` estate), additionally calls
-    /// `vectorStore.deleteAllVectors` to invalidate the standalone store's
-    /// resident array (the corpus and the standalone store share backing storage
-    /// but maintain separate in-memory indexes; both must be updated). Failure
-    /// here seals an `"expungeOrphan"` audit event (honest record of partial
-    /// completion) and then raises `VerbError.crossKitVectorDeleteFailed`.
+    /// `VectorStore` is also registered (`.glk` estate), additionally scrubs
+    /// three vector lanes keyed by the drawer id: the distillation
+    /// fingerprint lane (`deleteAllVectors(distillation-features-v1)`), the
+    /// encoder span lanes (`deleteSpanVectors` under every `encoder_models`
+    /// registry id plus the session's registered encoder — the `spanEncode`
+    /// duty's int8 span rows live under the encoder's own model id, not the
+    /// corpus model id) and the corpus model lane (`deleteAllVectors(corpus
+    /// model id)`, which also invalidates the standalone store's resident
+    /// array; the corpus and the standalone store share backing storage but
+    /// maintain separate in-memory indexes). Failure in any lane seals an
+    /// `"expungeOrphan"` audit event (the record of partial completion)
+    /// and then raises `VerbError.crossKitVectorDeleteFailed`.
     ///
     /// **Step 3 — Audit seal:** on success, seals the gate-produced `"tombstone"`
     /// event from step 1. On step-2 failure, seals an `"expungeOrphan"` event
@@ -746,17 +897,49 @@ public extension GeniusLocusKit {
         }
         let estate = try estate(for: handle)
 
-        // Step 0.5 — Pre-read for dataset cascade (MX-TAB-4).
+        // Step 0.5 — Pre-read for dataset cascade (MX-TAB-4) and sensitivity
+        // ceiling (GLK-CEILING).
         //
         // The storage expunge (step 1) zeroes the content blob, so any
         // DatasetHandleContent JSON must be decoded BEFORE tombstoning.
-        // If the pre-read fails or the drawer is not a dataset handle we
-        // proceed without a cascade — step 1 will surface a drawerNotFound
-        // error if the row genuinely doesn't exist.
+        // If the pre-read returns no row, or the drawer is not a dataset
+        // handle, we proceed without a cascade — step 1 will surface a
+        // drawerNotFound error if the row genuinely doesn't exist. A pre-read
+        // that ERRORS does not reach here; it is remapped and thrown below.
+        //
+        // Sensitivity ceiling: a caller who can only read rows at or below
+        // .elevated must not be able to erase a row above that tier. The
+        // check uses an explicit switch against .restricted and .secret (not
+        // isBulkExportable) so a future change to the bulk-export tier cannot
+        // silently shift this security boundary. The refusal is produced
+        // through the same remap path as an absent-row error — the caller
+        // cannot distinguish above-ceiling rows from absent rows, providing
+        // no existence oracle. A genuine read ERROR must propagate (fail-closed);
+        // only an absent row (nil return) is tolerated and flows to step 1.
+        let preReadDrawer: Drawer?
+        do {
+            preReadDrawer = try await estate.drawerById(rowID: frame.rowID)
+        } catch {
+            throw remap(verb: "expunge", estateID: handle.estateUUID.uuidString, error: error)
+        }
+
+        if let ceilingDrawer = preReadDrawer {
+            switch ceilingDrawer.adjectiveSensitivity {
+            case .restricted, .secret:
+                throw remap(
+                    verb: "expunge",
+                    estateID: handle.estateUUID.uuidString,
+                    error: LocusKitError.drawerNotFound(id: frame.rowID)
+                )
+            case .normal, .elevated:
+                break
+            }
+        }
+
         let datasetIdToErase: UUID?
-        if let preReadDrawer = try? await estate.drawerById(rowID: frame.rowID),
-           preReadDrawer.contentKind == .dataset,
-           let handleContent = try? DatasetHandleContent.decode(from: preReadDrawer.content) {
+        if let datasetDrawer = preReadDrawer,
+           datasetDrawer.contentKind == .dataset,
+           let handleContent = try? DatasetHandleContent.decode(from: datasetDrawer.content) {
             datasetIdToErase = handleContent.datasetId
         } else {
             datasetIdToErase = nil
@@ -769,7 +952,9 @@ public extension GeniusLocusKit {
         // cross-kit delete (§B-2a ordering). Storage failure remaps via remap
         // and aborts; the cross-kit step is never reached.
         // expungeReturningUnsealedEvent returns the full ExpungeOutcome:
-        // the unsealed audit event plus the gate-refused sibling ids.
+        // the unsealed audit event plus the ids of siblings left
+        // untouched — refused by the ceiling (.elevated, checked first,
+        // never reaching the gate) or refused by the gate (S-3).
         let storageOutcome: DrawerStore.ExpungeOutcome
         let unsealedEvent: AuditEvent
         do {
@@ -777,6 +962,11 @@ public extension GeniusLocusKit {
                 rowID: frame.rowID,
                 reason: frame.reason,
                 confirmation: frame.confirmation,
+                // GLK-CEILING: the erase verb enforces the same .elevated ceiling
+                // on siblings that step 0.5 enforces on the target. A caller who
+                // cannot read above .elevated must not be able to erase above it
+                // through the lineage cascade either.
+                sensitivityCeiling: .elevated,
                 now: now
             )
             // Force-unwrap is a deliberate programmer-error trap:
@@ -808,6 +998,32 @@ public extension GeniusLocusKit {
         let refusedIds = Set(storageOutcome.refusedSiblingIDs)
         let idsToDelete = (lineageIds.isEmpty ? [frame.rowID] : lineageIds)
             .filter { !refusedIds.contains($0) }
+
+        // Step 1.5 — Fact-extraction checkpoint cleanup (F6). Best-effort and
+        // independent of corpus/vectorStore registration: a retained
+        // checkpoint (QueueKit's "fact-extraction-checkpoints" stream) holds
+        // domain evidence — GroundedFactCandidate evidence quotes — keyed by
+        // source drawer id. The fact-extraction debt scan that would
+        // otherwise revisit and clean up a source's checkpoint excludes
+        // tombstoned drawers, so an un-deleted row for an expunged source is
+        // retained forever with no future pass that will ever look at it
+        // again. Runs for every lineage member the storage expunge actually
+        // scrubbed (idsToDelete — a refused sibling's checkpoint, if any,
+        // survives with the rest of its content). A checkpoint-store
+        // failure here must never abort the erase that already committed —
+        // logged and swallowed, matching the orphan-audit posture below.
+        do {
+            let checkpoints = try await factCheckpoints(handle)
+            for deleteId in idsToDelete {
+                _ = try await checkpoints.delete(
+                    id: Self.factWorkID(deleteId), stream: Self.factWorkStream)
+            }
+        } catch {
+            Self.verbLog.error(
+                "expunge fact-extraction checkpoint cleanup failed — rowID=\(frame.rowID, privacy: .public) estate=\(handle.estateUUID.uuidString, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
+            )
+        }
+
         let corpus = corpusKits[handle]
         let vectorStore = vectorStores[handle]
 
@@ -838,6 +1054,20 @@ public extension GeniusLocusKit {
                             itemID: deleteId,
                             modelID: Self.distillationLaneModelID
                         )
+                        // SECURITY: encoder-lane scrub (destruction contract,
+                        // GENIUSLOCUSKIT_SPEC §B-2a step 2). The spanEncode
+                        // duty stores up to maxSpans int8 span vectors per
+                        // drawer under the ENCODER's model id
+                        // (`<model>-w<window>`), which is neither the
+                        // distillation lane nor the corpus model id, so the
+                        // two deletes around this one never touch them.
+                        // Every registered encoder model id is scrubbed so no
+                        // content-derived span embedding, dequantisation
+                        // scale, word bound or content-version fingerprint
+                        // outlives the erase. Same fail-closed block: a
+                        // failure seals the orphan audit, never a success.
+                        try await scrubEncoderLanes(
+                            handle, vectorStore: vectorStore, rowID: deleteId)
                     }
                     if let vectorStore, let corpus {
                         // Invalidate the standalone VectorStore's resident slot
@@ -847,7 +1077,7 @@ public extension GeniusLocusKit {
                             itemID: deleteId,
                             modelID: modelID
                         )
-                    } else if let vectorStore {
+                    } else if vectorStore != nil {
                         throw VerbError.crossKitVectorDeleteFailed(
                             rowID: deleteId,
                             reason: "standalone VectorStore registered without a Corpus — modelID unavailable for deleteAllVectors; manual cleanup required for estate \(handle.estateUUID.uuidString)"
@@ -995,6 +1225,50 @@ public extension GeniusLocusKit {
         return ExpungeVerbOutcome(refusedSiblingIDs: storageOutcome.refusedSiblingIDs)
     }
 
+    // MARK: - Encoder-lane scrub (expunge step 2 + integrity sweep)
+
+    /// Model ids whose int8 span rows an erase must scrub for `handle`:
+    /// every `encoder_models` registry row (a model that was active earlier
+    /// in the estate's life may still own span rows for the drawer) plus the
+    /// encoder registered for this session. When the registry read throws or
+    /// the estate's storage is not retained, the registered encoder alone is
+    /// the source. Registry order (ascending model id) with the registered
+    /// id appended when absent, so both ports issue the same deletes in the
+    /// same order. Twin of Rust `encoder_lane_model_ids`.
+    func encoderLaneModelIDs(for handle: EstateHandle) async -> [String] {
+        var ids: [String] = []
+        if let storage = storages[handle],
+           let rows = try? await EncoderModelStore(storage: storage).all() {
+            ids = rows.map(\.modelID)
+        }
+        if let registered = registeredSpanEncoder(for: handle)?.spec.modelID,
+           !ids.contains(registered) {
+            ids.append(registered)
+        }
+        return ids
+    }
+
+    /// Delete the span rows of `rowID` under every encoder lane of `handle`
+    /// (`encoderLaneModelIDs(for:)`). Fail-closed: a delete failure surfaces
+    /// as `VerbError.crossKitVectorDeleteFailed` naming the row and the lane,
+    /// so the caller seals the orphan audit instead of a success. Called by
+    /// `expunge` step 2 and by `runExpungeIntegritySweep`. Twin of Rust
+    /// `scrub_encoder_lanes`.
+    func scrubEncoderLanes(
+        _ handle: EstateHandle, vectorStore: VectorStore, rowID: String
+    ) async throws {
+        for modelID in await encoderLaneModelIDs(for: handle) {
+            do {
+                try await vectorStore.deleteSpanVectors(itemID: rowID, modelID: modelID)
+            } catch {
+                throw VerbError.crossKitVectorDeleteFailed(
+                    rowID: rowID,
+                    reason: "encoder lane \(modelID) span delete failed: \(error.localizedDescription)"
+                )
+            }
+        }
+    }
+
     // MARK: - Expunge integrity sweep
 
     /// Run the expunge integrity sweep for a single estate.
@@ -1009,6 +1283,10 @@ public extension GeniusLocusKit {
     ///      - `corpus.removeContent` — scrubs BM25 + semantic-embedding index
     ///      - `vectorStore.deleteAllVectors(distillation-features-v1)` — scrubs
     ///        the structural fingerprint lane, unconditional on corpus presence
+    ///      - `vectorStore.deleteSpanVectors(encoder model id)` for every
+    ///        `encoder_models` registry id plus the registered encoder — scrubs
+    ///        the int8 span rows the `spanEncode` duty wrote, unconditional on
+    ///        corpus presence
     ///      - `vectorStore.deleteAllVectors(corpus model id)` — scrubs the
     ///        semantic embedding lane (requires corpus for model id)
     ///   2. Seals a synthetic "expungeOrphan" audit event via
@@ -1095,6 +1373,13 @@ public extension GeniusLocusKit {
                             itemID: rowID,
                             modelID: Self.distillationLaneModelID
                         )
+                        // SECURITY: encoder-lane scrub, same invariant as the
+                        // live expunge step 2 — the crash-window row's int8
+                        // span rows live under the encoder model id(s), which
+                        // neither the distillation nor the corpus-model delete
+                        // reaches. Unconditional on the corpus handle.
+                        try await scrubEncoderLanes(
+                            handle, vectorStore: vectorStore, rowID: rowID)
                         if let corpus {
                             let modelID = await corpus.modelID
                             try await vectorStore.deleteAllVectors(itemID: rowID, modelID: modelID)
@@ -1156,12 +1441,28 @@ public extension GeniusLocusKit {
     /// addressed by `handle`. At least one of `toRoom` or `toLattice`
     /// must be present; an empty reanchor raises `VerbError.emptyReanchor`
     /// at the GLK boundary before dispatch.
+    ///
+    /// F4 (§11.18): when the move changes room membership (`toRoom` and/or
+    /// `toWing` supplied), both the room the drawer LEAVES and the room it
+    /// JOINS are marked dirty for the incremental anomaly sweep. This is the
+    /// only point that room-membership change is knowable at all — the
+    /// audit trail records no history of a drawer's prior room (see
+    /// `markAnomalySweepRoomDirty`'s doc comment) — so a room whose cohesion
+    /// peer set just shrank would otherwise never be rescored.
     func reanchor(_ handle: EstateHandle, _ frame: ReanchorFrame) async throws {
         try requireMounted(handle, verb: "reanchor")
         guard frame.toRoom != nil || frame.toWing != nil || frame.toLattice != nil else {
             throw VerbError.emptyReanchor(rowID: frame.rowID)
         }
         let estate = try estate(for: handle)
+        let movesRoom = frame.toRoom != nil || frame.toWing != nil
+        // Captured before the move: the only moment the drawer's OUTGOING
+        // room is readable, since the row itself keeps no prior value.
+        var priorRoom: (wing: String, room: String)?
+        if movesRoom, let drawer = try? await estate.getDrawers(ids: [frame.rowID]).first {
+            priorRoom = try? await resolveNodeNames(
+                handle, parentNodeIds: [drawer.parentNodeId])[drawer.parentNodeId]
+        }
         do {
             try await estate.reanchor(
                 rowID: frame.rowID,
@@ -1171,6 +1472,41 @@ public extension GeniusLocusKit {
             )
         } catch {
             throw remap(verb: "reanchor", estateID: handle.estateUUID.uuidString, error: error)
+        }
+        guard movesRoom else { return }
+        // Best-effort: a checkpoint-write failure must never fail the move
+        // that already committed — the room is simply picked up on the next
+        // audit-fold pass (a rescore skipped a cycle late, not skipped
+        // forever) rather than the reanchor itself throwing after the fact.
+        let now = Date()
+        if let drawer = try? await estate.getDrawers(ids: [frame.rowID]).first,
+           let newRoom = try? await resolveNodeNames(
+               handle, parentNodeIds: [drawer.parentNodeId])[drawer.parentNodeId] {
+            try? await markAnomalySweepRoomDirty(wing: newRoom.wing, room: newRoom.room, for: handle, now: now)
+        }
+        if let priorRoom {
+            try? await markAnomalySweepRoomDirty(wing: priorRoom.wing, room: priorRoom.room, for: handle, now: now)
+        }
+    }
+
+    /// Update one drawer's lattice anchor with explicit audit provenance.
+    /// This is the Swift twin of Rust `EstateCoordinator.reanchor_anchor`;
+    /// Swift preserves LocusKit's deterministic caller-supplied timestamp.
+    func reanchorAnchor(
+        _ handle: EstateHandle,
+        rowID: RowID,
+        toLattice: LatticeAnchor,
+        changedBy: String,
+        reason: String = "anchor Q-ID resolved via enrichment-proposal acceptance",
+        now: Date
+    ) async throws {
+        try requireMounted(handle, verb: "reanchorAnchor")
+        let estate = try estate(for: handle)
+        do {
+            try await estate.reanchorAnchor(
+                rowID: rowID, toLattice: toLattice, changedBy: changedBy, reason: reason, now: now)
+        } catch {
+            throw remap(verb: "reanchorAnchor", estateID: handle.estateUUID.uuidString, error: error)
         }
     }
 
@@ -1692,6 +2028,331 @@ public extension GeniusLocusKit {
         } catch {
             throw remap(verb: "markRecallUsed", estateID: handle.estateUUID.uuidString, error: error)
         }
+    }
+
+    /// Provision the OPTIMIZER-OWNED default lane weights on an estate
+    /// (W2.5 Track R(b)): a JSON object of lane key → signed float stored
+    /// under the `lane_weights` manifest key. The RecallDirector consumes it
+    /// with shape-explicit > provisioned > 1.0 precedence on every recall.
+    /// The product never computes these weights — the quality optimizer is
+    /// the selection brain that emits them (benchmarker/optimizer split).
+    /// Keys are encoded sorted so the stored JSON is deterministic.
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionLaneWeights(
+        _ weights: [String: Float], for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(weights)
+            try await estate.setMeta(
+                key: GeniusLocusKit.laneWeightsMetaKey,
+                value: String(decoding: data, as: UTF8.self))
+        } catch {
+            throw remap(verb: "provisionLaneWeights", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Read back the provisioned default lane weights, or `[:]` when the
+    /// estate carries none (or the stored JSON is malformed — the same
+    /// fail-quiet contract the RecallDirector applies at recall).
+    ///
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionedLaneWeights(for handle: EstateHandle) async throws -> [String: Float] {
+        let estate = try estate(for: handle)
+        guard let json = try? await estate.meta(key: GeniusLocusKit.laneWeightsMetaKey),
+              let data = json.data(using: .utf8),
+              let map = try? JSONDecoder().decode([String: Float].self, from: data)
+        else { return [:] }
+        return map
+    }
+
+    /// Provision the OPTIMIZER-OWNED recall-tuning envelope on an estate:
+    /// a JSON object with the four recall knobs (`rrf_k`, `mmr_lambda`,
+    /// `rrf_bm25_weight`, `rrf_vector_weight`) stored under the
+    /// `"recall_tuning"` manifest key. The HybridRecall consumer reads it
+    /// with caller-explicit > provisioned > spec-default precedence.
+    /// The product never computes these values — the quality optimizer is
+    /// the selection brain that emits them (benchmarker/optimizer split).
+    /// Keys are encoded sorted so the stored JSON is deterministic.
+    ///
+    /// - Parameters:
+    ///   - tuning: the recall-tuning envelope to store.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionRecallTuning(
+        _ tuning: RecallTuningManifest, for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(tuning)
+            try await estate.setMeta(
+                key: GeniusLocusKit.recallTuningMetaKey,
+                value: String(decoding: data, as: UTF8.self))
+        } catch {
+            throw remap(verb: "provisionRecallTuning", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Read back the provisioned recall-tuning envelope, or `.default` when
+    /// the estate carries none (or the stored JSON is malformed — same
+    /// fail-quiet contract the RecallDirector applies at recall).
+    ///
+    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionedRecallTuning(for handle: EstateHandle) async throws -> RecallTuningManifest {
+        let estate = try estate(for: handle)
+        guard let json = try? await estate.meta(key: GeniusLocusKit.recallTuningMetaKey),
+              let data = json.data(using: .utf8),
+              let tuning = try? JSONDecoder().decode(RecallTuningManifest.self, from: data)
+        else { return .default }
+        return tuning
+    }
+
+    /// Provision the OPTIMIZER-OWNED embedding-provider selection on an estate:
+    /// a plain string holding the `EmbeddingProvider.modelID` of the provider
+    /// the Corpus ensemble should use for this estate, stored under the
+    /// `"embedding_provider"` manifest key.
+    ///
+    /// ## Semantics
+    ///
+    /// The selection is optimizer-owned and product-consumed — the same
+    /// benchmarker/optimizer split as `provisionLaneWeights` and
+    /// `provisionRecallTuning`. The product reads the key when constructing
+    /// the estate's Corpus ensemble; it never computes or modifies the
+    /// selection.
+    ///
+    /// An absent key means "use the deterministic default ensemble
+    /// (RI and LSA, both always on)." No estate migration is required.
+    ///
+    /// ## Provider model ID contract
+    ///
+    /// The value stored here is the `EmbeddingProvider.modelID` string, e.g.
+    /// `"apple-nl-v1"` or `"apple-nlembedding-v1"`. The Corpus consumer maps
+    /// it back to a concrete `EmbeddingModel` case at open time. Unknown
+    /// model IDs are ignored (fail-quiet, fallback to deterministic ensemble).
+    ///
+    /// - Parameters:
+    ///   - modelID: the `EmbeddingProvider.modelID` to store.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionEmbeddingProvider(
+        _ modelID: String, for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            // The value is a plain string, not JSON — no encoder needed.
+            // An empty modelID is written as-is; consumers treat unknown IDs
+            // as absent (fall through to the deterministic ensemble default).
+            try await estate.setMeta(
+                key: GeniusLocusKit.embeddingProviderMetaKey,
+                value: modelID)
+        } catch {
+            throw remap(verb: "provisionEmbeddingProvider", estateID: handle.estateUUID.uuidString, error: error)
+        }
+    }
+
+    /// Read back the provisioned embedding-provider model ID, or `nil` when
+    /// the estate carries none. `nil` means "use the deterministic default
+    /// ensemble" — the caller decides what to do with it.
+    ///
+    /// Unlike `provisionedRecallTuning`, there is no typed struct to decode:
+    /// the manifest stores a raw `String` (the `EmbeddingProvider.modelID`)
+    /// and callers map it to a concrete provider themselves. This keeps the
+    /// manifest reader lean and avoids a decoding dependency between
+    /// GeniusLocusKit and CorpusKit's provider registry.
+    ///
+    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    ///
+    /// `package` rather than internal so the 1.6 to 1.7 migration capsule (a
+    /// sibling module) can read the key.
+    package func provisionedEmbeddingProvider(for handle: EstateHandle) async throws -> String? {
+        let estate = try estate(for: handle)
+        // meta(key:) returns nil when the key is absent; an empty string
+        // stored by a previous call is returned as "". Callers treat "" the
+        // same as nil (unknown → deterministic default).
+        return try? await estate.meta(key: GeniusLocusKit.embeddingProviderMetaKey)
+    }
+
+    /// Provision the OPTIMIZER-OWNED door-selection config on an estate:
+    /// a JSON object with the `scoring` field holding the winning
+    /// `GLKRecallScoring` rawValue for this corpus, stored under the
+    /// `"door_config"` manifest key.
+    ///
+    /// ## Semantics
+    ///
+    /// The config is optimizer-owned and product-consumed — the same
+    /// benchmarker/optimizer split as `provisionLaneWeights`,
+    /// `provisionRecallTuning`, and `provisionEmbeddingProvider`. The
+    /// quality optimizer emits it via `quality-optimizer door-recommend`
+    /// from arm-comparison evidence; the product reads it on every
+    /// `moot_memory_search` call when no explicit `door` or `scoring`
+    /// argument is supplied (the A1 per-corpus static config tier).
+    ///
+    /// An absent key means "use the spec default (matrixAware)." No
+    /// estate migration is required.
+    ///
+    /// - Parameters:
+    ///   - config: the door config to store.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionDoorConfig(
+        _ config: DoorManifest, for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(config)
+            try await estate.setMeta(
+                key: GeniusLocusKit.doorConfigMetaKey,
+                value: String(decoding: data, as: UTF8.self))
+        } catch {
+            throw remap(
+                verb: "provisionDoorConfig",
+                estateID: handle.estateUUID.uuidString,
+                error: error)
+        }
+    }
+
+    /// Read back the provisioned door-selection config, or `.default`
+    /// (scoring = `.matrixAware`) when the estate carries none. Malformed
+    /// JSON and unknown scoring strings both fall back to `.default` — the
+    /// same fail-quiet contract `provisionedRecallTuning` applies.
+    ///
+    /// Delegates to `RecallDirector.provisionedDoorConfig(estate:)` — the single
+    /// implementation of the manifest-key decode for this key. One seam: the
+    /// director's internal method reads the key at recall time; this public method
+    /// exposes the same read to callers who only have an `EstateHandle`.
+    ///
+    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionedDoorConfig(for handle: EstateHandle) async throws -> DoorManifest {
+        let estate = try estate(for: handle)
+        return await provisionedDoorConfig(estate: estate)
+    }
+
+    /// Write the user-owned modes-preference config to the estate manifest.
+    ///
+    /// Stored as a JSON object under `"modes_config"`. AriaMcpKit reads it
+    /// once at session start and applies it to `ModeSessionState` (overriding
+    /// the spec defaults). An absent key leaves `ModeSessionState` at its
+    /// defaults (`stickyEnabled = true`, `coachingCalls = 25`).
+    ///
+    /// Part of the same provisioned-manifest family as `provisionDoorConfig`,
+    /// `provisionLaneWeights`, `provisionRecallTuning`, and
+    /// `provisionEmbeddingProvider`. The user (or a configuration tool) owns
+    /// this value; AriaMcpKit only reads it — never computes or overrides it.
+    ///
+    /// - Parameters:
+    ///   - config: the modes config to store.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionModesConfig(
+        _ config: ModesManifest, for handle: EstateHandle
+    ) async throws {
+        let estate = try estate(for: handle)
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.sortedKeys]
+            let data = try encoder.encode(config)
+            try await estate.setMeta(
+                key: GeniusLocusKit.modesConfigMetaKey,
+                value: String(decoding: data, as: UTF8.self))
+        } catch {
+            throw remap(
+                verb: "provisionModesConfig",
+                estateID: handle.estateUUID.uuidString,
+                error: error)
+        }
+    }
+
+    /// Read back the provisioned modes-preference config, or `.default`
+    /// (stickyEnabled = true, coachingCalls = 25) when the estate carries none.
+    /// Malformed JSON also falls back to `.default` — the same fail-quiet
+    /// contract as `provisionedDoorConfig`.
+    ///
+    /// Delegates to `RecallDirector.provisionedModesConfig(estate:)` — the
+    /// single implementation of the manifest-key decode for this key. One seam:
+    /// AriaMcpKit reads the key at session start through this public method.
+    ///
+    /// - Parameter handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionedModesConfig(for handle: EstateHandle) async throws -> ModesManifest {
+        let estate = try estate(for: handle)
+        return await provisionedModesConfig(estate: estate)
+    }
+
+    /// Provision a USER-OWNED estate preference: stored as the plain string
+    /// `"on"` or `"off"` under the key's manifest string (`key.rawValue`).
+    ///
+    /// Part of the same provisioned-manifest family as `provisionModesConfig`,
+    /// `provisionDoorConfig`, `provisionLaneWeights`, `provisionRecallTuning`,
+    /// and `provisionEmbeddingProvider`. The user or an operator tool sets
+    /// this value; `provisionedPreference(_:for:)` reads it back.
+    ///
+    /// An absent key is treated as `.on` (see `provisionedPreference`).
+    /// Seeding capsules write `"on"` on every populated estate so the key is
+    /// physically present and a later change to the default cannot silently
+    /// flip an estate already in use.
+    ///
+    /// - Parameters:
+    ///   - key: the preference to store.
+    ///   - value: the value to store; must be in `key.allowedValues`.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.invalidManifest` if `value` is not in
+    ///   `key.allowedValues`; `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionPreference(
+        _ key: EstatePreferenceKey, _ value: EstatePreferenceValue, for handle: EstateHandle
+    ) async throws {
+        guard key.allowedValues.contains(value) else {
+            let allowed = key.allowedValues.map(\.rawValue).joined(separator: ", ")
+            throw GeniusLocusKitError.invalidManifest(
+                key: key.rawValue,
+                detail: "value '\(value.rawValue)' is not allowed for '\(key.rawValue)'; allowed: \(allowed)")
+        }
+        let estate = try estate(for: handle)
+        do {
+            // The value is a plain string — the rawValue of the enum.
+            // No JSON encoding needed; the reader uses rawValue init.
+            try await estate.setMeta(key: key.rawValue, value: value.rawValue)
+        } catch {
+            throw remap(
+                verb: "provisionPreference",
+                estateID: handle.estateUUID.uuidString,
+                error: error)
+        }
+    }
+
+    /// Read back a provisioned estate preference, or `key.defaultValue` when
+    /// the estate carries none.
+    ///
+    /// Absent key, unrecognised string, value outside `key.allowedValues`, or
+    /// storage error each return `key.defaultValue` (fail-quiet). For the six
+    /// on/off switches the default is `.on`; for `fact_extractor` the default
+    /// is `.nuextract`. Use `provisionPreference(_:_:for:)` to write.
+    ///
+    /// - Parameters:
+    ///   - key: the preference to read.
+    ///   - handle: the estate handle returned by `open` or `provision`.
+    /// - Throws: `GeniusLocusKitError.estateNotOpen` if `handle` is stale.
+    func provisionedPreference(
+        _ key: EstatePreferenceKey, for handle: EstateHandle
+    ) async throws -> EstatePreferenceValue {
+        let estate = try estate(for: handle)
+        // meta(key:) returns nil when the key is absent → key.defaultValue.
+        // An unrecognised string returns nil from rawValue init → key.defaultValue.
+        // A value not in key.allowedValues (e.g. reading on/off for fact_extractor) → key.defaultValue.
+        guard let raw = try? await estate.meta(key: key.rawValue),
+              let value = EstatePreferenceValue(rawValue: raw),
+              key.allowedValues.contains(value)
+        else { return key.defaultValue }
+        return value
     }
 
     /// Count all rows in the recall_trace table for the estate addressed by

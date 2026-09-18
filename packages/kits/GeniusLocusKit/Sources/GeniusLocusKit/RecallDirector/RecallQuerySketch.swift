@@ -3,6 +3,12 @@ import LocusKit
 
 /// A compiled query sketch derived from a `GLKRecallRequest`.
 ///
+/// M4 (lattice-anchor single-derivation): `latticeAnchor` is now populated
+/// by both `compileSketch` paths using `QueryLatticeAnchor.derive(from:)` so
+/// derivation happens exactly once — here — and is surfaced to callers via
+/// `GLKRecallResult.queryLatticeAnchor`. CognitionKit reads the pre-computed
+/// anchor from the result rather than re-deriving from the query text.
+///
 /// The sketch extracts `queryText` from the request and — when a `Corpus`
 /// instance is available for the estate — pre-embeds it into `queryEngram`
 /// for the vector lane. `queryTokens` are derived from `queryText` and
@@ -53,6 +59,13 @@ struct RecallQuerySketch: Sendable {
     /// capitalization-heuristic `defaultExtractor`. nil when no structural
     /// features were found or the query text is blank.
     let queryFingerprint: Engram?
-    /// Lattice anchor from the request's frame, if present.
-    let latticeAnchor: LocusKit.LatticeAnchor?
+    /// The query's §8.3 lattice anchor, derived by `QueryLatticeAnchor.derive(from:)`
+    /// from the request's `queryText`. nil when `queryText` is nil, blank, or
+    /// unanchorable (no noun / phrase found in the FDC/QID tables).
+    ///
+    /// Populated by BOTH `compileSketch` paths (corpus and no-corpus) so the
+    /// anchor is derived exactly once. Surfaced to callers via
+    /// `GLKRecallResult.queryLatticeAnchor`. CognitionKit's PreciseRecall and
+    /// TemporalRecall read it there rather than re-deriving from the query text.
+    let latticeAnchor: QueryLatticeAnchor.Anchor?
 }

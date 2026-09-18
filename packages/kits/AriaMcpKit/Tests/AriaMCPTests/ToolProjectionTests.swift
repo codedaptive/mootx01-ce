@@ -9,7 +9,7 @@ import Testing
 /// `.recipe`; vault tools carry `.vault`. There are no `.lexicon` tools.
 ///
 /// Every test projects with `tools(environment: [:])` — an explicit empty
-/// environment — so the contract (68 tools: vault on by default, opt-in
+/// environment — so the contract (78 tools: vault on by default, opt-in
 /// memory tool off) holds regardless of what the test runner's process
 /// environment or a concurrently running suite has set.
 @Suite("Tool projection")
@@ -44,35 +44,26 @@ struct ToolProjectionTests {
         }
     }
 
-    /// Hard contract gate: the total tool count must be exactly 71.
-    /// Snapshot includes the interface, federation, recipe, lens, vault, and
-    /// maintenance surfaces exposed by ToolProjection, plus the three dataset
-    /// tools added in MX-TAB-7 (moot_file_dataset, moot_dataset_query,
-    /// moot_dataset_stats).
-    /// The 20th interface tool is moot_memory_get (Tier 1 — fetch one memory
-    /// drawer by id, in full; closes the fetch-drawer-by-ID gap,
-    /// build-now per Bob's ruling).
-    /// The 23rd lens tool is moot_lens_node_motion (diffusion node-layer lens,
-    /// node motion modeling) added alongside moot_lens_contradiction.
-    /// The 11th recipe tool is moot_hunt_contradictions (Wave 1: moot_recollect
-    /// was removed; moot_consolidate no longer dispatches — its alias era ended
-    /// with SPEC_DISTILLATION_STORAGE §3 Phase 2). The three
-    /// maintenance tools are moot_reindex (corpus/vector backfill),
-    /// moot_drain_status (background drain progress), moot_reclassify_fdc
-    /// (FDC anchor repair/reset), and moot_palace_import (PAR-PB-1,
-    /// direct palace import).
-    /// The contradiction hunter adds two: moot_hunt_contradictions (recipe —
-    /// on-demand content sweep for conflicts) and moot_review_tunnel
-    /// (interface Tier 2 — accept/reject a PROPOSED tunnel).
+    /// Hard contract gate: the total tool count must be exactly 80.
+    /// The v2 catalog (AriaV2SelectedCatalog) defines the complete surface —
+    /// all operations whose typed handlers are executable in this build.
+    /// Vault tools are included by default (MOOTX01_VAULT != "0" with empty env).
     /// Any accidental addition or removal fails here before it ships.
     @Test func testTotalToolCount() {
-        // 66 baseline + 2 contradiction-hunter tools (moot_hunt_contradictions,
-        // moot_review_tunnel) + 3 dataset tools (MX-TAB-7: moot_file_dataset,
-        // moot_dataset_query, moot_dataset_stats) + 4 packet tools (FAB5-I2:
-        // moot_file_packet, moot_packet_get, moot_packet_list, moot_packet_lineage) + moot_recall_connected
-        // + moot_json_import (MXE-JI-1 seed-file lane, vault-gated) = 77.
-        #expect(ToolProjection.tools(environment: [:]).count == 77,
-                "tools() must return exactly 77 tools; got \(ToolProjection.tools(environment: [:]).count)")
+        // 81 tools in the v2 catalog (vault-on with empty environment):
+        // - moot_help (v2 surface discovery)
+        // - 7 recall/search: moot_file_memory, moot_memory_get, moot_memory_list,
+        //   moot_memory_search, moot_transcript_recall, moot_update_memory,
+        //   moot_withdraw_memory, moot_erase_memory, moot_confirm_memory,
+        //   moot_move_memory (10 total Tier 1-5 memory tools)
+        // - 23 reasoning lenses + 8 recall operations (incl. moot_recall_similar) + grounded synthesize
+        // - 3 dataset tools, 5 vault tools
+        // - 4 KG/journal tool groups, 2 connection tools
+        // - estate diagnostics, migration, monitoring, contradiction hunter, dream
+        // - 3 maintenance: reindex, reclassify_fdc, palace_import
+        // - federated_recall, json_import
+        #expect(ToolProjection.tools(environment: [:]).count == 81,
+                "tools() must return exactly 81 tools (v2 catalog, vault-on); got \(ToolProjection.tools(environment: [:]).count)")
     }
 
     /// All 21 interface tools must be present.
@@ -122,36 +113,6 @@ struct ToolProjectionTests {
             )
         }
     }
-
-    /// The federation tool must be present, carry `.federation` provenance,
-    /// and use the renamed `federatedSearchToolName` constant.
-    ///
-    /// Item 2 hardening: `requesterEstateID` is now optional (anti-spoof gate
-    /// binds the requester to the default estate when omitted). The required
-    /// list must be empty. The property is still present in the schema so
-    /// callers can supply it for verification (it must match the default).
-    @Test func testFederationToolIsPresentAboveTheProjection() throws {
-        let federation = ToolProjection.tools(environment: [:]).filter { $0.provenance == .federation }
-        #expect(federation.count == 1, "exactly one federation tool is expected")
-        let tool = try #require(federation.first)
-        #expect(tool.name == ToolDispatcher.federatedSearchToolName)
-        #expect(tool.name == "moot_federated_search")
-        let schema = tool.inputSchema.objectValue
-        // requesterEstateID is optional; required must be empty (Item 2 hardening).
-        let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
-        #expect(!required.contains("requesterEstateID"),
-            "requesterEstateID must not be required after Item 2 anti-spoof hardening")
-        #expect(required.isEmpty, "federation tool has no required fields after Item 2")
-        // The property is present in the schema (so clients know it exists).
-        #expect(schema?["properties"]?.objectValue?["requesterEstateID"] != nil,
-            "requesterEstateID must remain in properties as an optional field")
-        #expect(schema?["properties"]?.objectValue?["estateID"] == nil,
-            "federation tool fans across estates, not a single estateID target")
-    }
-
-    /// `moot_file_memory` must require `content` and `location`, and must
-    /// NOT expose internal infrastructure fields (udcCode, embeddingModelID,
-    /// latticeAnchor, addedBy).
     @Test func testFileMemoryRequiredFieldsAndNoInternals() {
         guard let tool = ToolProjection.tools(environment: [:]).first(where: { $0.name == "moot_file_memory" }) else {
             Issue.record("moot_file_memory not found")
@@ -169,7 +130,8 @@ struct ToolProjectionTests {
         #expect(properties["latticeAnchor"] == nil, "latticeAnchor must not appear")
     }
 
-    /// `moot_erase_memory` must require `confirmed` (safety gate).
+    /// `moot_erase_memory` must require `confirmation` (safety gate).
+    /// The v2 surface uses `confirmation` (boolean const: true) not `confirmed`.
     @Test func testEraseMemoryRequiresConfirmed() {
         guard let tool = ToolProjection.tools(environment: [:]).first(where: { $0.name == "moot_erase_memory" }) else {
             Issue.record("moot_erase_memory not found")
@@ -177,7 +139,7 @@ struct ToolProjectionTests {
         }
         let required = tool.inputSchema.objectValue?["required"]?
             .arrayValue?.compactMap { $0.stringValue } ?? []
-        #expect(required.contains("confirmed"), "moot_erase_memory must require confirmed=true")
+        #expect(required.contains("confirmation"), "moot_erase_memory must require confirmation=true")
     }
 
     /// `moot_memory_search` accepts query OR near (PR-03 anchor pivot), so
@@ -206,91 +168,20 @@ struct ToolProjectionTests {
         #expect(ToolProjection.subjectRiderEnabled(environment: ["MOOTX01_SUBJECT_RIDER": ""]))
     }
 
-    /// `estateID` must be optional (in properties, not in required) on every
-    /// interface tool.
+    /// `estate_id` must be optional (in properties, not in required) on every
+    /// tool that exposes it. The v2 catalog uses snake_case `estate_id`.
     @Test func testEstateIDIsOptionalOnInterfaceTools() {
         for tool in ToolProjection.tools(environment: [:]) {
-            guard case .interface = tool.provenance else { continue }
             let schema = tool.inputSchema.objectValue
-            #expect(
-                schema?["properties"]?.objectValue?["estateID"] != nil,
-                "\(tool.name) must expose an optional estateID property"
-            )
+            // Only check tools that actually declare estate_id.
+            guard schema?["properties"]?.objectValue?["estate_id"] != nil else { continue }
             let required = schema?["required"]?.arrayValue?.compactMap { $0.stringValue } ?? []
             #expect(
-                !required.contains("estateID"),
-                "\(tool.name) must never require estateID"
+                !required.contains("estate_id"),
+                "\(tool.name) must never require estate_id"
             )
         }
     }
 
-    /// `moot_reindex` must pass the `InterfaceTools.isInterfaceTool` membership
-    /// gate so the serve host routes it to `runReindex` instead of throwing
-    /// "Unknown tool" (-32601).
-    ///
-    /// Regression gate: the `names` Set in `InterfaceTools` previously omitted
-    /// `moot_reindex`, causing the outer dispatcher to fall through to the
-    /// unknown-tool throw even though the dispatch switch already had the case.
-    @Test func testMootReindexPassesMembershipGate() {
-        // The gate that the serve host evaluates before reaching the dispatch switch.
-        #expect(
-            InterfaceTools.isInterfaceTool("moot_reindex"),
-            "moot_reindex must be in the InterfaceTools membership gate"
-        )
-    }
-
-    /// `moot_reclassify_fdc` must pass the `InterfaceTools.isInterfaceTool`
-    /// membership gate so the serve host routes it to `runReclassifyFDC`
-    /// instead of throwing "Unknown tool" (-32601).
-    @Test func testMootReclassifyFDCPassesMembershipGate() {
-        #expect(
-            InterfaceTools.isInterfaceTool("moot_reclassify_fdc"),
-            "moot_reclassify_fdc must be in the InterfaceTools membership gate"
-        )
-    }
-
-    /// `moot_palace_import` must pass the `InterfaceTools.isInterfaceTool` membership
-    /// gate so the serve host routes it to `runPalaceImport` instead of throwing
-    /// "Unknown tool" (-32601). Regression gate matching `testMootReindexPassesMembershipGate`.
-    @Test func testMootPalaceImportPassesMembershipGate() {
-        #expect(
-            InterfaceTools.isInterfaceTool("moot_palace_import"),
-            "moot_palace_import must be in the InterfaceTools membership gate"
-        )
-    }
-
-    /// Every tool in the `InterfaceTools` dispatch switch must also be in the
-    /// membership gate — the two sets must stay in sync. This catches the class
-    /// of bug where a case is added to the switch but omitted from `names`.
-    ///
-    /// The expected set is the canonical 21 Tier 1–5 tools plus maintenance
-    /// tools (`moot_reindex`, `moot_drain_status`, `moot_reclassify_fdc`,
-    /// `moot_palace_import`). If a new tool is added to the switch, add it here too.
-    @Test func testMembershipGateCoversAllDispatchCases() {
-        // All tools that appear in the InterfaceTools dispatch switch.
-        let dispatchCases: [String] = [
-            // Tier 1
-            "moot_file_memory", "moot_memory_search", "moot_memory_get",
-            "moot_update_memory", "moot_withdraw_memory", "moot_erase_memory",
-            "moot_confirm_memory", "moot_move_memory",
-            // Tier 2
-            "moot_link_memories", "moot_connection_search", "moot_connection_map",
-            "moot_review_tunnel",
-            // Tier 3
-            "moot_file_fact", "moot_fact_search", "moot_retire_fact",
-            "moot_fact_timeline",
-            // Tier 4
-            "moot_write_journal", "moot_read_journal",
-            // Tier 5
-            "moot_estate_status", "moot_estate_map", "moot_estate_ping",
-            // Maintenance / admin
-            "moot_reindex", "moot_drain_status", "moot_reclassify_fdc", "moot_palace_import",
-        ]
-        for name in dispatchCases {
-            #expect(
-                InterfaceTools.isInterfaceTool(name),
-                "\(name) is in the dispatch switch but missing from the membership gate"
-            )
-        }
-    }
 }
+

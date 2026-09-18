@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 import GeniusLocusKit
 import QueueKit
@@ -102,7 +103,7 @@ public struct PalacePump: Sendable {
     /// Injected clock (determinism rule); drives the QueueKit HLC.
     private let now: @Sendable () -> Date
 
-    private static let log = Logger(subsystem: "com.mootx01.kit", category: "VaultKit")
+    private static let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "VaultKit")
 
     /// - Parameters:
     ///   - client: a connected ``MCPStdioClient`` bound to the MemPalace

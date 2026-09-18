@@ -20,7 +20,46 @@ public struct EstateFormatVersion: Sendable, Codable, Hashable, Comparable,
 
     public static let v1_0 = EstateFormatVersion(major: 1, minor: 0)
     public static let v1_1 = EstateFormatVersion(major: 1, minor: 1)
-    public static let current = v1_1
+    /// Format 1.2: the corpus_index_state composition_policy column reached
+    /// populated estates through the migration catalog. CorpusKit's own
+    /// checkpoint ladder adds that column at open, so no capsule separates
+    /// 1.1 from 1.2 any more.
+    public static let v1_2 = EstateFormatVersion(major: 1, minor: 2)
+    /// Format 1.3: the drawers distilled_source_digest column (LocusKit schema
+    /// v18) reaches populated estates through the migration catalog.
+    public static let v1_3 = EstateFormatVersion(major: 1, minor: 3)
+    /// Format 1.4: the index composition policy was a stored estate setting
+    /// (LocusKit manifest key `index_composition_policy`), seeded on every
+    /// populated estate through the migration catalog. The setting retired
+    /// with the policy; no capsule separates 1.3 from 1.4 any more.
+    public static let v1_4 = EstateFormatVersion(major: 1, minor: 4)
+    /// Format 1.5: the schema-version ledger carries the vector tier under
+    /// its SynapseKit ids (`SynapseKit`, `SynapseKitClaims`); the rows of
+    /// every populated estate are moved there through the migration catalog.
+    public static let v1_5 = EstateFormatVersion(major: 1, minor: 5)
+    /// Format 1.6: the retired `corpus_index_state.composition_policy` column
+    /// is dropped from every populated estate through the migration catalog
+    /// (CorpusKit checkpoint schema v4).
+    public static let v1_6 = EstateFormatVersion(major: 1, minor: 6)
+    /// Format 1.7: the whole-record float rows (`vectors` kind 1) and the
+    /// `hnsw_graph` rows are vacuumed from every populated estate through the
+    /// migration catalog, the binary sidecar is rebuilt and the float
+    /// representation claim is released; a fresh estate is born without them.
+    public static let v1_7 = EstateFormatVersion(major: 1, minor: 7)
+    /// Format 1.8: the fact-extraction toggle (`fact_extraction` manifest key)
+    /// is seeded as `"on"` on every populated estate through the migration
+    /// catalog, so the on-by-default ruling is recorded per estate rather than
+    /// inferred from an absent key, and an operator's opt-out survives a later
+    /// change to the default.
+    public static let v1_8 = EstateFormatVersion(major: 1, minor: 8)
+    /// Format 1.9: the consolidation, contradiction_sweep,
+    /// cross_encoder_routing, maintenance and adaptive_recall preferences are
+    /// seeded "on" on every populated estate, and the recall_ratings table
+    /// exists.
+    public static let v1_9 = EstateFormatVersion(major: 1, minor: 9)
+    /// Format 1.10: keyed matrix records; legacy snapshot retired during offline upgrade.
+    public static let v1_10 = EstateFormatVersion(major: 1, minor: 10)
+    public static let current = v1_10
 
     public static func < (lhs: Self, rhs: Self) -> Bool {
         (lhs.major, lhs.minor) < (rhs.major, rhs.minor)

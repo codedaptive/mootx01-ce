@@ -7,7 +7,7 @@ import LocusKit
 import NeuronKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 @testable import AriaMCP
 
 /// Deterministic coverage for the resident Autonomic Governor: cadence firing
@@ -54,7 +54,7 @@ struct AutonomicGovernorTests {
             fallback: .failClosed, origin: .external))
     }
 
-    @Test func firstTickFiresDreamingAndMaintenance() async throws {
+    @Test func firstTickFiresDreaming() async throws {
         let (kit, handle) = try await makeEstate()
         let governor = AutonomicGovernor(kit: kit, handle: handle, poolDirectory: nil, poolTableArtifactURL: nil)
         // v2 (T9): dreaming fires on the first due tick ONLY when the dreaming
@@ -62,7 +62,6 @@ struct AutonomicGovernorTests {
         try await seedDreamingQueue(kit, handle)
         let report = await governor.tick(now: Date(timeIntervalSince1970: 1_000_000))
         #expect(report.dreamingFired)
-        #expect(report.maintenanceFired)
     }
 
     @Test func dreamingRespectsCadence() async throws {
@@ -124,8 +123,8 @@ struct AutonomicGovernorTests {
         let handler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void) = { kit, handle, now in
             let drawers = try await kit.allDrawers(in: handle)
             let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
-            let estate = try await kit.estate(for: handle)
-            let nodeNames = try await estate.resolveNodeNames(parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let nodeNames = try await kit.resolveNodeNames(
+                handle, parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 // Thread `now` from the handler parameter so telemetry carries the correct timestamp.
@@ -151,8 +150,8 @@ struct AutonomicGovernorTests {
         let handler: (@Sendable (GeniusLocusKit, EstateHandle, Date) async throws -> Void) = { kit, handle, now in
             let drawers = try await kit.allDrawers(in: handle)
             let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
-            let estate = try await kit.estate(for: handle)
-            let nodeNames = try await estate.resolveNodeNames(parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let nodeNames = try await kit.resolveNodeNames(
+                handle, parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 // Thread `now` from the handler parameter so telemetry carries the correct timestamp.

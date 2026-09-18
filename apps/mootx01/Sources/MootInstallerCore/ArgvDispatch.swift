@@ -14,6 +14,15 @@
 // name). Naming the executed program `mootx01-proxy` (argv[0]) is how
 // such a config still reaches `ProxyCommand` without an args array.
 //
+// `mootx01-botLink` (BL-1): the explicit AI data path for cloud agents
+// whose only channel to this Mac is a permissioned one-shot shell. The
+// agent execs `mootx01-botLink <subcommand>` by name; argv0 dispatch
+// prepends `botlink` so the invocation reaches `BotLinkCommand`'s
+// subcommands (`ping`/`list`/`call`/`rpc`). Unlike the proxy route —
+// which is a bare-invocation default because ProxyCommand takes no
+// subcommands — the botLink route namespaces args-carrying invocations
+// too: `mootx01-botLink ping` becomes `botlink ping`.
+//
 // This file is the PURE decision logic only — extracted into
 // MootInstallerCore (rather than living inline in MootMain.swift, an
 // untested executable-target entry point) so it is directly unit
@@ -32,23 +41,32 @@ public enum ArgvDispatch {
     /// The argv0 basename that triggers implicit `proxy` dispatch.
     public static let proxyInvocationName = "mootx01-proxy"
 
+    /// The argv0 basename that triggers implicit `botlink` dispatch (BL-1).
+    /// Matches the `mootx01-botLink → mootx01` symlink the installer places
+    /// beside the binary — capital L is deliberate and must match
+    /// `Installer.placeBinary`'s symlink name exactly.
+    public static let botLinkInvocationName = "mootx01-botLink"
+
     /// Resolve the effective CLI arguments given the raw argv and how
     /// the binary was invoked.
     ///
-    /// Two back-compat injections, evaluated in this order, and BOTH
-    /// only ever apply to a truly bare invocation (`rawArgs.isEmpty`).
-    /// Neither fires when the caller already named an explicit
-    /// subcommand (or passed `--help`/`--version`) — argv0 dispatch and
-    /// the bare-serve default are defaults for absent input, never
-    /// overrides of explicit input.
+    /// Three injections, evaluated in this order:
     ///
-    /// 1. `argv0`'s last path component is `mootx01-proxy` → inject
-    ///    `["proxy"]`. This is the NEW behavior this file adds.
-    /// 2. Otherwise, `stdinIsPipe` (non-interactive) → inject `["serve"]`.
-    ///    This is the PRE-EXISTING MCP-client back-compat default
-    ///    (originally inline in MootMain.swift: a client config with
-    ///    `"command": "mootx01"` and no subcommand still starts the
-    ///    server). Moved here unchanged so both defaults share one
+    /// 1. `argv0`'s last path component is `mootx01-botLink` → PREPEND
+    ///    `"botlink"` to the raw args (BL-1). This route namespaces rather
+    ///    than defaulting: the symlink IS the cloud agent's command surface,
+    ///    so `mootx01-botLink ping` must reach `botlink ping` and
+    ///    `mootx01-botLink --help` must print botlink usage. A leading
+    ///    explicit `botlink` is left untouched (no double-prepend).
+    /// 2. `argv0`'s last path component is `mootx01-proxy` AND the
+    ///    invocation is truly bare (`rawArgs.isEmpty`) → inject `["proxy"]`.
+    ///    ProxyCommand takes no subcommands, so the bare-only default is the
+    ///    whole surface; explicit args always pass through unchanged.
+    /// 3. Otherwise, bare invocation with `stdinIsPipe` (non-interactive) →
+    ///    inject `["serve"]`. This is the PRE-EXISTING MCP-client
+    ///    back-compat default (originally inline in MootMain.swift: a client
+    ///    config with `"command": "mootx01"` and no subcommand still starts
+    ///    the server). Moved here unchanged so all defaults share one
     ///    tested decision point.
     ///
     /// - Parameters:
@@ -66,8 +84,16 @@ public enum ArgvDispatch {
         rawArgs: [String],
         stdinIsPipe: Bool
     ) -> [String] {
+        let basename = (argv0 as NSString).lastPathComponent
+        if basename == botLinkInvocationName {
+            // Namespacing route — see rule 1 in the doc comment. Evaluated
+            // before the bare-invocation guard because it applies to args-
+            // carrying invocations too (`mootx01-botLink ping`).
+            if rawArgs.first == "botlink" { return rawArgs }
+            return ["botlink"] + rawArgs
+        }
         guard rawArgs.isEmpty else { return rawArgs }
-        if (argv0 as NSString).lastPathComponent == proxyInvocationName {
+        if basename == proxyInvocationName {
             return ["proxy"]
         }
         if stdinIsPipe {

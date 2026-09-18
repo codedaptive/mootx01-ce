@@ -17,7 +17,7 @@ use persistence_kit::{BackendConfiguration, Storage};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OpenFlags};
 
 // MARK: — InvertedIndexStore
 
@@ -106,6 +106,24 @@ impl InvertedIndexStore {
         Self::open(conn)
     }
 
+    /// Open existing SQLite index tables without DDL or a writable connection.
+    /// Non-SQLite backends retain their ephemeral index and write no durable data.
+    pub fn open_readonly_for_storage(storage: &Arc<dyn Storage>) -> Result<Self, rusqlite::Error> {
+        match &storage.configuration().backend {
+            BackendConfiguration::Sqlite { path, busy_timeout_secs } => {
+                let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+                persistence_kit::apply_install_encryption_to_conn(&conn, path)?;
+                conn.busy_timeout(std::time::Duration::from_secs_f64(*busy_timeout_secs))?;
+                // Validate the columns used by query hydration, without creating
+                // missing tables or reading the complete index at startup.
+                conn.prepare("SELECT term, item_id, freq FROM iix_termfreqs LIMIT 0")?;
+                conn.prepare("SELECT item_id, length FROM iix_doclens LIMIT 0")?;
+                Ok(Self { state: Mutex::new(StoreState { conn, cached: None }) })
+            }
+            _ => Self::open(Connection::open_in_memory()?),
+        }
+    }
+
     fn create_tables(conn: &Connection) -> Result<(), rusqlite::Error> {
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS iix_termfreqs (
@@ -169,29 +187,49 @@ impl InvertedIndexStore {
     ) -> Result<(), rusqlite::Error> {
         let mut state = self.state.lock().expect("mutex poisoned");
 
-        // Remove existing state from durable tables only.
-        Self::delete_from_db(&state.conn, item_id)?;
-
-        if tokens.is_empty() { state.cached = None; return Ok(()); }
-
-        // Compute term frequencies.
-        let mut tf: HashMap<String, usize> = HashMap::new();
-        for t in tokens { *tf.entry(t.clone()).or_insert(0) += 1; }
-        let doc_len = tokens.len();
-
-        // Persist to SQLite only — no in-memory mirror.
-        for (term, freq) in &tf {
-            state.conn.execute(
-                "INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq) VALUES (?1, ?2, ?3)",
-                params![term, item_id, *freq as i64],
+        // One savepoint per record (DRAIN-BATCH-TXN, 2026-08-29): a record
+        // indexes one row per TERM, and per-term autocommits made the queue
+        // drain spend its wall clock in commit/checkpoint fsync (sampled
+        // 46-68% on external volumes). A savepoint self-commits at RELEASE
+        // when no enclosing transaction is open (the queue-drain path) and
+        // nests silently inside `begin_batch`/`ingest_batch` brackets — so
+        // every caller gets at most one durable commit per record without
+        // this store's private write lock ever spanning foreign writes.
+        state.conn.execute_batch("SAVEPOINT iix_index")?;
+        let write_all = |conn: &rusqlite::Connection| -> Result<(), rusqlite::Error> {
+            // Remove existing state from durable tables only.
+            Self::delete_from_db(conn, item_id)?;
+            if tokens.is_empty() { return Ok(()); }
+            // Compute term frequencies.
+            let mut tf: HashMap<String, usize> = HashMap::new();
+            for t in tokens { *tf.entry(t.clone()).or_insert(0) += 1; }
+            let doc_len = tokens.len();
+            // Persist to SQLite only — no in-memory mirror.
+            for (term, freq) in &tf {
+                conn.execute(
+                    "INSERT OR REPLACE INTO iix_termfreqs (term, item_id, freq) VALUES (?1, ?2, ?3)",
+                    params![term, item_id, *freq as i64],
+                )?;
+            }
+            conn.execute(
+                "INSERT OR REPLACE INTO iix_doclens (item_id, length) VALUES (?1, ?2)",
+                params![item_id, doc_len as i64],
             )?;
+            Ok(())
+        };
+        match write_all(&state.conn) {
+            Ok(()) => {
+                state.conn.execute_batch("RELEASE iix_index")?;
+                state.cached = None;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = state
+                    .conn
+                    .execute_batch("ROLLBACK TO iix_index; RELEASE iix_index");
+                Err(error)
+            }
         }
-        state.conn.execute(
-            "INSERT OR REPLACE INTO iix_doclens (item_id, length) VALUES (?1, ?2)",
-            params![item_id, doc_len as i64],
-        )?;
-        state.cached = None;
-        Ok(())
     }
 
     // MARK: — Batch transaction bracket
@@ -206,8 +244,10 @@ impl InvertedIndexStore {
     // Corpus.storage), and SQLite is single-writer: a held `BEGIN IMMEDIATE`
     // takes the file write lock, so `Corpus::ingest_batch` sequences this
     // window AFTER the storage-connection transaction has committed — the two
-    // connections never hold overlapping write locks. Mirrors the Swift twin's
-    // beginBatch/commitBatch/rollbackBatch.
+    // connections never hold overlapping write locks. The Swift twin batches
+    // the same writes through `storage.transaction` with an `into: rowStore`
+    // parameter on `index()` — same one-commit-per-batch contract, different
+    // mechanism because the Swift store shares the estate connection.
 
     /// Open a write transaction on the sidecar connection. Caller MUST pair with
     /// `commit_batch` (success) or `rollback_batch` (error). `BEGIN IMMEDIATE`

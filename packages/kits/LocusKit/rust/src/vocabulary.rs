@@ -39,6 +39,9 @@ pub fn union_slots() -> Vec<FieldSlot> {
         FieldSlot::new(Column::Operational, 12, 12, "feature_flags"),
         FieldSlot::new(Column::Operational, 24, 1, "state_extension"),
         FieldSlot::new(Column::Operational, 25, 1, "lineage_clustering"),
+        // Bits 26 (is_anomalous) and 27 (span_indexed) are derived-signal
+        // bits their maintenance paths write through direct bitmap updates,
+        // outside the write gate; they carry no vocabulary slot.
         // provenance bitmap (cookbook §2.5)
         FieldSlot::with_values(
             Column::Provenance,

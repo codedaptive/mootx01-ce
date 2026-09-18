@@ -138,6 +138,15 @@ pub struct CaptureFrame {
     /// contract (B-18) before the row exists. Mirrors Swift
     /// `CaptureFrame.subject: String?`.
     pub subject: Option<String>,
+    /// Per-record capture timestamp in epoch milliseconds (schema v1.2
+    /// import seam). When `Some`, `capture_batch` uses this as the
+    /// ingest clock for the resulting drawer (`filed_at`) and derives the
+    /// HLC physical time from it, enabling spread-capture benchmark
+    /// estates where distinct records simulate filing at distinct instants.
+    /// `None` → `capture_batch`'s `now` parameter (byte-identical
+    /// legacy behavior for all existing callers). Mirrors Swift
+    /// `CaptureFrame.captureDate: Date?`.
+    pub capture_date: Option<i64>,
 }
 
 impl CaptureFrame {
@@ -180,6 +189,10 @@ impl CaptureFrame {
             // default None → born as subject debt (B-21); the ARIA
             // file_memory boundary supplies a real subject.
             subject: None,
+            // default None → capture_batch wall-clock now is used for
+            // filed_at, preserving byte-identical behavior for all existing
+            // callers. Import paths set this from the record's capture_date.
+            capture_date: None,
         }
     }
 }

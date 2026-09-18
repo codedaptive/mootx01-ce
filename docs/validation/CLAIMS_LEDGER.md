@@ -100,9 +100,9 @@ by I-16 and I-15 respectively; they are listed below as
 - Type: invariant
 - Status: active in v1.0
 - Evidence: pending. `modelID` and `modelVersion` are non-optional
-  parameters of the VectorKit lane-store write surface (exercised
+  parameters of the SynapseKit lane-store write surface (exercised
   throughout
-  `packages/kits/VectorKit/Tests/VectorKitTests/FloatLaneStoreTests.swift`),
+  `packages/kits/SynapseKit/Tests/SynapseKitTests/FloatLaneStoreTests.swift`),
   so the absent case is structurally unrepresentable there.
   Missing: an explicit negative test asserting a rung 2/3/4 write
   without model identification fails.
@@ -190,7 +190,7 @@ by I-16 and I-15 respectively; they are listed below as
 - Type: invariant
 - Status: active in v1.0
 - Evidence: evidenced by composition. GLK depends on LocusKit,
-  VectorKit, and CorpusKit per the kit-composition test
+  SynapseKit, and CorpusKit per the kit-composition test
   surfaces; no external storage adapter exists.
 - Evidence pointer:
   `packages/kits/GeniusLocusKit/Tests/GeniusLocusKitTests/CompositionConformanceTests.swift`.

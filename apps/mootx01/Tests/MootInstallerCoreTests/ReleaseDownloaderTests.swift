@@ -38,11 +38,11 @@ private func ok(_ url: String, _ data: Data) -> (String, Result<(Data, URLRespon
 
 // MARK: - Platform helpers
 
-#if !os(macOS)
 /// Locate the `minisign` executable via `which(1)`. Returns the full path when
 /// minisign is present in PATH, `nil` when it is absent. Used by tests that
 /// require minisign to actually run (as opposed to tests that mock the fetch
-/// layer and never reach the subprocess).
+/// layer or inject a stub verifier and never reach the subprocess). Available
+/// on every platform: the minisign gate runs on macOS too (UP-01).
 private func findMinisignInPath() -> String? {
     // Try which(1) at the two common POSIX locations.
     for whichPath in ["/usr/bin/which", "/bin/which"] {
@@ -62,7 +62,6 @@ private func findMinisignInPath() -> String? {
     }
     return nil
 }
-#endif
 
 // MARK: - Tests
 
@@ -204,11 +203,12 @@ struct ReleaseDownloaderTests {
         }
     }
 
-    /// A matching SHA-256 line is not enough on Linux/POSIX: checksums.txt must
+    /// A matching SHA-256 line is not enough on ANY platform: checksums.txt must
     /// also have a detached minisign signature. This prevents a tampered release
     /// endpoint from supplying a malicious tarball plus a matching checksum file.
+    /// Runs on macOS too (UP-01): the missing-.minisig fetch fails before the
+    /// verifier is ever reached, so no minisign install is required here.
     @Test func downloadRequiresMinisignSignatureWhenChecksumMatches() async throws {
-        #if !os(macOS)
         let tag = "v1.1.0"
 
         #if arch(arm64)
@@ -216,7 +216,11 @@ struct ReleaseDownloaderTests {
         #else
         let arch = "x86_64"
         #endif
+        #if os(macOS)
+        let os = "macos"
+        #else
         let os = "linux"
+        #endif
         let tarball  = "mootx01-\(tag)-\(os)-\(arch).tar.gz"
         let base     = "https://github.com/codedaptive/mootx01-ce/releases/download/\(tag)"
 
@@ -278,23 +282,21 @@ struct ReleaseDownloaderTests {
         } catch {
             Issue.record("Unexpected error type when minisig is absent: \(error)")
         }
-        #endif
     }
 
-        /// A structurally-valid minisign signature made with a key OTHER THAN the
+    /// A structurally-valid minisign signature made with a key OTHER THAN the
     /// embedded production public key must be rejected. This exercises the actual
     /// signature-validation rejection path: checksum verification passes (the
     /// SHA-256 is correct), the .minisig URL is fetched successfully, but
     /// `minisign -V` exits non-zero because the signature was made with a
     /// throwaway key that the embedded BC4D1E6ABCB5B788 pubkey cannot verify.
     ///
-    /// Gated #if !os(macOS): the production verify path skips minisign on macOS
-    /// (Gatekeeper / Developer ID handles code-signing there). Also requires
-    /// minisign in PATH; returns early when minisign is absent so CI stays green
-    /// on runners that do not have it installed — the "minisign unavailable"
-    /// rejection is a separate production code path, not what this test covers.
+    /// Runs on every platform (UP-01) — the production verify path is
+    /// unconditional. Requires minisign in PATH; returns early when minisign is
+    /// absent so CI stays green on runners that do not have it installed — the
+    /// "minisign unavailable" rejection is a separate production code path, not
+    /// what this test covers.
     @Test func downloadRejectsWrongKeyMinisignSignature() async throws {
-        #if !os(macOS)
         guard let minisignPath = findMinisignInPath() else { return }
 
         let tag = "v1.1.0"
@@ -303,7 +305,11 @@ struct ReleaseDownloaderTests {
         #else
         let arch = "x86_64"
         #endif
+        #if os(macOS)
+        let os = "macos"
+        #else
         let os = "linux"
+        #endif
         let tarball = "mootx01-\(tag)-\(os)-\(arch).tar.gz"
         let base    = "https://github.com/codedaptive/mootx01-ce/releases/download/\(tag)"
 
@@ -411,7 +417,228 @@ struct ReleaseDownloaderTests {
         } catch {
             Issue.record("Unexpected error type (expected UpgradeError.signatureVerificationFailed): \(error)")
         }
+    }
+
+    // MARK: download — verify-before-execute ordering (UP-01)
+
+    /// Thread-safe invocation recorder for the injected verifier stub.
+    /// @unchecked Sendable is justified by the NSLock guarding every access,
+    /// same pattern as _ErrTransport in ReleaseDownloader.validateTarballMembers.
+    private final class VerifierRecorder: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func record() { lock.lock(); count += 1; lock.unlock() }
+        var invocations: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+
+    /// Current-platform OS token matching ReleaseDownloader.currentPlatformOS(),
+    /// so fixtures build the exact asset name download() will request.
+    private static func platformTokens() -> (os: String, arch: String) {
+        #if os(macOS)
+        let os = "macos"
+        #else
+        let os = "linux"
         #endif
+        #if arch(arm64)
+        let arch = "arm64"
+        #else
+        let arch = "x86_64"
+        #endif
+        return (os, arch)
+    }
+
+    /// Build a real, extractable tarball containing a fake mootx01 binary plus
+    /// the matching checksums.txt line, so download() passes the SHA-256 check
+    /// and reaches the signature-verification gate with an artifact that WOULD
+    /// extract successfully. A valid tarball is the point: it makes the ordering
+    /// observable — if download() ever extracted before verifying, these
+    /// fixtures would produce a binary instead of the expected verifier error.
+    /// Returns nil (after recording an Issue) when local tar/shasum setup fails.
+    private func makeVerifiableTarballFixture(
+        tarballName: String, workDir: URL
+    ) throws -> (tarball: Data, checksums: String)? {
+        let contentDir = workDir.appendingPathComponent("contents", isDirectory: true)
+        try FileManager.default.createDirectory(at: contentDir, withIntermediateDirectories: true)
+        let fakeBinary = contentDir.appendingPathComponent("mootx01")
+        try Data("#!/bin/sh\necho up01 fixture\n".utf8).write(to: fakeBinary)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: fakeBinary.path)
+
+        let tarballURL = workDir.appendingPathComponent(tarballName)
+        let pack = Process()
+        pack.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+        pack.arguments = ["-czf", tarballURL.path, "-C", contentDir.path, "."]
+        pack.standardError = Pipe()
+        try pack.run()
+        pack.waitUntilExit()
+        guard pack.terminationStatus == 0 else {
+            Issue.record("Test setup: tar -czf exited \(pack.terminationStatus)")
+            return nil
+        }
+
+        let shasum = Process()
+        shasum.executableURL = URL(fileURLWithPath: "/usr/bin/shasum")
+        shasum.arguments = ["-a", "256", tarballURL.path]
+        let shasumPipe = Pipe()
+        shasum.standardOutput = shasumPipe
+        shasum.standardError = Pipe()
+        try shasum.run()
+        let shasumRaw = shasumPipe.fileHandleForReading.readDataToEndOfFile()
+        shasum.waitUntilExit()
+        guard shasum.terminationStatus == 0,
+              let digest = String(decoding: shasumRaw, as: UTF8.self).split(separator: " ").first
+        else {
+            Issue.record("Test setup: shasum -a 256 failed")
+            return nil
+        }
+        return (try Data(contentsOf: tarballURL), "\(digest)  \(tarballName)\n")
+    }
+
+    /// After a refused download, locate the isolated temp directory that
+    /// download() created for THIS call — identified by the unique per-test tag
+    /// in the tarball filename — and return whether an extracted `mootx01`
+    /// binary exists inside it. download() does not clean its temp directory on
+    /// throw (the caller owns cleanup on success), so the directory is
+    /// observable evidence of exactly how far the pipeline ran. Removes the
+    /// directory after inspection.
+    private func extractedBinaryExists(forTarball tarballName: String) -> Bool {
+        let tmpRoot = FileManager.default.temporaryDirectory
+        guard let entries = try? FileManager.default.contentsOfDirectory(atPath: tmpRoot.path)
+        else { return false }
+        var found = false
+        for entry in entries where entry.hasPrefix("mootx01-upgrade-") {
+            let dir = tmpRoot.appendingPathComponent(entry, isDirectory: true)
+            guard FileManager.default.fileExists(atPath: dir.appendingPathComponent(tarballName).path)
+            else { continue }  // some other test's download directory
+            if FileManager.default.fileExists(atPath: dir.appendingPathComponent("mootx01").path) {
+                found = true
+            }
+            try? FileManager.default.removeItem(at: dir)
+        }
+        return found
+    }
+
+    /// UP-01 case (a): an artifact that FAILS signature verification is never
+    /// extracted (and therefore can never be executed or installed) and the
+    /// upgrade surfaces the verification error. The fixture tarball is fully
+    /// valid, so the only way this test passes is the gate throwing BEFORE
+    /// extraction — a regression that moved verification after extraction is
+    /// caught by the extracted-binary probe, not just the error identity.
+    @Test func downloadFailedVerificationAbortsBeforeExtraction() async throws {
+        let tag = "v9.9.1-up01a"  // unique tag so the temp-dir probe is unambiguous
+        let (os, arch) = Self.platformTokens()
+        let tarballName = "mootx01-\(tag)-\(os)-\(arch).tar.gz"
+        let base = "https://github.com/codedaptive/mootx01-ce/releases/download/\(tag)"
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("up01-fail-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        guard let fixture = try makeVerifiableTarballFixture(
+            tarballName: tarballName, workDir: workDir) else { return }
+
+        let recorder = VerifierRecorder()
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.0.0",
+            fetchData: mockFetch([
+                ok("\(base)/\(tarballName)", fixture.tarball),
+                ok("\(base)/checksums.txt", fixture.checksums),
+                ok("\(base)/checksums.txt.minisig", Data("stub minisig".utf8)),
+            ]),
+            verifySignature: { _, _ in
+                recorder.record()
+                throw UpgradeError.signatureVerificationFailed("stub: signature rejected")
+            })
+
+        do {
+            _ = try await downloader.download(tag: tag)
+            Issue.record("download() returned a binary despite failed signature verification")
+        } catch let e as UpgradeError {
+            if case .signatureVerificationFailed = e { /* expected */ } else {
+                Issue.record("Wrong UpgradeError case: expected signatureVerificationFailed, got \(e)")
+            }
+        } catch {
+            Issue.record("Unexpected error type: \(error)")
+        }
+        #expect(recorder.invocations == 1, "the signature verifier must run exactly once")
+        #expect(!extractedBinaryExists(forTarball: tarballName),
+            "no archive member may be extracted when signature verification fails")
+    }
+
+    /// UP-01 case (b): an artifact that PASSES signature verification proceeds
+    /// normally — download() extracts and returns the binary.
+    @Test func downloadPassedVerificationProceedsToExtraction() async throws {
+        let tag = "v9.9.2-up01b"
+        let (os, arch) = Self.platformTokens()
+        let tarballName = "mootx01-\(tag)-\(os)-\(arch).tar.gz"
+        let base = "https://github.com/codedaptive/mootx01-ce/releases/download/\(tag)"
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("up01-pass-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        guard let fixture = try makeVerifiableTarballFixture(
+            tarballName: tarballName, workDir: workDir) else { return }
+
+        let recorder = VerifierRecorder()
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.0.0",
+            fetchData: mockFetch([
+                ok("\(base)/\(tarballName)", fixture.tarball),
+                ok("\(base)/checksums.txt", fixture.checksums),
+                ok("\(base)/checksums.txt.minisig", Data("stub minisig".utf8)),
+            ]),
+            verifySignature: { _, _ in recorder.record() })  // verification succeeds
+
+        let binaryURL = try await downloader.download(tag: tag)
+        defer { try? FileManager.default.removeItem(at: binaryURL.deletingLastPathComponent()) }
+        #expect(recorder.invocations == 1, "the signature verifier must run exactly once")
+        #expect(FileManager.default.fileExists(atPath: binaryURL.path),
+            "verified download must yield the extracted binary")
+        let contents = try String(contentsOf: binaryURL, encoding: .utf8)
+        #expect(contents.contains("up01 fixture"),
+            "extracted binary must be the fixture content")
+    }
+
+    /// UP-01 case (c): an INDETERMINATE verification result — the verifier
+    /// throws an error that is not a clean signature verdict (tool missing,
+    /// subprocess failure, environment error) — is treated as failure, not
+    /// success. download() must propagate the error and extract nothing.
+    @Test func downloadIndeterminateVerificationFailsClosed() async throws {
+        struct IndeterminateVerifierError: Error {}
+        let tag = "v9.9.3-up01c"
+        let (os, arch) = Self.platformTokens()
+        let tarballName = "mootx01-\(tag)-\(os)-\(arch).tar.gz"
+        let base = "https://github.com/codedaptive/mootx01-ce/releases/download/\(tag)"
+
+        let workDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("up01-indet-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: workDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: workDir) }
+        guard let fixture = try makeVerifiableTarballFixture(
+            tarballName: tarballName, workDir: workDir) else { return }
+
+        let downloader = ReleaseDownloader(
+            repo: testRepo,
+            currentVersion: "1.0.0",
+            fetchData: mockFetch([
+                ok("\(base)/\(tarballName)", fixture.tarball),
+                ok("\(base)/checksums.txt", fixture.checksums),
+                ok("\(base)/checksums.txt.minisig", Data("stub minisig".utf8)),
+            ]),
+            verifySignature: { _, _ in throw IndeterminateVerifierError() })
+
+        do {
+            _ = try await downloader.download(tag: tag)
+            Issue.record("download() returned a binary despite an indeterminate verification result")
+        } catch is IndeterminateVerifierError {
+            // Expected: the error propagates — indeterminate is failure, never success.
+        } catch {
+            Issue.record("Unexpected error type (expected IndeterminateVerifierError): \(error)")
+        }
+        #expect(!extractedBinaryExists(forTarball: tarballName),
+            "no archive member may be extracted on an indeterminate verification result")
     }
 
     // MARK: unsafeMemberReason — zip-slip path safety predicate

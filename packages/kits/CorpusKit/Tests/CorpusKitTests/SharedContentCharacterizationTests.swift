@@ -24,10 +24,16 @@ import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
 import Testing
-import VectorKit
+import SynapseKit
 import EngramLib
 
 @testable import CorpusKit
+
+/// Vector rows the RI slot writes per item: the engram row always; the float
+/// row (vectorIndex 1) via the whole-record float lane.
+private let vectorLanesPerItem: Int = {
+    2
+}()
 
 @Suite("SharedContentCharacterization", .serialized)
 struct SharedContentCharacterizationTests {
@@ -202,9 +208,9 @@ struct SharedContentCharacterizationTests {
             #expect(byTable["corpus_metadata"]?.rowCount == 2)
             #expect(byTable["iix_doclens"]?.rowCount == 2)
             #expect((byTable["iix_termfreqs"]?.rowCount ?? 0) > 0)
-            // Binary engram row per chunk; the deterministic provider also
-            // stores a float row per chunk (its float lane is live).
-            #expect(byTable["vectors"]?.rowCount == 4)
+            // Binary engram row per chunk; the whole-record float lane also
+            // stores a float row per chunk.
+            #expect(byTable["vectors"]?.rowCount == 2 * vectorLanesPerItem)
             #expect(byTable["removed_sources"]?.rowCount == 0)
 
             // Determinism: an identical build in a fresh estate produces the

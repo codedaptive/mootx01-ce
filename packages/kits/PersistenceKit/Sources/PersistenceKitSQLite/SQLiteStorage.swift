@@ -78,6 +78,10 @@ public final class SQLiteStorage: Storage, Sendable {
         try await backend.openSchema(schema)
     }
 
+    public func openExisting(schema: SchemaDeclaration) async throws {
+        try await backend.openExistingSchema(schema)
+    }
+
     public func close() async {
         await backend.close()
     }
@@ -88,6 +92,10 @@ public final class SQLiteStorage: Storage, Sendable {
 
     public func currentSchemaVersion(for kitID: String) async throws -> Int {
         try await backend.currentSchemaVersion(kitID: kitID)
+    }
+
+    public func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        try await backend.renameSchemaKit(from: oldKitID, to: newKitID)
     }
 
     public func migrate(to schema: SchemaDeclaration) async throws {
@@ -109,6 +117,10 @@ public final class SQLiteStorage: Storage, Sendable {
         }
         return result
     }
+
+    public func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        try await backend.captureInventorySnapshot(limits: limits)
+    }
 }
 
 // MARK: - StorageIntrospection
@@ -129,6 +141,10 @@ extension SQLiteStorage: StorageIntrospection {
 actor SQLiteBackend {
     let connection: SQLiteConnection
     private var inTransaction: Bool = false
+    // Snapshot-test observation seam. This advances immediately before a
+    // complete database row is decoded, allowing the oversized-body test to
+    // prove that its rejection came from the length preflight.
+    private(set) var inventorySnapshotFullRowMaterializations: Int = 0
     /// Blob change notifications buffered while a transaction is open.
     ///
     /// putBlob/deleteBlob append here instead of calling notifyBlobChange
@@ -164,6 +180,188 @@ actor SQLiteBackend {
         self.encryptionConfig = encryptionConfig
     }
 
+    /// Waits for any caller-owned transaction to finish, then performs both
+    /// reads synchronously on this actor's sole connection inside one SQLite
+    /// read transaction. No await occurs after BEGIN, so no other backend
+    /// operation can interleave with the two table reads.
+    func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        var waitedNanos: UInt64 = 0
+        let waitLimitNanos: UInt64 = 60_000_000_000
+        while inTransaction {
+            guard waitedNanos < waitLimitNanos else {
+                throw StorageError.transactionConflict(
+                    detail: "inventory snapshot waited 60 s for active transaction")
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+            waitedNanos += 25_000_000
+        }
+
+        try connection.exec("BEGIN")
+        do {
+            var serializedBytes = 0
+            let drawers = try boundedInventoryRows(
+                table: InventorySnapshot.drawersTable,
+                limits: limits,
+                serializedBytes: &serializedBytes
+            )
+            let nodes = try boundedInventoryRows(
+                table: InventorySnapshot.nodesTable,
+                limits: limits,
+                serializedBytes: &serializedBytes
+            )
+            try connection.exec("COMMIT")
+            return InventorySnapshot(drawers: drawers, nodes: nodes)
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw error
+        }
+    }
+
+    private func boundedInventoryRows(
+        table: String,
+        limits: InventorySnapshotLimits,
+        serializedBytes: inout Int
+    ) throws -> [StorageRow] {
+        try validateSQLIdentifier(table)
+        guard let schema = tableDeclarations[table]?.table else {
+            throw StorageError.invalidQuery(detail: "inventory snapshot: schema for \(table) not registered")
+        }
+        try preflightInventoryRows(
+            table: table,
+            schema: schema,
+            limits: limits,
+            serializedBytes: serializedBytes
+        )
+        let statement = try connection.prepareCached(
+            "SELECT * FROM \"\(table)\" LIMIT \(limits.maxRowsPerTable + 1)"
+        )
+        defer { statement.finalize() }
+
+        var rows: [StorageRow] = []
+        let columnCount = statement.columnCount()
+        while try statement.step() {
+            guard rows.count < limits.maxRowsPerTable else {
+                throw InventorySnapshotError.rowLimitExceeded(
+                    table: table,
+                    limit: limits.maxRowsPerTable
+                )
+            }
+            inventorySnapshotFullRowMaterializations += 1
+            var values: [String: TypedValue] = [:]
+            for index in 0..<columnCount {
+                let name = statement.columnName(index)
+                values[name] = try readColumn(
+                    stmt: statement,
+                    index: index,
+                    schema: schema,
+                    columnName: name,
+                    table: table
+                )
+            }
+            let decoded = try decryptedForRead(values, table: table, config: encryptionConfig)
+            let row = StorageRow(values: decoded)
+            let rowBytes = InventorySnapshot.serializedByteCount(of: row)
+            guard rowBytes <= limits.maxSerializedBytes - serializedBytes else {
+                throw InventorySnapshotError.byteLimitExceeded(limit: limits.maxSerializedBytes)
+            }
+            serializedBytes += rowBytes
+            rows.append(row)
+        }
+        return rows
+    }
+
+    /// Reject exact known canonical totals before `SELECT *`. SQLite stores
+    /// JSON as arbitrary BLOB, so strict UTF-8 validity cannot be decided in
+    /// SQL: that case contributes its raw byte count here, bounding its later
+    /// FFI acquisition, then the decoded row is exact-counted before retain.
+    private func preflightInventoryRows(
+        table: String,
+        schema: TableDeclaration,
+        limits: InventorySnapshotLimits,
+        serializedBytes: Int
+    ) throws {
+        let columns = schema.columns + schema.generatedColumns.map {
+            ColumnDeclaration(name: $0.name, type: $0.type, nullable: true)
+        }
+        guard !columns.isEmpty else { return }
+        let expressions = try columns.map { column -> String in
+            try validateSQLIdentifier(column.name)
+            let keyBytes = column.name.utf8.count + 1
+            let quoted = "\"\(column.name)\""
+            let bytes = "length(CAST(\(quoted) AS BLOB))"
+            let textEncoding = "(3.0 + length(CAST(\(bytes) AS TEXT)) + \(bytes))"
+            let blobEncoding = "(3.0 + length(CAST(\(bytes) AS TEXT)) + 2.0 * \(bytes))"
+            let integerEncoding = "(2.0 + length(CAST(\(quoted) AS TEXT)))"
+            // Mirror `readColumn`'s runtime-type fallback. This makes a wrong
+            // SQLite storage class contribute its raw body (or its exact
+            // canonical encoding) before `SELECT *`, rather than allowing an
+            // arbitrarily large corrupt scalar to reach the FFI read.
+            let runtimeEncoding = "CASE typeof(\(quoted)) WHEN 'integer' THEN \(integerEncoding) WHEN 'real' THEN 18.0 WHEN 'text' THEN \(textEncoding) WHEN 'blob' THEN \(blobEncoding) ELSE 1.0 END"
+            let boundedContribution: String
+            switch column.type {
+            case .text:
+                let plaintext = "(\(bytes) - 28)"
+                let plaintextEncoding = "(3.0 + length(CAST(\(plaintext) AS TEXT)) + \(plaintext))"
+                if encryptionConfig.usesRowCrypto,
+                   rowCryptoProtectedColumns(for: table).contains(column.name),
+                   columns.contains(where: { $0.name == rowCryptoKeyIDColumn }),
+                   let keyID = encryptionConfig.keyIdentifier {
+                    let escapedKeyID = keyID.replacingOccurrences(of: "'", with: "''")
+                    boundedContribution = "CASE WHEN typeof(\(quoted)) = 'blob' AND \"\(rowCryptoKeyIDColumn)\" = '\(escapedKeyID)' AND \(bytes) >= 28 THEN \(plaintextEncoding) ELSE \(runtimeEncoding) END"
+                } else {
+                    boundedContribution = runtimeEncoding
+                }
+            case .blob:
+                boundedContribution = runtimeEncoding
+            case .json:
+                // A valid JSON UTF-8 body is at least this large; invalid
+                // UTF-8 expands to hex and is caught by exact post-read count.
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'blob' THEN \(bytes) ELSE \(runtimeEncoding) END"
+            case .uuid:
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'text' AND \(bytes) = 36 THEN 38.0 ELSE \(runtimeEncoding) END"
+            case .float:
+                boundedContribution = runtimeEncoding
+            case .bool:
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'integer' THEN 3.0 ELSE \(runtimeEncoding) END"
+            case .int, .bitmap:
+                boundedContribution = runtimeEncoding
+            case .hlc:
+                // HLC stores UInt64 bits in SQLite's signed Int64 slot. For a
+                // negative stored integer, the unsigned canonical decimal has
+                // 19 digits through 9_999_999_999_999_999_999 and 20 above.
+                // Counting the stored minus sign would overcount the high-bit
+                // boundary by one and reject an exact canonical fit.
+                let unsignedDigits = "CASE WHEN \(quoted) < -8446744073709551616 THEN 19.0 WHEN \(quoted) < 0 THEN 20.0 ELSE length(CAST(\(quoted) AS TEXT)) END"
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'integer' THEN 2.0 + \(unsignedDigits) ELSE \(runtimeEncoding) END"
+            case .timestamp:
+                // Accepted RFC-3339 text is 20 or 24 bytes while canonical
+                // epoch-millisecond encoding can be as short as `s:0`.
+                // Subtracting at most 21 bytes preserves every exact canonical fit, yet any
+                // corrupt text admitted to the row read is bounded by the
+                // remaining budget plus that fixed parser-width allowance.
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'text' THEN MAX(\(bytes) - 21, 0) ELSE \(runtimeEncoding) END"
+            case .fingerprint:
+                boundedContribution = "CASE WHEN typeof(\(quoted)) = 'blob' AND \(bytes) = 32 THEN 66.0 ELSE \(runtimeEncoding) END"
+            }
+            return "CASE WHEN \(quoted) IS NULL THEN \(Double(keyBytes + 1)) ELSE \(Double(keyBytes)) + \(boundedContribution) END"
+        }
+        let separators = max(columns.count - 1, 0)
+        let rowBoundedBytes = "(\(expressions.joined(separator: " + ")) + \(Double(separators)))"
+        let remainingBytes = limits.maxSerializedBytes - serializedBytes
+        let statement = try connection.prepareCached(
+            "SELECT COUNT(*), CASE WHEN COALESCE(SUM(\(rowBoundedBytes)), 0.0) > \(Double(remainingBytes)) THEN 1 ELSE 0 END FROM \"\(table)\""
+        )
+        defer { statement.finalize() }
+        guard try statement.step() else { return }
+        let count = statement.columnInt64(0)
+        guard count <= Int64(limits.maxRowsPerTable) else {
+            throw InventorySnapshotError.rowLimitExceeded(table: table, limit: limits.maxRowsPerTable)
+        }
+        guard statement.columnInt64(1) == 0 else {
+            throw InventorySnapshotError.byteLimitExceeded(limit: limits.maxSerializedBytes)
+        }
+    }
+
     private func notifyObservers(_ change: TableChange) {
         if let r = observerRegistry {
             Task { await r.notify(change) }
@@ -195,6 +393,33 @@ actor SQLiteBackend {
     }
 
     // MARK: - Schema and migrations
+
+    func openExistingSchema(_ schema: SchemaDeclaration) throws {
+        guard try currentSchemaVersion(kitID: schema.kitID) == schema.version else {
+            throw StorageError.constraintViolation(detail: "frozen schema requires migration: \(schema.kitID)")
+        }
+        for table in schema.tables {
+            let quoted = table.name.replacingOccurrences(of: "\"", with: "\"\"")
+            let statement = try connection.prepare("PRAGMA table_xinfo(\"\(quoted)\")")
+            var columns: [String: String] = [:]
+            while try statement.step() {
+                if let name = statement.columnText(1) { columns[name] = statement.columnText(2)?.uppercased() ?? "" }
+            }
+            statement.finalize()
+            guard !columns.isEmpty, table.columns.allSatisfy({ column in
+                let storedType = columns[column.name]
+                // Shipped migrations (including Synapse vectors v6) declare
+                // JSON extension columns as TEXT; fresh declarations use BLOB.
+                // Both are supported persisted representations. Frozen opening
+                // must admit either without rewriting a current estate.
+                return storedType == SQLiteSchema.nativeType(column.type)
+                    || (column.type == .json && storedType == "TEXT")
+            }) else {
+                throw StorageError.constraintViolation(detail: "frozen schema is incomplete: \(table.name)")
+            }
+        }
+        try registerTableDeclarations(from: schema)
+    }
 
     func openSchema(_ schema: SchemaDeclaration) throws {
         try registerTableDeclarations(from: schema)
@@ -272,6 +497,7 @@ actor SQLiteBackend {
         // so the existing callers that invoke migrate(to:) after open(schema:) are
         // unaffected.
         try connection.exec(SQLiteSchema.migrationsTableSQL)
+        try normalizeLegacyMigrationTimestamps()
         for table in schema.tables {
             try connection.exec(SQLiteSchema.createTable(table))
             for trigger in SQLiteSchema.appendOnlyTriggers(table) {
@@ -311,6 +537,45 @@ actor SQLiteBackend {
         if final < schema.version {
             try recordSchemaVersion(kitID: schema.kitID, version: schema.version)
         }
+    }
+
+    /// Normalize ledger timestamps written by pre-convergence SQLite ports.
+    ///
+    /// The ledger's public readers only require its version, so legacy
+    /// INTEGER epoch-millisecond values remain readable while this schema
+    /// application rewrites them to the canonical TEXT representation. Rust
+    /// builds that wrote the epoch sentinel also carry no useful applied-at
+    /// instant, so replace that exact value with this migration's timestamp.
+    /// Both predicates are false after the rewrite, making repeat opens no-ops.
+    private func normalizeLegacyMigrationTimestamps() throws {
+        let stmt = try connection.prepare("""
+            UPDATE "_storagekit_migrations"
+            SET "applied_at" = CASE
+                WHEN typeof("applied_at") = 'integer'
+                    THEN strftime('%Y-%m-%dT%H:%M:%S',
+                        CASE WHEN "applied_at" < 0 AND "applied_at" % 1000 != 0
+                             THEN "applied_at" / 1000 - 1
+                             ELSE "applied_at" / 1000
+                        END,
+                        'unixepoch'
+                    ) || printf('.%03dZ',
+                        CASE WHEN "applied_at" < 0 AND "applied_at" % 1000 != 0
+                             THEN 1000 + "applied_at" % 1000
+                             ELSE "applied_at" % 1000
+                        END
+                    )
+                WHEN typeof("applied_at") = 'text'
+                    AND "applied_at" = '1970-01-01T00:00:00.000Z'
+                    THEN ?
+                ELSE "applied_at"
+            END
+            WHERE typeof("applied_at") = 'integer'
+               OR (typeof("applied_at") = 'text'
+                   AND "applied_at" = '1970-01-01T00:00:00.000Z')
+            """)
+        defer { stmt.finalize() }
+        try stmt.bind(.text(ISO8601.string(from: Date())), at: 1)
+        _ = try stmt.step()
     }
 
     /// Add a schema package's tables to the read-time type registry.
@@ -384,6 +649,12 @@ actor SQLiteBackend {
             if !column.nullable { sql += " NOT NULL DEFAULT " + SQLiteSchema.literalSQL(column.defaultValue ?? .null) }
             try connection.exec(sql)
         case .dropColumn(let table, let columnName):
+            // Idempotent, the addColumn rule in reverse: a migration capsule
+            // replays a kit's ladder on estates that may already carry the
+            // drop (a fresh estate creates the latest layout, a re-run of the
+            // capsule finds the column gone). SQLite has no DROP COLUMN IF
+            // EXISTS, so probe the table's columns and skip when absent.
+            if try !columnExists(table: table, column: columnName) { break }
             try connection.exec("ALTER TABLE \"\(table)\" DROP COLUMN \"\(columnName)\"")
         case .renameColumn(let table, let from, let to):
             try connection.exec("ALTER TABLE \"\(table)\" RENAME COLUMN \"\(from)\" TO \"\(to)\"")
@@ -397,9 +668,9 @@ actor SQLiteBackend {
     }
 
     /// True when `table` already has a column named `column`.
-    /// Used to make `.addColumn` idempotent (SQLite lacks ADD COLUMN IF NOT
-    /// EXISTS). PRAGMA table_info returns one row per column; column index 1 is
-    /// the column name.
+    /// Used to make `.addColumn` and `.dropColumn` idempotent (SQLite lacks
+    /// ADD COLUMN IF NOT EXISTS and DROP COLUMN IF EXISTS). PRAGMA table_info
+    /// returns one row per column; column index 1 is the column name.
     private func columnExists(table: String, column: String) throws -> Bool {
         let stmt = try connection.prepare("PRAGMA table_info(\"\(table)\")")
         defer { stmt.finalize() }
@@ -422,6 +693,36 @@ actor SQLiteBackend {
             return Int(stmt.columnInt64(0))
         }
         return 0
+    }
+
+    /// The ledger row's version for `kitID`, or nil when the kit has no row.
+    /// Distinct from `currentSchemaVersion(kitID:)`, which folds "no row"
+    /// into 0; the rename below must tell the two apart.
+    private func ledgerVersion(kitID: String) throws -> Int? {
+        let stmt = try connection.prepare("SELECT \"version\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = ?")
+        defer { stmt.finalize() }
+        try stmt.bind(.text(kitID), at: 1)
+        if try stmt.step() { return Int(stmt.columnInt64(0)) }
+        return nil
+    }
+
+    /// Move the ledger row for `oldKitID` to `newKitID` (SPEC I-7a). The
+    /// presence checks and the UPDATE all run on this actor, so no other
+    /// ledger write can interleave between the conflict check and the
+    /// rewrite; `kit_id` is the table's primary key and the check above
+    /// guarantees the UPDATE cannot collide. `version` and `applied_at` are
+    /// untouched.
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) throws -> SchemaKitRenameOutcome {
+        guard let oldVersion = try ledgerVersion(kitID: oldKitID) else { return .noRow }
+        if let newVersion = try ledgerVersion(kitID: newKitID) {
+            return .conflict(oldVersion: oldVersion, newVersion: newVersion)
+        }
+        let stmt = try connection.prepare("UPDATE \"_storagekit_migrations\" SET \"kit_id\" = ? WHERE \"kit_id\" = ?")
+        defer { stmt.finalize() }
+        try stmt.bind(.text(newKitID), at: 1)
+        try stmt.bind(.text(oldKitID), at: 2)
+        _ = try stmt.step()
+        return .renamed(version: oldVersion)
     }
 
     private func recordSchemaVersion(kitID: String, version: Int) throws {
@@ -677,9 +978,9 @@ actor SQLiteBackend {
         try validateSQLIdentifier(table)
         for name in values.keys { try validateSQLIdentifier(name) }
         // At-rest encryption seam (mode 2): UPDATE is a protected-text write
-        // path since the distilled-representation columns landed (a
-        // distillation write is an UPDATE carrying "distilled" text, and a
-        // subjecting write one carrying "subject" —
+        // path since ssc_facts joined the protected column set (an SSC-facts
+        // write is an UPDATE carrying "ssc_facts" text, and a subjecting
+        // write one carrying "subject" —
         // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals any non-empty
         // text in a column protected for this table and stamps keyID; it is a
         // no-op for the bitmap/timestamp updates that were this path's only
@@ -1753,15 +2054,74 @@ extension SQLiteBackend {
         }
         completed = 2
 
-        // Phase 3 — VACUUM. Atomic at the SQLite level; never interrupted
-        // mid-flight (cancellation was honoured at the phase boundary above).
+        // Phase 3 — VACUUM INTO + atomic file swap. `VACUUM INTO 'path'` passes
+        // a real file path to SQLite's internal ATTACH, bypassing the empty-string
+        // sentinel that sqlite3RunVacuum uses for its temp file (sqlite3.c line
+        // 166984). SQLCipher's SQLITE_HAS_CODEC pager hook fails on that sentinel
+        // with SQLITE_CANTOPEN on encrypted estates; a real path succeeds because
+        // sqlite3BtreeOpen handles it without the empty-path codec shortcut.
+        // After VACUUM INTO completes, the connection is closed to release the
+        // file lock, the compacted copy is atomically swapped in, and the
+        // connection is reopened so Phase 4 PRAGMAs operate on the new file.
         try enter(.vacuum)
+        let tempURL = connection.url
+            .deletingLastPathComponent()
+            .appendingPathComponent(".vacuum-\(UUID().uuidString).sqlite")
+        defer {
+            // Remove the compacted copy AND any journal siblings SQLite may
+            // have left next to it on a failure path (a successful run leaves
+            // none: the swap consumes the main file and the internal DETACH
+            // cleans up the journal).
+            for suffix in ["", "-wal", "-shm", "-journal"] {
+                try? FileManager.default.removeItem(atPath: tempURL.path + suffix)
+            }
+        }
+        // SQ-01: pre-create the destination as an empty owner-only file so the
+        // compacted copy is never observable at SQLite's default creation mode
+        // (0644 — world-readable, and plaintext on unencrypted estates).
+        try Self.createOwnerOnlyVacuumDestination(at: tempURL)
         do {
-            try connection.exec("VACUUM")
+            // Single-quote-escape the path: estate directory names may legally
+            // contain apostrophes (e.g. "alice's files"). The UUID segment is
+            // hex+hyphens and is safe; only the directory component needs escaping.
+            let escapedPath = tempURL.path.replacingOccurrences(of: "'", with: "''")
+            try connection.exec("VACUUM INTO '\(escapedPath)'")
         } catch {
             throw StorageMaintenanceError.backendFailure(
                 reason: "VACUUM failed: \(error)")
         }
+        // Defence-in-depth: re-assert owner-only on the destination family.
+        // The pre-created 0600 mode survives SQLite's open (POSIX open(2)
+        // applies its mode argument only at creation) and journal/WAL siblings
+        // are created by SQLite with the main database file's mode, so these
+        // calls are expected no-ops — they exist to hold the owner-only
+        // posture even if a future SQLite revision changes sibling-mode
+        // inheritance. Best-effort: a missing sibling is the normal case.
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: tempURL.path + suffix)
+        }
+        connection.close()
+        do {
+            try FileManager.default.replaceItem(
+                at: connection.url,
+                withItemAt: tempURL,
+                backupItemName: nil,
+                options: .usingNewMetadataOnly,
+                resultingItemURL: nil)
+        } catch {
+            // Original is intact; reopen the connection before surfacing the
+            // error so subsequent storage calls do not receive "connection closed".
+            // `try?` is deliberate: the swap failure is the error worth
+            // surfacing here. reopen() also applies the CAND-052 symlink
+            // refusal (SQ-01); if reopen throws — refusal included — the
+            // connection stays closed and the condition surfaces on the next
+            // storage call rather than masking the swap error.
+            try? connection.reopen()
+            throw StorageMaintenanceError.backendFailure(
+                reason: "VACUUM file swap failed: \(error)")
+        }
+        try connection.reopen()
         completed = 3
 
         // Phase 4 — post-operation introspection. VACUUM itself commits
@@ -1794,6 +2154,39 @@ extension SQLiteBackend {
     }
 
     // MARK: maintenance helpers
+
+    /// SQ-01: create the `VACUUM INTO` destination as an EMPTY owner-only
+    /// (0600) file before SQLite opens it.
+    ///
+    /// SQLite creates a `VACUUM INTO` destination with its default creation
+    /// mode — 0644, world-readable. On an unencrypted estate the compacted
+    /// copy is plaintext, so for the whole write window any local user could
+    /// read it; a chmod after creation would leave that race open. Instead
+    /// the destination is pre-created empty with `posixPermissions: 0o600`:
+    /// POSIX `open(2)` applies its mode argument only when it CREATES a file,
+    /// so SQLite's subsequent open preserves the 0600 mode — the copy is
+    /// owner-only at every instant of its existence. `VACUUM INTO` accepts an
+    /// existing destination as long as it is empty (the vendored sqlite3.c
+    /// rejects only `sz>0` in `sqlite3RunVacuum`), and journal/WAL siblings
+    /// SQLite creates next to a database inherit the main file's mode
+    /// (os_unix.c), so the whole temp family is owner-only too. The atomic
+    /// swap (`.usingNewMetadataOnly`) then carries this 0600 mode onto the
+    /// estate path, and `reopen()` re-asserts 0600 as defence-in-depth.
+    ///
+    /// `static` (not instance) so the mechanism is directly testable without
+    /// entering the actor: `StorageMaintenanceTests` pins both the mode and
+    /// the empty-destination acceptance.
+    static func createOwnerOnlyVacuumDestination(at url: URL) throws {
+        guard FileManager.default.createFile(
+            atPath: url.path,
+            contents: nil,
+            attributes: [.posixPermissions: 0o600])
+        else {
+            throw StorageMaintenanceError.backendFailure(
+                reason: "could not pre-create owner-only VACUUM destination "
+                    + "at \(url.lastPathComponent)")
+        }
+    }
 
     private func pragmaInt64(_ name: String) throws -> Int64 {
         let stmt = try connection.prepare("PRAGMA \(name)")

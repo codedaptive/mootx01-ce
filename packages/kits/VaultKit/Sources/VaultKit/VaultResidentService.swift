@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 import GeniusLocusKit
 import LocusKit
@@ -45,7 +46,7 @@ import LocusKit
 /// `pendingConflicts` and `blockedDeletions` from any context.
 public actor VaultResidentService {
 
-    private static let log = Logger(subsystem: "com.mootx01.kit", category: "VaultResidentService")
+    private static let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "VaultKit.ResidentService")
 
     // MARK: - Configuration
 

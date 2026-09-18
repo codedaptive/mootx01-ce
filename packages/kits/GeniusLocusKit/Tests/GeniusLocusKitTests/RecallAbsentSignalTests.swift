@@ -60,7 +60,8 @@ struct RecallAbsentSignalTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         // With no GraphCache registered, every hit's graph score must be 0.0.
@@ -109,7 +110,8 @@ struct RecallAbsentSignalTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         // All candidates have identical non-zero graph scores (0.7 from the

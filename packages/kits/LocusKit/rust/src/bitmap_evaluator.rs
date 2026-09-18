@@ -25,7 +25,8 @@
 //!    `AuditLogFold::project_state_at` (cookbook § 5.3) when
 //!    `frame.as_of` is `Some`; state is keyed on HLC.
 //! 3. **Structured tier** (§ 7.9.4 step 3) — `InRoom`, `InWing`,
-//!    `LineageID`, `CreatedAfter`, `CreatedBefore`, `LatticeAnchor`,
+//!    `LineageID`, `CreatedAfter`, `CreatedBefore`, `EventAfter`,
+//!    `EventBefore`, `LatticeAnchor`,
 //!    `LatticeUnder`, `WikidataConcept`.
 //! 4. **Content tier** (§ 7.9.4 step 4) — `ContentMatches` via a
 //!    case-insensitive substring fold.
@@ -133,9 +134,16 @@ const OP_CONTENT_KIND_SHIFT: i32 = 6;
 /// primitives and evaluates it against drawer rows. Per spec § 7.9.
 ///
 /// The struct is a unit type — every method is associated. This
-/// mirrors the Swift `internal struct BitmapEvaluator` with static
-/// methods.
+/// mirrors the Swift public `BitmapEvaluator` with static methods.
 pub struct BitmapEvaluator;
+
+/// The evaluator's admitted rows plus the count excluded only by the
+/// default-injected sensitivity ceiling.
+#[derive(Debug, Clone)]
+pub struct BitmapEvaluationResult {
+    pub rows: Vec<Drawer>,
+    pub withheld_by_sensitivity: usize,
+}
 
 impl BitmapEvaluator {
     // -----------------------------------------------------------------
@@ -165,7 +173,62 @@ impl BitmapEvaluator {
         store: &dyn DrawerStore,
         node_names: &BTreeMap<String, (String, String)>,
     ) -> Result<Vec<Drawer>, LocusKitError> {
-        let chain = Self::insert_defaults(&frame.filter_chain);
+        Self::evaluate_with_chain(
+            &Self::insert_defaults(&frame.filter_chain, true),
+            frame,
+            drawers,
+            store,
+            node_names,
+        )
+    }
+
+    /// Evaluates `frame` and reports rows withheld only by the implicit
+    /// sensitivity ceiling.
+    ///
+    /// The count evaluates the same loaded candidates without that default,
+    /// retaining every other default and caller-supplied predicate. An
+    /// explicit sensitivity filter suppresses the default and reports zero.
+    pub fn evaluate_result(
+        frame: &RecallFrame,
+        drawers: &[Drawer],
+        store: &dyn DrawerStore,
+        node_names: &BTreeMap<String, (String, String)>,
+    ) -> Result<BitmapEvaluationResult, LocusKitError> {
+        let rows = Self::evaluate_with_chain(
+            &Self::insert_defaults(&frame.filter_chain, true),
+            frame,
+            drawers,
+            store,
+            node_names,
+        )?;
+
+        if frame.filter_chain.iter().any(Self::is_bitmap_sensitivity_filter) {
+            return Ok(BitmapEvaluationResult {
+                rows,
+                withheld_by_sensitivity: 0,
+            });
+        }
+
+        let rows_without_default_ceiling = Self::evaluate_with_chain(
+            &Self::insert_defaults(&frame.filter_chain, false),
+            frame,
+            drawers,
+            store,
+            node_names,
+        )?;
+        Ok(BitmapEvaluationResult {
+            withheld_by_sensitivity: rows_without_default_ceiling.len() - rows.len(),
+            rows,
+        })
+    }
+
+    fn evaluate_with_chain(
+        chain: &[Filter],
+        frame: &RecallFrame,
+        drawers: &[Drawer],
+        store: &dyn DrawerStore,
+        node_names: &BTreeMap<String, (String, String)>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
 
         // 1. Per-row bitmap evaluation, with historical reconstruction
         //    when `as_of` is set. Reconstruction touches the
@@ -202,19 +265,19 @@ impl BitmapEvaluator {
                     drawer.provenance,
                 )
             };
-            if Self::evaluate_bitmap_tier(&chain, adj, op, prov) {
+            if Self::evaluate_bitmap_tier(chain, adj, op, prov) {
                 candidates.push(drawer.clone());
             }
         }
 
         // 2. Structured-tier filters (room / wing / time / lattice).
         // wing/room resolved from node_names map keyed by parent_node_id.
-        candidates.retain(|d| Self::evaluate_structured_tier(&chain, d, node_names));
+        candidates.retain(|d| Self::evaluate_structured_tier(chain, d, node_names));
 
         // 3. Content-tier filters (substring match).
         let mut result = Vec::with_capacity(candidates.len());
         for d in candidates {
-            if Self::evaluate_content_tier(&chain, &d)? {
+            if Self::evaluate_content_tier(chain, &d)? {
                 result.push(d);
             }
         }
@@ -243,7 +306,7 @@ impl BitmapEvaluator {
     /// No confirmation default is inserted. Freshly captured drawers are
     /// unconfirmed by design; callers that need the aging/retention-vouched
     /// subset must ask for `UserConfirmed` explicitly.
-    fn insert_defaults(chain: &[Filter]) -> Vec<Filter> {
+    fn insert_defaults(chain: &[Filter], include_sensitivity_default: bool) -> Vec<Filter> {
         let mut result: Vec<Filter> = chain.to_vec();
         if !chain.iter().any(Self::is_bitmap_state_filter) {
             result.insert(0, Filter::CurrentlyBelieve);
@@ -251,7 +314,7 @@ impl BitmapEvaluator {
         if !chain.iter().any(Self::is_bitmap_trust_filter) {
             result.insert(0, Filter::Trustworthy);
         }
-        if !chain.iter().any(Self::is_bitmap_sensitivity_filter) {
+        if include_sensitivity_default && !chain.iter().any(Self::is_bitmap_sensitivity_filter) {
             // Sensitivity default — ceiling is `Elevated`, the Normal-tier
             // ceiling per data-movement privacy tiers / VK-TIER-01 mapping (Normal
             // tier = normal + elevated; restricted = Private tier; secret =
@@ -602,6 +665,8 @@ impl BitmapEvaluator {
             | Filter::LineageID(_)
             | Filter::CreatedAfter(_)
             | Filter::CreatedBefore(_)
+            | Filter::EventAfter(_)
+            | Filter::EventBefore(_)
             | Filter::LatticeAnchor(_)
             | Filter::LatticeUnder(_)
             | Filter::WikidataConcept(_) => true,
@@ -627,6 +692,11 @@ impl BitmapEvaluator {
             Filter::LineageID(l) => drawer.lineage_id == *l,
             Filter::CreatedAfter(d) => drawer.filed_at > *d,
             Filter::CreatedBefore(d) => drawer.filed_at < *d,
+            // Event-time bounds are INCLUSIVE (window semantics), unlike the
+            // strict CreatedAfter/Before pair: a drawer whose event_time
+            // equals a window edge is inside the window.
+            Filter::EventAfter(d) => drawer.event_time >= *d,
+            Filter::EventBefore(d) => drawer.event_time <= *d,
             Filter::LatticeAnchor(a) => drawer.udc_code == a.udc_code,
             Filter::LatticeUnder(p) => drawer.udc_code.starts_with(p),
             Filter::WikidataConcept(q) => {
@@ -934,6 +1004,46 @@ mod tests {
             !result.iter().any(|d| d.id == "restricted"),
             "restricted drawer must be absent from default recall (Private tier)"
         );
+    }
+
+    #[test]
+    fn sensitivity_withheld_result_counts_only_default_ceiling_exclusions() {
+        let store = make_store();
+        let d_normal = base_drawer("normal");
+        let mut d_elevated = base_drawer("elevated");
+        d_elevated.adjective_bitmap |= AdjectiveSensitivity::Elevated.raw_value() << 6;
+        let mut d_restricted = base_drawer("restricted");
+        d_restricted.adjective_bitmap |= AdjectiveSensitivity::Restricted.raw_value() << 6;
+        let drawers = vec![d_normal, d_elevated, d_restricted];
+
+        let normal_frame = BitmapEvaluator::evaluate_result(
+            &make_frame(vec![]),
+            &drawers,
+            store.as_ref(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(normal_frame.rows.len(), 2);
+        assert_eq!(normal_frame.withheld_by_sensitivity, 1);
+
+        let elevated_frame = BitmapEvaluator::evaluate_result(
+            &make_frame(vec![Filter::SensitivityAtMost(AdjectiveSensitivity::Secret)]),
+            &drawers,
+            store.as_ref(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(elevated_frame.rows.len(), 3);
+        assert_eq!(elevated_frame.withheld_by_sensitivity, 0);
+
+        let explicit_sensitivity_frame = BitmapEvaluator::evaluate_result(
+            &make_frame(vec![Filter::Sensitivity(AdjectiveSensitivity::Restricted)]),
+            &drawers,
+            store.as_ref(),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(explicit_sensitivity_frame.withheld_by_sensitivity, 0);
     }
 
     #[test]
@@ -1262,6 +1372,28 @@ mod tests {
         let result = BitmapEvaluator::evaluate(&frame, &[a, b], store.as_ref(), &BTreeMap::new()).unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].id, "a");
+    }
+
+    #[test]
+    fn event_after_and_before_inclusive() {
+        let store = make_store();
+        let mut early = base_drawer("early");
+        early.event_time = NOW + 1;
+        let mut edge = base_drawer("edge");
+        edge.event_time = NOW + 50;
+        let mut late = base_drawer("late");
+        late.event_time = NOW + 100;
+        // [NOW+10, NOW+50] — the edge drawer sits exactly on the upper
+        // bound and must be INSIDE (inclusive window semantics, unlike
+        // the strict created* pair).
+        let frame = make_frame(vec![Filter::All(vec![
+            Filter::EventAfter(NOW + 10),
+            Filter::EventBefore(NOW + 50),
+        ])]);
+        let result = BitmapEvaluator::evaluate(
+            &frame, &[early, edge, late], store.as_ref(), &BTreeMap::new()).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "edge");
     }
 
     #[test]

@@ -8,7 +8,7 @@
 // the provider (no CoreML required). All assertions are behavioral, not
 // implementation:
 // they verify the public surface (ingest / recall / remove / count)
-// and the sealed-vector principle (no VectorKit type imported here).
+// and the sealed-vector principle (no SynapseKit type imported here).
 //
 // INTELLECTUS LOCK: All tests that call corpus.ingest (which calls
 // BundleStore.insert, emitting corpuskit.ingest.* metrics) or
@@ -20,6 +20,8 @@
 import Foundation
 import PersistenceKit
 import PersistenceKitSQLite
+import QueueKit
+import SubstrateTypes
 import Testing
 
 @testable import CorpusKit
@@ -234,22 +236,22 @@ struct CorpusTests {
 
     // MARK: - Sealed-vector principle
 
-    /// This file imports only CorpusKit (no VectorKit import). The fact
+    /// This file imports only CorpusKit (no SynapseKit import). The fact
     /// that this test compiles confirms that Corpus, EmbeddingModel, and
-    /// ScoredChunk are usable without any VectorKit dependency. Any
-    /// future change that leaks a VectorKit type onto the public surface
+    /// ScoredChunk are usable without any SynapseKit dependency. Any
+    /// future change that leaks a SynapseKit type onto the public surface
     /// would break this file at compile time.
     ///
     /// The grep step in Part 5 verifies this at the source level; this
     /// test documents the requirement as a compile-time assertion.
     @Test func noVectorTypesRequiredByPublicSurface() async throws {
         try await GlobalTestLock.shared.withLock {
-            // Corpus and EmbeddingModel are named from CorpusKit; no VectorKit import.
+            // Corpus and EmbeddingModel are named from CorpusKit; no SynapseKit import.
             let storage = try makeScratchStorage()
             let corpus = try await Corpus(storage: storage, model: .deterministic)
             try await corpus.ingest("hello world", sourceID: "test", now: fixedNow)
             let results: [ScoredChunk] = try await corpus.recall("hello", limit: 1, now: fixedNow)
-            // ScoredChunk is a CorpusKit type — no VectorKit type used here.
+            // ScoredChunk is a CorpusKit type — no SynapseKit type used here.
             _ = results.first?.chunk.text
             _ = results.first?.score
         }
@@ -424,14 +426,29 @@ struct CorpusTests {
         }
     }
 
-    /// the encode drain claims only stream="encode" jobs and
-    /// does not disturb jobs on other streams sharing the same queue.sqlite.
+    /// The encode drain claims only stream="encode" jobs and does not disturb
+    /// jobs on other streams sharing the same queue.
+    ///
+    /// The mounted drain worker and a manual `drainIngestQueueOnce` both drain
+    /// the encode stream, so which of them claims the encode job is a race;
+    /// the property under test is that NEITHER claims a job on another
+    /// stream, so the assertion is on the foreign job staying claimable after
+    /// the encode stream has drained to empty.
     @Test func encodeDrainIsStreamScoped() async throws {
         try await GlobalTestLock.shared.withLock {
             // Build an in-memory corpus (no file I/O needed; stream isolation is
             // queue-level, not backend-level).
             let corpus = try await makeCorpus()
             try await corpus.mountIngestQueue()
+            let queue = try #require(await corpus.ingestQueue)
+
+            // A job on a stream the encode drain must never claim, sharing the
+            // queue with the encode job below.
+            let foreignStream = StreamID(rawValue: "signal")
+            let foreign = try IngestJob(
+                sourceID: "doc-foreign", text: "foreign stream content", capturedAt: fixedNow)
+                .toJob(streamID: foreignStream, submittedAt: HLC(physicalTime: 1, logicalCount: 0, nodeID: 1))
+            try await queue.send(foreign)
 
             // Enqueue on the encode stream via the public API.
             try await corpus.enqueueIngest(
@@ -439,14 +456,20 @@ struct CorpusTests {
                 sourceID: "doc-scoped",
                 now: fixedNow
             )
-            // Drain once — only encode jobs are drained.
-            let drained = try await corpus.drainIngestQueueOnce()
-            #expect(drained == 1)
-
-            // After the drain pass the content must be searchable.
+            // Drain the encode stream to empty: the worker or this pass claims
+            // the encode job, never the foreign one.
+            _ = try await corpus.drainIngestQueueOnce()
             try await corpus.awaitIngestDrain()
+            #expect(try await corpus.drainIngestQueueOnce() == 0)
+
+            // The encode job was ingested and is searchable.
             let results = try await corpus.recall("stream scoped encode", limit: 5, now: fixedNow)
             #expect(!results.isEmpty)
+
+            // The foreign job is still pending on its own stream.
+            let untouched = try await queue.drain(stream: foreignStream)
+            #expect(untouched.count == 1)
+            #expect(untouched.first?.job.id == foreign.id)
 
             await corpus.dropIngestQueue()
         }

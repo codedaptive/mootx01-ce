@@ -1,20 +1,21 @@
 // ManagerConfig.swift
 //
 // Configuration for the moot-mgr manager process: the stats-store path and
-// the retention window. Both resolve from the environment with documented
-// defaults so the manager is zero-config out of the box but overridable for
-// tests and alternate deployments.
+// the retention window. The store path resolves from the product settings file
+// (`daemon.stats_store` in `<config-dir>/config.json`) with a computed default
+// fallback. The retention window and cadence resolve from environment variables.
 //
 // Design (MANAGER_1.0_PLAN.md §1, §4, §5):
-//   - Store path: env MOOT_MGR_STORE overrides; default under the app-support
-//     data dir at <data-dir>/moot-mgr/stats.sqlite, reusing the com.mootx01.ce
-//     bundle convention for the data directory.
+//   - Store path: `daemon.stats_store` in config.json (R6, 2026-09-09) overrides;
+//     computed default `<config-dir>/moot-mgr/stats.sqlite`. No env override.
 //   - Retention window: env MOOT_MGR_RETENTION_SECONDS overrides; default 7 days.
 //   - Retention cadence: env MOOT_MGR_RETENTION_CADENCE_SECONDS overrides;
 //     default 1 hour. This is how often the retention loop wakes (Phase 1 runs
 //     a one-shot pass via the CLI; the cadence is carried for the resident loop).
 
 import Foundation
+import GeniusLocusKit
+import MootProductIdentity
 
 // MARK: - ManagerConfig
 
@@ -26,9 +27,6 @@ import Foundation
 public struct ManagerConfig: Sendable, Equatable {
 
     // MARK: - Environment variable names
-
-    /// Env var overriding the stats-store file path.
-    public static let storePathEnvKey = "MOOT_MGR_STORE"
 
     /// Env var overriding the retention window, in whole seconds.
     public static let retentionWindowEnvKey = "MOOT_MGR_RETENTION_SECONDS"
@@ -47,15 +45,11 @@ public struct ManagerConfig: Sendable, Equatable {
     /// this often; the Phase-1 CLI runs a single pass on demand.
     public static let defaultRetentionCadence: TimeInterval = 60 * 60
 
-    /// The app-support subdirectory name and the SQLite file name. The manager
-    /// owns exactly one store file: <data-dir>/moot-mgr/stats.sqlite.
+    /// The configuration-directory subdirectory name and the SQLite file name.
+    /// The manager owns exactly one store file:
+    /// `<configuration>/moot-mgr/stats.sqlite`, beside the estate catalog.
     public static let storeSubdirectory = "moot-mgr"
     public static let storeFileName = "stats.sqlite"
-
-    /// The bundle-style data-dir convention reused for the manager's store
-    /// location. Matches the `com.mootx01.ce` convention referenced in the
-    /// mission so the manager's data sits alongside other MOOTx01 CE data.
-    public static let dataDirBundleID = "com.mootx01.ce"
 
     // MARK: - Resolved values
 
@@ -90,20 +84,26 @@ public struct ManagerConfig: Sendable, Equatable {
 
     /// Resolve configuration from the process environment, applying defaults.
     ///
-    /// - `MOOT_MGR_STORE` (non-empty) → that exact path; otherwise
-    ///   `<app-support>/moot-mgr/stats.sqlite`.
+    /// - Store path: `daemon.stats_store` in `config.json` (R6 setting); otherwise
+    ///   `<config-dir>/moot-mgr/stats.sqlite`. No environment override for the store
+    ///   path — the setting is the variable.
     /// - `MOOT_MGR_RETENTION_SECONDS` (parseable positive integer) → that window;
     ///   otherwise `defaultRetentionWindow` (7 days). A non-parseable or
     ///   non-positive value falls back to the default (no silent zero window —
     ///   a zero window would roll off everything immediately).
     /// - `MOOT_MGR_RETENTION_CADENCE_SECONDS` → likewise, default 1 hour.
     ///
-    /// - Parameter environment: The environment map (injectable for tests).
+    /// - Parameters:
+    ///   - environment:          The environment map (injectable for tests).
+    ///   - configurationDirectory: The directory that contains `config.json`.
+    ///                             Defaults to `EstateCatalog.configurationDirectory`.
+    ///                             Inject a scratch directory in tests.
     /// - Returns: A resolved `ManagerConfig`.
     public static func fromEnvironment(
-        _ environment: [String: String] = ProcessInfo.processInfo.environment
+        _ environment: [String: String] = ProcessInfo.processInfo.environment,
+        configurationDirectory: URL = EstateCatalog.configurationDirectory
     ) -> ManagerConfig {
-        let storeURL = resolveStoreURL(environment)
+        let storeURL = resolveStoreURL(configurationDirectory: configurationDirectory)
         let window = resolvePositiveInterval(
             environment[retentionWindowEnvKey],
             default: defaultRetentionWindow
@@ -119,24 +119,32 @@ public struct ManagerConfig: Sendable, Equatable {
         )
     }
 
-    /// Resolve the store URL: explicit env override, else the app-support default.
-    private static func resolveStoreURL(_ environment: [String: String]) -> URL {
-        if let raw = environment[storePathEnvKey], !raw.isEmpty {
-            return URL(fileURLWithPath: raw)
+    /// Resolve the store URL: `config.json` setting, else the computed default.
+    ///
+    /// Precedence (highest to lowest):
+    ///   1. `daemon.stats_store` key in `<config-dir>/config.json` (R6 setting,
+    ///      2026-09-09): a changeable setting so the daemon and moot-mgr can be
+    ///      redirected to a non-default store without rebuilding.
+    ///   2. The computed default: `<config-dir>/moot-mgr/stats.sqlite`.
+    ///
+    /// Twin of the Rust `resolve_store_path`. No environment override —
+    /// the setting is the variable (W-6 ruling, 2026-09-09). The
+    /// `configurationDirectory` parameter makes the settings read testable
+    /// without touching the developer's real file.
+    private static func resolveStoreURL(
+        configurationDirectory: URL = EstateCatalog.configurationDirectory
+    ) -> URL {
+        // R6: check the product settings file before falling back to the default.
+        // Reading through the injected directory makes this testable.
+        if let configured = MootProductIdentity.Settings.load(
+            configurationDirectory: configurationDirectory
+        ).daemonStatsStore {
+            return URL(fileURLWithPath: configured)
         }
-        // Default: <app-support>/com.mootx01.ce/moot-mgr/stats.sqlite.
-        // FileManager resolves the platform app-support directory (macOS:
-        // ~/Library/Application Support; Linux Swift: ~/.local/share via the
-        // same API). Falling back to the temporary directory keeps the manager
-        // functional even if app-support is unavailable (headless CI).
-        let base = (try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: false
-        )) ?? FileManager.default.temporaryDirectory
-        return base
-            .appendingPathComponent(dataDirBundleID, isDirectory: true)
+        // Default: <configuration>/moot-mgr/stats.sqlite, the same path
+        // AriaResident.statsStorePath computes when the setting is absent,
+        // so the daemon and moot-mgr open the same file out of the box.
+        return configurationDirectory
             .appendingPathComponent(storeSubdirectory, isDirectory: true)
             .appendingPathComponent(storeFileName, isDirectory: false)
     }

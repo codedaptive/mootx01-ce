@@ -4,13 +4,12 @@
 //! settings key is `permissions.allow` (nested under a `permissions`
 //! object), NOT top-level `allowedTools`. Entries take the MCP-prefixed
 //! form `mcp__mootx01__<tool_name>` for the direct connection, and
-//! `mcp__plugin_mootx01_mootx01__<tool_name>` for calls routed through the
-//! installed plugin (plugin-owned MCP connections, v1.0.15) — empirically confirmed against a
-//! live `~/.claude/settings.json` carrying both prefixes side by side (this
-//! installer's marketplace and plugin are both named `mootx01`, giving the
-//! concrete plugin prefix `mcp__plugin_mootx01_mootx01__`). A rule written
-//! for only one namespace matches zero calls made through the other
-//! connection — every tier write in this file covers BOTH.
+//! `mcp__plugin_mootx01_memory__<tool_name>` for calls routed through the
+//! installed plugin (Claude Code plugin mode, v1.1.0+: the plugin registers
+//! its server under the key `"memory"`, giving the concrete prefix
+//! `mcp__plugin_mootx01_memory__`). A rule written for only one namespace
+//! matches zero calls made through the other connection — every tier write
+//! in this file covers BOTH.
 //!
 //! Tool names are derived at runtime from the linked aria-mcp library
 //! (`tool_list::build_tool_list()`), so the allow list can never drift from
@@ -33,22 +32,82 @@ use crate::core::merge::MergeError;
 const PREFIX: &str = "mcp__mootx01__";
 
 /// The MCP tool prefix Claude Code uses for calls routed through the
-/// installed plugin. See the module doc comment for the empirical
-/// confirmation and shape rationale.
-const PLUGIN_PREFIX: &str = "mcp__plugin_mootx01_mootx01__";
+/// installed plugin (v1.1.0+: the plugin registers its server under the key
+/// `"memory"`, so the prefix is `mcp__plugin_mootx01_memory__`).
+const PLUGIN_PREFIX: &str = "mcp__plugin_mootx01_memory__";
+
+/// Pre-v1.1.0 plugin prefix. The plugin registered its server under `"mootx01"`
+/// before this release, giving `mcp__plugin_mootx01_mootx01__`. Kept ONLY in
+/// the revoke list so `revoke` migrates away existing allow/deny entries on
+/// upgrade; never written by grant paths.
+const LEGACY_PLUGIN_PREFIX: &str = "mcp__plugin_mootx01_mootx01__";
 
 /// Every namespace prefix a tool name must be written under.
 const ALL_PREFIXES: [&str; 2] = [PREFIX, PLUGIN_PREFIX];
 
-/// `mcp__mootx01__<name>` for every tool the linked server exposes (direct
-/// namespace only — used by `grant`, the allow-all opt-in).
+/// Prefixes consulted when READING a tool's existing tier for
+/// cross-namespace inheritance — `ALL_PREFIXES` plus the legacy pre-v1.1.0
+/// plugin prefix. A user's explicit allow/ask/deny recorded under the
+/// legacy prefix (before the plugin's server key renamed to `"memory"`) is
+/// a decision about the capability, not about a string that happened to
+/// change; `grant_tiered`'s inheritance must see it or the legacy decision
+/// is silently overridden by the classifier default on the current
+/// prefixes. This is READ-only: `ALL_PREFIXES` remains the WRITE set, so a
+/// grant path never creates a new legacy entry — only `revoke` still strips
+/// one that already exists.
+const ALL_READ_PREFIXES: [&str; 3] = [PREFIX, PLUGIN_PREFIX, LEGACY_PLUGIN_PREFIX];
+
+/// Tool names retired from the installer authorization inventory. This is a
+/// defensive floor applied to whatever tool list is built from the linked server.
+/// The linked projection does not carry a retired name today; the filter guards
+/// against a future regression where a retired name re-enters the projection by
+/// mistake. Mirrors Swift `PermissionsWriter.retiredToolNames`.
+const RETIRED_TOOL_NAMES: &[&str] = &[
+    "moot_file_packet",
+    "moot_packet_get",
+    "moot_packet_list",
+    "moot_packet_lineage",
+];
+
+/// Single predicate: returns true for any name that is not in RETIRED_TOOL_NAMES.
+/// Both adapters below call this so the rule lives in one place.
+fn is_authorized_name(name: &str) -> bool {
+    !RETIRED_TOOL_NAMES.contains(&name)
+}
+
+/// Filter `names` to those not in `RETIRED_TOOL_NAMES`. Borrowed form for tests.
+fn authorized_names<'a>(names: &[&'a str]) -> Vec<&'a str> {
+    names
+        .iter()
+        .copied()
+        .filter(|n| is_authorized_name(n))
+        .collect()
+}
+
+/// Filter `names` to those not in `RETIRED_TOOL_NAMES`. Owned form used by
+/// grant, grant_tiered, and migrate_tiers so the filter is applied uniformly
+/// on every path, matching Swift's three-site coverage of authorizedToolNames.
+fn authorized_names_owned(names: Vec<String>) -> Vec<String> {
+    names
+        .into_iter()
+        .filter(|n| is_authorized_name(n.as_str()))
+        .collect()
+}
+
+/// `mcp__mootx01__<name>` for every authorized tool the linked server exposes
+/// (direct namespace only — used by `grant`, the allow-all opt-in). Retired
+/// tool names are filtered out as a defensive floor; the linked projection does
+/// not carry them today, but the filter guards against future regressions.
 pub fn permission_entries() -> Vec<String> {
     let list = aria_mcp::tool_list::build_tool_list();
     list.as_array()
         .map(|tools| {
-            tools
+            let names: Vec<&str> = tools
                 .iter()
                 .filter_map(|t| t.get("name").and_then(|n| n.as_str()))
+                .collect();
+            authorized_names(&names)
+                .iter()
                 .map(|n| format!("{PREFIX}{n}"))
                 .collect()
         })
@@ -71,14 +130,39 @@ pub fn permission_entries() -> Vec<String> {
 /// Reads: no estate content is created, changed, or removed.
 const READ_TOOLS: &[&str] = &[
     "moot_estate_status", "moot_estate_ping", "moot_drain_status",
+    // Rebuild OPERATIONS are mutating; this is the read-only progress poll
+    // for them (same split as moot_drain_status over the drain workers).
+    "moot_rebuild_status",
+    // C3/A6: audit-derived timing metrics — pure audit-log read.
+    "moot_timing_report",
     "moot_list_lenses", "moot_list_recipes",
+    // Grounded synthesis reads candidates and generates text; it writes no
+    // drawer, packet, journal, meta, trace or reward (FRZ-3 read set).
+    "moot_synthesize",
     "moot_vault_status", "moot_vault_job",
     "moot_memory_search", "moot_memory_get", "moot_memory_list",
     "moot_recall_precise", "moot_recall_connected", "moot_recall_shaped", "moot_recall_distilled",
     "moot_recall_vague",
+    // Walk (breadth-first traversal) and temporal (time-ordered recall) are
+    // pure read operations — no estate content is created, changed, or removed.
+    // Added here when aria-mcp shipped the two new recall endpoints; mirrors
+    // the Swift PermissionsWriter.readTools parity requirement.
+    "moot_recall_walk", "moot_recall_temporal",
     "moot_fact_search", "moot_fact_timeline",
     "moot_connection_search", "moot_connection_map",
-    "moot_estate_map", "moot_read_journal", "moot_federated_search",
+    "moot_estate_map", "moot_read_journal",
+    // Grant-authorized federated read.
+    "moot_federated_recall",
+    // Surface help: capability discovery, always a pure read.
+    "moot_help",
+    // Transcript recall: reads session transcript, no estate writes.
+    "moot_memory_recall_transcript",
+    // Similar recall: nearest drawers by whole-record vector, no estate writes.
+    "moot_recall_similar",
+    // Monitoring inspection: reads daemon telemetry state without changing it.
+    "moot_monitoring_status",
+    // Migration candidate evaluation (read-only, does not commit).
+    "moot_migration_run",
     // Dataset reads (MX-TAB-7): query rows / column stats are read-only.
     "moot_dataset_query", "moot_dataset_stats",
     "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias",
@@ -89,39 +173,18 @@ const READ_TOOLS: &[&str] = &[
     "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
 ];
 
-/// Additive-unconfirmed writes: create NEW content; nothing already
-/// committed is changed, moved, or removed.
-const ADDITIVE_WRITE_TOOLS: &[&str] =
-    &["moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories"];
-
-/// Mutations of existing state: something already committed changes shape,
-/// is superseded, moves, or a background process alters estate-wide
-/// indexes/consolidation state.
-const MUTATION_TOOLS: &[&str] = &[
-    "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
-    "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-    "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
-    "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
-    // Seed-file JSON import (MXE-JI-1): reads a seed file from the filesystem
-    // and bulk-writes the estate — same Ask posture as palace/vault import.
-    "moot_json_import",
-    // Dataset import (MX-TAB-7): creates a backend table and can read a
-    // csv_path from the filesystem — same Ask posture as palace/vault import.
-    "moot_file_dataset",
-    // Monitoring flag mutation: sets daemon telemetry state
-    // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
-    // Mirrors Swift PermissionsWriter.mutationTools (parity required).
-    "moot_monitoring_status",
-    // Contradiction hunter: estate-wide sweep that persists PROPOSED
-    // contradicts tunnels (same sweep runs inside moot_dream, already ask
-    // tier). Review settles a proposed tunnel's lifecycle — a mutation of
-    // committed state, and rejection is durable (never re-proposed).
-    // Mirrors Swift PermissionsWriter.mutationTools (parity required).
-    "moot_hunt_contradictions", "moot_review_tunnel",
-];
-
-/// Destructive, irreversible: hard-deletes content from the estate.
-const DESTRUCTIVE_TOOLS: &[&str] = &["moot_erase_memory"];
+/// The additive-write, mutation and destructive tables live in aria-mcp
+/// (`tool_mutation_inventory`), the crate that owns the tool surface: the
+/// tiered installer default here and the frozen serve posture in the
+/// dispatcher read the same tables, so a new mutating tool is triaged once.
+/// Only the read table is installer-local.
+///
+/// The allow tier holds `moot_file_memory` without a confirmation prompt
+/// because the server, not the host, enforces the sensitivity tier: a memory
+/// filed while a restricted or secret grant is live takes the grant's tier
+/// when the caller names none and refuses a lower one, so no prompt is
+/// needed to stop a handoff downgrading granted material.
+use aria_mcp::tool_mutation_inventory::{ADDITIVE_WRITE_TOOLS, DESTRUCTIVE_TOOLS, MUTATION_TOOLS};
 
 /// Every tool name this module has explicitly triaged into a tier. Exposed
 /// so a test can assert this set equals the REAL tool inventory
@@ -174,7 +237,7 @@ pub fn grant(settings_path: &Path) -> Result<usize, MergeError> {
         .collect();
     let mut added = 0;
     let list = aria_mcp::tool_list::build_tool_list();
-    let names: Vec<String> = list
+    let raw_names: Vec<String> = list
         .as_array()
         .map(|tools| {
             tools
@@ -184,6 +247,10 @@ pub fn grant(settings_path: &Path) -> Result<usize, MergeError> {
                 .collect()
         })
         .unwrap_or_default();
+    // Defensive floor: retired tool names must not be granted even if the
+    // linked projection somehow re-introduces them (mirrors Swift's
+    // authorizedToolNames call in permissionEntries).
+    let names = authorized_names_owned(raw_names);
     for name in &names {
         for prefix in ALL_PREFIXES {
             let entry = format!("{prefix}{name}");
@@ -254,7 +321,7 @@ pub fn classify(tool: &str) -> Tier {
 ///
 /// Backfilling at the classifier default instead would bypass a user's
 /// `deny`: someone who denies `mcp__mootx01__moot_memory_get` would get
-/// `mcp__plugin_mootx01_mootx01__moot_memory_get` added to `allow` on the
+/// `mcp__plugin_mootx01_memory__moot_memory_get` added to `allow` on the
 /// next install or upgrade, because that exact string is "genuinely
 /// absent". A user cannot place an entry for a namespace they have never
 /// seen.
@@ -311,7 +378,7 @@ pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), Merge
     }
 
     let list = aria_mcp::tool_list::build_tool_list();
-    let names: Vec<String> = list
+    let raw_names: Vec<String> = list
         .as_array()
         .map(|tools| {
             tools
@@ -321,17 +388,22 @@ pub fn grant_tiered(settings_path: &Path) -> Result<(usize, usize, usize), Merge
                 .collect()
         })
         .unwrap_or_default();
+    // Defensive floor: mirrors Swift authorizedToolNames in mergeTiered.
+    let names = authorized_names_owned(raw_names);
 
     let mut added = (0usize, 0usize, 0usize);
     for name in names {
         // Computed from the pre-existing state, once per tool and before
-        // either entry is pushed. Scanning every prefix rather than only
-        // "the other one" is equivalent here and stays correct if a third
+        // either entry is pushed. Scanning every READ prefix (current
+        // namespaces plus the legacy plugin prefix) rather than only "the
+        // other one" is equivalent here and stays correct if a third
         // namespace is ever added: a prefix whose entry is absent
         // contributes nothing, and one whose entry is present is exactly a
         // sibling to inherit from. `max()` is most-restrictive-wins — see
-        // `Tier`'s variant-order note.
-        let inherited = ALL_PREFIXES
+        // `Tier`'s variant-order note. The legacy prefix is read-only here —
+        // it can supply an inherited tier but is never a write target in
+        // the loop below, which iterates `ALL_PREFIXES` only.
+        let inherited = ALL_READ_PREFIXES
             .iter()
             .filter_map(|p| existing_tier.get(&format!("{p}{name}")).copied())
             .max();
@@ -405,7 +477,7 @@ pub fn migrate_tiers(settings_path: &Path) -> Result<usize, MergeError> {
     }
 
     let list = aria_mcp::tool_list::build_tool_list();
-    let names: Vec<String> = list
+    let raw_names: Vec<String> = list
         .as_array()
         .map(|tools| {
             tools
@@ -415,6 +487,8 @@ pub fn migrate_tiers(settings_path: &Path) -> Result<usize, MergeError> {
                 .collect()
         })
         .unwrap_or_default();
+    // Defensive floor: mirrors Swift authorizedToolNames in migrateTiers.
+    let names = authorized_names_owned(raw_names);
 
     let mut moved = 0;
     for name in &names {
@@ -487,18 +561,22 @@ pub fn has_any_moot_entries(settings_path: &Path) -> bool {
     false
 }
 
-/// Remove every `mcp__mootx01__` AND `mcp__plugin_mootx01_mootx01__` entry
-/// from `permissions.allow` / `.ask` / `.deny`. Prefix-based, so tools
-/// renamed or removed since being granted are cleaned too, and both
-/// namespaces so an uninstall does not strand the plugin-prefixed twin
-/// entries `grant`/`grant_tiered` now write. Absent file is a no-op.
-/// Returns the number removed.
+/// Remove every `mcp__mootx01__`, `mcp__plugin_mootx01_memory__`, and
+/// `mcp__plugin_mootx01_mootx01__` (pre-v1.1.0 plugin prefix) entry from
+/// `permissions.allow` / `.ask` / `.deny`. Prefix-based, so tools renamed or
+/// removed since being granted are cleaned too. The legacy prefix is stripped
+/// here so an upgrade on a machine installed before v1.1.0 migrates away
+/// existing allow/deny entries rather than stranding them. Absent file is a
+/// no-op. Returns the number removed.
 pub fn revoke(settings_path: &Path) -> Result<usize, MergeError> {
     if !settings_path.exists() {
         return Ok(0);
     }
     let mut root = read_settings(settings_path)?;
     let mut removed = 0;
+    // All prefixes to strip: current direct, current plugin, and the pre-v1.1.0
+    // plugin prefix for migration (LEGACY_PLUGIN_PREFIX).
+    let revoke_prefixes = [PREFIX, PLUGIN_PREFIX, LEGACY_PLUGIN_PREFIX];
     for key in ["allow", "ask", "deny"] {
         if let Some(arr) = root
             .get_mut("permissions")
@@ -508,7 +586,7 @@ pub fn revoke(settings_path: &Path) -> Result<usize, MergeError> {
             let before = arr.len();
             arr.retain(|v| {
                 v.as_str()
-                    .map(|s| !ALL_PREFIXES.iter().any(|p| s.starts_with(p)))
+                    .map(|s| !revoke_prefixes.iter().any(|p| s.starts_with(p)))
                     .unwrap_or(true)
             });
             removed += before - arr.len();
@@ -569,6 +647,185 @@ mod tests {
         assert!(entries.len() >= 50, "expected the full tool surface, got {}", entries.len());
         assert!(entries.iter().all(|e| e.starts_with(PREFIX)));
         assert!(entries.iter().any(|e| e == "mcp__mootx01__moot_memory_search"));
+    }
+
+    // ------------------------------------------------------------------
+    // Finding F: retired names are filtered (mirrors Swift retiredToolNames)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn authorized_names_filters_retired_and_keeps_ordinary() {
+        // A retired name fed to authorized_names must not appear in the output,
+        // while an ordinary name in the same call must survive. Both halves are
+        // asserted so the test cannot pass by returning an empty list.
+        let retired = "moot_file_packet";
+        let ordinary = "moot_memory_get";
+        let result = authorized_names(&[retired, ordinary]);
+        assert!(
+            !result.contains(&retired),
+            "retired name {retired} must be filtered by authorized_names"
+        );
+        assert!(
+            result.contains(&ordinary),
+            "ordinary name {ordinary} must be kept by authorized_names"
+        );
+    }
+
+    #[test]
+    fn permission_entries_does_not_contain_retired_names() {
+        // Absence check over the live projection: the shipped permission set
+        // must name no retired operation under any prefix. This is not a gate
+        // on the filter itself — it asserts the end state, not the mechanism.
+        // The test that gates the filter (retired-name-in / absent-out) is
+        // `authorized_names_owned_filters_retired_and_keeps_ordinary`.
+        let entries = permission_entries();
+        for retired in RETIRED_TOOL_NAMES {
+            for prefix in ALL_PREFIXES {
+                let banned = format!("{prefix}{retired}");
+                assert!(
+                    !entries.contains(&banned),
+                    "permission_entries must not emit retired tool {retired} under {prefix}"
+                );
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Finding G: retired names filtered on the tiered-writer paths
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn grant_tiered_does_not_emit_retired_names() {
+        // Absence check over the tiered-write output: grant_tiered (the default
+        // install path, mirroring Swift mergeTiered) must not emit any retired
+        // name in any tier under either prefix. This is not a gate on the filter
+        // itself — it asserts the end state of the live projection, not the
+        // mechanism. The test that gates the filter (retired-name-in / absent-out)
+        // is `authorized_names_owned_filters_retired_and_keeps_ordinary`.
+        //
+        // grant_tiered is the default install path (mirrors Swift mergeTiered).
+        // Its output must not contain any retired name under either prefix,
+        // while ordinary names still land in their classifier-assigned tiers.
+        let dir = tmp("grant-tiered-retired");
+        let p = dir.join("settings.json");
+        grant_tiered(&p).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        for tier_key in ["allow", "ask", "deny"] {
+            let list = v["permissions"][tier_key].as_array().cloned().unwrap_or_default();
+            for retired in RETIRED_TOOL_NAMES {
+                for prefix in ALL_PREFIXES {
+                    let banned = format!("{prefix}{retired}");
+                    assert!(
+                        !list.contains(&serde_json::Value::String(banned.clone())),
+                        "grant_tiered must not emit {banned} in {tier_key}"
+                    );
+                }
+            }
+        }
+        // Ordinary name must still land somewhere.
+        let ordinary = "moot_memory_get";
+        let all_entries: Vec<String> = ["allow", "ask", "deny"]
+            .iter()
+            .flat_map(|k| {
+                v["permissions"][k]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|e| e.as_str().map(String::from))
+            })
+            .collect();
+        assert!(
+            all_entries.iter().any(|e| e.contains(ordinary)),
+            "ordinary tool {ordinary} must appear in some tier after grant_tiered"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn migrate_tiers_does_not_write_retired_names() {
+        // migrate_tiers is the upgrade path (mirrors Swift migrateTiers).
+        // It must not ADD any retired name to any tier. Seed an ordinary tool
+        // in ask (the old all-ask default) so the function has real work to do;
+        // verify the retired name never appears in the output while the ordinary
+        // name is present in some tier after migration.
+        //
+        // Note: migrate_tiers calls authorized_names_owned, not authorized_names.
+        // This test is an absence check on a name that is never seeded — it
+        // confirms the function does not invent entries from build_tool_list()
+        // for retired names. The discriminating unit test for authorized_names_owned
+        // (retired-in/absent-out, ordinary-in/present-out) is
+        // `authorized_names_owned_filters_retired_and_keeps_ordinary` below.
+        let dir = tmp("migrate-tiers-retired");
+        let p = dir.join("settings.json");
+        let retired = "moot_file_packet";
+        let ordinary = "moot_memory_get";
+        // Seed with the ordinary tool fossilised in ask (old default) and no
+        // retired entries — the function processes names from build_tool_list(),
+        // so a retired name absent from the settings file is never added.
+        let seed = serde_json::json!({
+            "permissions": {
+                "ask": [
+                    format!("{PREFIX}{ordinary}"),
+                    format!("{PLUGIN_PREFIX}{ordinary}"),
+                ]
+            }
+        });
+        std::fs::write(&p, serde_json::to_string(&seed).unwrap()).unwrap();
+
+        migrate_tiers(&p).unwrap();
+
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&p).unwrap()).unwrap();
+        let all_entries: Vec<String> = ["allow", "ask", "deny"]
+            .iter()
+            .flat_map(|k| {
+                v["permissions"][k]
+                    .as_array()
+                    .cloned()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|e| e.as_str().map(String::from))
+            })
+            .collect();
+
+        // Ordinary name must be present in some tier after migration (presence
+        // check; the specific tier is not asserted here).
+        assert!(
+            all_entries.iter().any(|e| e.contains(ordinary)),
+            "ordinary tool {ordinary} must be present after migrate_tiers"
+        );
+        // Retired name must not have been added to any tier under any prefix
+        // (absence check against a name that was never seeded).
+        for prefix in ALL_PREFIXES {
+            let banned = format!("{prefix}{retired}");
+            assert!(
+                !all_entries.contains(&banned),
+                "retired tool {retired} must not appear in any tier under {prefix} after migrate_tiers"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn authorized_names_owned_filters_retired_and_keeps_ordinary() {
+        // authorized_names_owned is the owned adapter called by grant,
+        // grant_tiered, and migrate_tiers. It must apply the same rule as
+        // authorized_names (the borrowed adapter). Both halves are asserted so
+        // the test cannot pass by returning an empty list.
+        let retired = "moot_file_packet".to_string();
+        let ordinary = "moot_memory_get".to_string();
+        let result = authorized_names_owned(vec![retired.clone(), ordinary.clone()]);
+        assert!(
+            !result.contains(&retired),
+            "retired name {retired} must be filtered by authorized_names_owned"
+        );
+        assert!(
+            result.contains(&ordinary),
+            "ordinary name {ordinary} must be kept by authorized_names_owned"
+        );
     }
 
     #[test]
@@ -674,8 +931,8 @@ mod tests {
         assert_eq!(classify("moot_palace_import"), Tier::Ask);
         assert_eq!(classify("moot_json_import"), Tier::Ask);
         assert_eq!(classify("moot_vault_import"), Tier::Ask);
-        // monitoring_status mutates daemon behaviour — ask tier.
-        assert_eq!(classify("moot_monitoring_status"), Tier::Ask, "monitoring_status is mutating — ask tier");
+        // moot_monitoring_status is inspection-only in v2 — pure read, no estate writes.
+        assert_eq!(classify("moot_monitoring_status"), Tier::Allow, "inspection-only in v2 — pure read, no estate writes");
 
         assert_eq!(classify("moot_erase_memory"), Tier::Deny);
 
@@ -735,9 +992,9 @@ mod tests {
             .map(|e| e.as_str().unwrap())
             .collect();
         assert!(allow.contains(&"mcp__mootx01__moot_memory_search"));
-        assert!(allow.contains(&"mcp__plugin_mootx01_mootx01__moot_memory_search"));
+        assert!(allow.contains(&"mcp__plugin_mootx01_memory__moot_memory_search"));
         assert!(deny.contains(&"mcp__mootx01__moot_erase_memory"));
-        assert!(deny.contains(&"mcp__plugin_mootx01_mootx01__moot_erase_memory"));
+        assert!(deny.contains(&"mcp__plugin_mootx01_memory__moot_erase_memory"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -755,7 +1012,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     const DIRECT_SEARCH: &str = "mcp__mootx01__moot_memory_search";
-    const PLUGIN_SEARCH: &str = "mcp__plugin_mootx01_mootx01__moot_memory_search";
+    const PLUGIN_SEARCH: &str = "mcp__plugin_mootx01_memory__moot_memory_search";
 
     /// Seed a settings.json with `seed`, run `grant_tiered`, and return the
     /// three resulting tier lists. Every inheritance test has the same
@@ -835,6 +1092,33 @@ mod tests {
     }
 
     #[test]
+    fn grant_tiered_legacy_plugin_deny_binds_absent_current_plugin_twin() {
+        // F7: the user denied the tool under the pre-v1.1.0 plugin prefix,
+        // and separately allowed it under the direct namespace (an install
+        // predating the rename, migrated forward but never re-tiered under
+        // the legacy prefix). Reading only ALL_PREFIXES for inheritance
+        // ignores the legacy deny entirely and lets the current plugin twin
+        // inherit the direct namespace's `allow` — silently dropping the
+        // user's explicit deny. The legacy entry itself is never rewritten;
+        // only the current plugin prefix inherits from it.
+        const LEGACY_SEARCH: &str = "mcp__plugin_mootx01_mootx01__moot_memory_search";
+        let (allow, _ask, deny) = seed_and_grant(
+            "grant-tiered-legacy-deny-binds-twin",
+            serde_json::json!({
+                "permissions": { "allow": [DIRECT_SEARCH], "deny": [LEGACY_SEARCH] }
+            }),
+        );
+        assert!(
+            deny.iter().any(|e| e == PLUGIN_SEARCH),
+            "the current plugin twin must inherit deny from the legacy prefix, not allow from the direct namespace"
+        );
+        assert!(
+            !allow.iter().any(|e| e == PLUGIN_SEARCH),
+            "the legacy deny must not be bypassed by the direct namespace's allow"
+        );
+    }
+
+    #[test]
     fn grant_tiered_never_moves_disagreeing_siblings() {
         // One namespace allowed, the other denied. With both entries present
         // there is nothing left to add for this tool, so the observable
@@ -888,7 +1172,7 @@ mod tests {
             );
         }
         // The unrelated tool's own inheritance still applies to ITS twin.
-        assert!(deny.iter().any(|e| e == "mcp__plugin_mootx01_mootx01__moot_estate_ping"));
+        assert!(deny.iter().any(|e| e == "mcp__plugin_mootx01_memory__moot_estate_ping"));
     }
 
     #[test]
@@ -926,12 +1210,12 @@ mod tests {
             &p,
             serde_json::to_string_pretty(&serde_json::json!({
                 "permissions": {
-                    "allow": ["mcp__mootx01__moot_estate_ping", "mcp__plugin_mootx01_mootx01__moot_estate_ping"],
+                    "allow": ["mcp__mootx01__moot_estate_ping", "mcp__plugin_mootx01_memory__moot_estate_ping"],
                     "ask": [
-                        "mcp__mootx01__moot_memory_search", "mcp__plugin_mootx01_mootx01__moot_memory_search",
-                        "mcp__mootx01__moot_withdraw_memory", "mcp__plugin_mootx01_mootx01__moot_withdraw_memory",
+                        "mcp__mootx01__moot_memory_search", "mcp__plugin_mootx01_memory__moot_memory_search",
+                        "mcp__mootx01__moot_withdraw_memory", "mcp__plugin_mootx01_memory__moot_withdraw_memory",
                     ],
-                    "deny": ["mcp__mootx01__moot_erase_memory", "mcp__plugin_mootx01_mootx01__moot_erase_memory"],
+                    "deny": ["mcp__mootx01__moot_erase_memory", "mcp__plugin_mootx01_memory__moot_erase_memory"],
                 }
             }))
             .unwrap(),
@@ -948,7 +1232,7 @@ mod tests {
         let ask: Vec<String> = v["permissions"]["ask"]
             .as_array().unwrap().iter().map(|e| e.as_str().unwrap().to_string()).collect();
         assert!(allow.contains(&"mcp__mootx01__moot_memory_search".to_string()));
-        assert!(allow.contains(&"mcp__plugin_mootx01_mootx01__moot_memory_search".to_string()));
+        assert!(allow.contains(&"mcp__plugin_mootx01_memory__moot_memory_search".to_string()));
         assert!(!ask.contains(&"mcp__mootx01__moot_memory_search".to_string()));
         assert!(ask.contains(&"mcp__mootx01__moot_withdraw_memory".to_string()), "a genuine mutation must stay in ask");
 
@@ -1022,7 +1306,7 @@ mod tests {
         std::fs::write(&p, br#"{"permissions":{"allow":["Bash(ls:*)"]}}"#).unwrap();
         assert!(!has_any_moot_entries(&p), "foreign-only file");
 
-        std::fs::write(&p, br#"{"permissions":{"deny":["mcp__plugin_mootx01_mootx01__moot_erase_memory"]}}"#).unwrap();
+        std::fs::write(&p, br#"{"permissions":{"deny":["mcp__plugin_mootx01_memory__moot_erase_memory"]}}"#).unwrap();
         assert!(has_any_moot_entries(&p), "plugin-namespace entry must count");
         let _ = std::fs::remove_dir_all(&dir);
     }

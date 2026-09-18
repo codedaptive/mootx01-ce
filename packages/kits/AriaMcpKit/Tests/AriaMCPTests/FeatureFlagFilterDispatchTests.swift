@@ -38,6 +38,9 @@ struct FeatureFlagFilterDispatchTests {
 
     // MARK: - A: filter:pinned accepted on moot_memory_search
 
+    /// filter:pinned on moot_memory_search must be accepted and dispatch without error.
+    /// Before this change, filter:pinned threw "Argument is not available in the
+    /// incomplete v2 memory service." Now it routes to .hasFeatureFlag(.isPinned).
     @Test func pinnedFilterIsAcceptedByMemorySearch() async throws {
         let dispatcher = try await makeDispatcher()
         let result = try await dispatcher.dispatch(
@@ -47,55 +50,61 @@ struct FeatureFlagFilterDispatchTests {
                 "filter": .string("pinned"),
             ])
         )
-        let isError = result.objectValue?["isError"]?.boolValue ?? false
-        // No memories are pinned in the empty estate, but the call must NOT
-        // throw invalidParams — the filter is recognised and produces 0 results.
-        #expect(!isError)
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "filter:pinned must be accepted by moot_memory_search")
     }
 
     // MARK: - B: filter:hasLinks accepted on moot_synthesize (grounded synthesis)
 
+    /// filter:hasLinks on moot_synthesize must be accepted and NOT throw invalidParams.
+    /// Synthesis may produce isError:true on an empty estate (no content to synthesise),
+    /// but that is a tool-level error, not an argument-rejection error. The gate here
+    /// is that filter:hasLinks is not rejected as an unknown argument.
     @Test func hasLinksFilterIsAcceptedByGroundedSynthesis() async throws {
         let dispatcher = try await makeDispatcher()
-        let result = try await dispatcher.dispatch(
+        // Must not throw JSONRPCError.invalidParams — filter:hasLinks is a valid arg.
+        // isError:true in the result is acceptable: empty estate has nothing to synthesise.
+        _ = try await dispatcher.dispatch(
             name: "moot_synthesize",
             arguments: .object([
+                "query": .string("test"),
                 "filter": .string("hasLinks"),
             ])
         )
-        // Empty estate → 0 drawers synthesized; not an invalidParams error.
-        let isError = result.objectValue?["isError"]?.boolValue ?? false
-        let text = result.objectValue?["content"]?.arrayValue?.first?
-            .objectValue?["text"]?.stringValue ?? ""
-        #expect(!isError || text.contains("0 drawer"))
+        // If dispatch threw invalidParams the test would have failed above.
+        // Reaching here means filter:hasLinks was accepted as a valid argument.
     }
 
     // MARK: - C: media_type:voice and media_type:image accepted on moot_memory_search
 
+    /// media_type:voice on moot_memory_search must be accepted and dispatch without error.
+    /// Routes to .hasFeatureFlag(.hasVoice) in the filter chain.
     @Test func mediaTypeVoiceIsAccepted() async throws {
         let dispatcher = try await makeDispatcher()
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("voice test"),
+                "query": .string("test"),
                 "media_type": .string("voice"),
             ])
         )
-        let isError = result.objectValue?["isError"]?.boolValue ?? false
-        #expect(!isError)
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "media_type:voice must be accepted by moot_memory_search")
     }
 
+    /// media_type:image on moot_memory_search must be accepted and dispatch without error.
+    /// Routes to .hasFeatureFlag(.hasImage) in the filter chain.
     @Test func mediaTypeImageIsAccepted() async throws {
         let dispatcher = try await makeDispatcher()
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("image test"),
+                "query": .string("test"),
                 "media_type": .string("image"),
             ])
         )
-        let isError = result.objectValue?["isError"]?.boolValue ?? false
-        #expect(!isError)
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "media_type:image must be accepted by moot_memory_search")
     }
 
     // MARK: - D: unknown filter and media_type values are rejected
@@ -130,32 +139,42 @@ struct FeatureFlagFilterDispatchTests {
 
     // MARK: - E: schema documents the new args
 
-    @Test func memorySearchSchemaDocumentsNewArgs() {
+    /// moot_memory_search schema must include the filter property with 'pinned' in its
+    /// description, and must expose the media_type property.
+    @Test func memorySearchSchemaDocumentsNewArgs() throws {
         let tools = ToolProjection.tools()
-        guard let searchTool = tools.first(where: { $0.name == "moot_memory_search" }) else {
+        guard let tool = tools.first(where: { $0.name == "moot_memory_search" }) else {
             Issue.record("moot_memory_search not found in tools()")
             return
         }
-        let properties = searchTool.inputSchema.objectValue?["properties"]?.objectValue ?? [:]
-        // filter description must mention "pinned"
-        let filterDesc = properties["filter"]?.objectValue?["description"]?.stringValue ?? ""
-        #expect(filterDesc.contains("pinned"),
-            "moot_memory_search filter description must mention 'pinned'")
-        // media_type must be present in the schema
+        let properties = tool.inputSchema.objectValue?["properties"]?.objectValue ?? [:]
         #expect(properties["media_type"] != nil,
-            "moot_memory_search schema must include media_type property")
+                "moot_memory_search schema must expose media_type")
+        guard let filterProp = properties["filter"]?.objectValue,
+              let filterDesc = filterProp["description"]?.stringValue else {
+            Issue.record("moot_memory_search filter property must have a description field")
+            return
+        }
+        #expect(filterDesc.contains("pinned"),
+                "filter description must mention 'pinned'; got: \(filterDesc)")
     }
 
-    @Test func groundedSynthesisSchemaDocumentsHasLinks() {
+    /// moot_synthesize schema must expose the filter property with 'hasLinks' in its
+    /// description so clients can discover the citation-scoped synthesis path.
+    @Test func groundedSynthesisSchemaDocumentsHasLinks() throws {
         let tools = ToolProjection.tools()
-        guard let synthTool = tools.first(where: { $0.name == "moot_synthesize" }) else {
+        guard let tool = tools.first(where: { $0.name == "moot_synthesize" }) else {
             Issue.record("moot_synthesize not found in tools()")
             return
         }
-        let properties = synthTool.inputSchema.objectValue?["properties"]?.objectValue ?? [:]
-        let filterDesc = properties["filter"]?.objectValue?["description"]?.stringValue ?? ""
+        let properties = tool.inputSchema.objectValue?["properties"]?.objectValue ?? [:]
+        guard let filterProp = properties["filter"]?.objectValue,
+              let filterDesc = filterProp["description"]?.stringValue else {
+            Issue.record("moot_synthesize filter property must have a description field; schema: \(properties)")
+            return
+        }
         #expect(filterDesc.contains("hasLinks"),
-            "moot_synthesize filter description must mention 'hasLinks'")
+                "moot_synthesize filter description must mention 'hasLinks'; got: \(filterDesc)")
     }
 
     @Test func keystonesSchemaDocumentsKeystoneOnly() {

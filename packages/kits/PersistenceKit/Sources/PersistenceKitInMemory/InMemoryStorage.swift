@@ -84,6 +84,10 @@ public final class InMemoryStorage: Storage, Sendable {
         await stateActor.schemaVersion(for: kitID)
     }
 
+    public func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        await stateActor.renameSchemaKit(from: oldKitID, to: newKitID)
+    }
+
     public func migrate(to schema: SchemaDeclaration) async throws {
         try await stateActor.applyMigrations(schema)
     }
@@ -129,6 +133,10 @@ public final class InMemoryStorage: Storage, Sendable {
             await stateActor.rollback(to: snapshot)
             throw error
         }
+    }
+
+    public func captureInventorySnapshot(limits: InventorySnapshotLimits) async throws -> InventorySnapshot {
+        try await stateActor.captureInventorySnapshot(limits: limits)
     }
 }
 
@@ -216,12 +224,68 @@ actor InMemoryStateActor {
     }
 
     func snapshot() -> InMemoryState { state }
+
+    /// Copies both tables inside one actor operation. Unlike the public
+    /// transaction closure, this operation cannot interleave with another
+    /// state mutation between the drawers and nodes reads.
+    func captureInventorySnapshot(limits: InventorySnapshotLimits) throws -> InventorySnapshot {
+        var serializedBytes = 0
+        let drawers = try boundedInventoryRows(
+            table: InventorySnapshot.drawersTable,
+            limits: limits,
+            serializedBytes: &serializedBytes
+        )
+        let nodes = try boundedInventoryRows(
+            table: InventorySnapshot.nodesTable,
+            limits: limits,
+            serializedBytes: &serializedBytes
+        )
+        return InventorySnapshot(drawers: drawers, nodes: nodes)
+    }
+
+    private func boundedInventoryRows(
+        table: String,
+        limits: InventorySnapshotLimits,
+        serializedBytes: inout Int
+    ) throws -> [StorageRow] {
+        guard let storedTable = state.tables[table] else {
+            throw StorageError.invalidQuery(detail: "inventory snapshot: table \(table) not found")
+        }
+        guard storedTable.rows.count <= limits.maxRowsPerTable else {
+            throw InventorySnapshotError.rowLimitExceeded(table: table, limit: limits.maxRowsPerTable)
+        }
+
+        var rows: [StorageRow] = []
+        for values in storedTable.rows.values {
+            let row = StorageRow(values: values)
+            let rowBytes = InventorySnapshot.serializedByteCount(of: row)
+            guard rowBytes <= limits.maxSerializedBytes - serializedBytes else {
+                throw InventorySnapshotError.byteLimitExceeded(limit: limits.maxSerializedBytes)
+            }
+            serializedBytes += rowBytes
+            rows.append(row)
+        }
+        return rows
+    }
     func schemaVersion() -> Int { state.schemaVersion }
 
     /// Per-kit schema version, keyed by kitID. Returns 0 if no migrations
     /// have been applied for this kit yet.
     func schemaVersion(for kitID: String) -> Int {
         state.kitSchemaVersions[kitID] ?? 0
+    }
+
+    /// Move the per-kit version entry for `oldKitID` to `newKitID` (SPEC
+    /// I-7a). The global `schemaVersion` is a maximum across kits and does
+    /// not change.
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) -> SchemaKitRenameOutcome {
+        guard let oldVersion = state.kitSchemaVersions[oldKitID] else { return .noRow }
+        if let newVersion = state.kitSchemaVersions[newKitID] {
+            return .conflict(oldVersion: oldVersion, newVersion: newVersion)
+        }
+        state.kitSchemaVersions[newKitID] = oldVersion
+        state.kitSchemaVersions.removeValue(forKey: oldKitID)
+        return .renamed(version: oldVersion)
     }
 
     func openSchema(_ schema: SchemaDeclaration) throws {

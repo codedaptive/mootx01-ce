@@ -77,6 +77,65 @@ public enum POSIXSocket {
         return (fd, actualPort)
     }
 
+    /// Bind a TCP listening socket to an arbitrary IPv4 address and start listening.
+    ///
+    /// SECURITY: unlike `listenLoopbackTCP`, this function accepts the bind address
+    /// as a parameter so callers may bind to 0.0.0.0 (all interfaces, for LAN
+    /// serving) or to 127.0.0.1 (loopback, for tests). The caller is responsible
+    /// for choosing the correct address for the security context:
+    ///   - LAN serving in production: pass "0.0.0.0" to accept connections from
+    ///     other devices on the local network.
+    ///   - Tests / sandbox-only: pass "127.0.0.1" to stay loopback-confined
+    ///     (identical security to `listenLoopbackTCP`).
+    ///
+    /// - Parameters:
+    ///   - port: Requested port; 0 lets the OS assign one (use in tests).
+    ///   - bindAddress: IPv4 address string to bind to (e.g. "0.0.0.0").
+    /// - Returns: `(fd, boundPort)` — the listening descriptor and the actual port.
+    /// - Throws: `SocketError` on any syscall failure or invalid address string.
+    public static func listenAnyTCP(port: UInt16, bindAddress: String) throws -> (fd: Int32, port: UInt16) {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { throw SocketError.syscall("socket", errno) }
+
+        var one: Int32 = 1
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &one, socklen_t(MemoryLayout<Int32>.size))
+
+        // Convert the caller-supplied address string to a network-byte-order uint32.
+        var inAddr = in_addr()
+        guard inet_pton(AF_INET, bindAddress, &inAddr) == 1 else {
+            close(fd)
+            throw SocketError.syscall("inet_pton", EINVAL)
+        }
+
+        var addr = sockaddr_in()
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = port.bigEndian
+        addr.sin_addr = inAddr
+
+        let bindResult = withUnsafePointer(to: &addr) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else {
+            let e = errno; close(fd); throw SocketError.syscall("bind", e)
+        }
+        guard listen(fd, 16) == 0 else {
+            let e = errno; close(fd); throw SocketError.syscall("listen", e)
+        }
+
+        // Read back the actual port (relevant when port 0 was requested).
+        var bound = sockaddr_in()
+        var len = socklen_t(MemoryLayout<sockaddr_in>.size)
+        _ = withUnsafeMutablePointer(to: &bound) { p in
+            p.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                getsockname(fd, sa, &len)
+            }
+        }
+        let actualPort = UInt16(bigEndian: bound.sin_port)
+        return (fd, actualPort)
+    }
+
     /// Bind a Unix-domain listening socket at `path` and chmod it to 0600.
     ///
     /// SECURITY: the socket file is created then immediately chmod'd to 0600

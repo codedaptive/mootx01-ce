@@ -76,6 +76,7 @@ pub struct RecallStream {
     /// an `Err` — is the channel. Mirrors Swift `RecallStream.degradedStages`.
     /// The GLK coordinator merges these into `GLKRecallResult.degraded_stages`.
     degraded_stages: Vec<String>,
+    withheld_by_sensitivity: usize,
 }
 
 impl RecallStream {
@@ -98,6 +99,7 @@ impl RecallStream {
             page_index: 0,
             exhausted: false,
             degraded_stages: Vec::new(),
+            withheld_by_sensitivity: 0,
         }
     }
 
@@ -111,6 +113,15 @@ impl RecallStream {
         self.degraded_stages = stages;
         self
     }
+
+    /// Attach the count produced by the existing bounded candidate evaluation.
+    pub fn with_withheld_by_sensitivity(mut self, count: usize) -> Self {
+        self.withheld_by_sensitivity = count;
+        self
+    }
+
+    /// Default-sensitivity exclusions from the already-retrieved candidate set.
+    pub fn withheld_by_sensitivity(&self) -> usize { self.withheld_by_sensitivity }
 
     /// The named internal-read failures recorded while producing this stream.
     /// Empty for a genuine (including genuine-empty) result. See the field doc.
@@ -182,17 +193,14 @@ fn hydrate(d: &Drawer, level: HydrationLevel) -> Drawer {
     match level {
         HydrationLevel::BitmapOnly => {
             // BitmapOnly = no text: clear content AND the content-derived
-            // text fields (distilled quad, subject trio). The Swift twin
-            // REBUILDS the drawer without these fields, so a clone that
-            // cleared only `content` silently leaked distilled/subject text
-            // through a tier the caller chose for disclosure minimisation
-            // (surfaced by the PR-03 dense row on federated bitmapOnly).
+            // text fields (ssc_facts, subject trio). The Swift twin REBUILDS
+            // the drawer without these fields, so a clone that cleared only
+            // `content` silently leaked derived text through a tier the
+            // caller chose for disclosure minimisation (surfaced by the
+            // PR-03 dense row on federated bitmapOnly).
             let mut d2 = d.clone();
             d2.content = String::new();
-            d2.distilled = None;
-            d2.distilled_pipeline_version = None;
-            d2.distilled_token_count = None;
-            d2.distilled_at = None;
+            d2.ssc_facts = None;
             d2.subject = None;
             d2.subject_pipeline_version = None;
             d2.subject_at = None;

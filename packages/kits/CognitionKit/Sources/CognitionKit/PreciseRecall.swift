@@ -149,7 +149,11 @@ public enum PreciseRecall {
             limit: poolSize,
             fallback: .allowDegraded,
             queryText: query,
-            traceLimit: limit)
+            traceLimit: limit,
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this caller does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off)
         let result = try await kit.recall(handle, request)
 
         // b. REDUCTION COMPOSITION — project each body-free pooled hit (with its
@@ -160,11 +164,30 @@ public enum PreciseRecall {
         //    hybrid lane's order and the reduce is bit-reproducible. Content is
         //    empty here — the body-free pool — and is filled by the late
         //    hydration closure for the survivors only.
-        let comp = NeuronKit.CompositionGrid.named(composition)
-        // The query arrives as plain text from the tool surface with no lattice
-        // anchor; the `lattice` signal is therefore neutral for these queries
-        // (it discriminates only when both sides carry a UDC code).
-        let reductionQuery = NeuronKit.ReductionQuery(text: query)
+        //
+        //    W4 recall_tuning consumption: read the estate-provisioned manifest so
+        //    named(_:applyingTuning:) can apply the tuned mmr_lambda when the
+        //    estate has a non-default tuning envelope. Failure to read the manifest
+        //    (unprovision estate or I/O error) falls back to .default —
+        //    byte-identical to the pre-W4 path. named(_:applyingTuning:) itself
+        //    is a no-op when tuning == .default, so an absent or default-valued
+        //    manifest never changes results.
+        let provisionedTuning = (try? await kit.provisionedRecallTuning(for: handle)) ?? .default
+        let comp = NeuronKit.CompositionGrid.named(composition, applyingTuning: provisionedTuning)
+        // Query-side §8.3 lattice anchor (W2.5 Track S): lets lattice-bearing
+        // compositions fire; the default text composition never reads it.
+        //
+        // M4: read the pre-computed anchor from the GLKRecallResult rather than
+        // re-deriving. The RecallDirector's compileSketch derives it exactly once
+        // (single-derivation doctrine); callers MUST NOT call
+        // QueryLatticeAnchor.derive() a second time on the same query text.
+        // When no anchor was found (unanchorable query), queryLatticeAnchor is nil
+        // and both udcCode and qid are empty strings — the lattice signal stays
+        // neutral exactly as before.
+        let reductionQuery = NeuronKit.ReductionQuery(
+            text: query,
+            udcCode: result.queryLatticeAnchor?.udcCode ?? "",
+            qid: result.queryLatticeAnchor?.qid ?? "")
         let candidates = result.hits.enumerated().map { index, hit in
             NeuronKit.ReductionCandidate.from(hit: hit, coarseRank: index)
         }

@@ -21,9 +21,12 @@ import Foundation
 ///
 /// Defaults are the spec defaults (NEURONKIT_SPEC § 3.2 schedule and
 /// thresholds): how often the daemon ticks, how often it re-verifies
-/// the audit chain, the decay / tombstone age windows, and the two
-/// drift thresholds that gate fingerprint-drift and byReference-drift
-/// proposals.
+/// the audit chain, the decay / tombstone age windows, and the drift
+/// threshold that gates byReference-drift proposals.
+///
+/// Codable is synthesized, so a persisted manifest that carries keys this
+/// struct no longer declares (for example a retired threshold) decodes
+/// cleanly: unknown keys are ignored, never an error.
 public struct MaintenancePolicy: Sendable, Equatable, Codable {
 
     /// Tick cadence in milliseconds. Spec default 300_000 (5 minutes,
@@ -55,13 +58,6 @@ public struct MaintenancePolicy: Sendable, Equatable, Codable {
     /// proposed for expunge confirmation.
     public var tombstoneGraceSeconds: Double
 
-    /// Per-room/wing fingerprint Hamming-distance drift fraction past
-    /// which a fingerprint-drift proposal is emitted. Spec default
-    /// 0.25 — a quarter of the fingerprint bits drifting from baseline
-    /// is the documented threshold at which the room's anchor is
-    /// considered to have moved enough to warrant review.
-    public var fingerprintDriftThreshold: Float
-
     /// LearnedReference source-drift threshold (fraction). Spec default
     /// 0.25 — when a learned reference's source content has drifted by
     /// at least this fraction, the reference may no longer be valid and
@@ -75,18 +71,16 @@ public struct MaintenancePolicy: Sendable, Equatable, Codable {
         auditCheckIntervalMs: Int = 300_000,
         decayWindowSeconds: Double = 2_592_000,
         tombstoneGraceSeconds: Double = 604_800,
-        fingerprintDriftThreshold: Float = 0.25,
         byReferenceDriftThreshold: Float = 0.25
     ) {
         self.tickIntervalMs = tickIntervalMs
         self.auditCheckIntervalMs = auditCheckIntervalMs
         self.decayWindowSeconds = decayWindowSeconds
         self.tombstoneGraceSeconds = tombstoneGraceSeconds
-        self.fingerprintDriftThreshold = fingerprintDriftThreshold
         self.byReferenceDriftThreshold = byReferenceDriftThreshold
     }
 
-    /// Spec-default policy (300_000 / 300_000 / 30d / 7d / 0.25 / 0.25).
+    /// Spec-default policy (300_000 / 300_000 / 30d / 7d / 0.25).
     public static let `default` = MaintenancePolicy()
 }
 
@@ -135,22 +129,58 @@ public extension MaintenancePolicyStore {
 /// - `proposedKeys`: maintenance proposal keys already emitted (never repeated).
 ///   Stored as a SORTED array so the serialized manifest value is byte-stable.
 /// - `cycleCount`: number of cycles run.
+/// - `lastPerformanceHealthAt`: when the daily timing-derivation health duty last
+///   ran. Nil = never run. Used by the 24 h gate inside `runCycle` (A7).
+///   `decodeIfPresent` keeps older persisted states loading cleanly when this
+///   field is absent from the manifest.
+/// - `performanceHealthWatermarkMs`: HLC physical-time watermark (epoch ms) for
+///   the audit-log page cursor. 0 = start from the beginning of the log (first
+///   run, or a reset). Advances to the last event's physical time after each
+///   successful health duty run. `decodeIfPresent ?? 0` for backward
+///   compatibility with states serialized before A7 landed.
 public struct MaintenanceDaemonState: Sendable, Equatable, Codable {
     public var lastTickAt: Date?
     public var lastAuditCheckAt: Date?
     public var proposedKeys: [String]
     public var cycleCount: Int
+    /// When the daily timing-derivation health duty last ran. Nil = never run.
+    public var lastPerformanceHealthAt: Date?
+    /// HLC physical-time watermark for the audit-log page cursor, epoch ms.
+    /// 0 = start from the beginning (first run or reset).
+    public var performanceHealthWatermarkMs: Int64
 
     public init(
         lastTickAt: Date?,
         lastAuditCheckAt: Date?,
         proposedKeys: [String],
-        cycleCount: Int
+        cycleCount: Int,
+        lastPerformanceHealthAt: Date? = nil,
+        performanceHealthWatermarkMs: Int64 = 0
     ) {
         self.lastTickAt = lastTickAt
         self.lastAuditCheckAt = lastAuditCheckAt
         self.proposedKeys = proposedKeys
         self.cycleCount = cycleCount
+        self.lastPerformanceHealthAt = lastPerformanceHealthAt
+        self.performanceHealthWatermarkMs = performanceHealthWatermarkMs
+    }
+
+    // MARK: - Codable (custom decoder for backward compatibility)
+
+    private enum CodingKeys: String, CodingKey {
+        case lastTickAt, lastAuditCheckAt, proposedKeys, cycleCount
+        case lastPerformanceHealthAt, performanceHealthWatermarkMs
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        lastTickAt = try c.decodeIfPresent(Date.self, forKey: .lastTickAt)
+        lastAuditCheckAt = try c.decodeIfPresent(Date.self, forKey: .lastAuditCheckAt)
+        proposedKeys = try c.decode([String].self, forKey: .proposedKeys)
+        cycleCount = try c.decode(Int.self, forKey: .cycleCount)
+        // A7 fields: absent in states serialized before A7 landed — default to nil / 0.
+        lastPerformanceHealthAt = try c.decodeIfPresent(Date.self, forKey: .lastPerformanceHealthAt)
+        performanceHealthWatermarkMs = try c.decodeIfPresent(Int64.self, forKey: .performanceHealthWatermarkMs) ?? 0
     }
 }
 

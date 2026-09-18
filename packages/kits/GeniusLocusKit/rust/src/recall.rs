@@ -32,7 +32,8 @@
 // mirrors the NeuronKit policy-store precedent where value-level results agree
 // across both ports despite different async shapes.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+use std::collections::HashSet;
 
 use locus_kit::drawer::Drawer;
 use locus_kit::filter::RecallFrame;
@@ -47,7 +48,7 @@ use locus_kit::filter::RecallFrame;
 /// implementation executes the mode semantics:
 ///
 ///   `LocusOnly`   — bitmap-index scan through LocusKit.
-///   `CorpusOnly`  — BM25 + vector lanes via registered CorpusKit/VectorKit.
+///   `CorpusOnly`  — BM25 + vector lanes via registered CorpusKit/SynapseKit.
 ///   `Hybrid`      — locus + BM25 + vector lanes, RRF-fused (k=60).
 ///   `UnionBest`   — all lanes with union profile and greedy MMR deduplication.
 ///   `NodeTreeNative` — host-tree topology path (see below).
@@ -102,11 +103,13 @@ impl GLKRecallMode {
 
 /// Scoring strategy applied after lane recall completes.
 ///
-/// `.raw` returns hits in the order the active lane produced them with no
-/// reranking. `.rrf` applies Reciprocal Rank Fusion across lanes.
-/// `.matrixAware` enables the full weighted pipeline (matrix co-occurrence
+/// `Raw` returns hits in the order the active lane produced them with no
+/// reranking. `Rrf` applies Reciprocal Rank Fusion across lanes.
+/// `MatrixAware` enables the full weighted pipeline (matrix co-occurrence
 /// + temporal, fieldFit, graph, preference signals) mirroring the Swift
-/// `RecallDirector`'s step-9 path.
+/// `RecallDirector`'s step-9 path. `Discriminative` is RRF-based scoring
+/// with the dense-lane saturation discount applied to the composite score;
+/// no matrix steer, fieldFit, graph, or preference signals are applied.
 ///
 /// Mirrors Swift `GLKRecallScoring` (GLKRecallScoring.swift).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,14 +120,20 @@ pub enum GLKRecallScoring {
     Rrf,
     /// Full weighted pipeline with matrix, fieldFit, graph, and preference signals.
     MatrixAware,
+    /// RRF composite score scaled by the dense-lane saturation discount
+    /// (`dense_discrimination_factor` ∈ [0, 1]). No matrix steer applied.
+    /// When the dense lane is absent or contrastive (spread ≥ 0.15) the
+    /// factor is 1.0 and the result is byte-identical to `Rrf`.
+    Discriminative,
 }
 
 impl GLKRecallScoring {
     pub fn raw_value(&self) -> &'static str {
         match self {
-            Self::Raw         => "raw",
-            Self::Rrf         => "rrf",
-            Self::MatrixAware => "matrixAware",
+            Self::Raw           => "raw",
+            Self::Rrf           => "rrf",
+            Self::MatrixAware   => "matrixAware",
+            Self::Discriminative => "discriminative",
         }
     }
 }
@@ -485,8 +494,19 @@ pub struct RecallHit {
     pub sources: Vec<RecallEvidencePath>,
     /// Score decomposition across all evidence lanes.
     pub score: RecallScoreVector,
-    /// Human-readable explanation tokens, one per active evidence lane.
+    /// Human-readable explanation lines. UnionBest hits carry the
+    /// `recall_explainer` block (`sources:`, `score:`, `mode: … | scoring: …`,
+    /// `why:`) plus a `denseSignals:` line when the dense lane voted; Hybrid and
+    /// CorpusOnly hits carry the sorted source raw values; the locus-only
+    /// fallbacks carry `["locusBitmap"]`. Byte-identical to Swift `RecallHit.explanation`.
     pub explanation: Vec<String>,
+    /// The span rerank hit for this drawer (best span index, word bounds, cosine
+    /// and lexical rank under the active encoder), when the UnionBest span stage
+    /// scored it (contract sheet §8). None for every other lane and for drawers
+    /// with no span rows under the active model; the composer renders the evidence
+    /// snippet from the bounds when present (sheet §9). Twin of Swift
+    /// `RecallHit.spanHit`.
+    pub span_hit: Option<crate::span_rerank::SpanRerankHit>,
 }
 
 // ---------------------------------------------------------------------------
@@ -559,6 +579,15 @@ impl Default for RecallOrigin {
 ///   - `"temporal"`        — the MatrixTier temporal-relevance column.
 ///   - `"graph"`           — the connection-graph column.
 ///   - `"preference"`      — the learned-preference column.
+///   Column-budget keys, namespace `signal:` (COL-1; steer ONLY the unionBest
+///   MatrixAware weighted score). Where the per-lane keys SCALE a column's
+///   term, a `signal:*` key at 0 EXCLUDES the whole column and REDISTRIBUTES
+///   its `RecallWeights` budget over the remaining columns (see
+///   `recall_signal_budget::RecallSignalBudget`). `1.0`/absent neutral, `<0`
+///   suppresses, other positive values scale without redistribution:
+///   - `"signal:locus"`, `"signal:bm25"`, `"signal:vector"` (Hamming + dense),
+///     `"signal:fieldFit"`, `"signal:matrix"` (coOccurrence + temporal),
+///     `"signal:graph"`, `"signal:preference"`, `"signal:agreement"`.
 ///
 /// A lane whose key is ABSENT uses the default weight `1.0`; an empty map
 /// reproduces the uniform fusion exactly (the back-compat contract — a `None`
@@ -600,6 +629,25 @@ pub struct RecallShape {
     /// computed default `min(max(limit * 4, 64), 256)`. When set, the value is
     /// clamped to `[FRONTIER_K_FLOOR, FRONTIER_K_CEILING]`.
     pub frontier_k: Option<usize>,
+    /// Binary-lane metric selector (W2.5 M1): "hamming" (default) or
+    /// "jaccard". Unknown values degrade to Hamming (shape contract).
+    /// Twin of Swift `RecallShape.binaryMetric` (which is Codable-additive;
+    /// this port's shape is constructed in-process, not deserialized).
+    pub binary_metric: String,
+    /// Float-lane metric selector (W2.5 M1 float unlock): "cosine" (default),
+    /// "l2", or "dot". Unknown values degrade to cosine (shape contract — a
+    /// shape must degrade, never fail). Twin of Swift `RecallShape.floatMetric`.
+    ///
+    /// Semantics:
+    /// - "cosine": 1 − cos(a,b). Scale-invariant; the historical default.
+    /// - "l2": Euclidean distance √Σ(aᵢ−bᵢ)². Magnitude-sensitive.
+    /// - "dot": negative dot product −Σ(aᵢbᵢ). For dot-product-trained embeddings.
+    pub float_metric: String,
+    /// Matrix-signal weighting selector (W2.5 S4-C): "counts" (default —
+    /// the canonical i64 count matrices) or "decayed" (the §8.13
+    /// exp-decayed projections). Unknown values degrade to counts.
+    /// Twin of Swift `RecallShape.matrixWeighting`.
+    pub matrix_weighting: String,
 }
 
 impl RecallShape {
@@ -618,7 +666,32 @@ impl RecallShape {
             lane_weights,
             anti_similar_lanes: HashSet::new(),
             frontier_k,
+            binary_metric: "hamming".to_string(),
+            float_metric: "cosine".to_string(),
+            matrix_weighting: "counts".to_string(),
         }
+    }
+
+    /// Builder: select the matrix-signal weighting ("counts" | "decayed",
+    /// W2.5 S4-C). Unknown values degrade to counts at the read site.
+    pub fn with_matrix_weighting(mut self, weighting: &str) -> Self {
+        self.matrix_weighting = weighting.to_string();
+        self
+    }
+
+    /// Builder: select the binary-lane metric ("hamming" | "jaccard",
+    /// W2.5 M1). Unknown values degrade to Hamming at the read site.
+    pub fn with_binary_metric(mut self, metric: &str) -> Self {
+        self.binary_metric = metric.to_string();
+        self
+    }
+
+    /// Builder: select the float-lane metric ("cosine" | "l2" | "dot",
+    /// W2.5 M1 float unlock). Unknown values degrade to cosine at the read
+    /// site. Twin of Swift `RecallShape.floatMetric`.
+    pub fn with_float_metric(mut self, metric: &str) -> Self {
+        self.float_metric = metric.to_string();
+        self
     }
 
     /// Builder: set the dense lane keys (`"dense:<modelID>"`) that invert their
@@ -629,11 +702,35 @@ impl RecallShape {
         self
     }
 
-    /// The signed weight for a lane key. Returns `1.0` for any key absent from
-    /// `lane_weights` — the neutral default that keeps unweighted lanes voting at
-    /// full strength.
+    /// The signed weight for a lane key. Returns `default_weight(lane_key)` for
+    /// any key absent from `lane_weights` — `1.0` for every key except
+    /// `SIGNAL_VECTOR`, whose default is `0`. Mirrors Swift `weight(for:)`.
     pub fn weight(&self, lane_key: &str) -> f32 {
-        self.lane_weights.get(lane_key).copied().unwrap_or(1.0)
+        self.lane_weights
+            .get(lane_key)
+            .copied()
+            .unwrap_or_else(|| Self::default_weight(lane_key))
+    }
+
+    /// The weight a lane key carries when no shape and no provisioned default
+    /// names it. `1.0` (neutral) for every key except `SIGNAL_VECTOR`, which
+    /// defaults to `0`: the whole-record vector column (Hamming + dense) is out
+    /// of the fused score by ruling (Encoder Rerank Program — the span rerank
+    /// stage carries the semantic signal) and a shape brings it back by setting
+    /// the key explicitly. The coordinator's weight resolvers and `weight` both
+    /// read this, so they agree. Mirrors Swift `RecallShape.defaultWeight(for:)`.
+    pub fn default_weight(lane_key: &str) -> f32 {
+        if lane_key == Self::SIGNAL_VECTOR { 0.0 } else { 1.0 }
+    }
+
+    /// The signed weight for `lane_key` from an optional shape: the shape's
+    /// weight when present, `default_weight` otherwise. The one resolver every
+    /// coordinator read site uses so a `None` shape and an empty shape agree.
+    pub fn weight_or_default(shape: &Option<RecallShape>, lane_key: &str) -> f32 {
+        match shape {
+            Some(s) => s.weight(lane_key),
+            None => Self::default_weight(lane_key),
+        }
     }
 
     /// Whether the given dense lane key inverts its objective to FARTHEST
@@ -662,41 +759,45 @@ impl RecallShape {
     /// typo surfaces at compile time, not as a silent no-op. Mirrors Swift
     /// `RecallShape.DenseSignal`.
     pub const DENSE_RANDOM_INDEXING: &'static str = "dense:random-indexing-v1";
-    /// Positive-PMI distributional provider dense lane key.
-    pub const DENSE_PPMI: &'static str = "dense:ppmi-v1";
-    /// Latent-Semantic-Analysis provider dense lane key.
+    /// The span rerank encoder lane, keyed by the floor model's registry id
+    /// (contract sheet §1: `<model>-w<window_words>`). The stage reads the key
+    /// for whichever model is ACTIVE via `dense_key_for_model`; this constant is
+    /// the floor model's spelling for presets and docs. Mirrors Swift
+    /// `RecallShape.DenseSignal.encoder`.
+    pub const DENSE_ENCODER: &'static str = "dense:minilm-l6-v2-w60";
+    /// The span rerank stage switch (contract sheet §8): `0` skips the stage,
+    /// any other value runs it. Not a scoring column — it has no budget slice
+    /// and never redistributes. Mirrors Swift `RecallShape.SignalKey.encoder`.
+    pub const SIGNAL_ENCODER: &'static str = "signal:encoder";
+
+    /// The lane key for a model id: `"dense:<model_id>"`. One spelling for the
+    /// dense consensus fold and the span rerank weight alike.
+    pub fn dense_key_for_model(model_id: &str) -> String {
+        format!("dense:{model_id}")
+    }
+    /// Latent-Semantic-Analysis provider dense lane key (always-on).
     pub const DENSE_LSA: &'static str = "dense:lsa-v1";
-    /// Non-negative-Matrix-Factorisation provider dense lane key.
-    pub const DENSE_NMF: &'static str = "dense:nmf-v1";
-    /// Field-Distribution-Coding provider dense lane key.
-    pub const DENSE_FDC: &'static str = "dense:fdc-v1";
+    /// The distributional dense lane keys in stable order: RI and LSA, both
+    /// always-on. Mirrors Swift `RecallShape.DenseSignal.all`.
+    pub const DENSE_SIGNALS: [&'static str; 2] = [Self::DENSE_RANDOM_INDEXING, Self::DENSE_LSA];
 
-    /// Every per-signal dense lane key the standard provider stack ships, in
-    /// stable order (RI, PPMI, LSA, NMF — fdc is forwarded separately by the
-    /// consensus preset). Mirrors Swift `RecallShape.DenseSignal.all`.
-    pub const DENSE_SIGNALS: [&'static str; 4] = [
-        Self::DENSE_RANDOM_INDEXING,
-        Self::DENSE_PPMI,
-        Self::DENSE_LSA,
-        Self::DENSE_NMF,
-    ];
 
-    /// The names of every preset in the roster, in stable declaration order — the
-    /// discoverable surface the catalog and the ARIA tool enumerate. Mirrors
-    /// Swift `RecallShape.presetNames` byte-for-byte.
-    pub const PRESET_NAMES: [&'static str; 20] = [
+    /// Default preset roster (35 names): RI, LSA, and all whole-record float
+    /// presets are always active. Mirrors Swift `RecallShape.presetNames`.
+    pub const PRESET_NAMES: [&'static str; 35] = [
         "balanced",
         "precise",
         "conceptual",
         "broad",
         "lexical",
+        "jaccard",
+        "float-l2",
+        "float-dot",
+        "matrix_decayed",
         "not_lexical",
         "associative",
         "consensus",
         "ri_forward",
-        "ppmi_forward",
-        "lsa_forward",
-        "nmf_forward",
         "fast",
         "structural",
         "temporal",
@@ -704,11 +805,39 @@ impl RecallShape {
         "field",
         "preference",
         "anti_redundant",
-        // session_hybrid: session-granularity recall — hybridRecall scoredLane +
-        // bounded temporal-window boost + speaker-aware weighting. Added in
-        // W1-session-hybrid. Mirrors Swift RecallShape.presetNames.
+        "anti_redundant_ri",
+        "lsa_forward",
+        "anti_redundant_lsa",
         "session_hybrid",
+        "temporal_connection",
+        "field_preference",
+        "no_locus",
+        "no_field_fit",
+        "no_matrix",
+        "no_graph",
+        "no_preference",
+        "no_agreement",
+        "no_bm25",
+        "no_vector",
+        "no_encoder",
     ];
+
+
+    pub const SIGNAL_LOCUS: &'static str = "signal:locus";
+    /// BM25 column budget key.
+    pub const SIGNAL_BM25: &'static str = "signal:bm25";
+    /// Vector budget key (Hamming + dense share it).
+    pub const SIGNAL_VECTOR: &'static str = "signal:vector";
+    /// Field-fit column budget key.
+    pub const SIGNAL_FIELD_FIT: &'static str = "signal:fieldFit";
+    /// Matrix budget key (coOccurrence + temporal share it).
+    pub const SIGNAL_MATRIX: &'static str = "signal:matrix";
+    /// Graph column budget key.
+    pub const SIGNAL_GRAPH: &'static str = "signal:graph";
+    /// Preference column budget key.
+    pub const SIGNAL_PREFERENCE: &'static str = "signal:preference";
+    /// Fixed signal-agreement bonus key.
+    pub const SIGNAL_AGREEMENT: &'static str = "signal:agreement";
 
     /// Resolve a named preset to its documented signed-weight shape. Mirrors
     /// Swift `RecallShape.preset`.
@@ -746,23 +875,21 @@ impl RecallShape {
             // Exactness: amplify keyword (bm25) + field-coding (fdc), forward the
             // dense consensus, NARROW the frontier so suppression reshapes a tight
             // high-precision pool. The "find the exact answer" shape.
-            "precise" => Some(shape(
-                &[("bm25", 1.5), (Self::DENSE_FDC, 1.5), ("dense", 1.2)],
-                Some(Self::FRONTIER_K_FLOOR),
-            )),
+            "precise" => {
+                // `mut` is used only when the dark families are compiled in.
+                #[allow(unused_mut)]
+                let mut pairs: Vec<(&str, f32)> = vec![("bm25", 1.5), ("dense", 1.2)];
+                Some(shape(&pairs, Some(Self::FRONTIER_K_FLOOR)))
+            }
 
             // Concepts over keywords: amplify the distributional dense lanes and
             // damp the literal keyword lane.
-            "conceptual" => Some(shape(
-                &[
-                    (Self::DENSE_RANDOM_INDEXING, 1.5),
-                    (Self::DENSE_PPMI, 1.5),
-                    (Self::DENSE_LSA, 1.5),
-                    (Self::DENSE_NMF, 1.5),
-                    ("bm25", 0.5),
-                ],
-                None,
-            )),
+            "conceptual" => {
+                let mut pairs: Vec<(&str, f32)> =
+                    Self::DENSE_SIGNALS.iter().map(|k| (*k, 1.5)).collect();
+                pairs.push(("bm25", 0.5));
+                Some(shape(&pairs, None))
+            }
 
             // Cast wide: forward every retrieval lane above neutral and WIDEN the
             // frontier to the ceiling. The "don't miss anything" shape.
@@ -777,39 +904,68 @@ impl RecallShape {
             )),
 
             // Keyword/field only: amplify bm25 + fdc, ZERO the vector lanes.
-            "lexical" => Some(shape(
-                &[
-                    ("bm25", 1.5),
-                    (Self::DENSE_FDC, 1.5),
-                    ("dense", 0.0),
-                    ("hamming", 0.0),
-                ],
-                None,
-            )),
+            "lexical" => {
+                // `mut` is used only when the dark families are compiled in.
+                #[allow(unused_mut)]
+                let mut pairs: Vec<(&str, f32)> = vec![("bm25", 1.5), ("dense", 0.0), ("hamming", 0.0)];
+                Some(shape(&pairs, None))
+            }
+
+            // Binary-lane metric swap (W2.5 M1): identical fusion, but the
+            // engram lanes score Jaccard set-overlap instead of Hamming.
+            "jaccard" => Some(
+                shape(&[], None).with_binary_metric("jaccard")
+            ),
+
+            // Float-lane metric presets: identical fusion to balanced, but the
+            // dense float embedding lane uses L2 or dot-product distance instead
+            // of the default cosine. Mirrors the jaccard/binary_metric pattern:
+            // only the distance function changes; all lane weights remain neutral.
+            "float-l2" => Some(
+                shape(&[], None).with_float_metric("l2")
+            ),
+
+            // Negative dot product (−Σaᵢbᵢ) as the float-lane distance. Useful
+            // for embeddings trained with a dot-product objective.
+            "float-dot" => Some(
+                shape(&[], None).with_float_metric("dot")
+            ),
+
+            // W2.5 S4-C arm: matrixAware O/T signals read the §8.13
+            // exp-decayed projections instead of the counts.
+            "matrix_decayed" => Some(shape(&[], None).with_matrix_weighting("decayed")),
 
             // Suppress the literal lanes: ZERO bm25 + fdc. Complement of lexical.
-            "not_lexical" => Some(shape(&[("bm25", 0.0), (Self::DENSE_FDC, 0.0)], None)),
+            "not_lexical" => {
+                // `mut` is used only when the dark families are compiled in.
+                #[allow(unused_mut)]
+                let mut pairs: Vec<(&str, f32)> = vec![("bm25", 0.0)];
+                Some(shape(&pairs, None))
+            }
 
             // Loose association: amplify RI + NMF and widen the frontier.
-            "associative" => Some(shape(
-                &[(Self::DENSE_RANDOM_INDEXING, 1.5), (Self::DENSE_NMF, 1.5)],
-                Some(Self::FRONTIER_K_CEILING),
-            )),
+            "associative" => {
+                // `mut` is used only when the dark families are compiled in.
+                #[allow(unused_mut)]
+                let mut pairs: Vec<(&str, f32)> = vec![(Self::DENSE_RANDOM_INDEXING, 1.5)];
+                Some(shape(&pairs, Some(Self::FRONTIER_K_CEILING)))
+            }
 
             // Dense consensus: forward EVERY per-signal dense lane at full
             // strength and narrow the frontier. "Where the embedding models agree."
             "consensus" => {
+                // `mut` is used only when the dark families are compiled in.
+                #[allow(unused_mut)]
                 let mut pairs: Vec<(&str, f32)> =
                     Self::DENSE_SIGNALS.iter().map(|k| (*k, 1.0)).collect();
-                pairs.push((Self::DENSE_FDC, 1.0));
                 Some(shape(&pairs, Some(Self::FRONTIER_K_FLOOR)))
             }
 
             // Single-signal forwarding: amplify ONE dense lane, ZERO its siblings.
+            // With the dense families dark only `ri_forward` exists and it has no
+            // siblings to zero.
             "ri_forward" => Some(single_dense_forward(Self::DENSE_RANDOM_INDEXING)),
-            "ppmi_forward" => Some(single_dense_forward(Self::DENSE_PPMI)),
             "lsa_forward" => Some(single_dense_forward(Self::DENSE_LSA)),
-            "nmf_forward" => Some(single_dense_forward(Self::DENSE_NMF)),
 
             // Cheapest vote: keep ONLY the 256-bit Hamming lane, ZERO float-dense.
             "fast" => Some(shape(&[("hamming", 1.5), ("dense", 0.0)], None)),
@@ -833,15 +989,15 @@ impl RecallShape {
             // suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate
             // the fused ranking. Frontier narrowed to the floor (64) to avoid hauling
             // a wide pool of duplicates. Mirrors Swift `RecallShape.preset("anti_redundant")`.
-            "anti_redundant" => {
-                let mut anti = HashSet::new();
-                anti.insert(Self::DENSE_FDC.to_string());
-                let s = shape(
-                    &[("bm25", -0.5), ("hamming", -0.5)],
-                    Some(Self::FRONTIER_K_FLOOR),
-                );
-                Some(s.with_anti_similar_lanes(anti))
-            }
+            // With the dense families dark there is no FDC lane to invert: the
+            // preset keeps the suppression and the narrow frontier;
+            // `anti_redundant_ri` is the inversion that stays live.
+            // FDC is dark: nothing is inverted; the suppression and the narrow
+            // frontier remain.
+            "anti_redundant" => Some(shape(
+                &[("bm25", -0.5), ("hamming", -0.5)],
+                Some(Self::FRONTIER_K_FLOOR),
+            )),
 
             // Session-granularity hybrid recall: amplify bm25 (keyword match for
             // conversation fragments), dense (semantic similarity within the session
@@ -855,6 +1011,62 @@ impl RecallShape {
                 None,
             )),
 
+            // Per-signal anti-similarity: same suppression shape as anti_redundant
+            // (bm25/hamming at -0.5, frontier narrowed to the floor) but inverts
+            // the RI, LSA, or NMF dense lane to FARTHEST. Each variant targets
+            // diversity in the corresponding distributional semantic space.
+            "anti_redundant_ri" => {
+                let mut anti = HashSet::new();
+                anti.insert(Self::DENSE_RANDOM_INDEXING.to_string());
+                let s = shape(
+                    &[("bm25", -0.5), ("hamming", -0.5)],
+                    Some(Self::FRONTIER_K_FLOOR),
+                );
+                Some(s.with_anti_similar_lanes(anti))
+            }
+
+            "anti_redundant_lsa" => {
+                let mut anti = HashSet::new();
+                anti.insert(Self::DENSE_LSA.to_string());
+                let s = shape(
+                    &[("bm25", -0.5), ("hamming", -0.5)],
+                    Some(Self::FRONTIER_K_FLOOR),
+                );
+                Some(s.with_anti_similar_lanes(anti))
+            }
+
+
+            // Multi-column matrix presets: amplify two matrixAware columns together.
+            // These are no-ops under .raw/.rrf (the matrix columns are dark there).
+
+            // Temporal + co-occurrence: surfaces memories that are BOTH recently
+            // relevant AND frequently filed together with the query's neighbourhood.
+            "temporal_connection" => Some(shape(
+                &[("temporal", 1.5), ("coOccurrence", 1.5)],
+                None,
+            )),
+
+            // Field-fit + preference: surfaces memories that BOTH match the query's
+            // filing facets AND have been historically favoured by the user.
+            "field_preference" => Some(shape(
+                &[("fieldFit", 1.5), ("preference", 1.5)],
+                None,
+            )),
+
+            // Column-exclusion presets (COL-1): one `signal:*` key at 0 each; the
+            // excluded column's budget is redistributed (RecallSignalBudget).
+            "no_locus" => Some(shape(&[(Self::SIGNAL_LOCUS, 0.0)], None)),
+            "no_field_fit" => Some(shape(&[(Self::SIGNAL_FIELD_FIT, 0.0)], None)),
+            "no_matrix" => Some(shape(&[(Self::SIGNAL_MATRIX, 0.0)], None)),
+            "no_graph" => Some(shape(&[(Self::SIGNAL_GRAPH, 0.0)], None)),
+            "no_preference" => Some(shape(&[(Self::SIGNAL_PREFERENCE, 0.0)], None)),
+            "no_agreement" => Some(shape(&[(Self::SIGNAL_AGREEMENT, 0.0)], None)),
+            "no_bm25" => Some(shape(&[(Self::SIGNAL_BM25, 0.0)], None)),
+            "no_vector" => Some(shape(&[(Self::SIGNAL_VECTOR, 0.0)], None)),
+            // Span rerank ablation (sheet §8): the stage is skipped and the
+            // lexical list enters the pool in BM25 order. No budget slice.
+            "no_encoder" => Some(shape(&[(Self::SIGNAL_ENCODER, 0.0)], None)),
+
             _ => None,
         }
     }
@@ -866,25 +1078,40 @@ impl RecallShape {
     pub fn preset_description(name: &str) -> &'static str {
         match name {
             "balanced" => "Uniform fusion — every lane votes equally. The unsteered default.",
-            "precise" => "Exactness — amplify keyword (bm25) + field-coding (fdc) + dense consensus over a narrow frontier.",
-            "conceptual" => "Concepts over keywords — amplify the distributional dense lanes (RI/PPMI/LSA/NMF), damp bm25.",
+            "precise" => "Exactness — amplify keyword (bm25) + dense consensus (+ field-coding when the dense families are compiled in) over a narrow frontier.",
+            "conceptual" => "Concepts over keywords — amplify the distributional dense lanes (RI and LSA), damp bm25.",
             "broad" => "Cast wide — forward every retrieval lane and widen the candidate frontier to the ceiling.",
-            "lexical" => "Keyword/field only — amplify bm25 + fdc, exclude the dense and Hamming vector lanes.",
-            "not_lexical" => "Suppress the literal lanes — exclude bm25 + fdc so distributional and structural signals decide.",
-            "associative" => "Loose association — amplify the RI + NMF distributional lanes over a wide frontier.",
+            "lexical" => "Keyword/field only — amplify bm25 (+ fdc when compiled in), exclude the dense and Hamming vector lanes.",
+            "jaccard" => "Jaccard binary metric — the engram lanes score set-overlap/union instead of Hamming distance; length-normalized similarity.",
+            "float-l2" => "L2 float metric — the dense float embedding lane scores Euclidean L2 distance instead of cosine; useful when absolute vector magnitude differences matter.",
+            "float-dot" => "Dot-product float metric — the dense float embedding lane scores negative dot product instead of cosine; useful for embeddings trained with a dot-product objective.",
+            "matrix_decayed" => "Decayed matrix signals — the co-occurrence and temporal matrix columns read the §8.13 exp-decayed projections (recent evidence outweighs stale) instead of raw counts.",
+            "not_lexical" => "Suppress the literal lanes — exclude bm25 (+ fdc when compiled in) so distributional and structural signals decide.",
+            "associative" => "Loose association — amplify the RI (+ NMF when compiled in) distributional lanes over a wide frontier.",
             "consensus" => "Dense consensus — forward every per-signal dense lane over a narrow frontier; where the embedding models agree.",
             "ri_forward" => "Isolate Random-Indexing — amplify the RI dense lane, exclude the other distributional signals.",
-            "ppmi_forward" => "Isolate PPMI — amplify the PPMI dense lane, exclude the other distributional signals.",
             "lsa_forward" => "Isolate LSA — amplify the LSA dense lane, exclude the other distributional signals.",
-            "nmf_forward" => "Isolate NMF — amplify the NMF dense lane, exclude the other distributional signals.",
             "fast" => "Cheapest vote — keep only the 256-bit Hamming lane, skip the float-dense cosine pass.",
             "structural" => "Structure-led — amplify the LocusKit bitmap lane so filed structure drives ranking.",
             "temporal" => "Time-led — amplify the temporal-relevance column (matrixAware scoring only).",
             "connection" => "Connection-led — amplify the connection-graph column (matrixAware scoring only).",
             "field" => "Field-led — amplify the co-occurrence column (matrixAware scoring only).",
             "preference" => "Preference-led — amplify the learned-preference column (matrixAware scoring only).",
-            "anti_redundant" => "Diversity — invert FDC to farthest (anti-similarity) + suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate; narrow frontier to 64.",
+            "anti_redundant" => "Diversity — suppress BM25/Hamming (-0.5) so lexical near-duplicates cannot dominate, invert FDC to farthest when the dense families are compiled in; narrow frontier to 64.",
+            "anti_redundant_ri" => "Diversity (RI space) — invert the RI dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the random-indexing semantic space.",
+            "anti_redundant_lsa" => "Diversity (LSA space) — invert the LSA dense lane to farthest + suppress BM25/Hamming (-0.5); narrow frontier to 64. Targets distributional diversity in the latent-semantic space.",
             "session_hybrid" => "Session-granularity — hybridRecall scoredLane + bounded temporal-window boost + speaker-aware weighting; amplify bm25 + dense + temporal.",
+            "temporal_connection" => "Recent + co-filed — amplify temporal (recency) + coOccurrence (shared filing neighbourhood) together; matrixAware scoring only.",
+            "field_preference" => "Filed + preferred — amplify fieldFit (FDC facet match) + preference (learned user preference) together; matrixAware scoring only.",
+            "no_locus" => "Ablation — exclude the locus (bitmap recency-rank) column and redistribute its budget; matrixAware scoring only.",
+            "no_field_fit" => "Ablation — exclude the fieldFit column and redistribute its budget; matrixAware scoring only.",
+            "no_matrix" => "Ablation — exclude the coOccurrence + temporal matrix columns and redistribute their budget; matrixAware scoring only.",
+            "no_graph" => "Ablation — exclude the graph column and redistribute its budget; matrixAware scoring only.",
+            "no_preference" => "Ablation — exclude the preference column and redistribute its budget; matrixAware scoring only.",
+            "no_agreement" => "Ablation — drop the fixed signal-agreement bonus; matrixAware scoring only.",
+            "no_bm25" => "Ablation — exclude the BM25 column and redistribute its budget; candidates from the lexical lane still enter the pool; matrixAware scoring only.",
+            "no_vector" => "Ablation — exclude the vector column (Hamming + dense) and redistribute its budget; candidates from the excluded lane still enter the pool; matrixAware scoring only. The vector column is already out by default, so this names the default explicitly.",
+            "no_encoder" => "Ablation — skip the span rerank stage; the lexical list enters the pool in BM25 order. Fuses identically to no_vector.",
             _ => "",
         }
     }
@@ -902,6 +1129,32 @@ fn single_dense_forward(forward_key: &str) -> RecallShape {
         );
     }
     RecallShape::new(weights, None)
+}
+
+// ---------------------------------------------------------------------------
+// GLKSubSpanScoring
+// ---------------------------------------------------------------------------
+
+/// Whether the unionBest matrixAware pipeline runs the step 5.8 sub-span
+/// dense refinement (`CorpusContentEngine::score_sub_spans`) for a request.
+///
+/// Sub-span scoring is an additive-cost stage: transient sentence-window
+/// embeddings for every candidate the `SubSpanBudget` admits, under the
+/// coordinator lock. Ruling 2026-09-07: every non-minimum feature is a call
+/// parameter with an explicit default chosen by the caller, and
+/// additive-cost features default off. `GLKRecallRequest::new` sets `Off`;
+/// every internal caller names its choice at the call site, and the switch
+/// is not an ARIA argument. Mirrors Swift `GLKSubSpanScoring`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum GLKSubSpanScoring {
+    /// Step 5.8 does not run: the dense column keeps the dense lane's
+    /// whole-record cosine (0 for candidates the dense lane never ranked).
+    Off,
+    /// Step 5.8 runs when the other conditions hold (matrixAware scoring, a
+    /// registered CorpusContentEngine, non-empty query text): the dense
+    /// column becomes `max(dense, sub_span_max_cosine)` for every candidate
+    /// scored inside the budget.
+    On,
 }
 
 /// Mirrors Swift `GLKRecallRequest` (GLKRecallRequest.swift).
@@ -948,48 +1201,105 @@ pub struct GLKRecallRequest {
     /// When None (the default), fusion uses uniform positive weights — every lane
     /// at weight `1.0` — BYTE-IDENTICAL to the pre-6b-modifiers behaviour.
     pub recall_shape: Option<RecallShape>,
+    /// Door identity for the reward-cycle trace rows (W2.5 Track R(a)):
+    /// the tool or recipe that issued this recall (e.g. "memory_search").
+    /// Recorded verbatim into `recall_trace.door` for external-origin
+    /// requests. None writes a NULL door. No query text is ever stored
+    /// (privacy ruling 2026-08-20). Mirrors Swift `GLKRecallRequest.door`.
+    pub door: Option<String>,
+    /// Composition identity for the reward-cycle trace rows: the caller's
+    /// composition name where the caller knows one. When None the
+    /// coordinator records "<mode>/<scoring>". Mirrors Swift
+    /// `GLKRecallRequest.composition`.
+    pub composition: Option<String>,
+    /// Optional per-call candidate-pool depth override.
+    ///
+    /// When non-None this overrides BOTH the coordinator's computed default AND
+    /// any `RecallShape.frontier_k` the request carries — the precedence is:
+    ///
+    ///   request.frontier_k > recall_shape.frontier_k > engine formula
+    ///
+    /// Clamped to `[RecallShape::FRONTIER_K_FLOOR, RecallShape::FRONTIER_K_CEILING]`
+    /// (`[64, 256]`). None falls through to the shape override or the formula
+    /// `min(max(limit * 4, 64), 256)`. Mirrors Swift `GLKRecallRequest.frontierK`.
+    pub frontier_k: Option<usize>,
+
+    // ── Anomalous-flag admission gate (§11.18, 2026-08-20) ──────────────────
+
+    /// Optional anomalous-flag admission gate (§11.18 anomalous-flag recall
+    /// prefilter).
+    ///
+    /// Applied BEFORE scoring at candidate admission in the coordinator:
+    /// - `None`  — no filtering; all candidates admitted (default, back-compat,
+    ///   byte-identical to requests without this parameter).
+    /// - `Some(true)`  — admit ONLY anomalous drawers (bit 26 set).
+    /// - `Some(false)` — EXCLUDE anomalous drawers (bit 26 clear).
+    ///
+    /// Mirrors Swift `GLKRecallRequest.anomalousFilter`.
+    pub anomalous_filter: Option<bool>,
+
+    /// Whether the step 5.8 sub-span dense refinement runs for this request.
+    ///
+    /// `Off` (what `new()` sets) leaves the dense column as the dense lane
+    /// produced it. `On` runs `score_sub_spans` on the unionBest matrixAware
+    /// pipeline when a corpus is registered and the request carries query
+    /// text, and blends `max(dense, sub_span_max_cosine)`. Every internal
+    /// caller sets this explicitly. Mirrors Swift
+    /// `GLKRecallRequest.subSpanScoring`.
+    pub sub_span_scoring: GLKSubSpanScoring,
+
+    /// The cross-encoder portion of the caller's recall strategy decision.
+    ///
+    /// `None` (what `new()` sets) and `Bypass` leave the final order as fused
+    /// and produce byte-identical hits; `None` also leaves
+    /// `GLKRecallResult::cross_encoder` None. `Apply` runs the retrieval-time
+    /// cross-encoder stage over the head of the authorized final list
+    /// (`cross_encoder_stage`) under the estate's manifest limits, or
+    /// degrades with a reason when it cannot. The ARIA verb surface does not
+    /// carry it yet; internal callers set it explicitly. Mirrors Swift
+    /// `GLKRecallRequest.rerankDirective`.
+    pub rerank_directive: Option<corpus_kit::encoder::RerankDirective>,
 }
 
 impl GLKRecallRequest {
-    /// Create a request with explicit lane, scoring, and policy.
+    /// Create a request with all five control parameters required explicitly.
     ///
-    /// Defaults match Swift: mode=hybrid, scoring=matrixAware, limit=12,
-    /// fallback=failClosed, query_text=None, origin=Internal.
-    pub fn new(frame: RecallFrame) -> Self {
+    /// Every caller names mode, scoring, limit, fallback, and origin at the
+    /// call site — the signature enforces completeness at compile time.
+    /// Optional fields (query_text, trace_limit, recall_shape) are set via
+    /// the retained builders below.
+    pub fn new(
+        frame: RecallFrame,
+        mode: GLKRecallMode,
+        scoring: GLKRecallScoring,
+        limit: usize,
+        fallback: RecallFallbackPolicy,
+        origin: RecallOrigin,
+    ) -> Self {
         Self {
             frame,
-            mode: GLKRecallMode::Hybrid,
-            scoring: GLKRecallScoring::MatrixAware,
-            limit: 12,
-            fallback: RecallFallbackPolicy::FailClosed,
+            mode,
+            scoring,
+            limit,
+            fallback,
             query_text: None,
             trace_limit: None,
-            origin: RecallOrigin::Internal,
+            origin,
             recall_shape: None,
+            door: None,
+            composition: None,
+            frontier_k: None,
+            anomalous_filter: None,
+            sub_span_scoring: GLKSubSpanScoring::Off,
+            rerank_directive: None,
         }
     }
 
-    /// Builder: set the recall mode.
-    pub fn with_mode(mut self, mode: GLKRecallMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    /// Builder: set the scoring strategy.
-    pub fn with_scoring(mut self, scoring: GLKRecallScoring) -> Self {
-        self.scoring = scoring;
-        self
-    }
-
-    /// Builder: set the maximum hits to return.
-    pub fn with_limit(mut self, limit: usize) -> Self {
-        self.limit = limit;
-        self
-    }
-
-    /// Builder: set the fallback policy.
-    pub fn with_fallback(mut self, fallback: RecallFallbackPolicy) -> Self {
-        self.fallback = fallback;
+    /// Builder: set the cross-encoder directive. `new()` sets `None`, which
+    /// is bypass with no report. Mirrors Swift's defaulted
+    /// `rerankDirective:` init parameter.
+    pub fn with_rerank_directive(mut self, directive: corpus_kit::encoder::RerankDirective) -> Self {
+        self.rerank_directive = Some(directive);
         self
     }
 
@@ -1009,20 +1319,63 @@ impl GLKRecallRequest {
         self
     }
 
-    /// Builder: mark this request as originating from an external consumer.
-    ///
-    /// Only the ARIA_MCP boundary should call this method (B-10a enforcement).
-    pub fn external(mut self) -> Self {
-        self.origin = RecallOrigin::External;
-        self
-    }
-
     /// Builder: set the signed per-lane fusion steering (6b-modifiers).
     ///
     /// `None`-equivalent (an empty-map shape) leaves fusion uniform; a populated
     /// shape forwards/excludes/suppresses lanes per `RecallShape`.
     pub fn with_recall_shape(mut self, shape: RecallShape) -> Self {
         self.recall_shape = Some(shape);
+        self
+    }
+
+    /// Builder: set the trace-row door identity (W2.5 Track R(a)).
+    /// Mirrors Swift's defaulted `door:` init parameter.
+    pub fn with_door(mut self, door: impl Into<String>) -> Self {
+        self.door = Some(door.into());
+        self
+    }
+
+    /// Builder: set the trace-row composition identity (W2.5 Track R(a)).
+    /// Mirrors Swift's defaulted `composition:` init parameter.
+    pub fn with_composition(mut self, composition: impl Into<String>) -> Self {
+        self.composition = Some(composition.into());
+        self
+    }
+
+    /// Builder: set an optional per-call candidate-pool depth override.
+    ///
+    /// Takes precedence over `recall_shape.frontier_k` and the coordinator's
+    /// computed default `min(max(limit * 4, 64), 256)`. Clamped to
+    /// `[RecallShape::FRONTIER_K_FLOOR, RecallShape::FRONTIER_K_CEILING]` at
+    /// the coordinator; setting an out-of-range value is not an error — the
+    /// value is silently clamped so shapes degrade rather than fail (shape
+    /// contract). Mirrors Swift `GLKRecallRequest.frontierK`.
+    pub fn with_frontier_k(mut self, frontier_k: usize) -> Self {
+        self.frontier_k = Some(frontier_k);
+        self
+    }
+
+    /// Builder: set the anomalous-flag admission gate (§11.18).
+    ///
+    /// `true`  = admit ONLY anomalous drawers (bit 26 set).
+    /// `false` = EXCLUDE anomalous drawers (bit 26 clear).
+    ///
+    /// Not calling this builder (the default) leaves `anomalous_filter` as
+    /// `None`, which is byte-identical to a request without any filter.
+    /// Mirrors Swift `GLKRecallRequest.anomalousFilter`.
+    pub fn with_anomalous_filter(mut self, filter: bool) -> Self {
+        self.anomalous_filter = Some(filter);
+        self
+    }
+
+    /// Builder: set the step 5.8 sub-span scoring switch.
+    ///
+    /// `new()` sets `Off`. Every internal caller calls this builder (or sets
+    /// the field in a struct literal) so the choice is visible at the call
+    /// site; the ARIA surface does not expose the switch. Mirrors Swift's
+    /// defaulted `subSpanScoring:` init parameter.
+    pub fn with_sub_span_scoring(mut self, sub_span_scoring: GLKSubSpanScoring) -> Self {
+        self.sub_span_scoring = sub_span_scoring;
         self
     }
 }
@@ -1046,6 +1399,10 @@ pub struct GLKRecallResult {
     pub union_profile: Option<RecallUnionProfile>,
     /// Hits in the order the active lane and scoring returned them.
     pub hits: Vec<RecallHit>,
+    /// Primary rows excluded only by LocusKit's default-injected sensitivity
+    /// ceiling. An explicit sensitivity filter disables that default, so the
+    /// value is then zero. Excluded rows never leave LocusKit.
+    pub withheld_by_sensitivity: usize,
     /// Dense float lane (Lane D) status for this query.
     ///
     /// Non-None when the lane was dark (did not contribute hits), carrying the
@@ -1112,6 +1469,47 @@ pub struct GLKRecallResult {
     ///
     /// Mirrors Swift `GLKRecallResult.degradedStages` (GLKRecallResult.swift).
     pub degraded_stages: Vec<String>,
+
+    /// Per-lane 1-based rank of every candidate the active lane(s) surfaced,
+    /// keyed by drawer id, then by lane key ("locus", "bm25", "hamming",
+    /// "dense" — `RecallTraceItem::LANE_RANK_ORDER`). Rank is the candidate's
+    /// position in that lane's final ranked candidate list BEFORE fusion.
+    /// Consumed by `recall_scored`'s external-origin trace write (W2.5 Track
+    /// R(a)). Mirrors Swift `GLKRecallResult.laneRanks`.
+    pub lane_ranks: std::collections::HashMap<String, std::collections::HashMap<String, i64>>,
+
+    /// The query's §8.3 lattice anchor, derived exactly ONCE inside the
+    /// recall director during sketch compilation (M4 single-derivation doctrine).
+    ///
+    /// Mirrors Swift `GLKRecallResult.queryLatticeAnchor`.
+    ///
+    /// `Some((udc_code, qid))` when the query anchors — `udc_code` is the FDC
+    /// code for noun-anchored queries (empty for phrase-anchored queries which
+    /// carry a QID but no FDC code); `qid` is the Wikidata QID ("" if none).
+    ///
+    /// `None` when:
+    ///   - The query was empty or unanchorable (no anchor found by `query_anchor`).
+    ///   - The lane compiled no sketch (`LocusOnly`).
+    ///
+    /// Callers — including CognitionKit's PreciseRecall and TemporalRecall —
+    /// MUST read the anchor here. Do NOT call `brain::enrichment_stage::query_anchor`
+    /// on the same text a second time; the single-derivation doctrine means the
+    /// director's result is the authoritative anchor for the whole recall pipeline.
+    pub query_lattice_anchor: Option<(String, String)>,
+
+    /// What the cross-encoder stage did for this request
+    /// (`cross_encoder_stage`), or `None` when the request carried no
+    /// `rerank_directive`. Bypass and degrade are reported here too; a
+    /// degraded apply also pushes `recall.cross_encoder_degraded` onto
+    /// `degraded_stages`. Mirrors Swift `GLKRecallResult.crossEncoder`.
+    pub cross_encoder: Option<crate::cross_encoder_stage::CrossEncoderReport>,
+
+    /// The preference key of the recall route that transformed this request,
+    /// or `None` when no route fired. Day one: `"cross_encoder_routing"` when
+    /// Route 1 applied its degradable rerank directive; `None` for all other
+    /// recalls.
+    /// Mirrors Swift `GLKRecallResult.route`.
+    pub route: Option<String>,
 }
 
 impl GLKRecallResult {
@@ -1275,4 +1673,74 @@ impl RecallUnionProfile {
         }).sum::<f32>() / n as f32;
         variance.sqrt()
     }
+}
+
+// ── UnionBest step 9.5: the MMR shingle view under a budget ─────────────────
+
+/// Scalars of one body the step 9.5 shingler reads at most. A body longer
+/// than the cap is shingled over its first 4,096 scalars: the character-3-gram
+/// Jaccard the MMR penalises near-duplicates with is a measure of the
+/// opening of the body, which is where a near-duplicate declares itself, and
+/// a set of at most 4,094 3-grams bounds every pairwise intersection in
+/// step 10. Swift `GeniusLocusKit.unionBestMMRBodyCapScalars` twin.
+pub const UNION_BEST_MMR_BODY_CAP_SCALARS: usize = 4_096;
+
+/// Aggregate scalars the step 9.5 shingler reads per query across the whole
+/// candidate view. The budget is split evenly: every body is shingled over
+/// the same prefix length, `min(cap, budget / bodies)`, so the shingle
+/// memory and the step 10 work (picks × the shingled scalars) are a
+/// constant of the build, not of the estate. An even split keeps one
+/// similarity measure for the whole pool. A body without a set in a pool of
+/// bodies with sets would fall to the sourceMask proxy, which reads a
+/// same-lane neighbour as an exact duplicate and a cross-lane neighbour as
+/// unrelated, and the MMR then drops the lane's real hits for the
+/// unrelated-looking ones; a shorter prefix on every body keeps the
+/// comparison symmetric. One million scalars is 244 full-cap bodies, or
+/// about 600 scalars each across the widest fused pool the lanes can
+/// supply (the lexical, locus and fingerprint lanes at the 256 frontier
+/// ceiling plus the 4x over-fetched dense lanes). Swift
+/// `GeniusLocusKit.unionBestMMRShingleBudgetScalars` twin.
+pub const UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS: usize = 1_000_000;
+
+/// The shingle sets of the MMR body view under the budget. `bodies[i]` is the
+/// body of slot i (`None` when the slot has none: a body-free tier or a
+/// candidate outside the frame-admissible pool). Every non-empty body is
+/// shingled over the same prefix, `min(UNION_BEST_MMR_BODY_CAP_SCALARS,
+/// UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS / non-empty bodies)` scalars.
+/// Returns one set per slot (`None` where the slot has no body or an empty
+/// body) and whether the aggregate budget shortened the prefix below the cap
+/// for at least one body longer than the prefix (the cap alone shortening a
+/// body is the measure, not a truncation). Swift
+/// `GeniusLocusKit.unionBestMMRShingles` twin; the two ports build the same
+/// sets for the same inputs.
+pub fn union_best_mmr_shingles(
+    bodies: &[Option<&str>],
+) -> (Vec<Option<std::collections::BTreeSet<String>>>, bool) {
+    let non_empty = bodies.iter().filter(|b| b.map_or(false, |b| !b.is_empty())).count();
+    let prefix = if non_empty == 0 {
+        UNION_BEST_MMR_BODY_CAP_SCALARS
+    } else {
+        UNION_BEST_MMR_BODY_CAP_SCALARS.min(UNION_BEST_MMR_SHINGLE_BUDGET_SCALARS / non_empty)
+    };
+    let mut sets: Vec<Option<std::collections::BTreeSet<String>>> = vec![None; bodies.len()];
+    let mut truncated = false;
+    for (i, body) in bodies.iter().enumerate() {
+        let Some(body) = body else { continue };
+        if body.is_empty() {
+            continue;
+        }
+        // `nth(prefix)` walks at most prefix + 1 scalars, so a long body is
+        // never scanned whole.
+        let longer_than_prefix = body.chars().nth(prefix).is_some();
+        if longer_than_prefix && prefix < UNION_BEST_MMR_BODY_CAP_SCALARS {
+            truncated = true;
+        }
+        let capped: String = if longer_than_prefix {
+            body.chars().take(prefix).collect()
+        } else {
+            (*body).to_string()
+        };
+        sets[i] = Some(substrate_ml::shingle_similarity::shingles(&capped));
+    }
+    (sets, truncated)
 }

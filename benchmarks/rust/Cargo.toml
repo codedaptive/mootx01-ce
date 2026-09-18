@@ -1,0 +1,42 @@
+[package]
+name = "mcp-benchmarker-rs"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "mcp-benchmarker Rust twin — full parity with the Swift leg: divergence + capability-manifest + degeneracy-guard conformance core, config/VerbMap decode, MCP stdio JSON-RPC client, ARIA v2 structured result parsing, transfer engine, and proxy translation."
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "mcp_benchmarker_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcp-benchmarker-rs"
+path = "src/main.rs"
+
+[dependencies]
+# estate-encryption: the plaintext-to-encrypted conversion the matrix benchmark
+# applies to a copy of a prebuilt database. Same library the product uses.
+#
+# harness-keyfile: the file-based db key. The harness serves a database it
+# converted moments earlier, so it has to hand the server the key it used.
+# Durable key custody would cost an approval prompt per spawned server and
+# leave residue behind. No product target enables this feature.
+estate-encryption = { path = "../../packages/libs/EstateEncryption/rust", features = [
+    "harness-keyfile",
+] }
+# moot-product-identity: canonical platform-specific configuration directory path.
+# Used by scratch_posture.rs to guard against serving a live registered estate
+# as a benchmark target. The harness must use the same directory rule the product
+# uses so the guard fires on the real path on every supported platform.
+moot-product-identity = { path = "../../packages/libs/MootProductIdentity/rust" }
+# JSON decode/encode for config, manifests, and the JSON-RPC wire. serde_json
+# also backs the loosely-typed JsonValue (Swift JSONValue) so the wire bytes
+# match the Foundation encoder for the same logical value. No other external
+# deps — std + serde + serde_json only, holding the zero-extra-dep line.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+# No external test deps — std + serde_json only.

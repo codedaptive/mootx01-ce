@@ -4,23 +4,25 @@
 // GeniusLocusKit accessor that assembles the status of every drain the estate
 // currently runs.
 //
-// The substrate reports TWO drains:
+// The substrate reports these drains:
 //
 //   1. "corpus_encode" — CorpusKit's encode drain (BM25 + vector lanes).
-//      Since the drain-stage distillation rider (SPEC_DISTILLATION_STORAGE
-//      §7.1), each encode job also distills its drawers BEFORE the job is
-//      replied, so this stream's frontiers cover capture-path distillation.
-//   2. "distillation" — the §7.1 accounting surface: `pending` is the
-//      count of active drawers whose representation is NULL or was
-//      produced under a stale pipeline contract (the sweep-eligibility
-//      predicate measured off the rows themselves — stronger than a
-//      queue-depth proxy, and it also covers lazy regeneration after a
-//      pipeline-version bump or an in-place content patch). `inFlight` is
-//      always 0: eligible rows are either awaiting the hourly
-//      distillation signal / a `moot_distill` sweep, or riding an encode
-//      job already counted by "corpus_encode". "Fully drained" therefore
-//      cannot read true while any row still owes a representation
-//      (FINDING_11X_MAINTENANCE_WALK constraint 6).
+//      The encode rider (room rollup, A2 marker, structural fingerprint
+//      lane entry) runs BEFORE each job is replied, so this stream's
+//      frontiers cover the rider's work too.
+//   2. "dreaming" — the persistent dreaming queue's job depth.
+//   3. "subject_backfill" — the subject producer's NULL-only debt, rendered
+//      only while a producer is registered.
+//   4. "span_encode" — drawers whose bit 27 is clear, rendered only while
+//      an encoder is active for the estate.
+//   5. "fact_extraction" — drawers whose bit 28 (facts extracted for the
+//      active recipe) is clear. Always rendered: a caller settling an
+//      estate needs to know extraction is finished even when no extractor
+//      is registered, so the detail names the missing extractor instead.
+//
+// There is no distillation drain: the distilled rendering is computed
+// inline at read time (Encoder Rerank contract sheet §9), so no row ever
+// owes one.
 //
 // `drainStatuses(_:)` returns a LIST so future drains append entries with
 // no wire reshape.
@@ -60,11 +62,17 @@ public struct DrainStatus: Sendable, Equatable {
     /// when a drain has no extra detail to report.
     public let detail: String?
 
-    public init(name: String, pending: Int, inFlight: Int, detail: String? = nil) {
+    /// Rows the lane settled by REJECTING them (fact extraction: bit 29).
+    /// Settled, so never part of `pending`; reported so a caller can see the
+    /// rejected corpus. Nil for lanes that have no such outcome.
+    public let rejected: Int?
+
+    public init(name: String, pending: Int, inFlight: Int, detail: String? = nil, rejected: Int? = nil) {
         self.name = name
         self.pending = pending
         self.inFlight = inFlight
         self.detail = detail
+        self.rejected = rejected
     }
 
     /// True while the drain has outstanding work on either frontier. False
@@ -76,17 +84,45 @@ public struct DrainStatus: Sendable, Equatable {
     /// and `encodeSettled` both key on it.
     public static let corpusEncodeName = "corpus_encode"
 
+    /// Canonical name of the dreaming-queue drain lane (2026-08-26). A
+    /// GENUINE queue drain: `pending` is the persistent `dreaming` stream's
+    /// job depth (recall-event dreaming debt), worked down out-of-band by
+    /// the dreamer (in-session, resident daemon, or the T10 detached
+    /// finisher). NON-GATING for the benchmarker's encode barrier — the
+    /// debt is paid outside the measured session, so a gating lane would
+    /// hang every encode barrier on healthy estates
+    /// (`barrierNonGatingLanes` gained this name in the same change).
+    public static let dreamingName = "dreaming"
+
     /// Canonical name of the subject-backfill drain lane (PR-09). The
     /// lane renders ONLY while a subject producer is registered for the
     /// estate (PR-10's Apple miniLLM rider; test stubs) — an
     /// always-present eligibility-count lane would hold the
     /// benchmarker's encode barrier open on healthy estates. When a
     /// rider first ships enabled, the benchmarker's non-gating denylist
-    /// must gain this name in the same mission (the distillation-lane
-    /// precedent). Dispatcher-side mirrors:
+    /// must gain this name in the same mission. Dispatcher-side mirrors:
     /// AriaMcpKit `ToolDispatcher.subjectBackfillLaneName` /
     /// `SUBJECT_BACKFILL_LANE_NAME`.
     public static let subjectBackfillName = "subject_backfill"
+
+    /// Canonical name of the span-encode row-debt lane. It is rendered only
+    /// while a span encoder is registered for the estate; `pending` is the
+    /// count of active, non-empty drawers whose span-indexed bit is clear.
+    /// This lane remains non-gating for `encodeSettled` because the detached
+    /// corpus finisher does not own the standing span duty.
+    public static let spanEncodeName = "span_encode"
+
+    /// Canonical name of the fact-extraction row-debt lane. `pending` is the
+    /// runnable, retrying and blocked work owed to the active recipe (bit 28
+    /// clear); a rejected source is settled (bits 28 and 29) and is reported
+    /// in `rejected`, never in `pending`. Always rendered, extractor
+    /// or not: a caller settling an estate (the benchmark bulk build, a
+    /// `mootx01 dream` loop) reads this lane to learn whether extraction is
+    /// finished, and an absent lane would read as "nothing owed". `in_flight`
+    /// is 0 — extraction is a bounded batch inside a dreaming cycle, never a
+    /// queued job. Non-gating for `encodeSettled`, like every row-debt lane.
+    /// Twin of Rust `DrainStatus::FACT_EXTRACTION_NAME`.
+    public static let factExtractionName = "fact_extraction"
 
     /// T5 finisher gate: true when the ENCODE drain is idle (or absent), so a
     /// detached `mootx01 drain` finisher may exit and release the encode
@@ -95,13 +131,10 @@ public struct DrainStatus: Sendable, Equatable {
     /// Deliberately ignores every drain except "corpus_encode" — the T5
     /// finisher's CONTRACT is the encode queue and its DrainLease, nothing
     /// else (PERF_W1_DRAIN_RIDER_2026-07-28 Finding 3 established the gate).
-    /// Since DISTILL_SEED_STALL routed the wing-seed hints through the encode
-    /// stream, the "distillation" entry also settles under a normal drain
-    /// (every enqueued drawer distills via the drain-stage rider before its
-    /// job replies); the gate stays encode-only anyway so the finisher's
-    /// lease tenure is bounded by its own queue, not by any other lane's
-    /// accounting (e.g. a pipeline-version bump that re-opens distillation
-    /// eligibility estate-wide without enqueuing anything).
+    /// The gate stays encode-only so the finisher's lease tenure is bounded
+    /// by its own queue, not by any other lane's accounting (the subject and
+    /// span-encode lanes are row-eligibility counts that can be non-zero
+    /// without anything enqueued).
     /// Mirrors Rust `DrainStatus::encode_settled`.
     public static func encodeSettled(_ statuses: [DrainStatus]) -> Bool {
         !statuses.contains { $0.name == corpusEncodeName && $0.isDraining }
@@ -113,11 +146,14 @@ extension GeniusLocusKit {
     /// currently runs, for AI/operator monitoring (the `moot_drain_status`
     /// tool and the `mootx01 query drain_status` CLI surface).
     ///
-    /// Today the only drain is the corpus encode/ingest drain: it reports the
-    /// queue depth (pending + in-flight encode jobs) and, as detail, the live
-    /// encoded-chunk count so forward progress is visible while the queue
-    /// drains. A bare LocusKit estate with no Corpus registered runs no encode
-    /// drain, so its list is empty.
+    /// The lanes, in report order: `corpus_encode` (queue depth plus the live
+    /// encoded-chunk count as detail; present only when a Corpus is
+    /// registered), `dreaming` (present only when the queue is mounted),
+    /// `subject_backfill` and `span_encode` (row debt; present only while
+    /// their rider is registered), and `fact_extraction` (row debt owed to
+    /// the active recipe; always present so a caller can settle an estate on
+    /// it). A bare LocusKit estate with no Corpus registered runs no encode
+    /// drain, so its list carries only the always-present lanes.
     ///
     /// Read-only: assembles the report by OBSERVING each drain's frontiers; it
     /// never claims, drains, or mutates, so it is safe to poll while drains run.
@@ -145,23 +181,25 @@ extension GeniusLocusKit {
             ))
         }
 
-        // Drain 2 of N: distillation accounting (SPEC §7.1). Present on
-        // every estate — distillation is a row-level obligation, not a
-        // corpus feature. `pending` is the eligibility-predicate count;
-        // rows in the encode queue are also counted here until their
-        // drain-stage distillation lands (a truthful double-count for the
-        // boolean "is anything still draining?" barrier).
+        // No distillation lane: the distilled rendering is computed inline at
+        // read time (Encoder Rerank contract sheet §9), so no row owes one.
         let estate = try estate(for: handle)
-        let undistilled = try await estate.countUndistilled(
-            pipelineVersion: DistillationPipelineVersion.current)
-        statuses.append(DrainStatus(
-            name: "distillation",
-            pending: undistilled,
-            inFlight: 0,
-            detail: "pipeline: \(DistillationPipelineVersion.current)"
-        ))
 
-        // Drain 3 of N: subject backfill (PR-09). Rendered ONLY while a
+        // Drain 3 of N: the dreaming queue (2026-08-26). Rendered only when
+        // the queue is MOUNTED (a fresh estate with no external-origin recall
+        // has no queue — absent ≠ 0, same honesty rule as the corpus lane).
+        // `in_flight` is 0: the queue's claim window is inside the dreamer's
+        // own drain call, not observable from a non-claiming peek.
+        if let dreamingPending = await dreamingQueuePendingCount(for: handle) {
+            statuses.append(DrainStatus(
+                name: DrainStatus.dreamingName,
+                pending: dreamingPending,
+                inFlight: 0,
+                detail: "stream: dreaming"
+            ))
+        }
+
+        // Drain 4 of N: subject backfill (PR-09). Rendered ONLY while a
         // subject producer is registered (rider-gated — see
         // `subjectBackfillName`). `pending` is the NULL-only presence
         // debt (`countSubjectDebt`), a row-level eligibility count like
@@ -175,6 +213,42 @@ extension GeniusLocusKit {
                 pending: debt,
                 inFlight: 0,
                 detail: "pipeline: \(producer.pipelineVersion)"
+            ))
+        }
+
+        // Drain 4 of N: span encode. This is row debt, not the corpus queue.
+        // Rendered whenever the estate's embedding provider is the encoder,
+        // loaded or not: a settle loop must see the debt even while no
+        // encoder is registered, otherwise an estate with every drawer owed
+        // reads as idle. The detail says which it is.
+        let encoder = spanEncoders[handle]
+        let encoderProvisioned =
+            (try? await provisionedEmbeddingProvider(for: handle)) == Self.encoderProviderID
+        if encoder != nil || encoderProvisioned {
+            let debt = try await estate.countSpanIndexDebt()
+            statuses.append(DrainStatus(
+                name: DrainStatus.spanEncodeName,
+                pending: debt,
+                inFlight: 0,
+                detail: encoder.map { "model: \($0.spec.modelID)" } ?? "encoder not loaded"
+            ))
+        }
+
+        // With the master preference off nothing is owed: the lane reads
+        // idle and says why, so a settle loop on an estate that turned
+        // extraction off (the Rust artifact build) finishes.
+        if (try? await provisionedPreference(.factExtraction, for: handle)) == .off {
+            statuses.append(DrainStatus(
+                name: DrainStatus.factExtractionName, pending: 0, inFlight: 0,
+                detail: "fact_extraction off"))
+        } else {
+            let facts = try await factExtractionWorkStatus(handle, now: Date())
+            statuses.append(DrainStatus(
+                name: DrainStatus.factExtractionName,
+                pending: facts.runnable + facts.retrying + facts.blocked,
+                inFlight: facts.inFlight,
+                detail: facts.detail,
+                rejected: facts.rejected
             ))
         }
 

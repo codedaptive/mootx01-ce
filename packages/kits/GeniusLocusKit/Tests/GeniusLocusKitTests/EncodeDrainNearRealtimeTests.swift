@@ -35,7 +35,7 @@ import LocusKit
 @testable import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 import QueueKit
 @testable import GeniusLocusKit
@@ -111,7 +111,8 @@ struct EncodeDrainNearRealtimeTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 
@@ -128,7 +129,8 @@ struct EncodeDrainNearRealtimeTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 

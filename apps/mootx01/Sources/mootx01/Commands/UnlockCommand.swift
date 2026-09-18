@@ -27,6 +27,7 @@
 #if os(macOS)
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 import AriaMCP   // SensitivityTier
 
@@ -59,15 +60,7 @@ struct UnlockCommand: AsyncParsableCommand {
     @Argument(help: "Tier to unlock: 'private' or 'secret'.")
     var tier: String
 
-    /// Optional named estate. When provided, the command resolves the daemon port
-    /// from that estate's data directory. Default: the active estate.
-    @Option(name: .long, help: "Named estate. Default: active estate.")
-    var db: String?
-
     func run() async throws {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let env = ProcessInfo.processInfo.environment
-        let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
 
         // Map user-facing name to internal SensitivityTier.
         let sensitivityTier: SensitivityTier
@@ -91,7 +84,7 @@ struct UnlockCommand: AsyncParsableCommand {
         do {
             approved = try await authority.requestApproval(tier: sensitivityTier, reason: reason)
         } catch let err as UnlockAuthorityError {
-            fputs("mootx01 unlock: \(err.localizedDescription ?? err.errorDescription ?? "authentication error")\n", stderr)
+            fputs("mootx01 unlock: \(err.localizedDescription)\n", stderr)
             throw ExitCode.failure
         }
 
@@ -105,7 +98,7 @@ struct UnlockCommand: AsyncParsableCommand {
         // Body: {"tier": "restricted"|"secret", "proof": {"ts": <epoch_ms>}}
         // The daemon verifies the timestamp freshness (±10 s) and issues the
         // in-RAM grant — no MCP tool is involved.
-        let resolvedPort = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let resolvedPort = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         let tierValue = sensitivityTier == .restricted ? "restricted" : "secret"
         let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
         let bodyDict: [String: Any] = [
@@ -161,10 +154,7 @@ struct LockCommand: AsyncParsableCommand {
     )
 
     func run() async throws {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let env = ProcessInfo.processInfo.environment
-        let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
-        let resolvedPort = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let resolvedPort = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
 
         guard let url = URL(string: "http://127.0.0.1:\(resolvedPort)/api/control/lock"),
               let bodyData = "{}".data(using: .utf8) else {

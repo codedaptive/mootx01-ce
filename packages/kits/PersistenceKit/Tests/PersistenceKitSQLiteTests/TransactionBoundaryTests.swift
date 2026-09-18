@@ -117,6 +117,77 @@ struct TransactionBoundaryTests {
         #expect(threw, "Expected nested beginTransaction to throw")
     }
 
+    // MARK: - V2 nesting probe (batch inserts inside open transaction)
+
+    /// V2 nesting probe for commit 6751fc618 (VAULT-FIX-01 V2).
+    ///
+    /// Background: the Rust PersistenceKit SQLite backend had three call sites
+    /// (transaction(), begin_transaction(), append_rows()) that all issued
+    /// BEGIN IMMEDIATE on one connection. Only transaction() held the serialising
+    /// lock; begin_transaction() and append_rows() had no such guard. When
+    /// vault_import drove capture_batch inside an outer transaction() bracket,
+    /// the inner begin_transaction() hit the same connection with a second
+    /// BEGIN IMMEDIATE, producing "cannot start a transaction within a
+    /// transaction". The Rust fix added a per-connection tx_depth counter with
+    /// SAVEPOINTs so nested callers transparently use SAVEPOINT tx_N instead.
+    ///
+    /// Swift exposure (from V2 commit message): "verified-unaffected.
+    /// SQLiteBackend throws transactionConflict loudly when inTransaction == true;
+    /// it does not produce the silent SQLite nesting error." That was an argument;
+    /// this test is the evidence.
+    ///
+    /// Why Swift is unaffected: SQLiteBackend's insertRow(), appendAuditBatch(),
+    /// and all other individual write operations are synchronous actor calls that
+    /// issue direct SQL (INSERT, etc.) without opening their own BEGIN IMMEDIATE.
+    /// Only beginTransactionDirect() and runTransaction() issue BEGIN IMMEDIATE.
+    /// Calling insertRow() inside an open beginTransactionDirect() bracket
+    /// therefore runs correctly as part of that transaction, not as a nested one.
+    ///
+    /// This test pins the actual observed behaviour: five insertRow calls inside
+    /// one open beginTransactionDirect() succeed and commit atomically. No
+    /// nested-BEGIN conflict occurs, and no SAVEPOINT logic is needed in Swift.
+    ///
+    /// VERDICT: VERIFIED-UNAFFECTED — Swift batch inserts inside a
+    /// beginTransactionDirect-opened transaction work correctly. The Rust
+    /// SAVEPOINT fix does not have a Swift equivalent because the Swift insert
+    /// path is direct SQL, not a re-entrant BEGIN IMMEDIATE site.
+    @Test("V2 nesting probe: batch inserts inside beginTransactionDirect succeed (VAULT-FIX-01 V2)")
+    func batchInsertsInsideBeginTransactionSucceed() async throws {
+        let storage = try await makeSQLiteStorage()
+        let rowStore = storage.rowStore
+
+        // Open an explicit transaction — mirrors the outer bracket that
+        // triggered the Rust crash (vault_import drove capture_batch inside a
+        // transaction() block, and the inner begin_transaction() site issued
+        // a second BEGIN IMMEDIATE on the same connection).
+        try await rowStore.beginTransaction()
+        defer {
+            // Safety rollback if the test body throws before commit.
+            Task { try? await rowStore.rollbackTransaction() }
+        }
+
+        // Batch: insert five rows while the transaction is open. Each call is a
+        // synchronous actor dispatch to insertRow — no BEGIN IMMEDIATE is issued
+        // by insertRow, so no nested-transaction conflict occurs. This is the
+        // Swift analogue of the Rust append_rows() path that the V2 SAVEPOINT
+        // fix covers via SAVEPOINT tx_N.
+        let ids = (0..<5).map { _ in UUID() }
+        for (i, id) in ids.enumerated() {
+            _ = try await rowStore.insert(
+                table: "items",
+                values: rowValues(id: id, val: "v2-probe-\(i)"))
+        }
+
+        // Commit all five rows as one atomic unit.
+        try await rowStore.commitTransaction()
+
+        // Verify all five rows are retrievable — proof the batch committed and
+        // no silent data loss occurred (a nested-BEGIN error would either throw
+        // or silently drop the transaction depending on the backend).
+        let rows = try await rowStore.query(table: "items", where: nil)
+        #expect(rows.count == 5, "All 5 batch rows must persist; got \(rows.count). A nested-BEGIN conflict would prevent commit.")
+    }
+
     // MARK: - CachingRowStore delegates to backing SQLiteRowStore
 
     @Test("CachingRowStore begin/commit delegates to backing store")

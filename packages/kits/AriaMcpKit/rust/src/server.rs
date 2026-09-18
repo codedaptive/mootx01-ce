@@ -16,24 +16,18 @@
 //! # ServerConfig
 //!
 //! Two constructors select the backend at startup:
-//! - `from_env()` — reads `ARIA_MCP_POSTGRES_URL` and `ARIA_MCP_SQLITE_PATH`
-//!   from the environment and applies a four-state precedence ladder (no
-//!   trimming on either var — whitespace-only values are treated as non-empty):
-//!
-//!   | ARIA_MCP_POSTGRES_URL | ARIA_MCP_SQLITE_PATH | Backend           |
-//!   |-----------------------|----------------------|-------------------|
-//!   | Non-empty             | Non-empty            | Ambiguous → exit 1|
-//!   | Non-empty             | Absent or empty      | PostgreSQL estate |
-//!   | Absent or empty       | Non-empty            | SQLite at path    |
-//!   | Absent or empty       | Absent or empty      | In-memory (default)|
-//!
-//!   `from_env()` is the production entry point; `runtime.rs` calls it via `runtime::run`.
+//! - `for_estate(RuntimeEstate)` — the production entry point, called by
+//!   `runtime::run`. The caller resolved the estate from the estate catalog
+//!   (`--db`, `--in-memory`); a SQLite record opens as its kind decides, a
+//!   PostgreSQL record at its connection string, `InMemory` in RAM. No
+//!   environment value names an estate.
 //! - `default_inmemory()` — unconditionally in-memory; preserved for tests.
 //!
 //! Wire surface (tools, schemas, JSON-RPC methods) is unchanged regardless
 //! of which backend is selected. Persistence is server-internal only.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::sync::Arc;
 
 use crate::dispatcher::Dispatcher;
 use crate::estate_registry::EstateRegistry;
@@ -41,7 +35,7 @@ use crate::estate_registry::EstateRegistry;
 /// Configuration for a server run. Carries the estate registry the
 /// dispatcher will route tool calls against.
 ///
-/// Build via `from_env()` for production (env-var-selected backend) or
+/// Build via `for_estate(RuntimeEstate)` for production or
 /// `default_inmemory()` for tests (unconditionally in-memory).
 pub struct ServerConfig {
     pub registry: EstateRegistry,
@@ -51,114 +45,101 @@ pub struct ServerConfig {
     /// construction via `crate::build_serial::derive()` so the filesystem
     /// is not touched on every ping call.
     pub build_serial: String,
-    /// version-skew advisory (empty ⇒ none to report). This
-    /// reference server has no plugin concept, so it always constructs
-    /// with the empty default via `String::new()` — kept as a real field
-    /// (not a constant) so `Dispatcher::new` has one signature shared by
-    /// every host.
+    /// Plugin/binary version-skew advisory (empty ⇒ none to report). This
+    /// reference server has no plugin concept, so it always constructs with
+    /// `String::new()`. Injected into the dispatcher via `with_version_skew`
+    /// inside `dispatcher_from_config`, the shared construction function called
+    /// by both `run_stdio_loop` and `run_http_loop`; surfaces as the optional
+    /// `version_skew` field of `moot_estate_ping` / `moot_estate_status`.
     pub version_skew: String,
     /// Upstream-release advisory provider (see
     /// `crate::dispatcher::UpdateAdvisoryProvider`) surfaced as an
     /// `update_available:` line by ping/status. `None` (both constructors'
     /// default) means no provider — the host (mootx01-cli's resident
-    /// `serve`) injects one after `from_env()`; stdio one-shots and the
+    /// `serve`) injects one after `for_estate()`; stdio one-shots and the
     /// aria-mcp dev server leave it unset.
     pub update_advisory: Option<crate::dispatcher::UpdateAdvisoryProvider>,
 }
 
+/// The estate a server runtime opens, decided by the caller from the estate
+/// catalog and passed in. Nothing in this kit reads an estate path or a
+/// connection string from the environment. Twin of the Swift AriaMCPMain
+/// `Arguments` resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeEstate {
+    /// A SQLite estate: the record's `estate.sqlite`, opened as the record
+    /// decides (`EstateOpening::for_record`), its manifest refreshed after the
+    /// migration chain with the at-rest posture the caller resolved.
+    Sqlite {
+        record: genius_locus_kit::EstateRecord,
+        opening: crate::estate_registry::EstateOpening,
+        encryption: genius_locus_kit::EstateManifestEncryption,
+    },
+    /// A PostgreSQL estate at the record's connection string, opened as the
+    /// record decides.
+    Postgresql {
+        connection_string: String,
+        opening: crate::estate_registry::EstateOpening,
+    },
+    /// The in-memory backend (`--in-memory`): the estate lives and dies with
+    /// the process. The caller still resolves its catalog record first, so a
+    /// bad `--db` is refused before the backend is chosen; the opening it
+    /// passes is always `EstateOpening::TRANSIENT` (R8, 2026-09-08).
+    InMemory { opening: crate::estate_registry::EstateOpening },
+}
+
 impl ServerConfig {
-    /// Construct a server config from environment variables.
-    ///
-    /// Reads `ARIA_MCP_POSTGRES_URL` and `ARIA_MCP_SQLITE_PATH` and applies
-    /// a four-state precedence ladder. No trimming on either var — a
-    /// whitespace-only value is treated as non-empty (a config error that
-    /// fails fast, not a silent fallback). Matches the Swift server's
-    /// no-trimming semantics exactly.
-    ///
-    /// Precedence table:
-    /// | ARIA_MCP_POSTGRES_URL | ARIA_MCP_SQLITE_PATH | Backend                   |
-    /// |-----------------------|----------------------|---------------------------|
-    /// | Non-empty             | Non-empty            | Ambiguous → exit 1        |
-    /// | Non-empty             | Absent or empty      | PostgreSQL estate         |
-    /// | Absent or empty       | Non-empty            | SQLite at path            |
-    /// | Absent or empty       | Absent or empty      | In-memory (default)       |
-    ///
-    /// Wire surface (tools, schemas, JSON-RPC) is unchanged for all backends.
-    pub fn from_env() -> Self {
-        // No .filter(|s| !s.is_empty()) — whitespace-only is non-empty here.
-        // None means the env var is absent; Some("") means it was set to empty.
-        // Both None and Some("") fall through to the absent/empty branch below.
-        let postgres_url = std::env::var("ARIA_MCP_POSTGRES_URL").unwrap_or_default();
-        let sqlite_path_raw = std::env::var("ARIA_MCP_SQLITE_PATH").unwrap_or_default();
-
-        let registry = if !postgres_url.is_empty() && !sqlite_path_raw.is_empty() {
-            // Ambiguous config: both vars set. Never pick silently — the
-            // operator must resolve the ambiguity by unsetting one of them.
-            // Mirrors Swift's AriaMCPMain ambiguous-config branch exactly.
-            eprintln!(
-                "aria-mcp: ambiguous config — both ARIA_MCP_POSTGRES_URL and \
-                 ARIA_MCP_SQLITE_PATH are set. Unset one to select the intended backend."
-            );
-            std::process::exit(1);
-        } else if !postgres_url.is_empty() {
-            // Only ARIA_MCP_POSTGRES_URL set → PostgreSQL-backed estate.
-            // EstateRegistry::new_postgres reads the estate manifest during
-            // construction, so an unreachable or unusable PostgreSQL estate
-            // fails at startup rather than on first tool call.
-            // Redact userinfo before logging — the URL may contain
-            // user:password@host, which would leak credentials to stderr / log
-            // aggregators. Log host only, matching the Swift side
-            // (URL(string:)?.host ?? "configured").
-            eprintln!("aria-mcp: opening PostgreSQL estate at {}", redact_postgres_url(&postgres_url));
-            match EstateRegistry::new_postgres(&postgres_url, "aria-mcp-default") {
-                Ok(reg) => {
-                    eprintln!("aria-mcp: PostgreSQL estate ready");
-                    reg
-                }
-                Err(e) => {
-                    // Scrub any verbatim occurrence of the connection string from
-                    // the error before logging, so credentials never reach stderr
-                    // (parity with the Swift fatal-path redaction).
-                    eprintln!("{}", format!("{e}").replace(&postgres_url, "[REDACTED]"));
-                    std::process::exit(1);
-                }
+    /// Construct a server config over `estate`. Fails with an operator-facing
+    /// message when the estate cannot be opened; a PostgreSQL connection
+    /// string never appears in that message.
+    pub fn for_estate(estate: RuntimeEstate) -> Result<Self, String> {
+        let registry = match estate {
+            RuntimeEstate::Postgresql { connection_string, opening } => {
+                // EstateRegistry::new_postgres reads the estate manifest during
+                // construction, so an unreachable or unusable PostgreSQL estate
+                // fails at startup rather than on first tool call. Redact
+                // userinfo before logging — the string may carry
+                // user:password@host.
+                eprintln!("aria-mcp: opening PostgreSQL estate at {}", redact_postgres_url(&connection_string));
+                let reg = EstateRegistry::new_postgres_with(&connection_string, "aria-mcp-default", opening)
+                    .map_err(|e| format!("{e}").replace(&connection_string, "[REDACTED]"))?;
+                eprintln!("aria-mcp: PostgreSQL estate ready");
+                reg
             }
-        } else if !sqlite_path_raw.is_empty() {
-            // Only ARIA_MCP_SQLITE_PATH set → SQLite-backed estate.
-            let path = sqlite_path_raw;
-            // Create parent directories if they do not exist. Missing parents
-            // are a common operator error (the path is new or the mount is
-            // stale); failing fast here with a clear message is better than
-            // a cryptic SQLite "unable to open database" error.
-            if let Some(parent) = std::path::Path::new(&path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    if let Err(e) = std::fs::create_dir_all(parent) {
-                        eprintln!("aria-mcp: cannot create parent directories for {path:?}: {e}");
-                        std::process::exit(1);
-                    }
+            RuntimeEstate::Sqlite { record, opening, encryption } => {
+                // The estate directory is the record's; create it so a first
+                // open of a fresh record succeeds.
+                std::fs::create_dir_all(&record.directory).map_err(|e| {
+                    format!("aria-mcp: cannot create the estate directory {}: {e}", record.directory.display())
+                })?;
+                let path_text = record.database_path().to_string_lossy().into_owned();
+                eprintln!("aria-mcp: opening SQLite estate at {path_text:?}");
+                let reg = EstateRegistry::new_sqlite_with(&path_text, "aria-mcp-default", opening)?;
+                // The manifest must say what is on disk: after the migration
+                // chain, or for an estate that predates manifests, rewrite
+                // estate.json. Twin of Swift `EstateManifestRefresh.afterPrepare`.
+                let now_millis = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis().min(i64::MAX as u128) as i64)
+                    .unwrap_or(0);
+                match genius_locus_kit_migrations::refresh_after_chain(&record, encryption, now_millis) {
+                    Ok(true) => eprintln!(
+                        "aria-mcp: estate manifest refreshed (format {}, schema {})",
+                        genius_locus_kit::estate_format::EstateFormatVersion::CURRENT,
+                        genius_locus_kit_migrations::composite_schema_version()
+                    ),
+                    Ok(false) => {}
+                    Err(e) => return Err(format!("aria-mcp: estate manifest at {} could not be written: {e}", record.manifest_path().display())),
                 }
+                eprintln!("aria-mcp: SQLite estate ready at {path_text:?}");
+                reg
             }
-            eprintln!("aria-mcp: opening SQLite estate at {path:?}");
-            match EstateRegistry::new_sqlite(&path, "aria-mcp-default") {
-                Ok(reg) => {
-                    eprintln!("aria-mcp: SQLite estate ready at {path:?}");
-                    reg
-                }
-                Err(e) => {
-                    eprintln!("{e}");
-                    std::process::exit(1);
-                }
+            RuntimeEstate::InMemory { opening } => {
+                eprintln!("aria-mcp: in-memory estate — exists only for this process");
+                EstateRegistry::new_inmemory_with(opening)
             }
-        } else {
-            // Neither set → in-memory ephemeral estate (v1.0 default).
-            eprintln!(
-                "aria-mcp: neither ARIA_MCP_POSTGRES_URL nor ARIA_MCP_SQLITE_PATH \
-                       set — using in-memory estate"
-            );
-            EstateRegistry::new_inmemory()
         };
-
-        ServerConfig {
+        Ok(ServerConfig {
             registry,
             server_name: "ARIA_MCP_Rust".to_owned(),
             server_version: "0.1.0".to_owned(),
@@ -167,7 +148,7 @@ impl ServerConfig {
             build_serial: crate::build_serial::derive(),
             version_skew: String::new(),
             update_advisory: None,
-        }
+        })
     }
 
     /// Construct the default in-memory server: one in-memory estate as the
@@ -265,6 +246,38 @@ fn read_line_capped<R: BufRead>(reader: &mut R) -> Option<String> {
     }
 }
 
+/// Construct a production [`Dispatcher`] from a [`ServerConfig`].
+///
+/// This is the ONLY place a production `Dispatcher` is constructed from a
+/// `ServerConfig`. Both server loops (`run_stdio_loop` and `run_http_loop`)
+/// call this function via `crate::server::dispatcher_from_config`, so both
+/// transports carry identical advisory wiring. Deleting either builder call
+/// (`.with_version_skew` or `.with_update_advisory`) here will turn at least
+/// one stdio gate AND the HTTP construction gate RED simultaneously.
+///
+/// `monitoring_control` is `None` for stdio (no stats store in that transport)
+/// and `Some(...)` for HTTP when a stats store is configured.
+pub(crate) fn dispatcher_from_config(
+    config: ServerConfig,
+    monitoring_control: Option<Arc<dyn crate::monitoring_control::MonitoringControl>>,
+) -> Dispatcher {
+    // Destructure first so config.registry can be moved into Dispatcher::new
+    // without triggering a "partial move" compile error on the remaining fields.
+    let ServerConfig {
+        registry,
+        server_name,
+        server_version,
+        build_serial,
+        version_skew,
+        update_advisory,
+    } = config;
+    Dispatcher::new(registry, &server_name, &server_version, &build_serial, monitoring_control)
+        .with_version_skew(version_skew)
+        // Forwarded even when None (stdio configs carry None, HTTP resident hosts
+        // inject the real provider). Both transports share the same builder chain.
+        .with_update_advisory(update_advisory)
+}
+
 /// Reads bytes from `reader`, splits on newline, parses each line as JSON,
 /// dispatches, and writes responses to `writer` one line each. Malformed
 /// lines emit a parseError response with a null id, matching the Swift
@@ -277,17 +290,7 @@ fn read_line_capped<R: BufRead>(reader: &mut R) -> Option<String> {
 pub fn run_stdio_loop<R: Read, W: Write>(reader: R, writer: &mut W, config: ServerConfig) {
     // stdio mode: no stats store → monitoring_control = None.
     // moot_monitoring_status will report "unavailable" in this transport.
-    let dispatcher = Dispatcher::new(
-        config.registry,
-        &config.server_name,
-        &config.server_version,
-        &config.build_serial,
-        &config.version_skew,
-        None,
-    )
-    // Forwarded even though resident hosts wire it only for HTTP mode —
-    // stdio configs carry None, so ping/status stay advisory-free here.
-    .with_update_advisory(config.update_advisory);
+    let dispatcher = dispatcher_from_config(config, None);
     let mut buf = BufReader::new(reader);
 
     loop {

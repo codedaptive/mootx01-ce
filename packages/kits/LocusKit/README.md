@@ -27,7 +27,7 @@ LocusKit is the right kit when you need exactly one estate. For coordinating mul
 ## What this kit does NOT provide
 
 - Multiple estates or cross-estate coordination → **GeniusLocusKit**
-- Embedding generation or vector search → **VectorKit**
+- Embedding generation or vector search → **SynapseKit**
 - Content-plus-vector RAG bundles → **CorpusKit**
 - Brain layer (standing signals, daemons, matrix layer) → **GeniusLocusKit**
 - AI reasoning algorithms → **NeuronKit**
@@ -54,4 +54,4 @@ LocusKit is the right kit when you need exactly one estate. For coordinating mul
 
 **Belongs here** if it touches: storage nouns, bitmap columns, DrawerStore, the single Estate actor and its verbs, Filter algebra, bitmap evaluator, audit enforcement, state/combination validation.
 
-**Does not belong here** if it: coordinates multiple estates → GeniusLocusKit · generates embeddings → VectorKit · bundles content+vector → CorpusKit · implements algorithms → NeuronKit · sequences workflows → CognitionKit · exposes MCP → ARIA_MCP.
+**Does not belong here** if it: coordinates multiple estates → GeniusLocusKit · generates embeddings → SynapseKit · bundles content+vector → CorpusKit · implements algorithms → NeuronKit · sequences workflows → CognitionKit · exposes MCP → ARIA_MCP.

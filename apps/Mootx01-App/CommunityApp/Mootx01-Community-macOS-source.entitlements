@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Source-build (Debug) entitlements: no App Sandbox, no app group, no shared
+     Keychain group. A build from a clone is its builder's, runs unsandboxed and
+     keeps its estate catalog in ~/Library beside the CLI's
+     (DECISION_INSTALL_TAKEOVER_2026-09-08). The signed Release build uses the
+     sibling file without "-source"; that file is tracked in git and selected by
+     CODE_SIGN_ENTITLEMENTS in the Release build configuration — xcodegen no
+     longer generates it; edit the file, not project.yml. -->
+<plist version="1.0">
+<dict>
+</dict>
+</plist>

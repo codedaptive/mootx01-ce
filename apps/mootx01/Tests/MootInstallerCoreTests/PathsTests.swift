@@ -1,7 +1,7 @@
 // PathsTests.swift
 //
 // Tests for MootInstallerCore.MootPaths. Most tests are pure path math
-// (environment and home injected, no filesystem access). Daemon-port
+// (home injected, no filesystem access). Daemon-port
 // tests write a temporary daemon.port file to exercise
 // MootPaths.resolvedResidentPort(dataDir:) end to end. Each
 // filesystem-touching test uses its own uniquely-named temp directory,
@@ -13,48 +13,6 @@ import Testing
 
 @Suite("MootPaths")
 struct PathsTests {
-
-    @Test func resolveDataDirectoryDefaultsToApplicationSupport() {
-        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
-        let resolved = MootPaths.resolveDataDirectory(
-            environment: [:],
-            homeDirectory: home
-        )
-        #expect(
-            resolved.path ==
-            "/Users/test/Library/Application Support/com.mootx01.ce"
-        )
-    }
-
-    @Test func resolveDataDirectoryHonorsEnvironmentOverride() {
-        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
-        let resolved = MootPaths.resolveDataDirectory(
-            environment: ["MOOTX01_DATA_DIR": "/tmp/sandbox-moot"],
-            homeDirectory: home
-        )
-        #expect(resolved.path == "/tmp/sandbox-moot")
-    }
-
-    @Test func resolveDataDirectoryIgnoresEmptyOverride() {
-        let home = URL(fileURLWithPath: "/Users/test", isDirectory: true)
-        let resolved = MootPaths.resolveDataDirectory(
-            environment: ["MOOTX01_DATA_DIR": ""],
-            homeDirectory: home
-        )
-        #expect(
-            resolved.path ==
-            "/Users/test/Library/Application Support/com.mootx01.ce"
-        )
-    }
-
-    @Test func estateURLAppendsFixedFilename() {
-        let dir = URL(fileURLWithPath: "/Users/test/Library/Application Support/com.mootx01.ce", isDirectory: true)
-        let estate = MootPaths.estateURL(in: dir)
-        #expect(
-            estate.path ==
-            "/Users/test/Library/Application Support/com.mootx01.ce/estate.sqlite"
-        )
-    }
 
     @Test func defaultOwnerIdentifierIsNonEmpty() {
         // LocusKit.Estate.create rejects an empty owner identifier
@@ -166,4 +124,21 @@ struct PathsTests {
         let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
         #expect(port == 5050)
     }
+}
+
+/// The resident-estate predicate: the rule `mootx01 upgrade` uses to
+/// decide whether a step may stop the resident daemon. Filesystem-touching
+/// tests use their own uniquely-named temp directory.
+@Suite("MootPaths resident estate")
+struct ResidentEstateTests {
+
+    private func makeTempRoot() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("mootx01-resident-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        return root
+    }
+
+    /// The platform-default directory under `home`, as the daemon serves it
+    /// when its registration carries no override.
 }

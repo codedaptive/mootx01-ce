@@ -22,13 +22,95 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use neuron_kit::{
-    DreamingDaemon, EstateDreamingReader, EstateDreamingSink, RecallTraceRewardSource,
+    DreamingDaemon, EstateDreamingReader, EstateDreamingSink, HNSWGraphMaintenance,
+    RecallTraceRewardSource,
 };
 use neuron_kit::estate_manifest_policy_store::EstateManifestDreamingPolicyStore;
 use neuron_kit::dreaming_cycle::DreamingPolicyStore;
 use neuron_kit::rem_cycle_table::{RemCycleKind, rem_cycle_table};
 
 use crate::estate_registry::EstateRegistry;
+
+// ── VectorStore HNSW maintenance adapter ─────────────────────────────────────
+
+/// Production implementation of `HNSWGraphMaintenance` backed by a live
+/// `VectorStore`. Injected into the resident `AutonomicGovernor` via
+/// `set_hnsw_maintenance` so the REM-BETA duty path compacts HNSW tombstones
+/// and reclaims superseded vector generations (VEC-SHADOWSWAP-01, finding 13b8e1a).
+///
+/// Implements all three maintenance methods by delegating to the VectorStore's
+/// public surface. All methods are non-fatal on failure (return `false`), so a
+/// single storage error does not abort the rest of the BETA cycle.
+///
+/// Constructed by `runtime.rs` after the governor is built, using the estate's
+/// live `Arc<VectorStore>` from the coordinator. The same adapter is used for
+/// the one-shot dream path below (direct BETA dispatch).
+///
+/// `pub` so integration tests in AriaMcpKit can verify the production wiring
+/// sequence without internal access to the governor's private field.
+pub struct VectorStoreHNSWAdapter(std::sync::Arc<synapsekit::VectorStore>);
+
+impl VectorStoreHNSWAdapter {
+    /// Wrap a live `Arc<VectorStore>` into the HNSW maintenance adapter.
+    pub fn new(vs: std::sync::Arc<synapsekit::VectorStore>) -> Self {
+        Self(vs)
+    }
+}
+
+impl HNSWGraphMaintenance for VectorStoreHNSWAdapter {
+    /// Rebuild all active HNSW graphs from current float records (THETA duty;
+    /// included here for protocol completeness — not called by the BETA path).
+    // Float index duty: the float index lane is always active.
+    fn rebuild_float_index(&mut self, _now_epoch_secs: f64) -> bool {
+        self.0.rebuild_all_hnsw_indices().is_ok()
+    }
+
+    /// Compact HNSW tombstones across all active graph partitions (BETA duty).
+    // Float index duty: the float index lane is always active.
+    fn compact_float_index_tombstones(&mut self, _now_epoch_secs: f64) -> bool {
+        self.0.compact_all_hnsw_tombstones().is_ok()
+    }
+
+    /// Delete vector rows whose generation is neither the serving generation
+    /// nor an active 'building' shadow for all models (BETA duty).
+    ///
+    /// `None` batch limit = unbounded pass; idempotent and safe to call
+    /// repeatedly. Non-fatal on failure — reclaimable rows are invisible to
+    /// queries; correctness is unaffected until the next BETA cycle.
+    fn reclaim_superseded_generations(&mut self, _now_epoch_secs: f64) -> bool {
+        self.0.reclaim_superseded_generations(None).is_ok()
+    }
+}
+
+/// Wire the HNSW maintenance handle into the governor from the live estate registry.
+///
+/// This is the SINGLE named point of wiring between the resident governor and the
+/// estate's live `VectorStore`. It encapsulates the sequence:
+///   lock `coord` → `vector_store_for(handle)` → if `Some(vs)` →
+///   `governor.set_hnsw_maintenance(Box::new(VectorStoreHNSWAdapter::new(vs)))`
+///
+/// Returns `true` when a handle was installed (estate has a registered VectorStore),
+/// `false` when the estate is LocusOnly (no VectorStore). Either way BETA still
+/// runs the base EWC prune; reclamation fires only when a handle is present.
+///
+/// Called once from `runtime.rs` after governor construction. Integration tests
+/// in AriaMcpKit drive the SAME function to verify the production wiring sequence
+/// end-to-end (VEC-SHADOWSWAP-01, finding 13b8e1a Adams Critical #2). Deleting
+/// or neutering this function causes the production-wiring test to go red.
+pub fn configure_hnsw_from_registry(
+    governor: &mut neuron_kit::autonomic_governor::AutonomicGovernor,
+    coord: &std::sync::Arc<std::sync::Mutex<genius_locus_kit::EstateCoordinator>>,
+    handle: &genius_locus_kit::EstateHandle,
+) -> bool {
+    let vs = coord.lock().ok().and_then(|c| c.vector_store_for(handle));
+    match vs {
+        Some(vs) => {
+            governor.set_hnsw_maintenance(Box::new(VectorStoreHNSWAdapter::new(vs)));
+            true
+        }
+        None => false,
+    }
+}
 
 /// Result of a `run_one_dreaming_cycle` call.
 #[derive(Debug)]
@@ -73,6 +155,7 @@ pub struct DreamRunResult {
 pub fn run_one_dreaming_cycle(
     estate_path: &str,
     owner: &str,
+    opening: crate::estate_registry::EstateOpening,
     now_epoch_secs: f64,
 ) -> Result<DreamRunResult, String> {
     // Nothing to do if the estate file does not exist.
@@ -86,12 +169,73 @@ pub fn run_one_dreaming_cycle(
         });
     }
 
-    // Open the estate. `EstateRegistry::new_sqlite` wires corpus + VectorStore
-    // + encode queue (semantic recall layer). The dreaming queue is a separate
-    // lazy-mount (below) — it is NOT wired by `new_sqlite`.
-    let reg = EstateRegistry::new_sqlite(estate_path, owner)
+    // Open the estate as its catalog record decides (`opening`): the open
+    // wires corpus + VectorStore + encode queue (semantic recall layer). The
+    // dreaming queue is a separate lazy-mount (below) — it is NOT wired here.
+    let reg = EstateRegistry::new_sqlite_with(estate_path, owner, opening)
         .map_err(|e| format!("dream: estate open failed: {e}"))?;
     let handle = reg.default.handle.clone();
+
+    // The coordinator pays ONE bounded Signal 14 batch while it has the estate
+    // open (§ DUTY_LIFECYCLE), built and activated through the same production
+    // function as the resident. It never loops until settled; `drain` does.
+    let fact_settings_directory = if opening.federate {
+        None
+    } else {
+        Path::new(estate_path).parent()
+    };
+    crate::runtime::configure_duty_limits_from_settings(&reg.coord, &handle, fact_settings_directory);
+    if let Some(fact_cycle) = crate::runtime::build_fact_extraction_cycle(
+        &reg.coord,
+        handle,
+        fact_settings_directory,
+    ) {
+        match fact_cycle() {
+            Ok(settled) => eprintln!(
+                "mootx01 dream: fact extraction batch complete — {settled} source(s) settled"
+            ),
+            Err(error) => eprintln!(
+                "mootx01 dream: fact extraction cycle failed: {error}"
+            ),
+        }
+        if let Ok(coord) = reg.coord.lock() {
+            let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default().as_millis() as i64;
+            if let Ok(status) = coord.fact_extraction_work_status(&handle, now_ms) {
+                eprintln!("mootx01 dream: fact extraction — {}", status.detail());
+            }
+        }
+    }
+    // Span debt: one bounded batch per dreaming pass, the same call the
+    // resident's dreaming duty makes, so `dream` plus drain status settles an
+    // estate whose drawers still owe spans. The batch attempts encoder
+    // activation itself when none is registered; with no model it is a clean
+    // 0. Twin of the Swift dream command's span step.
+    // Both duties run as claimed QueueKit jobs (duty_queue): one bounded
+    // subject batch and one span batch per pass (DutyLimits), as the Swift
+    // coordinator does.
+    match reg.coord.lock() {
+        Ok(mut coord) => {
+            use genius_locus_kit::brain::duty_queue::DutyKind;
+            let now_ms = (now_epoch_secs * 1000.0) as i64;
+            for kind in [DutyKind::SubjectBackfill, DutyKind::SpanEncode, DutyKind::AnomalySweep] {
+                if let Err(error) = coord.enqueue_duty(&handle, kind, now_ms) {
+                    eprintln!("mootx01 dream: {} enqueue error: {error:?}", kind.wire_name());
+                    continue;
+                }
+                match coord.drain_duty(&handle, kind, now_ms) {
+                    Ok(report) if report.jobs_run > 0 => eprintln!(
+                        "mootx01 dream: {} — {} paid, {} remaining",
+                        kind.wire_name(), report.units_paid, report.remaining_debt
+                    ),
+                    Ok(_) => {}
+                    Err(error) => eprintln!("mootx01 dream: {} error: {error:?}", kind.wire_name()),
+                }
+            }
+        }
+        Err(error) => eprintln!("mootx01 dream: duties skipped — coordinator lock poisoned: {error}"),
+    }
+
     // The DrawerStore is the manifest-backed KV surface for policy persistence.
     let store = std::sync::Arc::clone(&reg.default.store);
 
@@ -250,8 +394,19 @@ pub fn run_one_dreaming_cycle(
             }
             RemCycleKind::Beta => {
                 if dreaming.beta_due(now_epoch_secs) {
-                    dreaming.run_beta_cycle(now_epoch_secs);
-                    eprintln!("mootx01 dream: {} (T12) — advanced cadence timestamp", entry.name);
+                    // Wire the production reclaiming path (VEC-SHADOWSWAP-01,
+                    // finding 13b8e1a): build an adapter over the estate's live
+                    // VectorStore so run_beta_cycle_with_hnsw can reclaim
+                    // superseded vector generations alongside the EWC prune.
+                    //
+                    // `vector_store_for` returns None when no VectorStore is
+                    // registered (e.g. a LocusOnly estate). In that case the
+                    // adapter is absent and BETA runs the base EWC prune only —
+                    // correct, because there are no vector generations to reclaim.
+                    let vs = coord.vector_store_for(&handle);
+                    let mut adapter_opt = vs.map(VectorStoreHNSWAdapter);
+                    dreaming.run_beta_cycle_with_hnsw(now_epoch_secs, adapter_opt.as_mut());
+                    eprintln!("mootx01 dream: {} (T12) — EWC prune, HNSW compact, generation reclaim", entry.name);
                 }
             }
             RemCycleKind::Omega => {

@@ -890,7 +890,7 @@ mod tests {
         use crate::coordinator::{EstateKind, EstateLifetime, EstateProvisionParams, SyncMode};
         use crate::recall::{
             GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath,
-            RecallFallbackPolicy,
+            RecallFallbackPolicy, RecallOrigin,
         };
         use corpus_kit::corpus::EmbeddingModelConfig;
         use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -976,12 +976,15 @@ mod tests {
 
         // Verify the promoted row is reachable via the BM25 (corpus) lane —
         // the lane that was dark before Finding #9 was fixed.
-        let recall_req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-            .with_mode(GLKRecallMode::Hybrid)
-            .with_scoring(GLKRecallScoring::Raw)
-            .with_limit(10)
-            .with_fallback(RecallFallbackPolicy::FailClosed)
-            .with_query_text("tangerine-unique-phrase-for-promote-encode-test".to_string());
+        let recall_req = GLKRecallRequest::new(
+            RecallFrame::new(vec![Filter::Unconfirmed]),
+            GLKRecallMode::Hybrid,
+            GLKRecallScoring::Raw,
+            10,
+            RecallFallbackPolicy::FailClosed,
+            RecallOrigin::Internal,
+        )
+        .with_query_text("tangerine-unique-phrase-for-promote-encode-test".to_string());
 
         let results = coord
             .recall_scored(&handle, recall_req, T)

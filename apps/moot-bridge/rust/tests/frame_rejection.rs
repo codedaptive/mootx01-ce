@@ -392,8 +392,7 @@ impl StubRig {
         std::fs::write(&log_b, "").expect("create log B");
 
         // The log path travels as an env-var prefix on the command string, which
-        // RawMcpBackend splits off and sets on the child — the same mechanism the
-        // real config uses for MOOTX01_DATA_DIR. Paths carry no spaces (the
+        // RawMcpBackend splits off and sets on the child. Paths carry no spaces (the
         // command is whitespace-split), which the temp-dir naming guarantees.
         //
         // The verbs are never exercised: these tests issue no tools/call except

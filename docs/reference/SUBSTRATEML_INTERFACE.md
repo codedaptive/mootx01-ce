@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Interface
-version: 1.2.0
+version: 1.8.0
 status: active
-date: 2026-08-06
+date: 2026-09-15
 description: Public API surface for SubstrateML in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -2287,7 +2287,30 @@ target dependencies (authority: `the package-dependency rule`).
 
 `Cargo.toml` — `intellectus-lib = { path = "../../IntellectusLib/rust" }` added.
 
+## Security repair contract
+
+### Cancellable Jacobi decomposition
+
+Swift `JacobiSVD.decompose(A:rank:sweeps:shouldCancel:) throws -> SVDResult`
+and Rust `JacobiSvd::decompose_cancellable(a, rank, sweeps, should_cancel)
+-> Result<SvdResult, JacobiSvdCancelled>` check cancellation before allocation,
+before each sweep, between tournament rounds, and before result construction.
+Swift throws `JacobiSVDCancelled`. A cancelled operation returns no partial
+factors. The existing non-cancellable entry points use the same arithmetic.
+
 ## Changelog
+
+### 1.8.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 1.7.0 -- 2026-09-02
+
+- `DistillationPipelineVersion` (Swift) and `DISTILLATION_PIPELINE_VERSION`
+  (Rust `token_compaction`) are removed. Readers take the converter ID from
+  `GeniusLocusKit.distillationConverterID` / `genius_locus_kit::distillation_converter_id()`
+  (GENIUSLOCUSKIT_INTERFACE 2.11.0).
 
 ### 1.2.0 -- 2026-08-06
 
@@ -2330,4 +2353,12 @@ hash64. Updated the signature block for `RandomWalks` in the API section and add
 a concordance row. The existing indexed `walk(adjacency:start:length:...)` is unchanged.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **1.6.0 (2026-08-20)** — fold(...decayNowMs:decayHalfLifeSeconds:) + FoldResult.weightedDeltas (Rust: fold_with_decay, FoldResult.weighted_deltas).
+
+- **1.5.0 (2026-08-20)** — `DistillationPipelineVersion.current` = "p2.2-det".
+
+- **1.4.0 (2026-08-20)** — `DistillationPipelineVersion.current` = "p2.1-det".
+
+- **v1.3.0 (2026-08-20)** — `DistillationPipelineVersion.current` = "p2-det" (Rust `DISTILLATION_PIPELINE_VERSION`).
+
+

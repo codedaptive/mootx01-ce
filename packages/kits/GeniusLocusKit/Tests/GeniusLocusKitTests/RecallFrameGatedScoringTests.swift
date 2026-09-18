@@ -26,7 +26,7 @@ import Foundation
 import GeniusLocusKit
 import LocusKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 
@@ -98,7 +98,8 @@ struct RecallFrameGatedScoringTests {
             scoring: .rrf,
             limit: limit,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 
@@ -127,6 +128,30 @@ struct RecallFrameGatedScoringTests {
         // The admissible drawer must still surface.
         #expect(result.hits.contains { $0.id == admissible.id },
             "admissible drawer MUST surface in recall; hits: \(result.hits.map(\.id))")
+        #expect(result.withheldBySensitivity == 1,
+            "the GLK result must carry the one default-ceiling exclusion")
+    }
+
+    @Test func withheldCountUsesQueriedCandidatesInsteadOfStoragePrefix() async throws {
+        let (kit, handle) = try await provision(ownerSuffix: "withheld-query")
+        defer { Task { try? await kit.close(handle) } }
+
+        for index in 0..<65 {
+            _ = try await kit.capture(
+                handle,
+                admissibleFrame(content: "unrelated storage prefix \(index)"),
+                mode: .impatient)
+        }
+        _ = try await kit.capture(
+            handle,
+            restrictedFrame(content: "unique queried restricted needle"),
+            mode: .impatient)
+
+        let result = try await kit.recall(
+            handle, recallRequest(query: "unique queried restricted needle", limit: 1))
+
+        #expect(result.withheldBySensitivity == 1,
+            "withheld counting must evaluate the query candidate, not an arbitrary storage prefix")
     }
 
     // MARK: - B. Multiple restricted drawers — none surfaces, count is exact
@@ -258,7 +283,8 @@ struct RecallFrameGatedScoringTests {
             scoring: .rrf,
             limit: 20,
             fallback: .failClosed,
-            queryText: "oracle probe canary")
+            queryText: "oracle probe canary",
+            origin: .internal)
 
         let overrideResult = try await kit.recall(handle, overrideRequest)
         #expect(overrideResult.hits.contains { $0.id == restricted.id },
@@ -316,7 +342,8 @@ struct RecallFrameGatedScoringTests {
             scoring: .rrf,
             limit: 3,
             fallback: .failClosed,
-            queryText: "mmr oracle canary")
+            queryText: "mmr oracle canary",
+            origin: .internal)
 
         let resultA = try await kitA.recall(handleA, mmrRequestA)
         let contentsA = resultA.hits.compactMap { $0.drawer?.content }
@@ -343,7 +370,8 @@ struct RecallFrameGatedScoringTests {
             scoring: .rrf,
             limit: 3,
             fallback: .failClosed,
-            queryText: "mmr oracle canary")
+            queryText: "mmr oracle canary",
+            origin: .internal)
 
         let resultB = try await kitB.recall(handleB, mmrRequestB)
         let contentsB = resultB.hits.compactMap { $0.drawer?.content }
@@ -354,10 +382,14 @@ struct RecallFrameGatedScoringTests {
         #expect(!contentsB.contains("zeta quantum unrelated mmr decoy"),
             "restricted decoy must not appear in estate B unionBest results")
 
-        // Count must be invariant: both estates have 4 admissible drawers, limit=3,
-        // so 3 admissible items must be returned from each.
-        #expect(contentsA.count == 3,
-            "estate A must return 3 admissible drawers; got: \(contentsA)")
+        // Exact count (DECISION_SCORE_TRANSPARENT_ORDERING ruling 1): the four
+        // admissible drawers tie on score, the tie group straddles the limit-3
+        // boundary, and honest expansion returns the WHOLE group — exactly the
+        // admissible pool, deterministically. An exact assertion also catches
+        // over-expansion regressions a floor check would let through.
+        // Count must also be invariant to the restricted decoy's presence.
+        #expect(contentsA.count == admissibleContents.count,
+            "estate A must return exactly the \(admissibleContents.count) admissible drawers; got: \(contentsA)")
         #expect(contentsA.count == contentsB.count,
             "count must be invariant to restricted decoy content; A=\(contentsA.count), B=\(contentsB.count)")
 

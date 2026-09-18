@@ -2,7 +2,7 @@ import Foundation
 
 /// Consolidation sweep standing signal — Wave-2 D9: true consolidation runs
 /// ONLY in dream/maintenance windows, never inline with capture. Mirrors
-/// DistillationSignal exactly in structure: fixed cadence, .single
+/// TemporalCausalitySignal in structure: fixed cadence, .single
 /// concurrency, diagnostic emission, injected closure for the live cycle.
 ///
 /// Cadence: daily (86 400 seconds) — the THETA-window cadence class. Every
@@ -11,7 +11,7 @@ import Foundation
 /// its cursor next fire, so a large aged estate consolidates across cycles
 /// without ever starving the other dream-cycle work).
 ///
-/// Usage pattern (mirrors DistillationSignal):
+/// Usage pattern (mirrors TemporalCausalitySignal):
 ///
 ///     let spec = ConsolidationSignal.spec { now in
 ///         try await kit.consolidationSweepReport(
@@ -60,23 +60,6 @@ public enum ConsolidationSignal {
                         detail: "\(error)",
                         observedAt: context.now))]
                 }
-            })
-    }
-
-    /// Diagnostic-only spec for registration contexts with no live cycle
-    /// (mirrors DistillationSignal.defaultSpec — registerDefaultStandingSignals
-    /// cannot supply estate context).
-    public static func defaultSpec() -> SignalSpec {
-        SignalSpec(
-            name: signalName,
-            trigger: .interval(seconds: defaultCadenceSeconds),
-            freshnessTarget: defaultCadenceSeconds * 2,
-            concurrencyPolicy: .single,
-            emit: { context in
-                return [.diagnostic(DiagnosticReport(
-                    title: "consolidation-sweep.fired",
-                    detail: "sweep signal fired (no-op) at \(context.now.ISO8601Format())",
-                    observedAt: context.now))]
             })
     }
 }

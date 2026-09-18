@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 
+use substrate_ml::decay::decay_factor;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MatrixCalibrationBucket {
     pub count: i32,
@@ -81,12 +83,15 @@ impl MatrixCalibrationCurve {
     ///
     /// `elapsed_days` is time since last update. Decay is skipped for
     /// sub-day intervals to avoid floating-point noise. `half_life_days`
-    /// defaults to 30 per math treatise §8.
+    /// defaults to 30 per math treatise §8. The factor comes from
+    /// `substrate_ml::decay::decay_factor`, the one half-life formula every
+    /// decaying surface in both ports shares; days convert to seconds here
+    /// because that function works in seconds.
     pub fn apply_decay(&mut self, elapsed_days: f64, half_life_days: f64) {
         if elapsed_days < 1.0 {
             return;
         }
-        let factor = 0.5_f64.powf(elapsed_days / half_life_days);
+        let factor = decay_factor(elapsed_days * 86_400.0, half_life_days * 86_400.0);
         for bucket in &mut self.buckets {
             bucket.apply_decay(factor);
         }

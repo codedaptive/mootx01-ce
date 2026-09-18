@@ -248,13 +248,20 @@ struct CorpusContentBoundaryTests {
         // profile actually enforces is the "no column named text" check below —
         // no place a verbatim copy of canonical content could land — and a
         // per-term vector column does not offer one.
+        // corpus_provider_term_dictionary / corpus_provider_term_payload are
+        // the v4 integer-keyed pair (CORPUS-COUNTS-01). Same derived-vocabulary
+        // reasoning as corpus_provider_vocab: `term TEXT` in the dictionary is
+        // tokens, not canonical content, and the payload table carries only
+        // integer keys and vector bytes.
         #expect(names == ["corpus_index_state", "corpus_bitmap_generation",
                           "corpus_provider_coverage",
                           "corpus_provider_configuration",
                           "iix_termfreqs", "iix_doclens",
                           "corpus_provider_basis", "corpus_provider_counts",
                           "corpus_provider_count_references",
-                          "corpus_provider_vocab"])
+                          "corpus_provider_vocab",
+                          "corpus_provider_term_dictionary",
+                          "corpus_provider_term_payload"])
         // No column named "text" anywhere in the attached profile — there
         // is no place a verbatim copy could land.
         for table in CorpusSchemaProfile.attachedDeclaration.tables {

@@ -61,8 +61,8 @@ transliteration of the Swift code.
 |---|---|
 | `moot_list_recipes` | Enumerate catalog: name, version, description, required capabilities |
 | `moot_grounded_synthesis` | Hybrid-recall + synthesize into a grounded context document |
-| `moot_run_migration_benchmark` | Derive COW branches per plan, benchmark, rank survivors |
-| `moot_confirm_migration_promotion` | Promote a winning branch by id; discard losers (human-confirmed write) |
+| `moot_migration_run` | Derive COW branches per plan, benchmark, rank survivors |
+| `moot_migration_confirm` | Promote a winning branch by id; discard losers (human-confirmed write) |
 
 ### 14 reasoning-lens tools
 
@@ -118,18 +118,34 @@ methodNotFound on the Swift side. The Rust server is ahead here: the coordinator
 
 ## Persistence
 
-The server selects its storage backend from environment variables at startup.
-Both vars are read without trimming — a whitespace-only value is non-empty and
-fails fast, not a silent fallback.
+The server never reads an estate path or connection string from the
+environment. The host resolves the estate through the estate catalog
+(`genius_locus_kit::EstateCatalog`) and passes a `RuntimeEstate` to
+`aria_mcp::runtime::run`:
 
-### Backend precedence table
+| Selection | Estate | Notes |
+|---|---|---|
+| `--db <name>` | The registered estate of that name | Federates; charters seeded; created encrypted unless its manifest declares plaintext |
+| `--db <dir>/<name>` | A transient estate at `<dir>/<name>/` | Plaintext, identity in memory, no charters; never written to the catalog |
+| (neither) | The catalog's active estate | |
+| `--in-memory` | Record resolved for validation; estate starts empty | Served transient: no federation, no charters; discarded on exit |
 
-| `ARIA_MCP_POSTGRES_URL` | `ARIA_MCP_SQLITE_PATH` | Backend | Notes |
-|---|---|---|---|
-| Non-empty | Non-empty | — | Ambiguous config: exit 1, stderr names both vars |
-| Non-empty | Absent or empty | PostgreSQL estate | Pooled, lazy-connect, Swift-parity defaults |
-| Absent or empty | Non-empty | SQLite at that path | WAL-mode, durable across restarts |
-| Absent or empty | Absent or empty | In-memory (default) | Ephemeral; discarded on exit |
+A record whose catalog entry names a PostgreSQL backend opens at the record's
+connection string. The record's kind decides federation and charter seeding on
+SQLite and PostgreSQL backends; `--in-memory` overrides this — the estate starts
+**empty** (zero drawers), whatever the record says. A transient PostgreSQL estate
+holds exactly what was imported into it.
+
+`--in-memory` opens the catalog and resolves the record before the backend is
+chosen, so a `--db` that names no estate is refused rather than ignored. The
+same rule holds in the Swift port and in both ports of `mootx01 serve`.
+
+The `aria-mcp` dev binary takes `--db`, `--in-memory` and `--help`, and nothing
+else: `--frozen` and `--http`, which `mootx01 serve` accepts, are usage errors
+here. The frozen posture reaches this binary only through `MOOTX01_FROZEN`
+(`estate_posture.rs`), and the HTTP transport only through `MOOTX01_HTTP_PORT`.
+A refused command line prints the reason and the usage line to stderr and exits
+**1**, the same code the Swift port uses.
 
 **PostgreSQL:** the Rust server opens a pooled PostgreSQL estate via
 `locus_kit::PostgresDrawerStore` backed by persistence-kit's `PostgresStorage`.
@@ -150,7 +166,7 @@ CloudKit and live federation fan-out remain future work.
 
 ## Behavioral Facts
 
-**moot_confirm_migration_promotion is fully wired.** The confirm step dispatches
+**moot_migration_confirm is fully wired.** The confirm step dispatches
 `confirm_migration_promotion_by_id`, the id-addressed overload that works across
 the stateless run→confirm boundary. The server's in-memory coordinator retains all
 minted branches; the run result text carries the branch ids the caller needs.
@@ -168,9 +184,9 @@ stdin (newline-delimited JSON)
         └─► dispatcher::Dispatcher::handle
               ├─► initialize / ping / tools/list
               └─► tools/call
-                    └─► dispatch::dispatch_tool
-                          ├─► recipe_tools  (moot_list_recipes, moot_grounded_synthesis, …)
-                          ├─► lens_tools    (moot_keystones … moot_estate_divergence)
+                    └─► Dispatcher::handle
+                          ├─► selected v2 surface
+                          ├─► typed recall and orchestration lowers
                           └─► lexicon_tools (moot_capture_drawer, moot_drawer_recall,
                                              moot_capture_tunnel, moot_mutate_drawer,
                                              moot_withdraw_drawer, moot_expunge_drawer,

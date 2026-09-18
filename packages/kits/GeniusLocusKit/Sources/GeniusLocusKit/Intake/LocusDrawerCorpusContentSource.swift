@@ -23,21 +23,12 @@
 // surface returns empty; rebuilds stream `activeContentIDs()` +
 // `record(for:)` in deterministic ID order instead.
 //
-// DENSE-OVER-DISTILLATE (MISSION_11X_RECALL_GAP_01 Stream F):
-// `record(for:)` supplies `denseCompositionText: drawer.distilled`. When
-// `distilled` is nil (pre-sweep / edit-to-regeneration window), nil
-// propagates and `CorpusContentRecord.effectiveDenseText` falls back to
-// the verbatim `text` — zero behavior change for undistilled rows. When
-// non-nil, the engine uses the distillate for the dense float vector lane
-// while BM25 continues to index `text` unchanged (BM25 search isolation,
-// SPEC_DISTILLATION_STORAGE §9, is preserved: the content digest keys on
-// `text` and BM25 tokens come from `text`).
-//
-// Recomposability: on retrain / reindex the engine calls `source.record(for:)`
-// again. If the distillate is present, the re-embedded vector is distillate-
-// based; if swept away (content edit → NULL), the vector reverts to lexical.
-// Either way the persisted `distilled` column is the single source of truth —
-// no additional basis dependency is introduced.
+// INDEX COMPOSITION (schema 19): both lanes index the verbatim `content`.
+// The lexical lane's BM25 document is `content` plus the SSC facts
+// supplement the engine derives from `drawers.ssc_facts`
+// (`SSCFacts.lexicalSupplement`); the dense lane reads the same verbatim
+// text through `CorpusContentRecord.effectiveDenseText`. This is the one
+// composition every estate indexes.
 //
 // Rust twin: `rust/src/intake.rs` (`LocusDrawerContentSource`).
 
@@ -54,15 +45,21 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
         self.estate = estate
     }
 
+    /// Create the source for one open estate without exposing GLK's
+    /// internal raw-estate accessor outside the GeniusLocusKit module.
+    package init(kit: GeniusLocusKit, handle: EstateHandle) async throws {
+        self.estate = try await kit.estate(for: handle)
+    }
+
     /// Resolve the CURRENT canonical record for a Drawer ID. Empty-content
     /// and non-resolving drawers return nil (nothing to index; the engine
     /// clears derived state for a previously-indexed ID that stops
     /// resolving).
     ///
-    /// Supplies `denseCompositionText: drawer.distilled` so the dense
-    /// float lane is composed from the distillate when available. A nil
-    /// `distilled` column propagates as nil and `effectiveDenseText` falls
-    /// back to the verbatim `text` — the BM25 lane is always `text`.
+    /// The record carries the verbatim `content` as `text`, no separate
+    /// dense composition (the dense lane falls back to `text` through
+    /// `effectiveDenseText`), and the drawer's `ssc_facts` column value for
+    /// the engine's BM25 supplement. The digest keys on the verbatim text.
     public func record(for id: CorpusContentID) async throws -> CorpusContentRecord? {
         guard let drawer = try await estate.getDrawers(ids: [id]).first,
               !drawer.content.isEmpty,
@@ -75,12 +72,11 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
             revision: 1,
             digest: CorpusContentDigest.digest(drawer.content),
             text: drawer.content,
-            // Dense-over-distillate (Stream F): the distillate column is the
-            // dense-composition text when set. Nil = lexical fallback via
-            // effectiveDenseText. The digest always keys on `text` (content
-            // did not change when only the distillate was written), so the
-            // BM25 idempotence anchor is unaffected by distillation.
-            denseCompositionText: drawer.distilled)
+            denseCompositionText: nil,
+            // The engine appends `SSCFacts.lexicalSupplement(sscFacts)` to the
+            // BM25 document; the column is written by the enrichment stage
+            // before the drawer is indexed (contract sheet §6).
+            sscFacts: drawer.sscFacts)
     }
 
     /// The estate verbs are the change stream — the polling feed is empty.
@@ -90,11 +86,30 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
         .empty
     }
 
-    /// Every active Drawer ID with non-empty content, ascending — the
-    /// deterministic streaming order rebuilds use. Paged so no single call
-    /// materializes an unbounded drawer set.
+    /// Every active Drawer ID with non-empty content in a deterministic order
+    /// suitable for training. Paged so no single call materializes an
+    /// unbounded drawer set.
+    ///
+    /// Sort key: `(filedAt ascending, content ascending)`. UUID order is NOT
+    /// used because drawer UUIDs are random per fresh estate — sorting by UUID
+    /// produces a non-deterministic encounter order for `TermDocumentCounts`,
+    /// which assigns vocabulary indices as terms are first seen across the
+    /// training sequence. Non-deterministic vocabulary indices produce different
+    /// model weights (RI random projections) across runs from the same corpus,
+    /// causing recall scores to drift between replay runs even when the corpus
+    /// and capture timestamps are bit-identical.
+    ///
+    /// `filedAt` is seed-derived when `MOOT_BENCH_EPOCH_NOW` is active (set to
+    /// `captureDate` from the seed file), making it stable across replay runs.
+    /// `content` is the stable tiebreak for same-`filedAt` records (e.g.
+    /// contradiction pairs that share an event_time): it is a pure function of
+    /// the corpus and does not depend on drawer identity.
+    ///
+    /// Rust twin: `intake.rs` `active_content_ids`.
     public func activeContentIDs() async throws -> [CorpusContentID] {
-        var ids: [CorpusContentID] = []
+        // Collect (filedAt, content, id) tuples so the final sort uses the
+        // stable keys rather than the random drawer UUID.
+        var entries: [(filedAt: Date, content: String, id: String)] = []
         var cursor: String?
         let pageSize = 2_000
         while true {
@@ -105,10 +120,24 @@ public struct LocusDrawerCorpusContentSource: CorpusContentSource {
                 && drawer.contentKind != .dataset
                 && drawer.embeddingModelID != datasetHandleEmbeddingModelID
             {
-                ids.append(drawer.id)
+                entries.append((drawer.filedAt, drawer.content, drawer.id))
             }
             if page.count < pageSize { break }
         }
-        return ids.sorted()
+        // filedAt ascending, then content ascending as a stable tiebreak for
+        // same-instant records. Content comparison only fires for the rare
+        // same-filedAt case (e.g. two drawers in a contradiction pair), so the
+        // overhead of carrying the content string here is negligible in practice.
+        return entries.sorted {
+            if $0.filedAt != $1.filedAt { return $0.filedAt < $1.filedAt }
+            return $0.content < $1.content
+        }.map { $0.id }
+    }
+
+    /// Budget probe used by retraining. The estate pushes the eligibility
+    /// predicates, deterministic order, ID-only projection, and LIMIT into
+    /// storage before any document body can be loaded.
+    public func activeContentIDs(limit: Int) async throws -> [CorpusContentID] {
+        try await estate.activeCorpusContentIDs(limit: max(0, limit))
     }
 }

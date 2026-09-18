@@ -81,8 +81,12 @@ struct RecallShapeMatrixSteerTests {
         let d2Op = UInt64(bitPattern: (allDrawers.first { $0.id == d2 }?.operationalBitmap ?? 0))
         var seeded = false
         if d1Op != 0, d2Op != 0, d1Op != d2Op {
-            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
-            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            // locusSlice orders by filedAt DESC; d2 (captured last) is first and
+            // becomes the recall query (queryCoords = d2Op). Seed T[d2Op → d1Op]
+            // so the scorer's T[(queryCoord=d2Op, candidateCoord=d1Op, lag)] lookup
+            // finds a non-zero prior and boosts d1 as the temporal target candidate.
+            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
             matrix.applyTemporalEvent(source: src, target: tgt, deltaMinutes: 2, delta: 1000)
             seeded = true
         }
@@ -202,19 +206,21 @@ struct RecallShapeMatrixSteerTests {
             "both temporal-steered recalls must return hits")
 
         if seeded {
-            // The temporal target (d2) carries the seeded prior. Under temporal-up
-            // its rank must be no worse than under temporal-down (temporal steering
-            // can only help it, never demote it relative to the down shape).
-            let upRank = up.hits.firstIndex { $0.id == d2 }
-            let downRank = down.hits.firstIndex { $0.id == d2 }
+            // d1 is the temporal target (candidate boosted by the seeded prior).
+            // locusSlice puts d2 first (byCaptureTimeDesc), making d2 the query
+            // (queryCoord=d2Op). The seeded prior is T[d2Op → d1Op], so d1 gets
+            // a non-zero temporal score. Under temporal-up, d1's rank must be no
+            // worse than under temporal-down (temporal steering can only help it).
+            let upRank = up.hits.firstIndex { $0.id == d1 }
+            let downRank = down.hits.firstIndex { $0.id == d1 }
             if let u = upRank, let d = downRank {
                 #expect(u <= d,
                     "temporal-up must rank the temporally-relevant drawer no lower than temporal-down; up=\(u) down=\(d)")
             }
             // Steering temporal must actually move the score: the temporally-relevant
             // drawer's fused final must differ between up and down.
-            let upFinal = up.hits.first { $0.id == d2 }?.score.final
-            let downFinal = down.hits.first { $0.id == d2 }?.score.final
+            let upFinal = up.hits.first { $0.id == d1 }?.score.final
+            let downFinal = down.hits.first { $0.id == d1 }?.score.final
             if let uf = upFinal, let df = downFinal {
                 #expect(uf != df,
                     "temporal steering must change the relevant drawer's fused final; up=\(uf) down=\(df)")

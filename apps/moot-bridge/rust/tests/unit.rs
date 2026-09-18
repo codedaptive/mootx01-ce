@@ -29,7 +29,7 @@ fn minimal_config_decodes() {
         "verbMap": {
           "write": "moot_file_memory",
           "query": "moot_memory_search",
-          "constantArgs": { "location": "scratch/notes" },
+          "constantArgs": { "wing": "scratch", "location": "notes" },
           "resultFormat": { "kind": "mootText" }
         }
       },
@@ -47,6 +47,14 @@ fn minimal_config_decodes() {
     assert_eq!(
         config.backend_a.verb_map.result_format,
         ResultFormat::JsonObjects { id_key: None, content_key: "text".to_string() }
+    );
+    assert_eq!(
+        config.backend_b.verb_map.constant_args.get("wing"),
+        Some(&"scratch".to_string())
+    );
+    assert_eq!(
+        config.backend_b.verb_map.constant_args.get("location"),
+        Some(&"notes".to_string())
     );
     assert_eq!(config.backend_b.verb_map.result_format, ResultFormat::MootText);
 }
@@ -119,12 +127,14 @@ fn mempalace_verbs() -> VerbMap {
         query_arg: "query".to_string(),
         constant_args: constant,
         result_format: ResultFormat::JsonObjects { id_key: None, content_key: "text".to_string() },
+        subject_arg: None,
     }
 }
 
 fn mootx01_verbs() -> VerbMap {
     let mut constant = BTreeMap::new();
-    constant.insert("location".to_string(), "scratch/notes".to_string());
+    constant.insert("wing".to_string(), "scratch".to_string());
+    constant.insert("location".to_string(), "notes".to_string());
     VerbMap {
         write: "moot_file_memory".to_string(),
         query: "moot_memory_search".to_string(),
@@ -132,6 +142,7 @@ fn mootx01_verbs() -> VerbMap {
         query_arg: "query".to_string(),
         constant_args: constant,
         result_format: ResultFormat::MootText,
+        subject_arg: Some("subject".to_string()),
     }
 }
 
@@ -156,9 +167,12 @@ fn write_translates_to_secondary_tool() {
     assert_eq!(out["id"], json!(7));
     assert_eq!(out["params"]["name"], json!("moot_file_memory"));
     assert_eq!(out["params"]["arguments"]["content"], json!("hello bridge"));
-    assert_eq!(out["params"]["arguments"]["location"], json!("scratch/notes"));
-    // The primary-only constantArgs (wing/room) are NOT leaked to mootx01.
-    assert!(out["params"]["arguments"].get("wing").is_none());
+    // Secondary's constant write-context present: both wing and location.
+    assert_eq!(out["params"]["arguments"]["wing"], json!("scratch"));
+    assert_eq!(out["params"]["arguments"]["location"], json!("notes"));
+    // mootx01 requires a subject; the bridge derives it from the content.
+    assert_eq!(out["params"]["arguments"]["subject"], json!("hello bridge"));
+    // The primary-only constantArg room is NOT leaked to mootx01.
     assert!(out["params"]["arguments"].get("room").is_none());
 }
 
@@ -167,7 +181,7 @@ fn write_translates_reverse_direction() {
     let client_call: Value = serde_json::from_str(
         r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
             "params":{"name":"moot_file_memory",
-                      "arguments":{"content":"reverse content","location":"scratch/notes"}}}"#,
+                      "arguments":{"content":"reverse content","wing":"scratch","location":"notes"}}}"#,
     )
     .unwrap();
     let out_str = BridgeServer::translate_call(
@@ -200,6 +214,61 @@ fn write_without_content_returns_none() {
         1,
     )
     .is_none());
+}
+
+/// A subject the client already gave under the secondary's key is carried
+/// through unchanged rather than re-derived.
+#[test]
+fn write_carries_a_given_subject_through() {
+    let client_call: Value = serde_json::from_str(
+        r#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+            "params":{"name":"mempalace_add_drawer",
+                      "arguments":{"wing":"scratch","room":"notes","content":"body text","subject":"given"}}}"#,
+    )
+    .unwrap();
+    let out: Value = serde_json::from_str(
+        &BridgeServer::translate_call(Some(&client_call), BridgeCallType::Write, &mempalace_verbs(), &mootx01_verbs(), 2)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(out["params"]["arguments"]["subject"], json!("given"));
+}
+
+/// The derived subject is the first non-empty line, trimmed, cut to the 120
+/// scalars mootx01 accepts; empty content still yields a subject.
+#[test]
+fn derived_subject_shape() {
+    assert_eq!(BridgeServer::derived_subject("\n  first line  \nsecond"), "first line");
+    let long = "x".repeat(300);
+    assert_eq!(BridgeServer::derived_subject(&long).chars().count(), BridgeServer::DERIVED_SUBJECT_LIMIT);
+    assert_eq!(BridgeServer::derived_subject("   \n"), "memory");
+}
+
+/// The cut counts Unicode SCALARS, the unit the server's 120-character
+/// contract counts in both ports. "é" as e + U+0301 is one grapheme cluster
+/// and two scalars: an ASCII-only test cannot tell the two rules apart, and
+/// the Swift bridge's grapheme rule emitted subjects this server refused.
+/// Twin of the Swift `derivedSubjectCutsOnScalarsNotGraphemes`.
+#[test]
+fn derived_subject_cuts_on_scalars_not_graphemes() {
+    let combining = "e\u{0301}".repeat(300);
+    let derived = BridgeServer::derived_subject(&combining);
+    assert_eq!(derived.chars().count(), BridgeServer::DERIVED_SUBJECT_LIMIT);
+    // 120 scalars of a two-scalar cluster is 60 clusters — fewer clusters than
+    // the limit, which is exactly why the two rules disagree.
+    assert_eq!(derived.chars().count() / 2, BridgeServer::DERIVED_SUBJECT_LIMIT / 2);
+    // Whatever the bridge emits must satisfy the server's own check.
+    assert!(derived.chars().count() <= 120);
+}
+
+/// A mirrored write the secondary refused is a failure, never a completed
+/// mirror: JSON-RPC errors and `isError` tool results both count.
+#[test]
+fn failed_tool_responses_are_recognised() {
+    assert!(BridgeServer::is_failed_tool_response(r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32602,"message":"x"}}"#));
+    assert!(BridgeServer::is_failed_tool_response(r#"{"jsonrpc":"2.0","id":1,"result":{"isError":true,"content":[]}}"#));
+    assert!(!BridgeServer::is_failed_tool_response(r#"{"jsonrpc":"2.0","id":1,"result":{"isError":false,"content":[]}}"#));
+    assert!(BridgeServer::is_failed_tool_response("not json"));
 }
 
 // MARK: - Bridge tool schemas

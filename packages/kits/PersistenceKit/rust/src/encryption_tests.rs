@@ -264,13 +264,13 @@ fn aead_provider_swap_ciphertext_is_provider_specific() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Distilled-column seam coverage (SPEC_DISTILLATION_STORAGE §2).
-// The `distilled` column is content-derived text and carries the same
-// row-level protection class as `content`. Mirrors the Swift
-// DistilledColumnCryptoTests seam cases (twin-parity gate).
+// SSC-facts column seam coverage (SPEC_DISTILLATION_STORAGE §2).
+// The `ssc_facts` column is content-derived SSC fact text and carries the
+// same row-level protection class as `content`. Mirrors the Swift
+// SSCFactsColumnCryptoTests seam cases (twin-parity gate).
 // ─────────────────────────────────────────────────────────────────────────────
 
-mod distilled_seam {
+mod ssc_facts_seam {
     use super::*;
     use crate::sqlite::{
         assert_content_key_id_invariant, decrypted_for_read, encrypted_for_write,
@@ -279,15 +279,15 @@ mod distilled_seam {
     use std::collections::BTreeMap;
 
     #[test]
-    fn seals_distilled_alongside_content_and_stamps_key_id() {
+    fn seals_ssc_facts_alongside_content_and_stamps_key_id() {
         let config = EstateEncryptionConfig::row_encryption();
         let mut values = BTreeMap::new();
         values.insert("id".to_string(), TypedValue::Text("d1".to_string()));
         values.insert("content".to_string(), TypedValue::Text("original body".to_string()));
-        values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
+        values.insert("ssc_facts".to_string(), TypedValue::Text("kind: hobby, entity: painting".to_string()));
         let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
         assert!(matches!(sealed.get("content"), Some(TypedValue::Blob(_))));
-        assert!(matches!(sealed.get("distilled"), Some(TypedValue::Blob(_))));
+        assert!(matches!(sealed.get("ssc_facts"), Some(TypedValue::Blob(_))));
         assert_eq!(
             sealed.get("keyID"),
             Some(&TypedValue::Text(config.key_identifier.clone().unwrap()))
@@ -296,13 +296,13 @@ mod distilled_seam {
 
     #[test]
     fn seals_representation_only_value_map() {
-        // A distillation write is an UPDATE carrying only representation
-        // columns — the seam must still run for it.
+        // An SSC-facts write is an UPDATE carrying only the ssc_facts column —
+        // the seam must still run for it.
         let config = EstateEncryptionConfig::row_encryption();
         let mut values = BTreeMap::new();
-        values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
+        values.insert("ssc_facts".to_string(), TypedValue::Text("kind: hobby, entity: painting".to_string()));
         let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
-        assert!(matches!(sealed.get("distilled"), Some(TypedValue::Blob(_))));
+        assert!(matches!(sealed.get("ssc_facts"), Some(TypedValue::Blob(_))));
         assert_eq!(
             sealed.get("keyID"),
             Some(&TypedValue::Text(config.key_identifier.clone().unwrap()))
@@ -310,48 +310,48 @@ mod distilled_seam {
     }
 
     #[test]
-    fn opens_sealed_distilled_back_to_text() {
+    fn opens_sealed_ssc_facts_back_to_text() {
         let config = EstateEncryptionConfig::row_encryption();
         let mut values = BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text("body".to_string()));
-        values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
+        values.insert("ssc_facts".to_string(), TypedValue::Text("kind: hobby, entity: painting".to_string()));
         let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
         let opened = decrypted_for_read(sealed, "drawers", &config, &AesGcmAeadProvider).unwrap();
         assert_eq!(opened.get("content"), Some(&TypedValue::Text("body".to_string())));
         assert_eq!(
-            opened.get("distilled"),
-            Some(&TypedValue::Text("dense body".to_string()))
+            opened.get("ssc_facts"),
+            Some(&TypedValue::Text("kind: hobby, entity: painting".to_string()))
         );
     }
 
     #[test]
-    fn plaintext_mode_passes_distilled_through_unchanged() {
+    fn plaintext_mode_passes_ssc_facts_through_unchanged() {
         let config = EstateEncryptionConfig::plaintext();
         let mut values = BTreeMap::new();
-        values.insert("distilled".to_string(), TypedValue::Text("dense body".to_string()));
+        values.insert("ssc_facts".to_string(), TypedValue::Text("kind: hobby, entity: painting".to_string()));
         let out = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
         assert_eq!(
-            out.get("distilled"),
-            Some(&TypedValue::Text("dense body".to_string()))
+            out.get("ssc_facts"),
+            Some(&TypedValue::Text("kind: hobby, entity: painting".to_string()))
         );
         assert!(out.get("keyID").is_none());
     }
 
     #[test]
-    fn invariant_refuses_plaintext_distilled_without_key_id() {
+    fn invariant_refuses_plaintext_ssc_facts_without_key_id() {
         let config = EstateEncryptionConfig::row_encryption();
         let mut values = BTreeMap::new();
         values.insert("id".to_string(), TypedValue::Text("d1".to_string()));
         values.insert(
-            "distilled".to_string(),
-            TypedValue::Text("leaked dense body".to_string()),
+            "ssc_facts".to_string(),
+            TypedValue::Text("kind: location, entity: Paris".to_string()),
         );
         assert!(assert_content_key_id_invariant(&values, "drawers", &config).is_err());
-        // NULL distilled (the cleared-representation write) is exempt —
+        // NULL ssc_facts (the cleared-representation write) is exempt —
         // clearing carries nothing to encrypt.
         let mut cleared = BTreeMap::new();
         cleared.insert("id".to_string(), TypedValue::Text("d1".to_string()));
-        cleared.insert("distilled".to_string(), TypedValue::Null);
+        cleared.insert("ssc_facts".to_string(), TypedValue::Null);
         assert!(assert_content_key_id_invariant(&cleared, "drawers", &config).is_ok());
         // Empty-string protected text is the erasure-scrub exemption (#76).
         let mut scrub = BTreeMap::new();
@@ -428,7 +428,7 @@ mod table_aware_seam {
     }
 
     #[test]
-    fn seals_subject_alongside_content_and_distilled() {
+    fn seals_subject_alongside_content_and_ssc_facts() {
         let config = EstateEncryptionConfig::row_encryption();
         let mut values = BTreeMap::new();
         values.insert("id".to_string(), TypedValue::Text("d1".to_string()));
@@ -437,15 +437,15 @@ mod table_aware_seam {
             TypedValue::Text("original body".to_string()),
         );
         values.insert(
-            "distilled".to_string(),
-            TypedValue::Text("dense body".to_string()),
+            "ssc_facts".to_string(),
+            TypedValue::Text("kind: hobby, entity: painting".to_string()),
         );
         values.insert(
             "subject".to_string(),
             TypedValue::Text("a summary of the body".to_string()),
         );
         let sealed = encrypted_for_write(values, "drawers", &config, &AesGcmAeadProvider).unwrap();
-        for column in ["content", "distilled", "subject"] {
+        for column in ["content", "ssc_facts", "subject"] {
             assert!(
                 matches!(sealed.get(column), Some(TypedValue::Blob(_))),
                 "{column} was not sealed"
@@ -998,13 +998,13 @@ mod protected_map_coverage {
     /// "lost protection at a70add39e"; asserting one would mean inventing it.
     ///
     /// What IS real is the narrowing class itself. This pins the floor: drop
-    /// `distilled` or `subject` from the map — the shape the mission
+    /// `ssc_facts` or `subject` from the map — the shape the mission
     /// describes — and it fails. The cases above are driven off the map and so
     /// cannot catch a removal; only a floor stated independently of the map can.
     #[test]
     fn map_does_not_narrow() {
         let drawers = protected_cols_for_table("drawers");
-        for required in ["content", "distilled", "subject"] {
+        for required in ["content", "ssc_facts", "subject"] {
             assert!(
                 drawers.contains(&required),
                 "drawers.{required} was dropped from the protected-column map"

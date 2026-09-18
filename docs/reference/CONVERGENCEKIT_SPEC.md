@@ -1,8 +1,8 @@
 ---
 title: ConvergenceKit Specification
-version: 1.4
+version: 1.7
 status: active
-date: 2026-07-17
+date: 2026-09-08
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -113,6 +113,18 @@ it does not call the substrate-internal sync paths procedurally.
 CorpusKit is the present consumer (it builds a chunk-table manifest).
 ConvergenceKit is a foundation peer of PersistenceKit, not a layer above
 the substrate kits.
+
+**Integration note — authorized caller (MACD-3D):** in any split-process
+architecture the process that holds the `Storage` handle is the authorized
+ConvergenceKit caller — the only one that may call `enable`, `disable`,
+`push`, `pull`, `subscribe`, or `nudge`. In the macOS App configuration this
+is the resident daemon (not the GUI process). A GUI courier that forwards
+user intent over an IPC boundary does not hold the `Storage` handle and must
+not call the engine methods directly. A second process calling `enable` on
+the same estate would violate the one-writer invariant and is an integration
+error. The `SensitivityFilteredStorage` wrapper is mandatory at the call site
+of `enable` — the daemon must wrap the raw `Storage` before passing it to the
+engine (Perkins Amendment 1, `SensitivityFilteredStorage`).
 
 ## § 4 — Invariants
 
@@ -330,7 +342,7 @@ SubstrateTypes layout is optimised for compact node-ID addressing in
 the 8-bit range (node MSB). Side tables in each backend store HLCs from
 their own packing only — no cross-format integer comparison ever occurs.
 `SlotFencingScenarios.swift` provides two clearly-labelled extractor
-helpers as ground-truth references: `p4m3NodeIDOf` (SubstrateTypes
+helpers as canonical references: `p4m3NodeIDOf` (SubstrateTypes
 layout, node in bits 56–63) and `ckRecordNodeIDOf` (CKRecordMapping
 layout, node in low 4 bits).
 
@@ -837,6 +849,42 @@ configured test container (C-12, C-13, C-14 use `CloudKitDatabaseFake` to run
 without a live CloudKit container).
 
 ## Changelog
+
+### 1.7 -- 2026-09-08
+- **CKError classification change (W1b-8):** `.participantAlreadyInvited`
+  (`CKErrorTaxonomy.swift:250`) reclassified from retryable (`@unknown
+  default` path) to `permanent(.other(...))`. Previously the error fell to
+  the retryable backoff arc; it is now treated as a configuration-level
+  permanent failure and parks the outbox entry. The other two codes added
+  in the same pass — `.batchRequestFailed` and `.assetNotAvailable` — were
+  already on paths that produce the same outcome they had under `@unknown
+  default` and carry no classification change.
+- **OSLog subsystem consolidation (I1b-2):** five ConvergenceKit subsystem
+  strings (`com.mootx01.synckit.cloudkit`, `com.mootx01.synckit.federation`,
+  `com.mootx01.convergencekit.federation`, and their category variants)
+  collapsed into the single product subsystem `com.mootx01.kit` (category
+  names preserved). Operator runbooks or `log stream --subsystem` filters
+  that reference the old values return no output after this change; update
+  filter expressions to `--subsystem com.mootx01.kit`.
+
+### 1.6 -- 2026-08-26
+Ladder repair: develop/1.1.x (MACD-3D) and the benchmark lane each
+minted a 1.5 entry for unrelated changes. Both are preserved below
+under their original labels; neither is authoritative over the other,
+and 1.6 is the first version number that means one thing.
+
+### 1.5 -- 2026-08-19 (MACD-3D)
+- **Added integration note — authorized caller (§3):** in a split-process
+  architecture the process that holds the `Storage` handle is the authorized
+  ConvergenceKit caller. In the macOS App configuration this is the resident
+  daemon, not the GUI. A GUI courier must not call engine methods directly;
+  doing so violates the one-writer invariant. `SensitivityFilteredStorage`
+  is mandatory at the `enable` call site (Perkins Amendment 1).
+
+### 1.4 -- 2026-07-17 (CVK-WC8)
+### 1.5 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ### 1.3 -- 2026-07-17 (CVK-WC6)
 - **Firmed B-7 (Federation pairing):** expanded from a one-paragraph

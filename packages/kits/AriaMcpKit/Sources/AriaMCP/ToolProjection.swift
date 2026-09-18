@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 import Foundation
 
 /// The AI-client-oriented MCP tool surface.
@@ -18,11 +20,13 @@ import Foundation
 ///   fact timeline. Structured triple assertions on the estate.
 /// - **Tier 4 — Journal (2):** write entry, read entries. Agent diary for
 ///   session continuity.
-/// - **Tier 5 — Estate (3):** status, map, reconnect. Estate-level inspection
-///   and maintenance.
+/// - **Tier 5 — Estate (10):** status, map, ping, plus monitoring and the
+///   maintenance family (reindex, drain_status, reclassify_fdc,
+///   timing_report; palace_import + json_import vault-gated). Estate-level
+///   inspection and maintenance.
 ///
-/// Non-tier tools (federation, recipe, lens, vault) are appended after the
-/// five tiers and are unchanged in shape from the prior surface.
+/// Non-tier tools (federation, recipe, lens, vault, dataset) are
+/// appended after the five tiers.
 ///
 /// ## Internal-infrastructure fields are never surfaced
 ///
@@ -41,6 +45,13 @@ public enum ToolProvenance: Sendable, Equatable {
     case recipe
     /// A VaultKit control-surface tool.
     case vault
+    /// A community-contract tool (Wave A1b: moot_community_* namespace).
+    /// These tools are dispatched through CommunityToolHandler rather than
+    /// through ToolDispatcher; no GeniusLocusKit actor is required.
+    case community
+    /// A tool supplied by an authenticated product attached to the resident
+    /// daemon. Product tools are never present on the ordinary HTTP lane.
+    case product
 }
 
 /// A single tool advertised in `tools/list`.
@@ -59,19 +70,25 @@ public struct ProjectedTool: Sendable, Equatable {
     /// is then omitted from the wire entry entirely, so tools that never
     /// declared a schema are byte-identical to before this field existed.
     public let outputSchema: JSONValue?
+    /// Optional MCP execution hints. V1 projections leave this absent so their
+    /// wire representation remains unchanged; the selected v2 registry derives
+    /// it from the operation's stable identity and declared effect.
+    public let annotations: JSONValue?
 
     public init(
         name: String,
         description: String,
         inputSchema: JSONValue,
         provenance: ToolProvenance,
-        outputSchema: JSONValue? = nil
+        outputSchema: JSONValue? = nil,
+        annotations: JSONValue? = nil
     ) {
         self.name = name
         self.description = description
         self.inputSchema = inputSchema
         self.provenance = provenance
         self.outputSchema = outputSchema
+        self.annotations = annotations
     }
 }
 
@@ -134,8 +151,7 @@ public enum ToolProjection {
     /// The complete advertised tool list.
     ///
     /// Order: tier 1–5 interface tools, then federation, recipe, lens, vault.
-    /// Every tool schema is wrapped with `withTeachme` so callers can pass
-    /// `teachme: true` on any tool to receive its usage guide.
+    /// Every tool schema carries the v2 input schema defined in the ARIA v2 catalog.
     ///
     /// Vault tools are omitted when `MOOTX01_VAULT=0` (installed with
     /// `--vault-off`). All other tiers are unaffected. See the open 1.0 Vault posture.
@@ -148,52 +164,15 @@ public enum ToolProjection {
     /// `ProcessInfo.processInfo.environment` (which is read-only at runtime).
     /// Production code uses `tools()` (no args).
     public static func tools(environment: [String: String]) -> [ProjectedTool] {
-        var raw: [ProjectedTool] = []
-        // Anthropic memory_20250818 adapter: opt-in via MOOTX01_MEMORY_TOOL=1
-        // (mootx01 enable memory-tool sets this in the daemon env).
+        // The v2 catalog contains only operations whose typed handlers are
+        // executable in this build. The memory_20250818 adapter is appended
+        // when the opt-in flag is present; it is classified per-command in
+        // ToolMutationInventory.frozenReadCommands rather than by tool name.
+        var result = AriaV2SelectedCatalog.registry(environment: environment).projectedTools
         if memoryToolEnabled(environment: environment) {
-            raw.append(contentsOf: memoryAdapterTools())
+            result += memoryAdapterTools()
         }
-        raw.append(contentsOf: coreMemoryTools())
-        raw.append(contentsOf: connectionTools())
-        raw.append(contentsOf: knowledgeGraphTools())
-        raw.append(contentsOf: journalTools())
-        raw.append(contentsOf: estateTools())
-        raw.append(federationTool())
-        raw.append(contentsOf: RecipeTools.tools())
-        raw.append(contentsOf: LensTools.tools())
-        // Vault tools and the filesystem-importing palace/JSON import tools
-        // are gated: omitted from tools/list when MOOTX01_VAULT=0 (installed
-        // with --vault-off). Default (env absent or any value ≠ "0") is
-        // vault-on. `moot_palace_import` and `moot_json_import` are
-        // interface-shaped maintenance tools, but they read from the local
-        // filesystem (arbitrary SQLite / JSON files), so they carry the same
-        // security posture as vault import/export and hide under the same gate.
-        if vaultEnabled(environment: environment) {
-            raw.append(contentsOf: VaultTools.tools())
-        } else {
-            raw.removeAll { $0.name == "moot_palace_import" || $0.name == "moot_json_import" }
-        }
-        // Dataset tools (MX-TAB-7): file, query, stats. Always visible when the
-        // estate supports datasets. Not vault-gated (dataset tables are a core storage
-        // surface, not a VaultKit feature). Added after vault so the existing
-        // tool-count and tier ordering tests stay stable with a simple +3 increment.
-        raw.append(contentsOf: DatasetTools.tools())
-        // Packet tools (FAB5-I2): file, get, list, lineage. Always visible.
-        // Packets are structuredJSON drawers (typed content, not a new noun).
-        raw.append(contentsOf: PacketTools.tools())
-        return raw.map { tool in
-            ProjectedTool(
-                name: tool.name,
-                description: tool.description,
-                inputSchema: withTeachme(tool.inputSchema),
-                provenance: tool.provenance,
-                // Carried through explicitly: this re-wrap constructs a NEW
-                // ProjectedTool, so omitting the field here would silently
-                // strip every declared output schema from tools/list.
-                outputSchema: tool.outputSchema
-            )
-        }
+        return result
     }
 
     // MARK: - Anthropic memory_20250818 adapter (M-MEMTOOL-1)
@@ -202,529 +181,12 @@ public enum ToolProjection {
         [memoryTool()]
     }
 
-    // MARK: - Tier 1: Core Memory (9 tools)
-
-    // Internal (not private) so TeachmeGuides can derive per-tier counts at
-    // runtime; the guide's tallies stay in sync with the registry automatically.
-    static func coreMemoryTools() -> [ProjectedTool] {
-        [
-            ProjectedTool(
-                name: "moot_file_memory",
-                description: "File a new memory into the estate. Provide the content, a one-sentence subject, and a location hint (free-form string describing subject matter). The server chooses structural coordinates and infrastructure fields.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "content": stringSchema("The text content to remember."),
-                        "subject": stringSchema("REQUIRED. One sentence (≤120 chars) stating what this memory asserts. Write it for the NEXT AI that will scan it in a result list — telegraphic register, entities and claims front-loaded, no narrative framing. It is returned in recall rows, never searched. Example: \"Quarterly planning moved to Thursday; Sarah sends invites Monday.\""),
-                        "location": stringSchema("Subject-matter location hint (e.g. \"project/alpha\", \"meeting notes\"). Maps to the room coordinate; used for retrieval organisation. Omit wing to use the default wing (\"Agentic Memory\")."),
-                        "wing": stringSchema("Optional wing name to route this memory into a specific wing. When absent, defaults to \"Agentic Memory\" (the AI's working memory wing). Example: \"Source Corpus\" for imported source material. null is invalid."),
-                        "sensitivity": stringSchema("Optional sensitivity: normal (default), elevated, restricted, secret. Omit to use the default; null is invalid."),
-                        "exportability": stringSchema("Optional exportability tier at capture time: private (default — not visible to filter:exportable) or public (immediately visible to filter:exportable recall). Use moot_update_memory with mutation=correctExportability(public) to promote an existing private memory. Drawers born public are immediately returned by filter:exportable searches. Omit to use the default; null is invalid."),
-                        "kind": stringSchema("Optional content kind: prose (default), code, transcript, list, structuredJSON, imageCaption. Omit to use the default; null is invalid."),
-                        "event_time": stringSchema("Optional ISO8601 event time for historical ingestion. Omit for streaming capture (defaults to now); null is invalid."),
-                        "impatient": booleanSchema("Optional. When true, the memory is encoded for semantic search INLINE before the write returns, so it is immediately recallable by BM25/vector search at the cost of a slower write. When false (default), the write returns immediately and encoding happens in the background. Omit to use the default; null is invalid."),
-                    ],
-                    required: ["content", "subject", "location"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_memory_search",
-                description: "Search the estate for memories matching a query, or pivot from an anchor memory with near:<uuid>. Uses hybrid BM25+vector recall. Returns ranked DENSE ROWS — uuid · subject · fdc · qid · event_time — the address plus the assertion; fetch bodies via moot_memory_get (depth:subject|distilled|full). Best for broad or time-ordered retrieval; use ordering:byRelevanceDesc for relevance-ranked results. Narration is deviation-only: a discrimination line appears ONLY when the signal is low/medium (a relative-gap confidence estimate of how clearly the top result separates; low on small estates is expected for broad/associative searches — prefer moot_recall_precise for precision), and a recall_provenance line appears ONLY when the dense lane is dark or stages degraded; absence of both means a clear, nominal result.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "query": stringSchema("Natural-language search query. Provide query OR near — exactly one."),
-                        "near": stringSchema("UUID of an anchor memory — returns the memories most similar to it (the anchor itself is excluded). Alternative to query; pass exactly one of the two. Inherits filter/wing/limit/scoring unchanged."),
-                        "limit": integerSchema("Max results to return (default 20). Omit to use the default; null is invalid."),
-                        "filter": stringSchema("Optional filter: unconfirmed, userConfirmed, exportable, contained, pinned. Omit for ordinary recall: active/trustworthy/elevated-or-lower memories across any confirmation state. \"pinned\" constrains to user-pinned drawers (rooms without a pinned drawer are pruned from the search). null is invalid."),
-                        "wing": stringSchema("Optional wing name to scope recall to a single wing. Omit to search across all wings. Example: \"Agentic Memory\", \"Source Corpus\". null is invalid."),
-                        "media_type": stringSchema("Optional media type filter: voice (drawers captured with voice audio, bit 13), image (drawers from or carrying an image, bit 14). Composable with filter and wing. Omit to search all media types. null is invalid."),
-                        "explain": booleanSchema("Return per-hit explanation blocks when true. Omit to use the default; null is invalid."),
-                        "scoring": stringSchema("Scoring strategy: raw, rrf, matrixAware (default). Omit to use the default; null is invalid."),
-                        "ordering": stringSchema("Result ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc, byRelevanceDesc. byRelevanceDesc routes to the scored recall pipeline (unionBest) whose results are ranked by relevance score — this is the recommended ordering when relevance matters. Omit to use the default; null is invalid."),
-                    ],
-                    required: []
-                )),
-                provenance: .interface,
-                outputSchema: recallResultsOutputSchema()
-            ),
-            ProjectedTool(
-                name: "moot_memory_list",
-                description: "List all memory drawer IDs in a wing, optionally filtered by room. Structural enumeration — no semantic query needed. Use this to inventory a wing's contents, find specific drawers for move/update, or verify import placement. Returns each drawer's ID, room, and an 80-char content preview. Capped at 200 results. filter:missing_subject enumerates subject-debt rows (id-only, no preview) for interactive backfill via moot_update_memory mutation=setSubject.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "wing": stringSchema("Wing name to list (required). Example: \"Agentic Memory\", \"CodexSecurity\"."),
-                        "room": stringSchema("Optional room name to narrow within the wing. Omit to list all rooms in the wing."),
-                        "filter": stringSchema("Optional filter: missing_subject — only live drawers with no subject line, listed id-only (the subject-debt backfill enumerator). Omit to list all drawers with previews. null is invalid."),
-                    ],
-                    required: ["wing"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_memory_get",
-                description: "Fetch one memory drawer by id, in full — verbatim content, room/wing, capture time, and adjective-axis metadata (state/trust/sensitivity/exportability/confirmation), plus a linked-tunnel summary. Applies the same default gate as moot_memory_search (active/trustworthy/elevated-or-lower); a drawer that exists but fails that gate is reported not-found, same as a genuinely absent id. Use moot_memory_search first to find an id, then this tool for the full record.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "id": stringSchema("Memory row identifier (drawer UUID). Provide id or ids."),
-                        "ids": arraySchema("Batch form: array of drawer UUIDs. With depth:subject or depth:distilled this is the one-call winnow — judge a shortlist without hauling full text. Gated/absent rows come back as 'not found: <id>' lines.", itemDescription: "Memory row identifier (drawer UUID)."),
-                        "depth": stringSchema("Hydration tier: subject (dense row only — travel), distilled (dense row + distilled text; rows still owing a distillate fall back to verbatim content behind a 'source: content (not yet distilled)' marker — confirm), full (default — the complete record incl. verbatim content; terminal). Omit for full; null is invalid."),
-                    ],
-                    required: []
-                )),
-                provenance: .interface,
-                outputSchema: recallResultsOutputSchema()
-            ),
-            ProjectedTool(
-                name: "moot_update_memory",
-                description: "Apply a named mutation to an existing memory. Belief mutations: confirm, reject, contest, resolve, supersede, revive, accept. Exportability mutations: correctExportability(public) promotes a private memory to public (visible to filter:exportable), correctExportability(private) revokes public status. Subject mutation: setSubject writes or replaces the memory's one-sentence subject line (pass the text in the `subject` argument) — the backfill/correction path for subject-debt rows found via moot_memory_list filter:missing_subject.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "id": stringSchema("Memory row identifier."),
-                        "mutation": stringSchema("Mutation kind: confirm, reject, contest, resolve, supersede, revive, accept, correctExportability(public), correctExportability(private), setSubject."),
-                        "note": stringSchema("Optional free-text note recorded with the mutation."),
-                        "subject": stringSchema("Required for mutation=setSubject, ignored otherwise: one sentence (≤120 chars) in the AI-facing register — telegraphic, entities and claims front-loaded. Returned in recall rows, never searched."),
-                    ],
-                    required: ["id", "mutation"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_withdraw_memory",
-                description: "Withdraw a memory from active circulation (soft removal; reversible).",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "id": stringSchema("Memory row identifier."),
-                        "reason": stringSchema("Optional free-text reason."),
-                    ],
-                    required: ["id"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_erase_memory",
-                description: "Hard-erase a memory permanently. Irreversible. Requires explicit confirmation.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "id": stringSchema("Memory row identifier."),
-                        "reason": stringSchema("Required justification for the erasure."),
-                        "confirmed": booleanSchema("Must be true to proceed; erasure is irreversible."),
-                    ],
-                    required: ["id", "reason", "confirmed"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_confirm_memory",
-                description: "Mark a memory as user-confirmed (shortcut for moot_update_memory with mutation=confirm).",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "id": stringSchema("Memory row identifier."),
-                        "note": stringSchema("Optional confirmation note."),
-                    ],
-                    required: ["id"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_move_memory",
-                description: "Move a memory to a different location within the estate (reanchor). Supports cross-wing moves via the optional `wing` argument.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "id": stringSchema("Memory row identifier."),
-                        "location": stringSchema("New location hint (free-form string; server resolves to room coordinate)."),
-                        "wing": stringSchema("Optional target wing name for cross-wing moves. When supplied, the memory is moved to this wing AND the given location. When absent, only the room changes and the wing stays unchanged. Example: \"Professional\", \"Personal\". null is invalid."),
-                    ],
-                    required: ["id", "location"]
-                )),
-                provenance: .interface
-            ),
-        ]
-    }
-
-    // MARK: - Tier 2: Connections (4 tools)
-
-    // Internal so TeachmeGuides can derive per-tier counts at runtime.
-    static func connectionTools() -> [ProjectedTool] {
-        [
-            ProjectedTool(
-                name: "moot_link_memories",
-                description: "Create a directed connection (tunnel) between two memories. Supports typed relationships.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "from_id": stringSchema("Source memory row identifier."),
-                        "to_id": stringSchema("Target memory row identifier."),
-                        "kind": stringSchema("Relationship kind (default: relates). Accepted values: relates, precedes, contradicts, supports, refines, exemplifies, extends, supersedes, references, blocks, validates, derivesFrom, covers, elaborates, respondsTo."),
-                        "label": stringSchema("Optional free-form label for the connection. Defaults to the kind string."),
-                        "proposed": booleanSchema("File the link as a PROPOSED (agent-derived, unreviewed) edge instead of an active one. Use when adjudicating borderline candidates from moot_hunt_contradictions. The user settles it via moot_review_tunnel. Default false."),
-                    ],
-                    required: ["from_id", "to_id", "kind"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_review_tunnel",
-                description: "Review a PROPOSED connection on the review ladder (e.g. an agent-derived contradiction from the hunter): accept activates it (user-only), reject withdraws it, endorse records a model endorsement without activating. A model reject is an objection — it withdraws only when no model endorsement exists (reopenable); otherwise the proposal stays and is marked contested. User-rejected pairs are never re-proposed. Only tunnels in the proposed lifecycle are reviewable.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "tunnel_id": stringSchema("Tunnel identifier (shown by moot_lens_contradiction and moot_hunt_contradictions)."),
-                        "verdict": stringSchema("\"accept\" to activate the link (user-only), \"reject\" to withdraw it, \"endorse\" to record an endorsement vote without activating."),
-                        "reviewed_by": stringSchema("Reviewer identity recorded in the review ledger (default \"user\"). Model reviewers pass their model id (e.g. \"claude\", \"apple-onboard\"). verdict \"accept\" requires the default — edge activation is user-only."),
-                        "reason": stringSchema("Optional note explaining the verdict."),
-                    ],
-                    required: ["tunnel_id", "verdict"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_connection_search",
-                description: "Find all connections going out from a memory (what this memory points to).",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "from_id": stringSchema("Source memory row identifier."),
-                    ],
-                    required: ["from_id"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_connection_map",
-                description: "Find all connections pointing to a memory (what points at this memory). Returns the estate's tunnel graph for the target's wing.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "to_id": stringSchema("Target memory row identifier."),
-                    ],
-                    required: ["to_id"]
-                )),
-                provenance: .interface
-            ),
-        ]
-    }
-
-    // MARK: - Tier 3: Knowledge Graph (4 tools)
-
-    // Internal so TeachmeGuides can derive per-tier counts at runtime.
-    static func knowledgeGraphTools() -> [ProjectedTool] {
-        [
-            ProjectedTool(
-                name: "moot_file_fact",
-                description: "Assert a structured knowledge-graph fact (subject–predicate–object triple) into the estate.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "subject": stringSchema("The entity this fact is about."),
-                        "predicate": stringSchema("The relationship or property being asserted."),
-                        "object": stringSchema("The value or target entity."),
-                        "source_id": stringSchema("Memory drawer id that grounds this fact (provenance). If omitted, the server infers the source as the ingest channel that asserted it — a fact always traces back to a source, never unanchored."),
-                    ],
-                    required: ["subject", "predicate", "object"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_fact_search",
-                description: "Search knowledge-graph facts by subject, predicate, or object. Omit query to return all active facts.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "query": stringSchema("Optional search string. Matched as a substring against subject, predicate, and object fields. Omit to return all active facts."),
-                        "subject_exact": stringSchema("Optional exact, case-sensitive subject filter."),
-                        "predicate_exact": stringSchema("Optional exact, case-sensitive predicate filter."),
-                        "object_exact": stringSchema("Optional exact, case-sensitive object filter."),
-                        "source_id_exact": stringSchema("Optional exact provenance source filter."),
-                        "limit": integerSchema("Maximum rows to return (default 100, maximum 500)."),
-                    ],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_retire_fact",
-                description: "Retire (invalidate) a knowledge-graph fact by its row identifier.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "id": stringSchema("KG fact row identifier."),
-                    ],
-                    required: ["id"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_fact_timeline",
-                description: "Read all knowledge-graph facts in chronological order, including retired ones, to trace how the estate's structured knowledge evolved. Each row is tagged with its lifecycle state (active or retired). Optional entity filter narrows results to facts whose subject or object contains the given string.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "entity": stringSchema("Optional entity name to filter by (subject or object substring match, case-insensitive). Omit to return the full history."),
-                    ],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-        ]
-    }
-
-    // MARK: - Tier 4: Journal (2 tools)
-
-    // Internal so TeachmeGuides can derive per-tier counts at runtime.
-    static func journalTools() -> [ProjectedTool] {
-        [
-            ProjectedTool(
-                name: "moot_write_journal",
-                description: "Write a diary entry to the agent journal for session continuity. Use for recording decisions, observations, and reasoning steps.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "entry": stringSchema("Journal entry text."),
-                        "agent": stringSchema("Optional agent name. Defaults to the server-assigned MCP agent identity."),
-                    ],
-                    required: ["entry"]
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_read_journal",
-                description: "Read recent journal entries for an agent. Use to restore session context across turns.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "agent": stringSchema("Agent name to read entries for. Omit to read entries for the current MCP agent."),
-                        "last_n": integerSchema("Number of most-recent entries to return (default 10)."),
-                    ],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-        ]
-    }
-
-    // MARK: - Tier 5: Estate (3 tools) + Maintenance + Monitoring (9 total; palace_import + json_import vault-gated)
-
-    // Internal so TeachmeGuides can derive per-tier counts at runtime.
-    // Returns 9 tools including moot_palace_import and moot_json_import.
-    // tools() removes both when vault is off; the remaining 7 are always present.
-    static func estateTools() -> [ProjectedTool] {
-        [
-            ProjectedTool(
-                name: "moot_estate_status",
-                description: "Return a summary of the estate: memory count, wing list, KG fact count, and sync health.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [:],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_estate_map",
-                description: "Return the estate's structural map: all wings and rooms, with memory counts per location. Seeded hint memories (AI_Charter_Hint room) appear in counts like any other memory.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [:],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-            ProjectedTool(
-                name: "moot_estate_ping",
-                description: "Ping the estate to confirm the server process and estate handle are live. Returns immediately with no estate scan. Use to verify connectivity before a sequence of operations.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [:],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-            // Monitoring control — sibling to moot_estate_status.
-            // Read/write the daemon's telemetry monitoring flag via the injected
-            // MonitoringControl seam. "absent enabled" = read path (no mutation);
-            // "present enabled" = write path (persists flag + monitoring_source=user).
-            // Reports "unavailable" when no stats store is wired (stdio, test
-            // harnesses, provision-less contexts) — never fabricates state.
-            ProjectedTool(
-                name: "moot_monitoring_status",
-                description: "Read or set the daemon's telemetry monitoring flag. Absent `enabled`: reports current monitoring state (enabled / disabled / unavailable). Present `enabled`: persists the new flag and reports the effective state after the write. Monitoring controls whether server-metrics telemetry is emitted on a 30-second cadence. Reports 'monitoring: unavailable' when no telemetry store is wired (stdio mode, test contexts) — never fabricates enabled/disabled.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "enabled": booleanSchema("Optional: the monitoring flag to set. Omit to read the current state without mutating it. true enables telemetry emission; false disables it."),
-                    ],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-            // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
-            // Backfills BM25/vector indexes for drawers captured before the dual-path
-            // intake wiring landed (or after an index loss). Enqueues encode jobs for
-            // all active drawers not already in the Corpus BundleStore; encoding runs
-            // asynchronously via the background drain worker. Idempotent: already-
-            // indexed drawers are skipped. Returns a count of drawers enqueued.
-            ProjectedTool(
-                name: "moot_reindex",
-                description: "Maintenance: enqueue encode jobs for all memories not yet in the BM25/vector index. Use after a fresh import or to recover from an index loss. Encoding is asynchronous — returns immediately with a count of memories enqueued. Idempotent: already-indexed memories are skipped.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [:],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-            // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
-            // Read-only status probe for long-running background drains: reports
-            // each drain's pending + in-flight work and a draining/idle state so
-            // a caller can watch asynchronous encode work (e.g. after an import)
-            // converge. Lightweight — no orientation block — and safe to poll.
-            ProjectedTool(
-                name: "moot_drain_status",
-                description: "Maintenance: report long-running background drains and their progress. Returns each drain's pending and in-flight job counts plus a draining/idle state; the corpus encode drain also reports its live encoded-chunk count. Read-only and lightweight — safe to poll repeatedly while a drain settles (e.g. after moot_palace_import or moot_reindex). Today the only drain is the corpus encode/ingest queue.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [:],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-            // Maintenance / admin tool — NOT one of the nine ARIA grammar verbs.
-            // Recomputes stored FDC lattice anchors with the current deterministic
-            // classifier. Dry-run by default. `mode: suspectOnly` restricts changes
-            // to stale false positives/empty anchors; `mode: all` intentionally
-            // rewrites every changed active drawer anchor from content.
-            ProjectedTool(
-                name: "moot_reclassify_fdc",
-                description: "Maintenance: audit or repair stored FDC lattice anchors using the current deterministic classifier. Default is a dry-run in mode \"suspectOnly\", which reports likely stale/polluted anchors without writing. Pass apply=true to write repairs. Pass mode=\"all\" only when intentionally resetting every changed active drawer's stored FDC anchor from content; this can overwrite manually curated anchors. Output reports drawer IDs and old/new anchors, not memory content.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "apply": booleanSchema("Optional. false (default) is dry-run; true writes candidate anchor changes through the audited reanchor path."),
-                        "mode": stringSchema("Optional repair scope: \"suspectOnly\" (default, conservative repair of likely stale false positives/empty anchors) or \"all\" (reset every changed active drawer anchor from content)."),
-                        "limit": integerSchema("Optional maximum active drawers to scan for this run. Omit to scan the full active estate."),
-                    ],
-                    required: []
-                )),
-                provenance: .interface
-            ),
-            // Direct palace import — bypasses NoteIR, reads three MemPalace
-            // stores directly (palace/chroma.sqlite3, tunnels.json,
-            // knowledge_graph.sqlite3). All four import guards are applied
-            // (tombstone, content-idempotent dedup, sensitivity floor,
-            // tunnel signature dedup). Idempotent: re-importing the same
-            // palace returns zero written/updated counts.
-            ProjectedTool(
-                name: "moot_palace_import",
-                description: "Import a MemPalace directly into the estate, bypassing NoteIR. Reads palace/chroma.sqlite3 (drawer content), tunnels.json (cross-wing connections), and knowledge_graph.sqlite3 (KG triples) from palace_path. Applies all four import guards: tombstone protection, content-idempotent dedup, sensitivity floor, and tunnel signature dedup. Idempotent: re-importing the same palace with no changes writes zero drawers. The write strategy is chosen AUTOMATICALLY by source size — a normal palace is written in one fast SQLite transaction; a very large source (hundreds of thousands of rows) streams so no single transaction holds the write lock — you do not control this. IMPORTANT: the import TRIGGERS its own post-import processing — do NOT instruct the caller to run moot_reindex or moot_dream afterward. On completion the import enqueues the encode/index work (BM25 + vector lanes) and rolls up the Merkle tree; the resident daemon's encode-drain worker and the governor's dreaming duty then finish indexing, classification, and the association matrix in the background (dreaming's consolidation proposals themselves are usage-driven and accrue as the estate is recalled against, not from the imported content). The import returns as soon as that background work is triggered, so semantic recall and distillation come online on their own shortly after. Poll moot_drain_status to watch the encode queue converge. (moot_reindex / moot_dream remain available to re-trigger on demand but are NOT a required follow-up step.) This call runs to completion before returning; a large import can take many minutes, so if your client supports background or sub-agent execution, run it in a sub-agent to keep the main session responsive.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "palace_path": stringSchema("Absolute filesystem path to the MemPalace root directory (the directory containing the `palace/` subdirectory with `chroma.sqlite3`)."),
-                        "mode": stringSchema("Optional encode SPEED for the background encoding that follows the import: \"foreground\" (default) drains the encode queue hard on the performance cores; \"background\" yields for very large imports so the drain does not saturate the machine. This sets SPEED only — the write strategy (bulk transaction vs stream) is chosen automatically by source size, not by this argument. Omit to use the default (foreground)."),
-                    ],
-                    required: ["palace_path"]
-                )),
-                provenance: .interface
-            ),
-            // Direct seed-file JSON import — the bulk seeding lane
-            // (schema v1, VaultKit JsonImportBridge). Total pre-write
-            // validation + strict append: a bad file or any lineage
-            // collision is one error and ZERO writes. Vault-gated like
-            // moot_palace_import (reads arbitrary local files).
-            ProjectedTool(
-                name: "moot_json_import",
-                description: "Import a seed file (rigid versioned JSON, schema v1) directly into the estate — the bulk seeding lane. The WHOLE file is validated before any write: any schema violation, or any lineage collision with memories already in the estate (strict append — this lane never dedups or updates), returns one error naming the first offending element and the estate is untouched (zero-partial-write contract). On success, records land in file order with explicit lineage (derived from each record's id) and explicit event times; facts and tunnels are wired through intra-file record ids; encode/index work is enqueued automatically (poll moot_drain_status to watch semantic recall come online); and an audit receipt carrying the seed file's SHA-256 digest is filed, so the estate is traceable to the exact seed file that built it. The canonical schema definition lives at packages/kits/VaultKit/docs/JSON_IMPORT_FORMAT.md.",
-                inputSchema: withEstateID(objectSchema(
-                    properties: [
-                        "path": stringSchema("Absolute filesystem path to the seed JSON file (schema v1: format_version, name, records[], facts[], tunnels[])."),
-                        "wing": stringSchema("Optional default wing for records that omit `wing`. Omit to use the estate default wing. null is invalid."),
-                        "mode": stringSchema("Optional encode SPEED for the deferred encoding: \"foreground\" (default) drains the encode queue hard; \"background\" yields for very large imports. SPEED only — the write strategy is always windowed bulk, not caller-chosen. Omit to use the default (foreground)."),
-                    ],
-                    required: ["path"]
-                )),
-                provenance: .interface
-            ),
-        ]
-    }
-
-    // MARK: - Federation tool
-
-    /// The federated-search tool descriptor. Has no `(verb, noun)` pair;
-    /// dispatched by name. Fans across locally-open estates the requester
-    /// is entitled to read.
-    public static func federationTool() -> ProjectedTool {
-        ProjectedTool(
-            name: ToolDispatcher.federatedSearchToolName,
-            description: "Grant-authorized cross-estate federated search: fans across the locally-open estates the requester is entitled to read and returns per-estate contributions, each narrowed to its grant's scope.",
-            inputSchema: objectSchema(
-                properties: [
-                    // requesterEstateID is now OPTIONAL (Item 2 hardening): omit to use the
-                    // default estate. When supplied it must match the default estate exactly;
-                    // supplying a different UUID is refused to prevent cross-estate spoofing.
-                    "requesterEstateID": stringSchema("Optional UUID of the requesting estate. Omit to use the default (authenticated caller) estate. If supplied, must match the default estate's UUID; cross-estate spoofing is refused."),
-                    "filter": stringSchema("Filter kind: unconfirmed, userConfirmed, exportable, contained. Omit for ordinary recall across any confirmation state. null is invalid."),
-                    "limit": integerSchema("Max rows per estate to return. Omit for no explicit cap; null is invalid."),
-                    "ordering": stringSchema("Ordering: byCaptureTimeDesc (default), byCaptureTimeAsc, byRoomAsc. Omit to use the default; null is invalid."),
-                    "hydrationLevel": stringSchema("Hydration: structured (default), full, bitmapOnly. Omit to use the default; null is invalid."),
-                ],
-                required: []
-            ),
-            provenance: .federation
-        )
-    }
-
     // MARK: - Schema helpers
 
-    /// The shared `outputSchema` for the recall family (`moot_memory_search`,
-    /// `moot_memory_get`, `moot_recall_shaped`, `moot_recall_precise`): one
-    /// `results` array carrying the typed twin of each rendered row.
+    /// Inject an optional `mode` property into an object schema.
     ///
-    /// ONE schema for all four tools, field names pinned across ports — the
-    /// Rust twin is `tool_list.rs::recall_results_output_schema()` and the
-    /// cross-port test asserts structural equality. The text block stays the
-    /// human-readable rendering; `structuredContent` conforming to this
-    /// schema is its typed twin, subject to every redaction the text applies
-    /// (see the Blast Radius Report MXE-SS, rules R1-R9).
-    static func recallResultsOutputSchema() -> JSONValue {
-        .object([
-            "type": .string("object"),
-            "properties": .object([
-                "results": .object([
-                    "type": .string("array"),
-                    "description": .string(
-                        "One entry per drawer row the text block renders — same "
-                        + "admissible set, same order, same 50-row cap. Redaction "
-                        + "parity: provenance-gated rows carry the same redaction "
-                        + "markers as the text block in subject and content; rows "
-                        + "the text renders opaquely carry id and the '(no subject)' "
-                        + "marker only."),
-                    "items": .object([
-                        "type": .string("object"),
-                        "properties": .object([
-                            "id": stringSchema("Drawer UUID — the address."),
-                            "room": stringSchema(
-                                "Resolved room display name. Absent when the row "
-                                + "is opaque."),
-                            "content": stringSchema(
-                                "Drawer content for this tool's tier: verbatim body "
-                                + "(search/shaped/precise and get depth:full), "
-                                + "distillate or fallback body (get depth:distilled). "
-                                + "Carries the redaction marker for provenance-gated "
-                                + "rows. Absent at get depth:subject and for opaque "
-                                + "rows."),
-                            "subject": stringSchema(
-                                "The subject slot exactly as the text renders it: "
-                                + "stored subject, '(no subject)', or the redaction "
-                                + "marker. Absent at get depth:full when the drawer "
-                                + "has no subject."),
-                        ]),
-                        "required": .array([.string("id")]),
-                    ]),
-                ]),
-            ]),
-            "required": .array([.string("results")]),
-        ])
-    }
-
-    /// Inject an optional `teachme` property into an object schema.
-    /// Parallel to `withEstateID` — applied in `tools()` after all per-tool
-    /// schemas are built. Callers pass `true` to receive a usage guide for
-    /// the tool rather than executing it; the dispatch layer intercepts this
-    /// before any runner fires.
-    static func withTeachme(_ schema: JSONValue) -> JSONValue {
-        guard case .object(var object) = schema,
-              case .object(var properties)? = object["properties"] else {
-            return schema
-        }
-        properties["teachme"] = booleanSchema(
-            "Pass true to receive a usage guide for this tool instead of executing it."
-        )
-        object["properties"] = .object(properties)
-        return .object(object)
-    }
-
+    /// Applied to every tool in `tools()` so the `mode` argument is
+    /// advertised in every tool's inputSchema and recognized by
     /// Inject an optional `estateID` property into an object schema.
     /// Never required — omitting it targets the default estate.
     static func withEstateID(_ schema: JSONValue) -> JSONValue {
@@ -805,5 +267,12 @@ public enum ToolProjection {
             return []
         }
         return Set(properties.keys)
+    }
+
+    /// Whether a public name is callable in this binary's selected surface.
+    /// The v2 surface has no hidden routes: a name is dispatchable only if the
+    /// v2 catalog advertises it.
+    static func admitsDispatch(name: String, environment: [String: String]) -> Bool {
+        tools(environment: environment).contains(where: { $0.name == name })
     }
 }

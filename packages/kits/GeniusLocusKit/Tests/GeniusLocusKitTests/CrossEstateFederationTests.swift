@@ -55,7 +55,7 @@ struct CrossEstateFederationTests {
             estateID: UUID(), backend: .inMemory
         ))
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        return try await kit.open(storage: storage, owner: owner)
+        return try await kit.open(storage: storage, owner: owner, federate: true)
     }
 
     /// Capture one tagged drawer into the estate addressed by `handle`.
@@ -400,6 +400,27 @@ struct CrossEstateFederationTests {
             "contentLevel=16 must include elevated rows (rawValue=16 ≤ 16)")
         #expect(!ids.contains(dRestrict.id),
             "contentLevel=16 must exclude restricted rows (rawValue=32 > 16)")
+    }
+
+    @Test
+    func federatedWithheldCountIncludesOnlyGrantAuthorizedCandidates() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-fed-withheld")
+        let requester = try await openEstate(in: kit, owner: owner)
+        let source = try await openEstate(in: kit, owner: owner)
+        _ = try await kit.issueGrant(source, grantOptions(to: requester, contentLevel: 48))
+
+        let normal = try await captureWithSensitivity(
+            into: source, tag: "withheld-normal", sensitivity: .normal, kit: kit)
+        let restricted = try await captureWithSensitivity(
+            into: source, tag: "withheld-restricted", sensitivity: .restricted, kit: kit)
+
+        let result = try await kit.federatedRecall(
+            unconfirmedFrame, from: source, requestedBy: requester)
+        #expect(result.drawers.map(\.id).contains(normal.id))
+        #expect(!result.drawers.map(\.id).contains(restricted.id))
+        #expect(result.withheldBySensitivity == 1,
+            "only the authorized source's restricted primary row is counted")
     }
 
     // MARK: - GRANT-SCOPE-P1 — scope subtree enforcement (tests 10–14)

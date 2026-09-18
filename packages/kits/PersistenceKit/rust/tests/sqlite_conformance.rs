@@ -5,6 +5,7 @@ mod conformance;
 
 use conformance::{run_all, vector_fixtures, Factory};
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
+use rusqlite::Connection;
 use uuid::Uuid;
 
 #[test]
@@ -22,6 +23,118 @@ fn sqlite_conformance() {
     });
     run_all("SQLite", &factory);
     vector_fixtures("SQLite", &factory);
+}
+
+#[test]
+fn migration_ledger_writes_canonical_text_and_normalizes_legacy_timestamps() {
+    let path = std::env::temp_dir().join(format!("pk_migration_ledger_{}.sqlite", Uuid::new_v4()));
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let schema = persistence_kit::SchemaDeclaration::new("TestKit", 1, vec![]);
+
+    let writer = SqliteStorage::new(config.clone()).expect("writer storage");
+    writer.open(&schema).expect("writer schema open");
+    drop(writer);
+    let conn = Connection::open(&path).expect("raw writer read");
+    let written: (String, String) = conn
+        .query_row(
+            "SELECT typeof(\"applied_at\"), \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("written ledger row");
+    assert!(
+        written.0 == "text"
+            && written.1.contains('T')
+            && written.1.ends_with('Z')
+            && written.1 != "1970-01-01T00:00:00.000Z",
+        "new migration rows must be current canonical ISO-8601 TEXT; got {:?}",
+        written
+    );
+    conn.execute_batch(
+        "DROP TABLE \"_storagekit_migrations\";
+         CREATE TABLE \"_storagekit_migrations\" (
+             \"kit_id\" TEXT NOT NULL,
+             \"version\" INTEGER NOT NULL,
+             \"applied_at\" INTEGER NOT NULL,
+             PRIMARY KEY (\"kit_id\")
+         );
+         INSERT INTO \"_storagekit_migrations\" (\"kit_id\", \"version\", \"applied_at\")
+         VALUES ('TestKit', 1, 1700000123456);",
+    )
+    .expect("seed integer legacy migration table");
+    drop(conn);
+
+    let integer_legacy = SqliteStorage::new(config.clone()).expect("integer legacy storage");
+    assert_eq!(
+        integer_legacy.current_schema_version_for("TestKit").expect("legacy version read"),
+        1,
+        "version reader must accept a legacy INTEGER applied_at value"
+    );
+    integer_legacy.open(&schema).expect("normalize integer legacy timestamp");
+    drop(integer_legacy);
+    let conn = Connection::open(&path).expect("read normalized integer");
+    let normalized_integer: (String, String) = conn
+        .query_row(
+            "SELECT typeof(\"applied_at\"), \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("normalized integer ledger row");
+    assert_eq!(
+        normalized_integer,
+        ("text".to_string(), "2023-11-14T22:15:23.456Z".to_string()),
+        "schema application must normalize the legacy INTEGER timestamp once"
+    );
+    conn.execute(
+        "UPDATE \"_storagekit_migrations\" SET \"applied_at\" = '1970-01-01T00:00:00.000Z' WHERE \"kit_id\" = 'TestKit'",
+        [],
+    )
+    .expect("seed Rust epoch sentinel");
+    drop(conn);
+
+    let sentinel_legacy = SqliteStorage::new(config.clone()).expect("sentinel legacy storage");
+    sentinel_legacy.open(&schema).expect("normalize sentinel timestamp");
+    drop(sentinel_legacy);
+    let conn = Connection::open(&path).expect("read normalized sentinel");
+    let normalized_sentinel: (String, String) = conn
+        .query_row(
+            "SELECT typeof(\"applied_at\"), \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("normalized sentinel ledger row");
+    assert!(
+        normalized_sentinel.0 == "text" && normalized_sentinel.1 != "1970-01-01T00:00:00.000Z",
+        "the Rust epoch sentinel must be replaced once; got {:?}",
+        normalized_sentinel
+    );
+    conn.execute(
+        "UPDATE \"_storagekit_migrations\" SET \"applied_at\" = '2024-02-03T04:05:06.789Z' WHERE \"kit_id\" = 'TestKit'",
+        [],
+    )
+    .expect("seed canonical timestamp");
+    drop(conn);
+
+    let canonical = SqliteStorage::new(config).expect("canonical storage");
+    canonical.open(&schema).expect("reopen canonical timestamp");
+    drop(canonical);
+    let conn = Connection::open(&path).expect("read canonical timestamp");
+    let preserved: String = conn
+        .query_row(
+            "SELECT \"applied_at\" FROM \"_storagekit_migrations\" WHERE \"kit_id\" = 'TestKit'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("preserved canonical ledger row");
+    assert_eq!(preserved, "2024-02-03T04:05:06.789Z");
+    drop(conn);
+    std::fs::remove_file(path).expect("remove migration-ledger fixture");
 }
 
 // ─────────────────────────────────────────────────────────────────────
@@ -394,4 +507,98 @@ fn sqlite_audit_same_millisecond_burst_orders_chronologically() {
     let tail = log.iterate(Some(burst), None, 10).unwrap();
     let tail_verbs: Vec<&str> = tail.iter().map(|e| e.verb.as_str()).collect();
     assert_eq!(tail_verbs, ["mutate"], "after-cursor must resume chronologically");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// V2 regression: transaction nesting via SAVEPOINT.
+//
+// Before the fix, any code that called begin_transaction() or append_rows()
+// while already inside a transaction() block issued a second BEGIN IMMEDIATE
+// on the same SQLite connection, which fails immediately with
+// "cannot start a transaction within a transaction". The fix: a per-connection
+// tx_depth counter in Inner drives SAVEPOINT nesting at depth ≥ 1.
+//
+// These two tests reproduce the exact call sequences that vault_import uses:
+// an outer transaction() bracket with begin_transaction/commit_transaction
+// and with append_rows called on the shared dataset store.
+// ─────────────────────────────────────────────────────────────────────
+
+fn make_sqlite_nesting_storage() -> SqliteStorage {
+    let path = std::env::temp_dir()
+        .join(format!("pk_nesting_{}.sqlite", Uuid::new_v4()));
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite {
+            path: path.to_string_lossy().into_owned(),
+            busy_timeout_secs: 5.0,
+        },
+    );
+    let storage = SqliteStorage::new(config).expect("open sqlite storage");
+    let schema = persistence_kit::SchemaDeclaration::new("nesting-test", 1, vec![]);
+    storage.open(&schema).expect("open schema");
+    storage
+}
+
+#[test]
+fn sqlite_nested_begin_transaction_uses_savepoint() {
+    // Verifies that begin_transaction() called inside a transaction() block
+    // succeeds via SAVEPOINT (depth 0→1→2→1→0) rather than failing with
+    // "cannot start a transaction within a transaction". This reproduces the
+    // vault_import capture path where capture_batch calls begin_transaction
+    // while already inside an outer transaction bracket.
+    let storage = make_sqlite_nesting_storage();
+    use persistence_kit::IsolationLevel;
+    storage
+        .transaction(IsolationLevel::Serializable, &mut |txn| {
+            // At this point tx_depth = 1 (BEGIN IMMEDIATE was issued).
+            // begin_transaction must issue SAVEPOINT tx_1 (depth 1→2),
+            // not a second BEGIN IMMEDIATE.
+            let rs = txn.row_store();
+            rs.begin_transaction()?;
+            // SAVEPOINT tx_1 is open; tx_depth = 2.
+            rs.commit_transaction()?;
+            // RELEASE SAVEPOINT tx_1; tx_depth = 1.
+            Ok(())
+        })
+        .expect("begin_transaction inside transaction() must succeed via SAVEPOINT");
+}
+
+#[test]
+fn sqlite_nested_append_rows_uses_savepoint() {
+    // Verifies that append_rows() called inside a transaction() block
+    // succeeds via SAVEPOINT. append_rows issues its own nest_begin; at
+    // tx_depth = 1 (outer transaction open) it gets SAVEPOINT instead of
+    // a second BEGIN IMMEDIATE, which is what broke vault_import in the
+    // field ("captureBatch: cannot start a transaction within a transaction").
+    use persistence_kit::dataset_store::DatasetSchema;
+    use persistence_kit::ColumnDeclaration;
+
+    let storage = make_sqlite_nesting_storage();
+    let ds = storage.dataset_store().expect("dataset_store");
+    let id = Uuid::new_v4();
+    let schema = DatasetSchema {
+        columns: vec![ColumnDeclaration::text("label").nullable()],
+        primary_key_column: None,
+    };
+    ds.create_dataset(id, &schema, &[]).expect("create_dataset");
+
+    let mut row_map = std::collections::BTreeMap::new();
+    row_map.insert("label".to_string(), persistence_kit::TypedValue::Text("test".to_string()));
+    let rows = vec![row_map];
+
+    use persistence_kit::IsolationLevel;
+    storage
+        .transaction(IsolationLevel::Serializable, &mut |_txn| {
+            // ds shares the same Inner Arc as storage. At tx_depth = 1,
+            // append_rows must issue SAVEPOINT tx_1 instead of BEGIN IMMEDIATE.
+            ds.append_rows(id, &rows)?;
+            Ok(())
+        })
+        .expect("append_rows inside transaction() must succeed via SAVEPOINT");
+
+    // Confirm the row landed: the outer transaction committed it.
+    let result = ds
+        .query_rows(id, None, &[], None, None, None)
+        .expect("query_rows");
+    assert_eq!(result.len(), 1, "row appended inside nested transaction must be visible after commit");
 }

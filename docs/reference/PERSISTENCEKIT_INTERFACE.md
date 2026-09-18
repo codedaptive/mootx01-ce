@@ -2,8 +2,8 @@
 title: PersistenceKit Interface
 status: active
 authors: MOOTx01 maintainers
-date: 2026-08-03
-version: 1.14.0
+date: 2026-09-13
+version: 1.21.0
 spec_type: kit
 description: Public API surface for PersistenceKit in both the Swift and Rust ports.
 package: PersistenceKit
@@ -111,7 +111,20 @@ public protocol Storage: Sendable {
     ) async throws -> T
     func currentSchemaVersion() async throws -> Int
     func currentSchemaVersion(for kitID: String) async throws -> Int
+    /// Move the schema-version ledger row for `oldKitID` to `newKitID`,
+    /// keeping its version and applied-at (SPEC I-7a). Never migrates.
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome
     func migrate(to schema: SchemaDeclaration) async throws
+}
+
+/// The result of `renameSchemaKit(from:to:)`.
+public enum SchemaKitRenameOutcome: Sendable, Equatable {
+    /// A row under the old id moved to the new id; `version` is the version it carried.
+    case renamed(version: Int)
+    /// No row exists under the old id; nothing changed.
+    case noRow
+    /// Rows exist under both ids; nothing changed.
+    case conflict(oldVersion: Int, newVersion: Int)
 }
 
 public extension Storage {
@@ -140,6 +153,10 @@ pub trait Storage: Send + Sync {
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()>;
     fn close(&self) -> StorageResult<()>;
     fn current_schema_version(&self) -> StorageResult<i32>;
+    fn current_schema_version_for(&self, kit_id: &str) -> StorageResult<i32>;
+    /// Move the schema-version ledger row for `old_kit_id` to `new_kit_id`,
+    /// keeping its version and applied-at (SPEC I-7a). Never migrates.
+    fn rename_schema_kit(&self, old_kit_id: &str, new_kit_id: &str) -> StorageResult<SchemaKitRenameOutcome>;
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()>;
     fn transaction(
         &self,
@@ -289,12 +306,12 @@ public protocol BlobStore: Sendable {
 
 PersistenceKit exposes **no** `VectorIndex` protocol, `knn` method, or
 `DistanceMetric`/`IndexParameters`/`SearchParameters`/`VectorSearchResult`
-type. Dense-embedding k-NN lives solely in VectorKit (the vector-ownership contract). Storage does
+type. Dense-embedding k-NN lives solely in SynapseKit (the vector-ownership contract). Storage does
 not surface a VectorIndex (SPEC § 1, B-9).
 
 Instead, every backend accommodates a vector workload's STORAGE needs
 through the general `RowStore`/`BlobStore` surfaces. A consumer (e.g.
-VectorKit) stores embeddings as ordinary rows: an opaque binary payload
+SynapseKit) stores embeddings as ordinary rows: an opaque binary payload
 (`.blob`, 32 bytes for a packed Engram/fingerprint) and/or a float32
 payload (`.blob`, dim×4 bytes for a dense embedding), keyed by `.uuid`.
 The accommodation contract — vector-payload round-trip, ≥1k bulk
@@ -613,10 +630,14 @@ public struct EstateConfiguration: Sendable {
     public let encryptionConfig: EstateEncryptionConfig   // defaults .plaintext (SPEC B-12)
     public let cacheConfig: EstateCacheConfig             // defaults .disabled (SPEC I-11)
     public let novelTokenTagger: NovelTokenTaggerChoice   // defaults .hmm (SPEC I-20)
+    public let residencyHint: ResidencyHint               // defaults .ramResident (SPEC I-22)
+    public let residentIndexBudget: ResidentIndexBudget   // defaults .systemFraction(0.25) (SPEC I-22)
     public init(estateID: UUID, backend: BackendConfiguration,
                 encryptionConfig: EstateEncryptionConfig = .plaintext,
                 cacheConfig: EstateCacheConfig = .disabled,
-                novelTokenTagger: NovelTokenTaggerChoice = .hmm)
+                novelTokenTagger: NovelTokenTaggerChoice = .hmm,
+                residencyHint: ResidencyHint = .ramResident,
+                residentIndexBudget: ResidentIndexBudget = .systemFraction(0.25))
 }
 public enum BackendConfiguration: Sendable {
     case sqlite(url: URL, busyTimeout: TimeInterval = 5.0)
@@ -625,13 +646,13 @@ public enum BackendConfiguration: Sendable {
     case inMemory
 }
 ```
-**Rust:** `pub struct EstateConfiguration { estate_id, backend, encryption_config, cache_config, novel_token_tagger, residency_hint }`.
-The Rust version carries all six fields, mirroring the Swift struct field-for-field.
+**Rust:** `pub struct EstateConfiguration { estate_id, backend, encryption_config, cache_config, novel_token_tagger, residency_hint, resident_index_budget }`.
+The Rust version carries all seven fields, mirroring the Swift struct field-for-field.
 `EstateConfiguration::new(estate_id, backend)` defaults all optional fields to plaintext /
-disabled / Hmm, so existing call sites are unchanged.
+disabled / Hmm / RamResident / SystemFraction(0.25), so existing call sites are unchanged.
 `EstateConfiguration::new_with_tagger(estate_id, backend, choice)` accepts an explicit
 `NovelTokenTaggerChoice`; returns `StorageError::InvalidConfiguration` when `NlTagger`
-is requested on Rust (no NaturalLanguage framework — fail-closed, SPEC I-20).
+is requested on Rust (no NaturalLanguage framework, fail-closed, SPEC I-20).
 `pub enum BackendConfiguration { Sqlite{…}, Postgresql{…}, InMemory }`.
 `pub enum NovelTokenTaggerChoice { Hmm, NlTagger }` — `NlTagger` exists for schema parity
 with the Swift port; active construction via `new_with_tagger` is rejected on Rust.
@@ -669,9 +690,11 @@ cited file. Promote a type into Tier 1 when a consumer adopts it.
   operations), `SchemaOperation` (`.createTable`, `.dropTable`,
   `.addColumn`, `.dropColumn`, `.renameColumn`, `.addIndex`,
   `.dropIndex`, `.custom(sqlite:postgresql:)` — the per-backend SQL
-  escape hatch) — `Schema.swift`. (Migration is exercised through
-  `SchemaDeclaration.migrations` / `Storage.migrate`, not named
-  directly by consumers yet.)
+  escape hatch) — `Schema.swift`. `.addColumn` and `.dropColumn` are
+  idempotent on every backend (spec I-7b): a present column is not
+  re-added, an absent column is not re-dropped. (Migration is exercised
+  through `SchemaDeclaration.migrations` / `Storage.migrate`; the first
+  `.dropColumn` consumer is CorpusKit's checkpoint schema v4.)
 - **At-rest encryption:** `EncryptionMode` (`.plaintext`,
   `.rowEncryption`, `.fullDatabase` — modes 1–3),
   `EstateEncryptionConfig` (mode + key identifier + `package`/`pub(crate)`-scoped
@@ -717,10 +740,46 @@ let rows   = try await storage.rowStore.query(table: "drawers",
                 orderBy: [OrderClause(column: createdCol, direction: .descending)],
                 limit: 50, offset: 0)
 // Vector embeddings persist as ordinary rows (a .blob payload column);
-// dense-embedding k-NN is VectorKit's, not PersistenceKit's (the vector-ownership contract).
+// dense-embedding k-NN is SynapseKit's, not PersistenceKit's (the vector-ownership contract).
 _ = try await storage.rowStore.insert(table: "vectors", values: vectorRow)
 try await storage.auditLog.append(event)                            // idempotent on (eventID, hlc)
 let stream = storage.observer.observe(table: "drawers", events: [.insert, .update])
+```
+
+### RowKeyDerivation — deterministic row-key utility
+
+Public utility for deriving the RowKey the storage layer assigns to a
+single-column TEXT-primary-key row. Callers that must reference such a row
+from an audit event use this to obtain the row's `rowId` without going
+through the storage layer. See SPEC § 10 for the full contract (D-1 to D-4).
+
+**Swift:**
+
+```swift
+public enum RowKeyDerivation {
+    /// Returns the RowKey the storage layer assigns to a TEXT-PK row whose id
+    /// is `stringId`, on every backend. UUID strings are returned unchanged;
+    /// non-UUID strings derive a stable UUID via SHA-256. Empty strings fail loud.
+    public static func deterministicRowKey(from stringId: String) -> RowKey
+}
+```
+
+**Rust:**
+
+```rust
+/// Returns the RowKey the storage layer assigns to a TEXT-PK row whose id
+/// is `string_id`, on every backend. UUID strings are returned unchanged;
+/// non-UUID strings derive a stable UUID via SHA-256. Empty strings fail loud.
+pub fn deterministic_row_key(string_id: &str) -> Uuid
+// Re-exported: persistence_kit::deterministic_row_key
+```
+
+**Example — LocusKit audit event for a kg_facts row:**
+
+```swift
+// Derive the kg_facts row's RowKey without inserting:
+let rowId = RowKeyDerivation.deterministicRowKey(from: fact.id)
+// Use rowId in an AuditEvent.
 ```
 
 ## § 4 — Errors
@@ -917,13 +976,15 @@ struct inside `IncrementalReplicationSession.swift`.
 | `ColumnRole` | `ColumnRole` | Semantic role for temporal filtering (the node-integrity contract §15). Two cases: `createdHlc`/`CreatedHlc`, `tombstonedHlc`/`TombstonedHlc`. |
 | `IndexDeclaration` | `IndexDeclaration` | Index manifest: `name`, `table`, `columns`, `unique`. |
 | `Migration` | `Migration` | Schema migration step: `fromVersion`/`from_version` (Int/i32), `toVersion`/`to_version` (Int/i32), `operations` ([SchemaOperation]/Vec<SchemaOperation>). |
+| `SchemaKitRenameOutcome` | `SchemaKitRenameOutcome` | Result of `renameSchemaKit(from:to:)` / `rename_schema_kit`: `renamed(version:)`/`Renamed { version }`, `noRow`/`NoRow`, `conflict(oldVersion:newVersion:)`/`Conflict { old_version, new_version }` (SPEC I-7a). |
 | `SchemaOperation` | `SchemaOperation` | Closed migration-operation enum: `createTable`/`CreateTable`, `dropTable`/`DropTable`, `addColumn`/`AddColumn`, `dropColumn`/`DropColumn`, `renameColumn`/`RenameColumn`, `addIndex`/`AddIndex`, `dropIndex`/`DropIndex`, `custom(sqlite:postgresql:)`/`Custom{sqlite,postgresql}` (per-backend SQL escape hatch). |
 | `GeneratedColumn` | `GeneratedColumn` | Computed column: `name`, `type`/`col_type`, `expression`. |
 | `GeneratedExpression` | `GeneratedExpression` | Integer expression algebra. Swift: `public indirect enum` (recursive). Rust: `pub enum`. Same cases: `column`/`Column`, `literal`/`Literal`, `bitAnd`/`BitAnd`, `bitOr`/`BitOr`, `bitXor`/`BitXor`, `shiftRight`/`ShiftRight`, `shiftLeft`/`ShiftLeft`, `equal`/`Equal`, `notEqual`/`NotEqual`. Audit regex limitation as for `StoragePredicate`. |
 | `EstateConfiguration` | `EstateConfiguration` | See EstateConfiguration field parity table below. |
 | `BackendConfiguration` | `BackendConfiguration` | Three cases: `sqlite(url:busyTimeout:)`/`Sqlite{…}`, `postgresql(…)`/`Postgresql{…}`, `inMemory`/`InMemory`. |
 | `NovelTokenTaggerChoice` | `NovelTokenTaggerChoice` | See NovelTokenTaggerChoice parity table below. |
-| `ResidencyHint` | `ResidencyHint` | the storage-residency rule: `.diskBacked`/`DiskBacked` (default), `.ramResident`/`RamResident`. Kits read this to choose index caching strategy. |
+| `ResidencyHint` | `ResidencyHint` | The storage-residency rule: `.ramResident`/`RamResident` (default), `.diskBacked`/`DiskBacked`. Kits read this field to choose their index caching strategy (SPEC I-22). |
+| `ResidentIndexBudget` | `ResidentIndexBudget` | Admission ceiling for per-model float-lane indexes held resident in VectorStore. Three cases: `.systemFraction(Double)`/`SystemFraction(f64)` (default 0.25), `.bytes(Int)`/`Bytes(u64)`, `.unbounded`/`Unbounded`. Queries that exceed the ceiling degrade to the table-scan path (SPEC I-22). |
 | `StorageError` | `StorageError` | Closed error enum. Swift: `throws`; Rust: `StorageResult<T>`. Fifteen cases, case-for-case identical. |
 | `InMemoryStorage` | `InMemoryStorage` | In-memory `Storage` conformer/implementor. |
 | `SQLiteStorage` | `SqliteStorage` | SQLite backend (name idiom: `SQLite`/`Sqlite`). |
@@ -1047,9 +1108,9 @@ encryption seam at the storage layer:
 | Write-boundary guard (all verbs) | `assertContentKeyIDInvariant` | `assert_content_key_id_invariant` | Runs beneath the seam on insert, upsert and update. Rejects non-empty TEXT in a protected column on an encrypting estate regardless of `keyID` — ciphertext is a blob, so text means the seam did not run. Blob, null/absent and empty text (erasure scrub) are accepted |
 
 Interception is by **(table, column) pair**, never by column name alone. The
-protected columns are `"content"`, `"distilled"` and `"subject"` on the
-`drawers` table; `"keyID"` is the key-identifier column the seam stamps on
-every row it seals. A table absent from the map passes through untouched in
+protected columns are `"content"` and `"subject"` on the `drawers` table
+(schema 19; the `"distilled"` column was removed in that version);
+`"keyID"` is the key-identifier column the seam stamps on every row it seals. A table absent from the map passes through untouched in
 both directions and never receives a `keyID` stamp.
 
 A table joins the map only when it BOTH carries content or content-derived
@@ -1087,7 +1148,8 @@ behavioral (same rows retrieved), not on-disk byte-identical.
 | Encryption config | `encryptionConfig: EstateEncryptionConfig` | `encryption_config: EstateEncryptionConfig` |
 | Cache config | `cacheConfig: EstateCacheConfig` | `cache_config: EstateCacheConfig` |
 | Novel-token tagger | `novelTokenTagger: NovelTokenTaggerChoice` default `.hmm` | `novel_token_tagger: NovelTokenTaggerChoice` default `Hmm` |
-| Residency hint | `residencyHint: ResidencyHint` default `.diskBacked` | `residency_hint: ResidencyHint` default `DiskBacked` |
+| Residency hint | `residencyHint: ResidencyHint` default `.ramResident` | `residency_hint: ResidencyHint` default `RamResident` |
+| Resident-index budget | `residentIndexBudget: ResidentIndexBudget` default `.systemFraction(0.25)` | `resident_index_budget: ResidentIndexBudget` default `SystemFraction(0.25)` |
 
 ### `NovelTokenTaggerChoice` parity (SPEC I-20)
 
@@ -1156,12 +1218,10 @@ by adding the dependency explicitly.
 
 ### Port differences
 
-- The Rust `Storage` trait has no `currentSchemaVersion(for: kitID)`. The Rust
-  replication gate uses the global `current_schema_version()` and compares it
-  against `schema.version` directly. This is correct for single-kit-per-storage
-  estates (the common case). Multi-kit estates require a
-  `current_schema_version_for(kit_id)` addition to the Rust trait — a planned
-  extension.
+- The Rust `Storage` trait carries `current_schema_version_for(kit_id)`, the
+  twin of `currentSchemaVersion(for:)`; all three backends override it. The
+  Rust replication gate still compares the global `current_schema_version()`
+  against `schema.version`.
 
 ---
 
@@ -1521,6 +1581,59 @@ fn perform_maintenance(
 ```
 
 ## Changelog
+
+### 1.21.0 -- 2026-09-13
+Added `FaultCell`, `FaultingRowStore`, and `FaultingStorage` to the Swift
+`PersistenceKitTestSupport` library target and the Rust `test_support` module
+(gated behind the `test-support` Cargo feature flag). These types provide a
+forwarding `Storage` decorator that injects a table-level query fault on
+demand, enabling fail-closed pre-read tests in kits such as GeniusLocusKit.
+The types are absent from production builds.
+
+### 1.20.0 -- 2026-09-12
+Added `RowKeyDerivation` subsection to § 3 (Public functions). Documents
+the public Swift `RowKeyDerivation.deterministicRowKey(from:)` and Rust
+`deterministic_row_key` as the row-key derivation utility. These symbols
+were always `pub`/`package`; this entry records their promotion to the
+documented public surface. Contract points cross-reference SPEC § 10.
+
+### 1.19.0 -- 2026-09-08
+`KeychainKeyStore.storeKey(_ key: Data) throws` (Swift): store an existing
+32-byte key under this store's account; refuses a wrong length and an
+account that already holds an item. The relocation path for a moved estate
+file, used by GeniusLocusKit's `EstateOpenPosture.relocateKey`. Minting stays
+`loadOrCreateKey`. No Rust twin: the Rust key file moves with the directory.
+
+### 1.18.0 -- 2026-09-06
+
+`SchemaOperation.dropColumn` / `SchemaOperation::DropColumn` is idempotent
+(spec I-7b): SQLite probes the table's columns before the statement in both
+ports, Swift PostgreSQL emits `DROP COLUMN IF EXISTS`, InMemory already
+removed the column only when present. The conformance runners gain the
+fresh-open and populated `dropColumn` fixtures, both ports.
+
+### 1.17.0 -- 2026-09-05
+
+ENC-W6B doc sweep. B-12a encryption seam table: `"distilled"` removed from the
+protected-column list for `drawers` (schema 19 removed that column).
+
+### 1.16.0 -- 2026-09-04
+`Storage.renameSchemaKit(from:to:)` / `Storage::rename_schema_kit` and the
+`SchemaKitRenameOutcome` enum (SPEC I-7a), both ports, all three backends.
+The Rust trait block now lists `current_schema_version_for`, which the code
+has carried since the per-kit ledger landed; the § 8 port-differences note
+that called it a planned extension is corrected.
+
+### 1.15.0 -- 2026-08-15
+Corrected the residency default and documented the new admission-bound field
+(RS-01). The residencyHint default was stated as `.diskBacked`/`DiskBacked`
+across three locations (Rust struct description, type parity table, field parity
+table); the implementation has defaulted to `.ramResident`/`RamResident` since
+commit 20aee2a21. All three locations are corrected. The Swift EstateConfiguration
+struct block now includes `residencyHint` and `residentIndexBudget`. The Rust
+struct description now lists `resident_index_budget` as the seventh field. A
+`ResidentIndexBudget` row is added to the type parity table, and a matching row
+is added to the EstateConfiguration field parity table.
 
 ### 1.14.0 -- 2026-08-03
 Corrected the intercepted-column contract (MXE-RW). The at-rest wiring

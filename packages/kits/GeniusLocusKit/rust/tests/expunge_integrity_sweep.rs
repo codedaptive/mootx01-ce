@@ -29,6 +29,7 @@ use std::sync::Arc;
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::{EstateCoordinator, ExpungeIntegritySweepResult};
 use locus_kit::{
+    adjectives::AdjectiveSensitivity,
     drawer_store::DrawerStore, drawer_store_inmemory::InMemoryDrawerStore,
     estate_types::OwnerCredentials,
 };
@@ -38,7 +39,7 @@ use locus_kit::{
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use persistence_kit::{inmemory::InMemoryStorage, BackendConfiguration, EstateConfiguration, Storage};
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 const NOW: i64 = 1_700_000_000;
 const NOW2: i64 = 1_700_000_001;
@@ -99,7 +100,7 @@ fn seed_crash_window(
     // unsealed (the GLK coordinator path). We immediately discard the event
     // to simulate a crash before the seal call.
     let _unsealed = estate
-        .expunge(&drawer.id, "crash-window-sim", true, NOW2, false)
+        .expunge(&drawer.id, "crash-window-sim", true, NOW2, false, AdjectiveSensitivity::Secret)
         .expect("estate expunge (no seal) for crash-window seed");
 
     drawer.id
@@ -131,7 +132,7 @@ fn s1_sweep_remediates_crash_window_row_with_corpus() {
     // Tombstone the row WITHOUT sealing any audit (crash-window simulation).
     let estate = coord.estate_for(&h).expect("estate");
     let _unsealed = estate
-        .expunge(&drawer.id, "crash-window-sim", true, NOW2, false)
+        .expunge(&drawer.id, "crash-window-sim", true, NOW2, false, AdjectiveSensitivity::Secret)
         .expect("estate expunge no seal");
 
     // Verify pre-condition: no tombstone or expungeOrphan audit event yet.
@@ -283,7 +284,7 @@ fn s3_sweep_locusonly_closes_audit_gap_with_no_vector_store() {
 // S4: sweep re-delete scrubs orphaned distillation-features-v1 lane entry
 // ---------------------------------------------------------------------------
 
-/// Three-sentence content is distilled (writes a distillation-features-v1
+/// Three-sentence content is fingerprinted (writes a distillation-features-v1
 /// lane entry in the VectorStore), then the process crashes between step 1
 /// (LocusKit tombstone) and step 2 (cross-kit delete). The lane entry
 /// survives the crash window. The integrity sweep's re-delete must now
@@ -295,8 +296,8 @@ fn s4_sweep_remediates_orphaned_distillation_lane_entry() {
     let (mut coord, h) = open_one();
 
     // Three-sentence content with repeated named entity ("Rhenium") so the
-    // matrix distillation path (≥3 sentences) produces a non-zero structural
-    // fingerprint — which causes distill_items_sweep to write a
+    // matrix path (≥3 sentences) produces a non-zero structural fingerprint —
+    // which makes write_structural_fingerprint write a
     // distillation-features-v1 lane entry in the VectorStore. Same content
     // style as E10 (known to produce non-zero fingerprints via the default
     // extractor).
@@ -315,27 +316,24 @@ fn s4_sweep_remediates_orphaned_distillation_lane_entry() {
     coord.register_corpus(&h, corpus);
     coord.register_vector_store(&h, vs);
 
-    // Distill the item — writes the distillation-features-v1 lane entry
-    // when the structural fingerprint is non-zero.
-    let distilled = coord
-        .distill_items_sweep(&h, NOW + 100, None)
-        .expect("distill_items_sweep");
-    assert!(
-        distilled >= 1,
-        "distill must produce at least 1 item; got {distilled}"
-    );
+    // Write the lane entry — present when the structural fingerprint is
+    // non-zero.
+    let written = coord
+        .write_structural_fingerprint(&h, &drawer.id, content, NOW + 100)
+        .expect("write_structural_fingerprint");
+    assert!(written, "write_structural_fingerprint must write a lane entry for the fixture");
 
     // Confirm the lane entry exists before the crash window.
     // Use vectors_for_item (raw table query) rather than find_nearest so
     // the check is fingerprint-independent.
-    let distill_lane = genius_locus_kit::brain::distillation_cycle::DISTILLATION_LANE_MODEL_ID;
+    let distill_lane = genius_locus_kit::brain::fingerprint_lane::DISTILLATION_LANE_MODEL_ID;
     let before_vecs = vs_ref
         .vectors_for_item(&drawer.id)
         .expect("vectors_for_item before crash-window");
     let has_distill_before = before_vecs.iter().any(|v| v.model_id == distill_lane);
     assert!(
         has_distill_before,
-        "distillation lane entry must exist after distillation; got model_ids {:?}",
+        "distillation lane entry must exist after the fingerprint write; got model_ids {:?}",
         before_vecs.iter().map(|v| &v.model_id).collect::<Vec<_>>()
     );
 
@@ -345,7 +343,7 @@ fn s4_sweep_remediates_orphaned_distillation_lane_entry() {
     // The VectorStore lane entry survives.
     let estate = coord.estate_for(&h).expect("estate for crash-window");
     let _unsealed = estate
-        .expunge(&drawer.id, "crash-window-sim-s4", true, NOW2, false)
+        .expunge(&drawer.id, "crash-window-sim-s4", true, NOW2, false, AdjectiveSensitivity::Secret)
         .expect("estate expunge (no seal) for crash-window seed");
 
     // Lane entry must STILL exist after the crash-window (step 2 never ran).

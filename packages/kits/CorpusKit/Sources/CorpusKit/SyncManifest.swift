@@ -1,6 +1,6 @@
 // SyncManifest.swift
 //
-// Per-estate sync manifest for RAG content. Pairs with VectorKit's
+// Per-estate sync manifest for RAG content. Pairs with SynapseKit's
 // vectors-table sync (when the application enables both): chunks
 // and their vectors travel together in the same CloudKit zone so
 // they remain join-compatible across devices.

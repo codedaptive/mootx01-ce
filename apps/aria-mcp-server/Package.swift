@@ -24,7 +24,10 @@ let package = Package(
         .executable(name: "aria-mcp", targets: ["aria-mcp"]),
     ],
     dependencies: [
-        .package(name: "AriaMcpKit", path: "../../packages/kits/AriaMcpKit"),
+        .package(
+            name: "AriaMcpKit",
+            path: "../../packages/kits/AriaMcpKit"
+        ),
         .package(
             name: "GeniusLocusKit",
             path: "../../packages/kits/GeniusLocusKit",
@@ -33,7 +36,7 @@ let package = Package(
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "PersistenceKit", path: "../../packages/kits/PersistenceKit"),
         .package(name: "CorpusKit", path: "../../packages/kits/CorpusKit"),
-        .package(name: "VectorKit", path: "../../packages/kits/VectorKit"),
+        .package(name: "SynapseKit", path: "../../packages/kits/SynapseKit"),
     ],
     targets: [
         .executableTarget(
@@ -47,9 +50,9 @@ let package = Package(
                 .product(name: "LocusKit", package: "LocusKit"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
-                // SQLite backend: selected at runtime via ARIA_MCP_SQLITE_PATH.
+                // SQLite backend: the estate catalog record's default backend.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
-                // PostgreSQL backend: selected at runtime via ARIA_MCP_POSTGRES_URL.
+                // PostgreSQL backend: a catalog record that names a connection string.
                 .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
                 // Semantic recall wiring for the durable SQLite estate (BM25 + vector).
                 .product(name: "CorpusKit", package: "CorpusKit"),
@@ -58,9 +61,29 @@ let package = Package(
                 // Dependency per in-repository dependency direction; the
                 // server is downstream of the providers, no layering inversion.
                 .product(name: "CorpusKitProviders", package: "CorpusKit"),
-                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
             ],
             path: "Sources/aria-mcp"
+        ),
+        // The command-line surface is the only part of this executable that
+        // can be tested without opening an estate, and it is the part that
+        // decides which estate opens. Twin of the Rust bin's inline
+        // `parse_arguments` tests.
+        .testTarget(
+            name: "aria-mcpTests",
+            dependencies: [
+                "aria-mcp",
+                // GeniusLocusKit needed for EstateCatalog.configurationDirectoryOverride
+                // in EstateSelectionTests (the test seam that redirects the catalog dir).
+                .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                // LocusKit needed for LocusKit.hintRoom in charter-seeding tests.
+                .product(name: "LocusKit", package: "LocusKit"),
+                // PersistenceKit needed for EstateConfiguration in charter-seeding tests.
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                // PersistenceKitInMemory needed for InMemoryStorage in charter-seeding tests.
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+            ],
+            path: "Tests/aria-mcpTests"
         ),
     ]
 )

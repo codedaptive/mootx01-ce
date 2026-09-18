@@ -11,7 +11,9 @@ use persistence_kit::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+/// Serialised as `{"major": 1, "minor": 8}`: the shape the estate manifest
+/// (`estate.json`) records and the Swift port's synthesized Codable writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
 pub struct EstateFormatVersion {
     pub major: u32,
     pub minor: u32,
@@ -20,7 +22,45 @@ pub struct EstateFormatVersion {
 impl EstateFormatVersion {
     pub const V1_0: Self = Self { major: 1, minor: 0 };
     pub const V1_1: Self = Self { major: 1, minor: 1 };
-    pub const CURRENT: Self = Self::V1_1;
+    /// Format 1.2: the corpus_index_state composition_policy column reached
+    /// populated estates through the migration catalog. CorpusKit's own
+    /// checkpoint ladder adds that column at open, so no capsule separates
+    /// 1.1 from 1.2 any more.
+    pub const V1_2: Self = Self { major: 1, minor: 2 };
+    /// Format 1.3: the drawers distilled_source_digest column (LocusKit schema
+    /// v18) reaches populated estates through the migration catalog.
+    pub const V1_3: Self = Self { major: 1, minor: 3 };
+    /// Format 1.4: the index composition policy was a stored estate setting
+    /// (LocusKit manifest key `index_composition_policy`), seeded on every
+    /// populated estate through the migration catalog. The setting retired
+    /// with the policy; no capsule separates 1.3 from 1.4 any more.
+    pub const V1_4: Self = Self { major: 1, minor: 4 };
+    /// Format 1.5: the schema-version ledger carries the vector tier under
+    /// its SynapseKit ids (`SynapseKit`, `SynapseKitClaims`); the rows of
+    /// every populated estate are moved there through the migration catalog.
+    pub const V1_5: Self = Self { major: 1, minor: 5 };
+    /// Format 1.6: the retired `corpus_index_state.composition_policy` column
+    /// is dropped from every populated estate through the migration catalog
+    /// (CorpusKit checkpoint schema v4).
+    pub const V1_6: Self = Self { major: 1, minor: 6 };
+    /// Format 1.7: the whole-record float rows (`vectors` kind 1) and the
+    /// `hnsw_graph` rows are vacuumed from every populated estate through the
+    /// migration catalog, the binary sidecar is rebuilt and the float
+    /// representation claim is released; a fresh estate is born without them.
+    pub const V1_7: Self = Self { major: 1, minor: 7 };
+    /// Format 1.8: the fact-extraction toggle (`fact_extraction` manifest key)
+    /// is seeded as `"on"` on every populated estate through the migration
+    /// catalog, so the on-by-default ruling is recorded per estate rather than
+    /// inferred from an absent key, and an operator's opt-out survives a later
+    /// change to the default.
+    pub const V1_8: Self = Self { major: 1, minor: 8 };
+    /// Format 1.9: the consolidation, contradiction_sweep,
+    /// cross_encoder_routing, maintenance and adaptive_recall preferences are
+    /// seeded "on" on every populated estate, and the recall_ratings table
+    /// exists.
+    pub const V1_9: Self = Self { major: 1, minor: 9 };
+    pub const V1_10: Self = Self { major: 1, minor: 10 };
+    pub const CURRENT: Self = Self::V1_10;
 }
 
 impl std::fmt::Display for EstateFormatVersion {

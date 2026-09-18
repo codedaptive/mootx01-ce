@@ -154,13 +154,16 @@ struct KGFactStoreTests {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
 
+        // Bits 27-30 are FREE (ADORN-STORE-02 v17): new drawers start with
+        // operationalBitmap 0: no write path ORs bits at insert.
         let drawer = Drawer(
             id: TestStorage.tid("drawer-1"),
             content: "hello",
             parentNodeId: "test-parent",
             addedBy: "bilby",
             filedAt: t(1_000),
-            embeddingModelID: "minilm-v6"
+            embeddingModelID: "minilm-v6",
+            operationalBitmap: 0
         )
         try await store.addDrawer(drawer)
 
@@ -241,7 +244,7 @@ struct KGFactStoreTests {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
         try await store.addKGFact(sampleFact(id: "f-retired", subject: "bob"))
-        try await store.withdrawKGFact(id: "f-retired")
+        try await store.withdrawKGFact(id: "f-retired", changedBy: "test-actor", reason: nil, now: Date(timeIntervalSince1970: 1_700_000_000))
 
         // Active-only scan must exclude the withdrawn fact.
         let active = try await store.allKGFacts()
@@ -261,7 +264,7 @@ struct KGFactStoreTests {
         defer { cleanup(url) }
         try await store.addKGFact(sampleFact(id: "f-a", subject: "carol", filedAt: t(1_700_000_000)))
         try await store.addKGFact(sampleFact(id: "f-r", subject: "eve", filedAt: t(1_700_000_001)))
-        try await store.withdrawKGFact(id: "f-r")
+        try await store.withdrawKGFact(id: "f-r", changedBy: "test-actor", reason: nil, now: Date(timeIntervalSince1970: 1_700_000_001))
 
         let timeline = try await store.allKGFactsIncludingRetired()
         #expect(timeline.count == 2)

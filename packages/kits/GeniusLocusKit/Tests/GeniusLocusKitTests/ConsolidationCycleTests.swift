@@ -22,7 +22,7 @@ import Foundation
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 @testable import SubstrateML
 @testable import GeniusLocusKit
@@ -82,7 +82,7 @@ struct ConsolidationCycleTests {
         "The telescope needs a new focuser knob. Jupiter rises after midnight this week. Collimation drifts in cold air.",
     ]
 
-    /// Full pipeline to a consolidated estate: capture → distill (fingerprints)
+    /// Full pipeline to a consolidated estate: capture → fingerprint lane
     /// → consolidation sweep 91 days later. Returns (kit, handle, aged now).
     private func consolidatedEstate() async throws
         -> (GeniusLocusKit, EstateHandle, [String], Date, Int)
@@ -96,8 +96,7 @@ struct ConsolidationCycleTests {
             _ = try await captureItem(body: body, kit: kit, handle: handle)
         }
         let now = Date()
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         let produced = try await kit.consolidationSweep(
             handle: handle,
@@ -125,6 +124,13 @@ struct ConsolidationCycleTests {
             // pin the GLK-visible half: no tombstone, no content change).
             #expect(!drawer.content.isEmpty)
         }
+        let recalled = try await kit.recall(handle, RecallFrame(
+            filterChain: [], hydrationLevel: .full, ordering: .byCaptureTimeDesc))
+        let vagueResult = recalled.first(where: { $0.isVague })
+        let vague = try #require(vagueResult)
+        // Distinct source bodies retain their grammar and document boundaries;
+        // structural selection must not produce the consolidation's text.
+        #expect(Set(vague.content.components(separatedBy: "\n\n")) == Set(clusterBodies))
     }
 
     @Test("sweep is idempotent — represented constituents leave the pool")
@@ -148,8 +154,7 @@ struct ConsolidationCycleTests {
             _ = try await captureItem(body: body, kit: kit, handle: handle)
         }
         let now = Date()
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let produced = try await kit.consolidationSweep(
             handle: handle,
             distillFn: GeniusLocusKit.defaultDistillFn,
@@ -165,8 +170,7 @@ struct ConsolidationCycleTests {
             ids.append(try await captureItem(body: body, kit: kit, handle: handle))
         }
         let now = Date()
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         // Trace one cluster member as recalled INSIDE the quiet window: the
         // cluster drops below D5 and nothing consolidates.
@@ -233,9 +237,7 @@ struct ConsolidationCycleTests {
         let fifthID = try await captureItem(
             body: "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria still owns the Falcon rollout checklist.",
             kit: kit, handle: handle)
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn,
-            now: aged.addingTimeInterval(3_600), limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: aged.addingTimeInterval(3_600))
 
         // …and ages past the gate before the next maintenance window.
         let aged2 = aged.addingTimeInterval(92 * 86_400)
@@ -316,5 +318,35 @@ struct ConsolidationCycleTests {
             handle, query: "Project Falcon rollout checklist",
             constituentsPerHit: 8, totalConstituents: 1)
         #expect(mBound.constituents.count == 1)
+    }
+}
+
+/// W2.5 S6 — offset mapping of cluster sentences to constituent timestamps.
+@Suite("GeniusLocusKit.sentenceTimestamps (W2.5 S6)")
+struct SentenceTimestampMappingTests {
+
+    private let t1 = Date(timeIntervalSince1970: 1_000_000)
+    private let t2 = Date(timeIntervalSince1970: 2_000_000)
+
+    @Test("sentences map to the piece their start offset falls in")
+    func mapsByOffset() {
+        let pieces = [("Alpha fact one. Alpha fact two.", t1),
+                      ("Beta fact three.", t2)]
+        let separator = "\n\n"
+        let combined = pieces.map(\.0).joined(separator: separator)
+        let sentences = ["Alpha fact one.", "Alpha fact two.", "Beta fact three."]
+        let ts = GeniusLocusKit.sentenceTimestamps(
+            sentences: sentences, pieces: pieces,
+            separator: separator, combined: combined)
+        #expect(ts == [t1, t1, t2])
+    }
+
+    @Test("an unlocatable sentence fails quiet to nil (uniform branch)")
+    func failQuiet() {
+        let pieces = [("Alpha.", t1)]
+        let ts = GeniusLocusKit.sentenceTimestamps(
+            sentences: ["Missing sentence."], pieces: pieces,
+            separator: "\n\n", combined: "Alpha.")
+        #expect(ts == nil)
     }
 }

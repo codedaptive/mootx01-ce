@@ -6,7 +6,7 @@
 // (k = 60), reranks with Maximal Marginal Relevance (λ = 0.7 by
 // default), and pages the reranked output into an `AsyncSequence`.
 //
-// MOOTx01 invariant B-1: NeuronKit never calls LocusKit, VectorKit, or
+// MOOTx01 invariant B-1: NeuronKit never calls LocusKit, SynapseKit, or
 // CorpusKit directly. The estate handle is the only substrate boundary
 // available. The estate's `recall` verb today returns a single
 // `[Drawer]` array — its underlying RecallStream is drained inside the
@@ -65,7 +65,7 @@ public typealias Drawer = LocusKit.Drawer
 /// either knob on a per-call basis.
 ///
 /// The scored second lane of hybrid recall: a `GLKRecallRequest` in
-/// `.unionBest`/`.raw` mode (BM25 + vector fusion — the same lane
+/// `.unionBest` mode (BM25 + vector fusion — the same lane
 /// `moot_memory_search` and PreciseRecall's coarse grab use). When
 /// supplied, `hybridRecall` unions this lane's relevance-ordered hits
 /// with the frame lane's rows (scored hits first, frame-only extras
@@ -85,10 +85,21 @@ public struct ScoredLane: Sendable {
     /// (same rationale as PreciseRecall's traceLimit).
     public let traceLimit: Int
 
-    public init(frame: RecallFrame, queryText: String, traceLimit: Int) {
+    /// Scoring strategy for the GLK query lane. Existing recipe callers keep
+    /// the historical `.raw` merge; selected ARIA v2 synthesis opts into the
+    /// same query-aware matrix scoring used by `moot_memory_search`.
+    public let scoring: GLKRecallScoring
+
+    public init(
+        frame: RecallFrame,
+        queryText: String,
+        traceLimit: Int,
+        scoring: GLKRecallScoring = .raw
+    ) {
         self.frame = frame
         self.queryText = queryText
         self.traceLimit = traceLimit
+        self.scoring = scoring
     }
 }
 
@@ -113,6 +124,38 @@ public func hybridRecall(
     scoredLane: ScoredLane? = nil
 ) async throws -> RecallStream {
     let start = Date().timeIntervalSince1970
+
+    // Resolve per-estate recall tuning with caller-explicit > provisioned > spec
+    // precedence. When the caller uses `.default` and the estate carries a
+    // provisioned "recall_tuning" manifest key, the manifest's four knobs
+    // (rrf_k, mmr_lambda, rrf_bm25_weight, rrf_vector_weight) override the
+    // spec constants. A caller who constructs a non-default RecallFrameTuning
+    // keeps their values unchanged — their explicit values win. pageSize has
+    // no manifest equivalent and always comes from the caller's tuning.
+    // The manifest read fails quiet (returns .default) if the key is absent or
+    // malformed, preserving byte-identical behavior for estates with no key.
+    let manifestTuning: RecallTuningManifest
+    if tuning == .default {
+        manifestTuning = (try? await glk.provisionedRecallTuning(for: handle)) ?? .default
+    } else {
+        // Caller supplied explicit values — skip the manifest read entirely.
+        manifestTuning = .default
+    }
+    // When the caller used .default AND the manifest differs from the spec,
+    // build a new RecallFrameTuning from the manifest's four knobs.
+    // pageSize is not a manifest concern and is always taken from the caller.
+    let resolvedTuning: RecallFrameTuning
+    if tuning == .default && manifestTuning != .default {
+        resolvedTuning = RecallFrameTuning(
+            bm25Weight: manifestTuning.rrfBm25Weight,
+            vectorWeight: manifestTuning.rrfVectorWeight,
+            rrfK: manifestTuning.rrfK,
+            mmrLambda: manifestTuning.mmrLambda,
+            pageSize: tuning.pageSize)
+    } else {
+        resolvedTuning = tuning
+    }
+
     let frameRows = try await glk.recall(handle, frame)
 
     // Union the two lanes. Scored hits lead in THEIR relevance order —
@@ -139,11 +182,15 @@ public func hybridRecall(
         let request = GLKRecallRequest(
             frame: scoredLane.frame,
             mode: .unionBest,
-            scoring: .raw,
-            limit: scoredLane.frame.limit ?? tuning.pageSize,
+            scoring: scoredLane.scoring,
+            limit: scoredLane.frame.limit ?? resolvedTuning.pageSize,
             fallback: .allowDegraded,
             queryText: scoredLane.queryText,
-            traceLimit: scoredLane.traceLimit)
+            traceLimit: scoredLane.traceLimit,
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this caller does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off)
         let scored = try await glk.recall(handle, request)
         var seen = Set<String>()
         var union: [Drawer] = []
@@ -175,21 +222,22 @@ public func hybridRecall(
     // adjacent-rank lexical gap stays constant, so any blended weight
     // degrades to recency-first exactly on large estates (the measured
     // trial-2 failure). rrfK, mmrLambda, and pageSize always come from the
-    // caller.
+    // resolved tuning (manifest-filled when the caller used .default, caller
+    // values when an explicit RecallFrameTuning was passed).
     let effectiveTuning: RecallFrameTuning
     if !cueTerms.isEmpty && scoredLeadCount == 0 {
         effectiveTuning = RecallFrameTuning(
             bm25Weight: 1.0,
             vectorWeight: 0.0,
-            rrfK: tuning.rrfK,
-            mmrLambda: tuning.mmrLambda,
-            pageSize: tuning.pageSize)
+            rrfK: resolvedTuning.rrfK,
+            mmrLambda: resolvedTuning.mmrLambda,
+            pageSize: resolvedTuning.pageSize)
     } else {
-        effectiveTuning = tuning
+        effectiveTuning = resolvedTuning
     }
 
     let reranked = HybridRecallEngine.rerank(drawers: drawers, tuning: effectiveTuning, cueTerms: cueTerms)
-    let stream = RecallStream(rows: reranked, pageSize: tuning.pageSize)
+    let stream = RecallStream(rows: reranked, pageSize: resolvedTuning.pageSize)
 
     // Emit hybrid-recall telemetry at the operation boundary. `start` is
     // read from `Date().timeIntervalSince1970` here at the verb boundary

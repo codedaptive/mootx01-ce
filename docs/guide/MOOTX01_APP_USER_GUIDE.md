@@ -1,6 +1,6 @@
 ---
 title: MOOTx01 — User Guide
-version: v0.6
+version: v0.7
 status: draft
 ---
 
@@ -42,31 +42,51 @@ Once the walkthrough is complete it never appears again.
 
 ## The app at a glance
 
-MOOTx01 uses two tab profiles:
+MOOTx01 adapts its navigation to the space it has. On a wide window (Mac, iPad
+full-width) it uses a **sidebar**; on a narrow window (iPhone, iPad in Split
+View) it uses a **tab bar** across the bottom. The destinations are the same
+either way, and switching between the two — say, rotating an iPad — keeps you on
+the same destination.
 
-**Standard profile (default)** — everything a new user needs:
+**Everyday destinations** — everything a new user needs:
 
 - **Capture** — save a thought, note, or idea to your memory.
 - **Recall** — search your memories.
 - **Review** — the Review Center: what your estate remembers now, what matters
   today, what changed, and what may be ready to retire.
 - **Intelligence** — ask an on-device assistant that answers from your memories.
-- **Settings** — iCloud Sync switch and the Advanced Mode toggle (see below).
 
-**Advanced Mode** — adds engineering and power-user tabs. Turn it on in
-**Settings → Advanced Mode**:
+**Settings** is the **gear icon** in the toolbar (on Mac, also the app menu,
+⌘,) — it holds the iCloud Sync switch, the Advanced Mode toggle, and the Quick
+Capture visibility toggle. It is no longer a tab.
 
-- **The Top** — your most relevant / recent memories.
+**Advanced Mode** — adds engineering and power-user destinations. Turn it on in
+**Settings → Advanced Mode**. On a wide window they appear as an *Advanced*
+sidebar section; on a narrow window they appear in an **Advanced** menu in the
+toolbar (the everyday tab bar stays as it is):
+
+- **Overview** — the estate's tool surface (your most relevant / recent
+  memories).
 - **Apple Surfaces** — see how MOOTx01 shows up in Siri, Spotlight, and
   Shortcuts.
 - **Edges** — an honest status board of what's connected and what isn't.
 - **Engine** — how the app hosts your estate, plus the portable LAN server.
-- **Miners** — optional automatic capture from Calendar and Contacts.
 - **Federation** — share selected memories with another Mootx01 estate on your
   local network, on demand, for a limited time.
+- **Miners** — optional automatic capture from Calendar and Contacts.
 
-Advanced Mode persists across launches. You can switch back to Standard any
-time from **Settings**.
+Advanced Mode persists across launches. You can switch it back off any time from
+**Settings**; if you turn it off while viewing an Advanced destination, the app
+returns you to Capture.
+
+**Attachment status.** A small status indicator shows whether the app is
+attached to your estate: a colored dot plus the connection path. On a narrow
+window it sits in a compact pill just above the tab bar (long paths are
+shortened in the middle; the full path is read aloud by VoiceOver). On a wide
+window it runs along the bottom as a status band.
+
+**Quick Capture.** A blue round button with a plus sign sits in the **lower-right
+corner** in every layout — see *Capturing a memory* below.
 
 ---
 
@@ -85,6 +105,29 @@ saved as the link itself.
 
 **From the Action Button / Shortcuts:** add the "Capture Memory" shortcut and
 trigger it however you like.
+
+**Quick Capture (from anywhere in the app):** a **blue round button with a plus
+sign** sits in the **lower-right corner** — the same position in every layout
+(Mac, iPad, iPhone), and it stays in the physical lower-right even in
+right-to-left languages. Tap it — or press **⌘K** on a keyboard — to capture
+without losing your place:
+
+- If you are already on **Capture**, the content field clears and the cursor
+  returns to it, ready for a new entry. (There is no undo for that clear, so
+  don't press it mid-draft if you want to keep what you have — move to another
+  destination first.)
+- If you are anywhere else, a **Quick Capture** sheet slides up. File your memory
+  and tap **Done** or **Cancel**; the destination you were on stays selected.
+
+**Hiding the Quick Capture button.** If you'd rather keep the corner clear, open
+**Settings** (the gear icon) → **Quick Capture** and turn off **Quick Capture
+Button**. The button disappears; your navigation, status, and everything else
+stay put. **⌘K still works when the button is hidden** — the shortcut is wired to
+the app itself, not to the button.
+
+![Quick Capture button in the lower-right corner on iPhone, above the tab bar and status pill](assets/quick-capture/quick-capture-iphone-visible.png)
+
+![The same screen with Quick Capture turned off — the button is gone, navigation and status remain](assets/quick-capture/quick-capture-iphone-hidden.png)
 
 **Privacy at capture:** the Private/Public choice matters. Private is the
 default and never leaves the device. Public means the memory can appear in
@@ -337,13 +380,13 @@ Sync requires two things:
    Sync is off by default — the app does nothing with iCloud until you
    enable the master switch in Settings.
 
-Once both conditions are met, open the **Settings** tab and turn on the
-**iCloud Sync** switch. The setting persists across launches.
+Once both conditions are met, open **Settings** (the **gear icon** in the
+toolbar) and turn on the **iCloud Sync** switch. The setting persists across
+launches.
 
 - **Mac:** Settings also opens from the app menu (⌘,).
-- **iPhone / iPad (Standard profile):** tap the **Settings** tab.
-- **iPhone / iPad (Advanced profile):** tap the **Settings** tab or the gear
-  icon in the Engine tab toolbar — both control the same switch.
+- **iPhone / iPad:** tap the **gear icon** in the toolbar — in both the everyday
+  and Advanced layouts.
 
 ### What syncs — and what never leaves the machine
 
@@ -448,18 +491,18 @@ that persist across multiple beats are usually caused by a temporary CloudKit
 error — check iCloud status and your connection.
 
 **Sync not starting at all:** verify both conditions in "Before you begin"
-above, and confirm the **iCloud Sync** toggle in the Settings tab is turned on.
+above, and confirm the **iCloud Sync** toggle in Settings is turned on.
 The app makes no iCloud calls — and shows no sync status — until both the
 build supports sync and the toggle is on.
 
 ### Turning iCloud Sync on or off
 
-Open the **Settings** tab and find the **iCloud Sync** switch:
+Open **Settings** (the **gear icon** in the toolbar) and find the **iCloud
+Sync** switch:
 
-- **Mac:** Settings tab, or the app menu (⌘,).
-- **iPhone / iPad (Standard profile):** Settings tab.
-- **iPhone / iPad (Advanced profile):** Settings tab or the gear icon in the
-  Engine tab toolbar — both toggle the same switch.
+- **Mac:** the gear icon, or the app menu (⌘,).
+- **iPhone / iPad:** the gear icon in the toolbar — in both the everyday and
+  Advanced layouts.
 
 The change takes effect immediately — turning it off stops the sync engine and
 stops the app from forwarding push notifications to CloudKit; turning it on

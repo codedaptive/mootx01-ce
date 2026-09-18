@@ -1,4 +1,4 @@
-//! core/clients.rs — the MCP client registry (spec §4.2's 11-agent table).
+//! core/clients.rs — the MCP client registry (spec §4.2's 12-agent table).
 //!
 //! Ported from Swift MootInstallerCore/ClientConfig.swift (the reference).
 //! `config_path` is home-relative except where a platform demands otherwise
@@ -62,13 +62,10 @@ pub struct McpClient {
 pub const SERVER_NAME: &str = "mootx01";
 
 /// The server entry name inside a generated **plugin package**'s MCP
-/// manifest. Deliberately different from `SERVER_NAME`: the host
-/// namespaces a plugin's servers under the plugin id, so the plugin entry
-/// surfaces to the user as `plugin:mootx01:memory` — the plainest naming
-/// for someone meeting the tool for the first time. A direct entry has no
-/// such namespace and keeps `SERVER_NAME`, so the two keys are not
-/// interchangeable and the plugin-ownership hook can still tell a
-/// competing direct entry apart from ours.
+/// manifest. In PLUGIN mode Claude Code uses `"memory"` as the server key,
+/// giving tools the `mcp__plugin_mootx01_memory__*` prefix. Direct installs
+/// (Cursor, Codex, Gemini, Continue) continue to use `SERVER_NAME`
+/// (`"mootx01"`), so the two install paths carry distinct prefixes.
 ///
 /// The generated packages are the authority for this value; it is mirrored
 /// here so the installer has one place to read it instead of a literal at
@@ -179,6 +176,9 @@ impl McpClient {
                     home.join(".kiro").exists()
                 }
             }
+            // Grok CLI — ~/.grok only. Do not treat /Applications/Grok Bot.app
+            // (Anysphere) as this client.
+            "grok" => home.join(".grok").exists(),
             _ => false,
         }
     }
@@ -352,6 +352,9 @@ pub fn supported() -> Vec<McpClient> {
         // so the Rust port matches that behavior for conformance.
         c("antigravity", "Antigravity", Some(".gemini/config/mcp_config.json"), Json, true, false, false),
         c("kiro", "Kiro", Some(".kiro/settings/mcp.json"), Json, true, false, false),
+        // Grok CLI — xAI terminal agent. TOML url field, same shape as Codex.
+        // Detected via ~/.grok only (not /Applications/Grok Bot.app).
+        c("grok", "Grok CLI", Some(".grok/config.toml"), Toml, true, false, false),
     ]
 }
 
@@ -445,10 +448,10 @@ mod tests {
     }
 
     #[test]
-    fn registry_has_eleven_clients() {
-        // 11 clients: the two Codex entries (CLI + Desktop) are collapsed into one
-        // "codex" entry since they share ~/.codex/config.toml.
-        assert_eq!(supported().len(), 11);
+    fn registry_has_twelve_clients() {
+        // 12 clients: Codex CLI + Desktop remain one "codex" entry (shared
+        // ~/.codex/config.toml); Grok CLI is a separate TOML client at ~/.grok.
+        assert_eq!(supported().len(), 12);
     }
 
     #[test]
@@ -579,6 +582,33 @@ mod tests {
                 || resolved.ends_with(std::path::Path::new(".codex\\config.toml")),
             "codex config path must end with .codex/config.toml; got: {resolved:?}"
         );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn grok_detected_via_dotgrok_dir() {
+        let home = tmp_home("grok-detect");
+        let gk = supported().into_iter().find(|c| c.id == "grok").unwrap();
+        assert!(!gk.detected(&home), "absent .grok must not detect");
+        std::fs::create_dir_all(home.join(".grok")).unwrap();
+        assert!(gk.detected(&home), "present .grok dir must detect");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn grok_config_path_resolves_to_dotgrok() {
+        let home = tmp_home("grok-path");
+        let gk = supported().into_iter().find(|c| c.id == "grok").unwrap();
+        let resolved = gk.config_path(&home).expect("grok must have a config path");
+        assert!(
+            resolved.ends_with(std::path::Path::new(".grok/config.toml"))
+                || resolved.ends_with(std::path::Path::new(".grok\\config.toml")),
+            "grok config path must end with .grok/config.toml; got: {resolved:?}"
+        );
+        assert_eq!(gk.display_name, "Grok CLI");
+        assert!(gk.supports_local_http);
+        assert!(!gk.http_entry_includes_type);
+        assert_eq!(gk.format, ConfigFormat::Toml);
         let _ = std::fs::remove_dir_all(&home);
     }
 }

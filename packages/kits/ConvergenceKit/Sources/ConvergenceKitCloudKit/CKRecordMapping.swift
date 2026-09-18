@@ -49,13 +49,19 @@ public enum CKRecordMapping {
     /// in `moot_sync_hlc` so the receiver applies the same LWW gate as for
     /// upserts (D2 fix) and persists the HLC in `_ck_sync_meta` after
     /// hard-deleting the row (A6 adjudication, stale-resurrect guard).
+    ///
+    /// The `representation` parameter controls how `moot_sync_hlc` is
+    /// encoded: `.legacyPacked` uses the packed `Int64` NSNumber (existing
+    /// behavior, default); `.fullWidthV2` uses `Data(HLC.wireBytes)` —
+    /// 16 bytes, fully lossless. Must match the zone's manifest declaration.
     public static func tombstoneRecord(
         rowKey: UUID,
         table: String,
         kitID: String,
         deleteHLC: HLC,
         schemaVersion: Int,
-        zone: CKRecordZone.ID
+        zone: CKRecordZone.ID,
+        representation: HLCWireRepresentation = .legacyPacked
     ) -> CKRecord {
         let id = recordID(rowKey: rowKey, zone: zone)
         let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: id)
@@ -64,7 +70,18 @@ public enum CKRecordMapping {
         record[SyncTombstone.deletedFieldKey] = NSNumber(value: 1)
         // Delete HLC: lets the receiver gate against stale resurrections via the
         // standard LWW comparison and persist the HLC in _ck_sync_meta after delete.
-        record[SyncMetadataField.hlc] = packed(deleteHLC) as NSNumber
+        // Representation-aware encoding — must match the zone's manifest declaration
+        // so the receiving decode() path can read the correct type.
+        switch representation {
+        case .legacyPacked:
+            // Legacy 48/12/4 packed Int64. Byte-identical to all existing zones.
+            // logicalCount above 4095 silently truncates under this representation.
+            record[SyncMetadataField.hlc] = packed(deleteHLC) as NSNumber
+        case .fullWidthV2:
+            // Lossless 16-byte wire format: 8 bytes physicalTime LE, 4 bytes
+            // logicalCount LE, 4 bytes nodeID LE. No component is truncated.
+            record[SyncMetadataField.hlc] = Data(deleteHLC.wireBytes) as NSData
+        }
         record[SyncMetadataField.schemaVersion] = NSNumber(value: schemaVersion)
         record[SyncMetadataField.kitID] = kitID as NSString
         return record
@@ -79,6 +96,10 @@ public enum CKRecordMapping {
     ///   - columnHLCs: Per-column HLC map for `fieldLevelLWW` records. When
     ///     non-nil and non-empty, encoded as a JSON blob in `moot_sync_column_hlcs`.
     ///     Nil or empty for non-fieldLevelLWW records — field is omitted.
+    ///   - representation: Controls how `moot_sync_hlc` and `TypedValue.hlc`
+    ///     columns are encoded. Default `.legacyPacked` preserves byte-identical
+    ///     behavior for all existing zones. Use `.fullWidthV2` only for zones
+    ///     explicitly declared with that representation in their manifest.
     public static func record(
         from values: [String: TypedValue],
         table: String,
@@ -88,7 +109,8 @@ public enum CKRecordMapping {
         kitID: String,
         zone: CKRecordZone.ID,
         columnHLCs: ColumnHLCMap? = nil,
-        encryptedColumns: Set<String> = []
+        encryptedColumns: Set<String> = [],
+        representation: HLCWireRepresentation = .legacyPacked
     ) throws -> CKRecord {
         let recordID = recordID(rowKey: rowKey, zone: zone)
         let record = CKRecord(recordType: recordType(kitID: kitID, table: table), recordID: recordID)
@@ -126,12 +148,33 @@ public enum CKRecordMapping {
             // Declared columns go through the encrypted channel; all others stay plaintext.
             // encryptedValues is itself a CKRecord, so assign() works unchanged.
             let target = encryptedColumns.contains(key) ? record.encryptedValues : record
-            try assign(value: value, to: target, forKey: key)
+            try assign(value: value, to: target, forKey: key, representation: representation)
         }
         // Sync metadata fields use client-writable names from one canonical vocabulary.
-        record[SyncMetadataField.hlc] = packed(hlc) as NSNumber
+        // Representation-aware encoding — must match the zone's manifest declaration
+        // so the receiving decode() path can read the correct type.
+        switch representation {
+        case .legacyPacked:
+            // Legacy 48/12/4 packed Int64. Byte-identical to all existing zones.
+            // logicalCount above 4095 silently truncates under this representation.
+            record[SyncMetadataField.hlc] = packed(hlc) as NSNumber
+        case .fullWidthV2:
+            // Lossless 16-byte wire format: 8 bytes physicalTime LE, 4 bytes
+            // logicalCount LE, 4 bytes nodeID LE. No component is truncated.
+            record[SyncMetadataField.hlc] = Data(hlc.wireBytes) as NSData
+        }
         record[SyncMetadataField.schemaVersion] = NSNumber(value: schemaVersion)
         record[SyncMetadataField.kitID] = kitID as NSString
+        // A live save clears the tombstone marker EXPLICITLY. Pushes save with
+        // `.changedKeys`, so a key this record never sets keeps whatever the
+        // server holds: a live upsert that reuses the record ID of an earlier
+        // delete (a newer write after a delete, which the HLC guards admit)
+        // would merge its values and HLC onto the stored `moot_sync_deleted =
+        // 1` and decode as a tombstone carrying the live HLC. Writing 0 marks
+        // the key changed and overwrites the stale 1; `tombstoneRecord` keeps
+        // writing 1. No lifecycle decision is made here — the write was
+        // admitted before it was serialized.
+        record[SyncTombstone.deletedFieldKey] = NSNumber(value: 0)
         // moot_sync_column_hlcs: present only for fieldLevelLWW records (B-8).
         // JSON-encoded ColumnHLCMap blob. Omitted when nil or empty so non-fieldLevelLWW
         // records stay compact on the wire.
@@ -158,17 +201,81 @@ public enum CKRecordMapping {
     /// `moot_sync_deleted == 1`. Tombstone records are applied through the
     /// standard LWW gate; on a win the row is hard-deleted and the HLC
     /// persists in `_ck_sync_meta` (A6 adjudication).
-    public static func decode(_ record: CKRecord) throws -> DecodedRecord {
-        guard let hlcPacked = (record[SyncMetadataField.hlc] as? NSNumber)?.int64Value else {
-            throw SyncError.decodingFailure(
-                detail: "missing \(SyncMetadataField.hlc) on \(record.recordID.recordName)"
-            )
+    ///
+    /// The `representation` parameter controls how `moot_sync_hlc` and
+    /// `TypedValue.hlc` columns are decoded. Default `.legacyPacked` reads
+    /// the packed `Int64` NSNumber (existing behavior). `.fullWidthV2` requires
+    /// a 16-byte `Data` blob and fails closed (`SyncError.decodingFailure`) on:
+    /// - packed NSNumber where Data is expected (and vice versa)
+    /// - wrong-length Data (not exactly 16 bytes)
+    /// - malformed wire bytes
+    /// - any TypedValue.hlc column using the wrong representation for the zone
+    ///   (mixed-representation record detection)
+    public static func decode(
+        _ record: CKRecord,
+        representation: HLCWireRepresentation = .legacyPacked
+    ) throws -> DecodedRecord {
+        // Decode moot_sync_hlc with strict representation-awareness.
+        // No silent cross-acceptance: legacyPacked rejects 16-byte Data;
+        // fullWidthV2 rejects packed NSNumber.
+        let hlc: HLC
+        switch representation {
+        case .legacyPacked:
+            // Reject 16-byte Data where packed NSNumber is expected —
+            // guards against a legacyPacked decoder accidentally reading
+            // a record written by a fullWidthV2 encoder.
+            if record[SyncMetadataField.hlc] is Data {
+                throw SyncError.decodingFailure(
+                    detail: "legacyPacked zone: moot_sync_hlc must be packed NSNumber " +
+                            "(48/12/4 Int64); found Data — mixed representation rejected " +
+                            "on \(record.recordID.recordName)"
+                )
+            }
+            guard let hlcPacked = (record[SyncMetadataField.hlc] as? NSNumber)?.int64Value else {
+                throw SyncError.decodingFailure(
+                    detail: "missing \(SyncMetadataField.hlc) on \(record.recordID.recordName)"
+                )
+            }
+            hlc = unpacked(hlcPacked)
+        case .fullWidthV2:
+            // Reject packed NSNumber where 16-byte Data is expected —
+            // guards against a fullWidthV2 decoder accidentally reading
+            // a record written by a legacyPacked encoder.
+            if record[SyncMetadataField.hlc] is NSNumber {
+                throw SyncError.decodingFailure(
+                    detail: "fullWidthV2 zone: moot_sync_hlc must be 16-byte Data; " +
+                            "found packed NSNumber — mixed representation rejected " +
+                            "on \(record.recordID.recordName)"
+                )
+            }
+            guard let hlcData = record[SyncMetadataField.hlc] as? Data else {
+                throw SyncError.decodingFailure(
+                    detail: "fullWidthV2 zone: missing or wrong-type moot_sync_hlc " +
+                            "on \(record.recordID.recordName)"
+                )
+            }
+            guard hlcData.count == 16 else {
+                throw SyncError.decodingFailure(
+                    detail: "fullWidthV2 zone: moot_sync_hlc Data must be exactly 16 bytes " +
+                            "(8 physicalTime LE + 4 logicalCount LE + 4 nodeID LE); " +
+                            "got \(hlcData.count) bytes on \(record.recordID.recordName)"
+                )
+            }
+            do {
+                // HLC.wireBytes inverse — throws HLCError.invalidWireLength if buffer
+                // is not 16 bytes, but we guard above so this is defense in depth.
+                hlc = try HLC(wireBytes: [UInt8](hlcData))
+            } catch {
+                throw SyncError.decodingFailure(
+                    detail: "fullWidthV2 zone: moot_sync_hlc malformed wireBytes: \(error) " +
+                            "on \(record.recordID.recordName)"
+                )
+            }
         }
         guard let schemaVersion = (record[SyncMetadataField.schemaVersion] as? NSNumber)?.intValue else {
             throw SyncError.decodingFailure(detail: "missing \(SyncMetadataField.schemaVersion)")
         }
         let kitID = (record[SyncMetadataField.kitID] as? String) ?? ""
-        let hlc = unpacked(hlcPacked)
         let parts = record.recordType.split(separator: "_", maxSplits: 1)
         let tableName = parts.count > 1 ? String(parts[1]) : record.recordType
         // Reject fabrication: a corrupt recordName must never become a fresh
@@ -236,10 +343,56 @@ public enum CKRecordMapping {
                         values[col] = .bitmap(i)
                     }
                 case "hlc":
-                    // .hlc was stored as packed(h) (Int64 NSNumber), decoded as .int(packed).
-                    // Restore by unpacking the Int64 back to the HLC struct.
-                    if case .int(let packed) = v {
-                        values[col] = .hlc(unpacked(packed))
+                    // TypedValue.hlc column restoration is representation-aware.
+                    //
+                    // legacyPacked: column was stored as packed(h) — packed Int64 NSNumber.
+                    //   typedValue(from:) decoded NSNumber as .int(packed). We unpack back
+                    //   to HLC. If .blob is found instead, the record is mixed-representation
+                    //   and we fail closed to prevent silent data corruption.
+                    //
+                    // fullWidthV2: column was stored as Data(h.wireBytes) — 16-byte NSData.
+                    //   typedValue(from:) decoded NSData as .blob(data). We reconstruct via
+                    //   HLC(wireBytes:). If .int is found instead, the record is mixed-
+                    //   representation and we fail closed.
+                    //
+                    // No silent cross-acceptance in either direction (A1 binding decision).
+                    switch representation {
+                    case .legacyPacked:
+                        if case .blob = v {
+                            // 16-byte Data where packed NSNumber expected.
+                            throw SyncError.decodingFailure(
+                                detail: "hlc column '\(col)': 16-byte Data found but " +
+                                        "legacyPacked representation expected packed NSNumber " +
+                                        "— mixed representation rejected"
+                            )
+                        }
+                        if case .int(let packed) = v {
+                            values[col] = .hlc(unpacked(packed))
+                        }
+                    case .fullWidthV2:
+                        if case .int = v {
+                            // Packed NSNumber (decoded as .int) where 16-byte Data expected.
+                            throw SyncError.decodingFailure(
+                                detail: "hlc column '\(col)': packed NSNumber (decoded as .int) " +
+                                        "found but fullWidthV2 representation expected 16-byte " +
+                                        "Data — mixed representation rejected"
+                            )
+                        }
+                        if case .blob(let d) = v {
+                            guard d.count == 16 else {
+                                throw SyncError.decodingFailure(
+                                    detail: "hlc column '\(col)': expected 16-byte Data " +
+                                            "(HLC.wireBytes), got \(d.count) bytes"
+                                )
+                            }
+                            do {
+                                values[col] = .hlc(try HLC(wireBytes: [UInt8](d)))
+                            } catch {
+                                throw SyncError.decodingFailure(
+                                    detail: "hlc column '\(col)': malformed wireBytes: \(error)"
+                                )
+                            }
+                        }
                     }
                 case "json":
                     // .json was stored as NSString (UTF-8) or NSData (non-UTF-8 blob).
@@ -288,7 +441,21 @@ public enum CKRecordMapping {
         )
     }
 
-    private static func assign(value: TypedValue, to record: any CKRecordKeyValueSetting, forKey key: String) throws {
+    /// Assign one `TypedValue` to a CKRecord key-value target.
+    ///
+    /// The `representation` parameter controls how `TypedValue.hlc` columns
+    /// are stored. `.legacyPacked` uses the packed Int64 NSNumber (48/12/4
+    /// bit layout — logicalCount >4095 truncates silently). `.fullWidthV2`
+    /// uses `Data(HLC.wireBytes)` — 16 bytes, fully lossless. Must match the
+    /// zone's manifest declaration; the matching decode() path reads the same
+    /// type and rejects the opposite form (fail-closed mixed-representation
+    /// detection, A1 binding decision).
+    private static func assign(
+        value: TypedValue,
+        to record: any CKRecordKeyValueSetting,
+        forKey key: String,
+        representation: HLCWireRepresentation = .legacyPacked
+    ) throws {
         switch value {
         case .null:
             record[key] = nil
@@ -317,7 +484,17 @@ public enum CKRecordMapping {
                 record[key] = d as NSData
             }
         case .hlc(let h):
-            record[key] = packed(h) as NSNumber
+            // Representation-aware HLC encoding for TypedValue.hlc columns.
+            // legacyPacked: 48/12/4 Int64 NSNumber — logicalCount >4095 truncates.
+            // fullWidthV2: Data(HLC.wireBytes) — 16 bytes lossless.
+            // The decode() type-tag "hlc" path reads the symmetric form and
+            // fails closed if the opposing type is found (mixed-representation guard).
+            switch representation {
+            case .legacyPacked:
+                record[key] = packed(h) as NSNumber
+            case .fullWidthV2:
+                record[key] = Data(h.wireBytes) as NSData
+            }
         case .fingerprint(let fp):
             // 32 bytes (4 x UInt64 little-endian).
             var data = Data(capacity: 32)

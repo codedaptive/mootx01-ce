@@ -18,6 +18,9 @@ use crate::cli::{ExistingDbArg, InstallDepthArg, Location};
 use crate::core::clients::{self, join_rel, ConfigFormat, McpClient, SERVER_NAME};
 use crate::core::depth::{self, DepthOutcome, InstallDepth, ProcessClaudeCliRunner};
 use crate::core::desktop_ext;
+use genius_locus_kit::{EstateCatalog, EstateRecord};
+use genius_locus_kit_migrations as manifest_refresh;
+
 use crate::core::{mcp_ownership, merge, paths, permissions};
 use crate::exit;
 
@@ -32,8 +35,10 @@ pub fn run(
     vault_on: bool,
     depth_arg: Option<InstallDepthArg>,
     db_arg: Option<ExistingDbArg>,
+    no_encrypt: bool,
 ) -> ExitCode {
     let home = home_dir();
+
     let registry = clients::supported();
 
     let selected = match resolve_targets(&registry, target, yes, &home) {
@@ -43,16 +48,118 @@ pub fn run(
             return ExitCode::from(exit::FAILURE);
         }
     };
-    if selected.is_empty() {
-        println!("Nothing selected.");
-        return ExitCode::from(exit::OK);
-    }
-
     // Existing-database disposition (reinstall contract): resolved BEFORE any
     // wiring so a 'replace' that cannot proceed (daemon running, trash
     // failure) aborts the install with nothing half-done.
     if let Err(code) = handle_existing_database(db_arg, yes) {
         return code;
+    }
+
+    // Seed the product settings file (`config.json`) with the computed default
+    // stats-store path when the key is absent. Idempotent: a second run leaves
+    // an existing value untouched (R6, 2026-09-09). `upgrade` never calls this.
+    // Placed after the DB abort gate AND before the nothing-selected return so
+    // an install that selects no client still seeds the setting (W-5, matching
+    // Swift's placement at InstallCommand.swift:161 vs the guard at :185).
+    seed_config_defaults();
+
+    // Nothing-selected check comes AFTER seeding so the setting is always
+    // written on first install regardless of whether any client is wired.
+    if selected.is_empty() {
+        println!("Nothing selected.");
+        return ExitCode::from(exit::OK);
+    }
+
+    // At-rest encryption posture for the DEFAULT estate (twin of Swift
+    // InstallCommand). install does not create the estate file — the substrate
+    // writes it lazily on first serve — so --no-encrypt cannot act now; it
+    // records the choice in the default estate's manifest, the one record
+    // every opener reads, and the open posture honors it when the file is
+    // finally created. Encrypted is the default: absent a plaintext
+    // declaration, first serve mints db.key and creates an encrypted estate.
+    //
+    // Recorded in the estate manifest rather than only in the daemon
+    // environment because `mootx01 serve` run by hand carries no service
+    // environment, and the two must not disagree about the same estate.
+    //
+    // The catalog names the default estate and its files; install inspects
+    // the same database file every opener will open.
+    {
+        use aria_mcp::estate_migration::{detect_estate_file_state, EstateFileState};
+        let active = match crate::core::estate_open::catalog(None) {
+            Ok(catalog) => catalog.active().clone(),
+            Err(e) => {
+                eprintln!("mootx01: {e}");
+                return ExitCode::from(exit::FAILURE);
+            }
+        };
+        let estate = active.database_path();
+        let format = genius_locus_kit::estate_format::EstateFormatVersion::CURRENT;
+        if no_encrypt {
+            match detect_estate_file_state(&estate) {
+                EstateFileState::Absent => {
+                    if let Err(e) = manifest_refresh::refresh(
+                        &active,
+                        format,
+                        genius_locus_kit::EstateManifestEncryption::Plaintext,
+                        wall_now_millis(),
+                    ) {
+                        // Failing to record the choice must not silently
+                        // produce the opposite posture — the user would get an
+                        // encrypted estate after asking for a plaintext one.
+                        eprintln!(
+                            "mootx01: could not record the --no-encrypt choice in {}: {e}",
+                            active.manifest_path().display()
+                        );
+                        return ExitCode::from(exit::FAILURE);
+                    }
+                    println!("Estate encryption: DISABLED (--no-encrypt). The estate will be stored unencrypted.");
+                    println!("  Run `mootx01 upgrade` at any time to encrypt it.");
+                }
+                EstateFileState::Plaintext => {
+                    println!("Estate encryption: already unencrypted; --no-encrypt has nothing to change.");
+                }
+                EstateFileState::Ciphertext => {
+                    // Refuse to imply that --no-encrypt decrypts an existing
+                    // estate. It does not, and there is deliberately no path
+                    // that does.
+                    println!("Estate encryption: the existing estate is already ENCRYPTED; --no-encrypt does not decrypt it and was ignored.");
+                }
+            }
+        } else if detect_estate_file_state(&estate) == EstateFileState::Absent {
+            // Encrypted is the default for THIS install. A plaintext declaration
+            // left in the manifest by an earlier estate at the same path (a prior
+            // opt-out install whose database was later removed outside
+            // --replace-db) must not survive to downgrade the estate this
+            // install just promised would be encrypted: the open posture honors
+            // the declaration for an ABSENT estate, so first serve would
+            // silently create plaintext (stale-choice downgrade). --replace-db
+            // trashes the manifest with the estate in apply_replace; this
+            // branch covers every other way a manifest outlives its database.
+            // Only the absent case is touched — an existing estate's posture is
+            // a fact about the file, never the manifest.
+            if manifest_refresh::declares_plaintext(&active) {
+                match manifest_refresh::refresh(
+                    &active,
+                    format,
+                    genius_locus_kit::EstateManifestEncryption::Encrypted,
+                    wall_now_millis(),
+                ) {
+                    Ok(_) => println!("Estate encryption: a stale plaintext declaration was replaced; the new estate will be created ENCRYPTED (the default)."),
+                    Err(e) => {
+                        // Failing to enact the default must not silently produce
+                        // the opposite posture — the same rule the opt-out branch
+                        // applies to recording the choice.
+                        eprintln!(
+                            "mootx01: could not replace a stale plaintext declaration in {}: {e}. \
+                             Remove it manually, or pass --no-encrypt if plaintext was intended.",
+                            active.manifest_path().display()
+                        );
+                        return ExitCode::from(exit::FAILURE);
+                    }
+                }
+            }
+        }
     }
 
     // Resolve the global integration depth (§4.4). Precedence:
@@ -212,7 +319,14 @@ pub fn run(
             // untouched — the resident daemon carries the vault posture in
             // its own service-manager environment (`core::service`),
             // independent of this call.
-            match depth::apply(client.id, depth, &home, !vault_on, &ProcessClaudeCliRunner) {
+            let result = if client.id == "codex" && depth == InstallDepth::Plugin
+                && depth::codex_cli_home_matches(&home) {
+                depth::apply_codex_plugin(&home, !vault_on, false, &depth::ProcessCodexCliRunner)
+                    .map(|outcome| outcome.unwrap_or(DepthOutcome::Server))
+            } else {
+                depth::apply(client.id, depth, &home, !vault_on, &ProcessClaudeCliRunner)
+            };
+            match result {
                 Ok(DepthOutcome::Server) => {
                     // Claude Desktop's "plugin" is a Desktop extension, not a
                     // file-drop payload. At plugin depth, install it
@@ -278,7 +392,7 @@ pub fn run(
     //                          before grant_tiered adds anything still
     //                          missing; both write BOTH the direct
     //                          (mcp__mootx01__) and plugin
-    //                          (mcp__plugin_mootx01_mootx01__) namespaces —
+    //                          (mcp__plugin_mootx01_memory__) namespaces —
     //                          a rule under only one matches zero calls made
     //                          through the other Claude Code connection.
     //   --grant-permissions  → every tool into allow (explicit opt-in).
@@ -337,16 +451,14 @@ pub fn run(
     #[cfg(target_os = "linux")]
     {
         use crate::core::service;
-        let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
         if !no_daemon {
             // vault_on baked into the unit's Environment= block so the resident
-            // daemon reads MOOTX01_VAULT without it being set in the shell.
-            // Fails CLOSED if MOOTX01_DATA_DIR contains characters that would allow
-            // systemd directive injection.
-            match service::daemon_unit(&binary_path, data_override.as_deref(), vault_on) {
-                Ok(unit) => report_registration("daemon", service::register(&home, service::DAEMON_UNIT, &unit)),
-                Err(e) => eprintln!("  ✗ daemon service: data-dir path rejected: {e}"),
-            }
+            // daemon reads MOOTX01_VAULT without it being set in the shell. The
+            // daemon finds its estate through the catalog in the platform
+            // configuration directory, so no data-directory value travels in
+            // the unit.
+            let unit = service::daemon_unit(&binary_path, vault_on);
+            report_registration("daemon", service::register(&home, service::DAEMON_UNIT, &unit));
         }
         if !no_mgr {
             let mgr_binary = std::path::Path::new(&binary_path)
@@ -356,16 +468,8 @@ pub fn run(
             match mgr_binary {
                 Some(mgr) => {
                     let token = service::random_token();
-                    // Fails CLOSED if MOOTX01_DATA_DIR contains characters that would
-                    // allow systemd directive injection.
-                    match service::mgr_unit(
-                        &mgr.display().to_string(),
-                        &token,
-                        data_override.as_deref(),
-                    ) {
-                        Ok(unit) => report_registration("moot-mgr", service::register(&home, service::MGR_UNIT, &unit)),
-                        Err(e) => eprintln!("  ✗ moot-mgr service: data-dir path rejected: {e}"),
-                    }
+                    let unit = service::mgr_unit(&mgr.display().to_string(), &token);
+                    report_registration("moot-mgr", service::register(&home, service::MGR_UNIT, &unit));
                 }
                 None => println!(
                     "  skipping moot-mgr service (no moot-mgr binary beside mootx01)"
@@ -376,15 +480,13 @@ pub fn run(
     #[cfg(target_os = "windows")]
     {
         use crate::core::service;
-        let data_override = std::env::var("MOOTX01_DATA_DIR").ok().filter(|v| !v.is_empty());
         if !no_daemon {
             // vault_on baked into the cmd wrapper as `set MOOTX01_VAULT=...&&`
-            // so the resident daemon reads MOOTX01_VAULT at launch.
-            // Fails CLOSED if MOOTX01_DATA_DIR contains cmd.exe-unsafe characters.
-            match service::daemon_task_command(&binary_path, data_override.as_deref(), vault_on) {
-                Ok((exe, arg)) => report_registration("daemon", service::register_task(service::DAEMON_TASK, &exe, &arg)),
-                Err(e) => eprintln!("  ✗ daemon service: data-dir path rejected: {e}"),
-            }
+            // so the resident daemon reads MOOTX01_VAULT at launch. The daemon
+            // finds its estate through the catalog in the platform configuration
+            // directory, so no data-directory value travels in the task.
+            let (exe, arg) = service::daemon_task_command(&binary_path, vault_on);
+            report_registration("daemon", service::register_task(service::DAEMON_TASK, &exe, &arg));
         }
         if !no_mgr {
             let mgr_binary = std::path::Path::new(&binary_path)
@@ -397,15 +499,8 @@ pub fn run(
                     if let Err(e) = service::write_mgr_control_token(&token) {
                         report_registration("moot-mgr", service::RegisterOutcome::Failed(e));
                     } else {
-                        // Fails CLOSED if MOOTX01_DATA_DIR contains cmd.exe-unsafe characters.
-                        match service::mgr_task_command(
-                            &mgr.display().to_string(),
-                            &token,
-                            data_override.as_deref(),
-                        ) {
-                            Ok((exe, arg)) => report_registration("moot-mgr", service::register_task(service::MGR_TASK, &exe, &arg)),
-                            Err(e) => eprintln!("  ✗ moot-mgr service: data-dir path rejected: {e}"),
-                        }
+                        let (exe, arg) = service::mgr_task_command(&mgr.display().to_string(), &token);
+                        report_registration("moot-mgr", service::register_task(service::MGR_TASK, &exe, &arg));
                     }
                 }
                 None => println!(
@@ -581,7 +676,7 @@ fn dedupe_one(
 /// §3: clients are pointed at the resident daemon; resolve its URL from the
 /// port file, falling back to the default 4242.
 fn daemon_url() -> String {
-    let port = paths::read_port_file(&paths::daemon_port_file(&paths::data_dir())).unwrap_or(4242);
+    let port = paths::read_port_file(&paths::daemon_port_file(&EstateCatalog::configuration_directory())).unwrap_or(4242);
     format!("http://127.0.0.1:{port}")
 }
 
@@ -722,8 +817,6 @@ pub(crate) fn home_dir() -> PathBuf {
 /// is unit-testable without a TTY.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum DbDecision {
-    /// No existing database — nothing to decide.
-    Fresh,
     /// Proceed without touching anything (with the printed reason).
     Untouched(&'static str),
     /// Adopt the existing database; reset the moot-mgr store.
@@ -797,21 +890,19 @@ pub(crate) fn decide_existing_db(
     }
 }
 
-/// True when a default estate database already exists in `data`, in either
-/// layout: the Rust `databases/default/estate.sqlite` or the Swift legacy
-/// flat `<data>/estate.sqlite` (a migrated data directory).
-pub(crate) fn default_estate_exists(data: &Path) -> bool {
-    paths::estate_sqlite_path(data, "default").exists() || data.join("estate.sqlite").exists()
+/// True when an estate's database file exists at `database` (the catalog
+/// record's `database_path`). Twin of Swift `DataRetention.estateExists`.
+pub(crate) fn estate_exists(database: &Path) -> bool {
+    database.exists()
 }
 
-/// Adopt the existing database: it stays the active default estate; the
-/// moot-mgr history store is trashed so the dashboard's estate registry
-/// rebuilds from what the daemon actually serves.
-pub(crate) fn apply_reuse(data: &Path) -> Result<(), String> {
-    repair_reused_audit_dialect(data)?;
-    paths::set_active_estate(data, "default")
-        .map_err(|e| format!("cannot set active estate: {e}"))?;
-    trash_mgr_store(data)
+/// Adopt the existing estate: it stays where it is; the moot-mgr history
+/// store is trashed so the dashboard's estate registry rebuilds from what
+/// the daemon actually serves. The caller makes the estate the catalog's
+/// active record.
+pub(crate) fn apply_reuse(record: &EstateRecord, configuration: &Path) -> Result<(), String> {
+    repair_reused_audit_dialect(&record.database_path())?;
+    trash_mgr_store(configuration)
 }
 
 /// One-release compatibility repair for Rust estates created with the verbose
@@ -822,12 +913,8 @@ pub(crate) fn apply_reuse(data: &Path) -> Result<(), String> {
 /// columns are renamed to the established short estate format in one SQLite
 /// transaction. Failure aborts reuse before the active-estate pointer or
 /// manager history changes.
-fn repair_reused_audit_dialect(data: &Path) -> Result<(), String> {
-    let candidates = [
-        paths::estate_sqlite_path(data, "default"),
-        data.join("estate.sqlite"),
-    ];
-    for path in candidates.iter().filter(|path| path.exists()) {
+fn repair_reused_audit_dialect(database: &Path) -> Result<(), String> {
+    for path in [database].into_iter().filter(|path| path.exists()) {
         let conn = rusqlite::Connection::open(path)
             .map_err(|e| format!("cannot inspect reused estate {}: {e}", path.display()))?;
         persistence_kit::apply_install_encryption_to_conn(&conn, &path.to_string_lossy())
@@ -868,44 +955,33 @@ fn repair_reused_audit_dialect(data: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Fresh start: move the default estate files (both layouts) and the
-/// moot-mgr store to the platform trash. Named estates are untouched.
-pub(crate) fn apply_replace(data: &Path) -> Result<(), String> {
-    // Flat legacy layout: the SQLite file, its WAL/SHM sidecars, and the
-    // derived vector / dreaming-queue siblings that carry estate content
-    // (`estate.sqlite` → `estate.vectors.vec` / `estate.queue.sqlite`,
-    //  see VectorStore.vectorsURL and EstateConfiguration.queueSibling).
-    for name in [
-        "estate.sqlite",
-        "estate.sqlite-wal",
-        "estate.sqlite-shm",
-        "estate.vectors.vec",
-        "estate.queue.sqlite",
-        "estate.queue.sqlite-wal",
-        "estate.queue.sqlite-shm",
-    ] {
-        let p = data.join(name);
-        if p.exists() {
-            trash::delete(&p).map_err(|e| format!("cannot trash {}: {e}", p.display()))?;
-        }
+/// Fresh start: every file of the estate (the record's owned files, its
+/// `db.key`, and the legacy `no-encrypt` marker, which would otherwise
+/// downgrade the NEXT estate to plaintext) and the moot-mgr store move to the
+/// platform trash; the estate directory stays and a fresh database is created
+/// in it on first serve. Other estates are untouched — they are addressed by
+/// `mootx01 db`, not by the install flow.
+pub(crate) fn apply_replace(estate_files: &[PathBuf], configuration: &Path) -> Result<(), String> {
+    for p in estate_files.iter().filter(|p| p.exists()) {
+        trash::delete(p).map_err(|e| format!("cannot trash {}: {e}", p.display()))?;
     }
-    // Rust layout: the whole databases/default/ directory (SQLite, sidecars,
-    // and the whole-file encryption key live together).
-    let default_dir = data.join("databases").join("default");
-    if default_dir.exists() {
-        trash::delete(&default_dir)
-            .map_err(|e| format!("cannot trash {}: {e}", default_dir.display()))?;
-    }
-    paths::set_active_estate(data, "default")
-        .map_err(|e| format!("cannot set active estate: {e}"))?;
-    trash_mgr_store(data)
+    trash_mgr_store(configuration)
 }
 
-/// Move the moot-mgr history store (<data>/moot-mgr/) to the platform trash
-/// if present. The manager recreates an empty store on next start, so this
-/// is the "reset registration" primitive both branches share.
-fn trash_mgr_store(data: &Path) -> Result<(), String> {
-    let mgr = data.join("moot-mgr");
+/// The files `apply_replace` trashes for `record`: its owned files, the
+/// Rust key file beside the database, and the pre-manifest opt-out marker.
+pub(crate) fn replaceable_estate_files(record: &EstateRecord) -> Vec<PathBuf> {
+    let mut files = record.owned_file_paths();
+    files.push(record.directory.join(aria_mcp::INSTALL_KEY_FILE));
+    files.push(record.legacy_encryption_opt_out_path());
+    files
+}
+
+/// Move the moot-mgr history store (`<configuration>/moot-mgr/`) to the
+/// platform trash if present. The manager recreates an empty store on next
+/// start, so this is the "reset registration" primitive both branches share.
+fn trash_mgr_store(configuration: &Path) -> Result<(), String> {
+    let mgr = configuration.join("moot-mgr");
     if mgr.exists() {
         trash::delete(&mgr).map_err(|e| format!("cannot trash {}: {e}", mgr.display()))?;
     }
@@ -915,10 +991,25 @@ fn trash_mgr_store(data: &Path) -> Result<(), String> {
 /// Interactive/flag front-end for the reinstall contract. Returns Err(code)
 /// when the install must stop (user abort, daemon still running, trash
 /// failure); Ok(()) to continue installing.
+///
+/// The existing estate is the catalog's default record. Opening the catalog
+/// creates it on a first install, which is what install is for. The estate
+/// this reasons about is already at the catalog's base directory: any legacy
+/// Windows base is adopted by `core::estate_open::catalog` before the catalog
+/// opens. (No layout adoption belongs here: the Rust port never kept a flat
+/// estate in its base directory, so the Swift flat-layout capsule has no twin
+/// — ruling R3.)
 fn handle_existing_database(flag: Option<ExistingDbArg>, yes: bool) -> Result<(), ExitCode> {
     use std::io::IsTerminal;
-    let data = paths::data_dir();
-    if !default_estate_exists(&data) {
+    let mut catalog = crate::core::estate_open::catalog(None).map_err(|e| {
+        eprintln!("  ✗ {e}");
+        ExitCode::from(exit::FAILURE)
+    })?;
+    let Some(record) = catalog.record_named(EstateCatalog::DEFAULT_NAME).cloned() else {
+        return Ok(());
+    };
+    let configuration = EstateCatalog::configuration_directory();
+    if !estate_exists(&record.database_path()) {
         return Ok(());
     }
     let interactive = io::stdin().is_terminal();
@@ -927,7 +1018,7 @@ fn handle_existing_database(flag: Option<ExistingDbArg>, yes: bool) -> Result<()
         yes,
         interactive,
         || {
-            println!("\nAn existing MOOTx01 database was found at {}.", data.display());
+            println!("\nAn existing MOOTx01 estate was found at {}.", record.directory.display());
             print!("Reuse it, or replace it with a fresh one? [reuse/replace] (reuse): ");
             let _ = io::stdout().flush();
             let mut line = String::new();
@@ -945,7 +1036,6 @@ fn handle_existing_database(flag: Option<ExistingDbArg>, yes: bool) -> Result<()
         },
     );
     match decision {
-        DbDecision::Fresh => Ok(()),
         DbDecision::Untouched(reason) => {
             println!("  ⓘ {reason}");
             Ok(())
@@ -955,27 +1045,42 @@ fn handle_existing_database(flag: Option<ExistingDbArg>, yes: bool) -> Result<()
             Err(ExitCode::from(exit::FAILURE))
         }
         DbDecision::Reuse => {
-            reject_if_daemon_alive("reusing the database resets the moot-mgr history store")?;
-            apply_reuse(&data).map_err(|e| {
-                eprintln!("  ✗ {e}");
-                ExitCode::from(exit::FAILURE)
-            })?;
-            println!("  ✓ Existing database adopted as the default estate; moot-mgr history reset.");
+            reject_if_daemon_alive("reusing the estate resets the moot-mgr history store")?;
+            apply_reuse(&record, &configuration)
+                .and_then(|()| catalog.activate(&record.name).map_err(|e| e.to_string()))
+                .map_err(|e| {
+                    eprintln!("  ✗ Could not adopt the existing estate: {e}");
+                    ExitCode::from(exit::FAILURE)
+                })?;
+            println!("  ✓ Existing estate adopted as the default estate; moot-mgr history reset.");
             Ok(())
         }
         DbDecision::Replace => {
-            reject_if_daemon_alive("replacing the database")?;
-            apply_replace(&data).map_err(|e| {
-                eprintln!("  ✗ {e}");
-                ExitCode::from(exit::FAILURE)
-            })?;
+            reject_if_daemon_alive("replacing the estate")?;
+            apply_replace(&replaceable_estate_files(&record), &configuration)
+                .and_then(|()| catalog.activate(&record.name).map_err(|e| e.to_string()))
+                .map_err(|e| {
+                    eprintln!("  ✗ Could not replace the estate: {e}");
+                    ExitCode::from(exit::FAILURE)
+                })?;
             println!(
-                "  ✓ Previous database moved to {}; a fresh estate will be created on first serve.",
+                "  ✓ Previous estate moved to {}; a fresh estate will be created on first serve.",
                 super::uninstall::trash_name()
             );
             Ok(())
         }
     }
+}
+
+/// Current wall-clock time as milliseconds since the Unix epoch, for the
+/// manifest's `created` stamp when install first declares a posture.
+fn wall_now_millis() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
 }
 
 /// A live daemon holds the estate and stats stores open (on Windows, open
@@ -990,6 +1095,33 @@ fn reject_if_daemon_alive(action: &str) -> Result<(), ExitCode> {
         return Err(ExitCode::from(exit::FAILURE));
     }
     Ok(())
+}
+
+/// Seed `<config-dir>/config.json` with the computed default stats-store path
+/// when the key is absent. Delegates to `seed_config_defaults_at` with the
+/// live configuration directory so there is one implementation path for both
+/// production and tests (W-1).
+fn seed_config_defaults() {
+    seed_config_defaults_at(&moot_product_identity::storage::configuration_directory());
+}
+
+/// Seed `<config_dir>/config.json` with the computed default stats-store path
+/// when the key is absent. Accepts the directory explicitly so tests can
+/// redirect seeding to a scratch path without touching the developer's real
+/// configuration file.
+///
+/// Non-fatal: a write failure logs a warning but does not abort the install;
+/// both the daemon and moot-mgr fall back to the computed default when the
+/// setting is absent.
+fn seed_config_defaults_at(config_dir: &std::path::Path) {
+    // Use the canonical path helper — the subdirectory + filename are spelled
+    // exactly once across all callers (W-1).
+    let default_path = moot_product_identity::paths::daemon_stats_store_default(config_dir);
+    if let Err(e) =
+        moot_product_identity::settings::seed_defaults_if_absent(config_dir, &default_path)
+    {
+        eprintln!("mootx01: warning: could not seed config.json: {e}");
+    }
 }
 
 #[cfg(test)]
@@ -1271,12 +1403,16 @@ mod tests {
             "the stale bare `command: mootx01` placeholder must be gone; got: {rewritten}"
         );
 
-        // The stranded-cache refresh must have
-        // invoked the CLI-update seam, since the plugin is already installed.
+        // The stranded-cache refresh must have invoked the CLI-update seam,
+        // since the plugin is already installed. The fixture's cache carries
+        // no .mcp.json, so after the version-only update the refresh reads it
+        // as stale and rebuilds it by reinstalling. Twin of the Swift
+        // PluginDedupeTests expectation.
+        let verbs: Vec<String> = fake.invoked.borrow().iter().map(|call| call[1].clone()).collect();
         assert_eq!(
-            fake.invoked.borrow().as_slice(),
-            &[vec!["plugin".to_string(), "update".to_string(), "mootx01@mootx01".to_string()]],
-            "rematerializing an already-installed plugin must invoke `claude plugin update`"
+            verbs,
+            vec!["update".to_string(), "uninstall".to_string(), "install".to_string()],
+            "rematerializing an already-installed plugin must invoke `claude plugin update`, then rebuild the manifest-less cache"
         );
 
         // No direct entry must exist — the plugin still owns the connection.
@@ -1294,12 +1430,14 @@ mod tests {
         let client = claude_code_client();
         let config = client.config_path(&home).unwrap();
         std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        // A dev-rig direct entry: our server name, but selecting another
+        // estate with --db — the plugin-ownership rule's "not ours or
+        // non-default".
         let dev_rig = serde_json::json!({
             "mcpServers": {
                 "mootx01": {
                     "command": "/Users/dev/build/mootx01",
-                    "args": ["proxy"],
-                    "env": {"MOOTX01_DATA_DIR": "/Users/dev/rig-a/.mootx01-data"},
+                    "args": ["serve", "--db", "rig-a"],
                 }
             }
         });
@@ -1309,14 +1447,14 @@ mod tests {
         let outcome = dedupe_one(&client, &home, Location::Global).unwrap();
         match outcome {
             merge::JsonOwnershipOutcome::RetainedForeign { reason, path } => {
-                assert!(reason.contains("MOOTX01_DATA_DIR"));
+                assert!(reason.contains("--db"));
                 assert_eq!(path, config);
             }
             other => panic!("expected RetainedForeign, got {other:?}"),
         }
         let entry = read_direct_entry(&client, &home).unwrap();
         assert_eq!(entry["command"], "/Users/dev/build/mootx01");
-        assert_eq!(entry["env"]["MOOTX01_DATA_DIR"], "/Users/dev/rig-a/.mootx01-data");
+        assert_eq!(entry["args"], serde_json::json!(["serve", "--db", "rig-a"]));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -1517,25 +1655,31 @@ mod tests {
     }
 
     #[test]
-    fn default_estate_detection_covers_both_layouts() {
+    fn estate_detection_is_the_record_database_file() {
         let data = std::env::temp_dir()
             .join(format!("mootx01-dbdetect-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
-        std::fs::create_dir_all(&data).unwrap();
-        assert!(!default_estate_exists(&data));
-        // Swift legacy flat layout.
-        std::fs::write(data.join("estate.sqlite"), b"x").unwrap();
-        assert!(default_estate_exists(&data));
-        let _ = std::fs::remove_file(data.join("estate.sqlite"));
-        // Rust databases/default layout.
-        std::fs::create_dir_all(data.join("databases").join("default")).unwrap();
-        std::fs::write(
-            data.join("databases").join("default").join("estate.sqlite"),
-            b"x",
-        )
-        .unwrap();
-        assert!(default_estate_exists(&data));
+        let record = EstateRecord::new("default", data.join("databases").join("default"));
+        assert!(!estate_exists(&record.database_path()));
+        std::fs::create_dir_all(&record.directory).unwrap();
+        std::fs::write(record.database_path(), b"x").unwrap();
+        assert!(estate_exists(&record.database_path()));
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// Replace trashes the estate's files — database, sidecars, manifest,
+    /// key, legacy marker — and leaves the directory for the next estate;
+    /// a sibling estate is untouched.
+    #[test]
+    fn replace_file_list_covers_key_and_legacy_marker_only_for_this_estate() {
+        let data = std::env::temp_dir().join(format!("mootx01-replace-{}", std::process::id()));
+        let record = EstateRecord::new("default", data.join("databases").join("default"));
+        let files = replaceable_estate_files(&record);
+        assert!(files.contains(&record.database_path()));
+        assert!(files.contains(&record.manifest_path()));
+        assert!(files.contains(&record.directory.join(aria_mcp::INSTALL_KEY_FILE)));
+        assert!(files.contains(&record.legacy_encryption_opt_out_path()));
+        assert!(files.iter().all(|f| f.starts_with(&record.directory)));
     }
 
     #[test]
@@ -1543,8 +1687,9 @@ mod tests {
         let data = std::env::temp_dir()
             .join(format!("mootx01-reuse-audit-dialect-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&data);
-        let estate = paths::estate_sqlite_path(&data, "default");
-        std::fs::create_dir_all(estate.parent().unwrap()).unwrap();
+        let record = EstateRecord::new("default", data.join("databases").join("default"));
+        let estate = record.database_path();
+        std::fs::create_dir_all(&record.directory).unwrap();
 
         let conn = rusqlite::Connection::open(&estate).unwrap();
         conn.execute_batch(
@@ -1567,7 +1712,7 @@ mod tests {
         .unwrap();
         drop(conn);
 
-        apply_reuse(&data).expect("reuse must repair the legacy Rust dialect");
+        apply_reuse(&record, &data).expect("reuse must repair the legacy Rust dialect");
 
         let conn = rusqlite::Connection::open(&estate).unwrap();
         let columns: Vec<String> = conn
@@ -1596,7 +1741,7 @@ mod tests {
         // Restart-safe: a second reuse sees the short dialect and proceeds
         // without touching the table again.
         drop(conn);
-        apply_reuse(&data).expect("canonical reuse must be a no-op");
+        apply_reuse(&record, &data).expect("canonical reuse must be a no-op");
         let _ = std::fs::remove_dir_all(&data);
     }
 
@@ -1613,8 +1758,9 @@ mod tests {
             "mootx01-reuse-capture-{}",
             uuid::Uuid::new_v4().simple()
         ));
-        let estate_path = paths::estate_sqlite_path(&data, "default");
-        std::fs::create_dir_all(estate_path.parent().unwrap()).unwrap();
+        let record = EstateRecord::new("default", data.join("databases").join("default"));
+        let estate_path = record.database_path();
+        std::fs::create_dir_all(&record.directory).unwrap();
         let path = estate_path.to_string_lossy().into_owned();
 
         // Build a complete current estate, then transpose only the audit
@@ -1660,7 +1806,7 @@ mod tests {
             .unwrap();
         drop(conn);
 
-        apply_reuse(&data).expect("reuse must repair before publishing the estate");
+        apply_reuse(&record, &data).expect("reuse must repair before publishing the estate");
         let reopened_store = Arc::new(
             SqliteDrawerStore::from_path(&path, 1_700_000_002, None, 5.0).unwrap(),
         );
@@ -1688,5 +1834,176 @@ mod tests {
         assert!(after_count > before_count, "post-repair capture must append audit state");
         drop(conn);
         let _ = std::fs::remove_dir_all(&data);
+    }
+
+    /// W-5: an install that selects no client (nothing-selected path) must still
+    /// seed config.json with the default stats-store path. The seeder runs AFTER
+    /// the DB abort gate AND BEFORE the nothing-selected return in `run()`.
+    ///
+    /// This test drives `run()` itself under the process-global
+    /// CONFIGURATION_TEST_LOCK so both the EstateCatalog and
+    /// `configuration_directory()` (via XDG_DATA_HOME) land in a scratch
+    /// directory, isolating the test from the developer's real config.json.
+    #[test]
+    fn nothing_selected_install_seeds_stats_store_key() {
+        use crate::core::estate_adoption::CONFIGURATION_TEST_LOCK;
+        use moot_product_identity::{settings, storage::UNIX_DATA_FOLDER};
+
+        // Lock the process-global configuration directory seam shared by all
+        // tests that redirect EstateCatalog and configuration_directory().
+        let _guard = CONFIGURATION_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        // scratch_base is the XDG_DATA_HOME root; config_dir is what
+        // configuration_directory() resolves to under that root.
+        let scratch_base = std::env::temp_dir()
+            .join(format!("mootx01-w5-{}", std::process::id()));
+        let config_dir = scratch_base.join(UNIX_DATA_FOLDER);
+        let _ = std::fs::remove_dir_all(&scratch_base);
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        // Redirect EstateCatalog (used by handle_existing_database) and
+        // configuration_directory() (used by seed_config_defaults) to the same
+        // scratch directory.
+        EstateCatalog::set_configuration_directory_override(Some(config_dir.clone()));
+        let old_xdg = std::env::var("XDG_DATA_HOME").ok();
+        std::env::set_var("XDG_DATA_HOME", &scratch_base);
+
+        struct Restore {
+            old_xdg: Option<String>,
+            scratch_base: std::path::PathBuf,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                EstateCatalog::set_configuration_directory_override(None);
+                match &self.old_xdg {
+                    Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                    None => std::env::remove_var("XDG_DATA_HOME"),
+                }
+                let _ = std::fs::remove_dir_all(&self.scratch_base);
+            }
+        }
+        let _restore = Restore { old_xdg, scratch_base: scratch_base.clone() };
+
+        // Precondition: config.json does not exist yet.
+        let config_file = config_dir.join("config.json");
+        assert!(!config_file.exists(), "scratch dir must start clean");
+
+        // Drive run() with an empty target list so selected is empty. All
+        // interactive-write flags are disabled so only the seeder writes anything.
+        let code = run(
+            Some(vec![]),   // target: empty selection → nothing-selected path
+            Location::Global,
+            true,           // yes
+            false,          // grant_permissions
+            true,           // no_permissions
+            true,           // no_mgr
+            true,           // no_daemon
+            false,          // vault_on
+            None,           // depth_arg
+            None,           // db_arg
+            true,           // no_encrypt
+        );
+
+        // run() must return OK — the nothing-selected path is not an error.
+        // We check the side-effect rather than comparing ExitCode directly
+        // (ExitCode does not implement PartialEq in stable Rust).
+        assert!(
+            config_file.exists(),
+            "run() must seed config.json before the nothing-selected return (W-5); exit was non-zero if this is absent"
+        );
+
+        // The seeded value must be present and under scratch.
+        let loaded = settings::load(&config_dir);
+        assert!(
+            loaded.daemon_stats_store.is_some(),
+            "seed must write daemon.stats_store to config.json (W-5)"
+        );
+        let store_path = loaded.daemon_stats_store.unwrap();
+        assert!(
+            store_path.starts_with(config_dir.to_string_lossy().as_ref()),
+            "seeded path must be under the scratch config directory, not the real one; got: {store_path}"
+        );
+
+        // Idempotent: a second run() call must leave the existing value untouched.
+        let _ = run(Some(vec![]), Location::Global, true, false, true, true, true, false, None, None, true);
+        let loaded2 = settings::load(&config_dir);
+        assert_eq!(
+            loaded2.daemon_stats_store.as_deref(),
+            Some(store_path.as_str()),
+            "seeder must not overwrite an existing value on repeated calls"
+        );
+
+        // Suppress unused-variable warning for code; it captures the W-5
+        // ordering contract via the config_file.exists() assertion above.
+        let _ = code;
+    }
+
+    /// W-5 ordering: config.json must NOT be seeded when handle_existing_database
+    /// aborts before seeding. If seed_config_defaults() were moved above the DB
+    /// abort gate, this test would catch the violation (config.json would exist
+    /// despite the abort).
+    #[test]
+    fn seed_not_written_when_db_gate_aborts() {
+        use crate::core::estate_adoption::CONFIGURATION_TEST_LOCK;
+        use moot_product_identity::storage::UNIX_DATA_FOLDER;
+
+        let _guard = CONFIGURATION_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let scratch_base = std::env::temp_dir()
+            .join(format!("mootx01-w5-ord-{}", std::process::id()));
+        let config_dir = scratch_base.join(UNIX_DATA_FOLDER);
+        let _ = std::fs::remove_dir_all(&scratch_base);
+        std::fs::create_dir_all(&config_dir).unwrap();
+
+        EstateCatalog::set_configuration_directory_override(Some(config_dir.clone()));
+        let old_xdg = std::env::var("XDG_DATA_HOME").ok();
+        std::env::set_var("XDG_DATA_HOME", &scratch_base);
+
+        struct Restore {
+            old_xdg: Option<String>,
+            scratch_base: std::path::PathBuf,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                EstateCatalog::set_configuration_directory_override(None);
+                match &self.old_xdg {
+                    Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+                    None => std::env::remove_var("XDG_DATA_HOME"),
+                }
+                let _ = std::fs::remove_dir_all(&self.scratch_base);
+            }
+        }
+        let _restore = Restore { old_xdg, scratch_base: scratch_base.clone() };
+
+        // Write a malformed catalog so EstateCatalog::open() fails inside
+        // handle_existing_database, causing it to return Err before seeding.
+        std::fs::write(config_dir.join("estatecatalog.json"), b"NOT_VALID_JSON").unwrap();
+
+        let config_file = config_dir.join("config.json");
+        assert!(!config_file.exists(), "no config.json before run()");
+
+        // run() should abort (handle_existing_database fails on the bad catalog).
+        let _ = run(
+            Some(vec![]),
+            Location::Global,
+            true,
+            false,
+            true,
+            true,
+            true,
+            false,
+            None,
+            None,
+            true,
+        );
+
+        // Ordering assertion: seeding must NOT have happened because the DB gate
+        // aborted before the seeder call site. If seed_config_defaults() were
+        // moved above handle_existing_database, config.json would exist here and
+        // this assertion would fail.
+        assert!(
+            !config_file.exists(),
+            "config.json must NOT be seeded when handle_existing_database aborts (W-5 ordering)"
+        );
     }
 }

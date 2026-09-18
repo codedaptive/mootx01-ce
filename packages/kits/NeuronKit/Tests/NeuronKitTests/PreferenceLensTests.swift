@@ -1,4 +1,6 @@
+import Foundation
 import Testing
+import LocusKit
 @testable import NeuronKit
 
 // Preference lenses (SPEC § 7.3). Tests assert the behavioral claims the spec
@@ -134,5 +136,78 @@ struct PreferenceLensTests {
         #expect(throws: MOOTx01Error.self) {
             try NeuronKit.learnedPreference(records: records)
         }
+    }
+
+    // MARK: preferenceTracesWindowLimit — 1,000-trace window conformance vector
+    //
+    // Shared conformance vector for both ports (PREF-1). 1,200 synthetic traces:
+    //   oldest 100: drawer-X endorsed (used=true), drawer-Y dismissed (used=false) — 100 each
+    //   newest 1,000: drawer-Y endorsed (used=true)
+    //
+    // Without window (all 1,200): X = 100e/0d, Y = 1,000e/100d.
+    // BT ratio X = (100+1)/(0+1) = 101; Y = (1,000+1)/(100+1) ≈ 9.9 → X ranks above Y.
+    //
+    // With window (newest 1,000): only drawer-Y appears → Y positive, X absent (≈ 0) → Y ranks above X.
+    //
+    // This vector fails on the pre-fix Rust (no window) and passes on both fixed ports.
+    // Pre-fix Rust result (mutation control): X above Y. Recorded in PREF-1_REPORT.md.
+    @Test("preferenceTracesWindowLimit: 1,000-trace window — Y ranks above X; full 1,200 would rank X above Y")
+    func preferenceWindowConformanceVector() throws {
+        // Helper: date offset from a reference epoch by `seconds`.
+        let epoch = Date(timeIntervalSince1970: 1_700_000_000)
+        func t(_ seconds: Double) -> Date { epoch.addingTimeInterval(seconds) }
+
+        var traces: [RecallTraceItem] = []
+        traces.reserveCapacity(1_200)
+
+        // Old group (seconds 0..<100): 100 X-endorsements + 100 Y-dismissals.
+        // These are the OLDEST 200 traces; they fall outside the 1,000-trace window.
+        for i in 0..<100 {
+            traces.append(RecallTraceItem(
+                id: "x-end-\(i)", target: "drawer-X",
+                recalledAt: t(Double(i)),
+                operationalBitmap: RecallTraceItem.flagUsed))     // used = true → endorsement
+        }
+        for i in 0..<100 {
+            traces.append(RecallTraceItem(
+                id: "y-dis-\(i)", target: "drawer-Y",
+                recalledAt: t(Double(100 + i)),
+                operationalBitmap: 0))                             // used = false → dismissal
+        }
+        // Sort by recalledAt to guarantee ascending order (mirrors the storage sort).
+        traces.sort { $0.recalledAt < $1.recalledAt }
+
+        // New group (seconds 200..<1200): 1,000 Y-endorsements. These are the NEWEST traces
+        // and fill the entire 1,000-trace window when the window is applied.
+        for i in 0..<1_000 {
+            traces.append(RecallTraceItem(
+                id: "y-end-\(i)", target: "drawer-Y",
+                recalledAt: t(Double(200 + i)),
+                operationalBitmap: RecallTraceItem.flagUsed))     // used = true → endorsement
+        }
+
+        #expect(traces.count == 1_200, "vector must be exactly 1,200 traces")
+
+        // Verify the conformance-vector control: without the window, X ranks above Y.
+        // (This is the pre-fix behaviour the window corrects.)
+        let allRecords = PreferenceOutcomes.build(traces: traces)
+        let allStrengths = try NeuronKit.learnedPreference(records: allRecords.map {
+            (label: $0.label, endorsements: $0.endorsements, dismissals: $0.dismissals)
+        })
+        let xAll = allStrengths.first { $0.label == "drawer-X" }?.strength ?? 0.0
+        let yAll = allStrengths.first { $0.label == "drawer-Y" }?.strength ?? 0.0
+        #expect(xAll > yAll, "mutation control: without window, X (100e/0d) outranks Y (1,000e/100d) — BT ratio X≈101, Y≈9.9")
+
+        // Apply the 1,000-trace window (the fix). Suffix == newest 1,000 traces.
+        let windowed = Array(traces.suffix(AutonomicGovernor.preferenceTracesWindowLimit))
+        #expect(windowed.count == 1_000)
+
+        let windowedRecords = PreferenceOutcomes.build(traces: windowed)
+        let windowedStrengths = try NeuronKit.learnedPreference(records: windowedRecords.map {
+            (label: $0.label, endorsements: $0.endorsements, dismissals: $0.dismissals)
+        })
+        let xWindowed = windowedStrengths.first { $0.label == "drawer-X" }?.strength ?? 0.0
+        let yWindowed = windowedStrengths.first { $0.label == "drawer-Y" }?.strength ?? 0.0
+        #expect(yWindowed > xWindowed, "with 1,000-trace window, Y (1,000e/0d) ranks above absent X (strength 0.0)")
     }
 }

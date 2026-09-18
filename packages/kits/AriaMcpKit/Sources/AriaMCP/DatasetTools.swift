@@ -1,3 +1,5 @@
+import AriaMCPWire
+
 // DatasetTools.swift
 // AriaMcpKit
 //
@@ -11,14 +13,12 @@
 // Design decisions documented here so future agents do not re-derive them:
 //
 //   DISPATCH SHAPE: Follows VaultTools/LensTools pattern — static enum with
-//   isDatasetTool(), dispatch(), and tools(). Inserted in ToolDispatch.dispatch()
-//   after VaultTools and before InterfaceTools so dataset tools do not interfere
-//   with the existing tier structure.
+//   isDatasetTool(), dispatch(), and tools().
 //
 //   PROVENANCE: .interface — dataset tools are user-facing CRUD operations that
 //   target a specific estate (they carry an optional estateID like all interface
 //   tools). withEstateID() is applied in the tool schema here, consistent with
-//   how coreMemoryTools() applies it in ToolProjection.
+//   the v2 catalog in AriaV2SelectedCatalog.
 //
 //   CSV SIZE CAP: csvPathSizeCapBytes = 100 MiB. Rationale: generous for
 //   substantial real-world datasets while bounding peak parse memory.
@@ -94,52 +94,12 @@ enum DatasetTools {
         datasetToolNames.contains(name)
     }
 
-    // MARK: - Dispatch
-
-    /// Run the named dataset tool. Follows the same contract as LensTools.dispatch
-    /// and VaultTools.dispatch: out-of-band faults throw JSONRPCError; substrate
-    /// refusals return an errorResult (isError: true).
-    ///
-    /// `serverIdentity` is the host's identity string, used as the `addedBy`
-    /// parameter on captureDatasetHandle (parity with other capture calls).
-    static func dispatch(
-        name: String,
-        args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        resolveHandle: ([String: JSONValue]) throws -> EstateHandle,
-        serverIdentity: String
-    ) async throws -> JSONValue {
-        switch name {
-        case "moot_file_dataset":
-            return try await runFileDataset(
-                args: args, kit: kit,
-                handle: try resolveHandle(args),
-                serverIdentity: serverIdentity)
-
-        case "moot_dataset_query":
-            return try await runDatasetQuery(
-                args: args, kit: kit,
-                handle: try resolveHandle(args))
-
-        case "moot_dataset_stats":
-            return try await runDatasetStats(
-                args: args, kit: kit,
-                handle: try resolveHandle(args))
-
-        default:
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.methodNotFound,
-                message: "Unknown dataset tool: \(name)")
-        }
-    }
-
     // MARK: - Tool schema projection
 
     /// The three dataset tools added to the tool list.
     ///
     /// Schemas are wrapped with withEstateID() so the estate-addressing contract
-    /// matches all other interface tools. withTeachme() is applied globally by
-    /// ToolProjection.tools(environment:).
+    /// matches all other interface tools.
     static func tools() -> [ProjectedTool] {
         [
             ProjectedTool(
@@ -259,406 +219,404 @@ enum DatasetTools {
         ]
     }
 
-    // MARK: - moot_file_dataset
+    // MARK: - Typed v2 lowers
 
-    private static func runFileDataset(
-        args: [String: JSONValue],
+    /// Typed production snapshots for the v2 data-mobility lower. These call
+    /// the same store and estate seams as the v1 tools, but never construct or
+    /// interpret a rendered `ToolResult`.
+    enum DirectFailure: Error, Sendable { case datasetUnavailable }
+
+    static func directFileDataset(
+        arguments: [String: JSONValue],
         kit: GeniusLocusKit,
         handle: EstateHandle,
-        serverIdentity: String
+        now: Date
     ) async throws -> JSONValue {
-        // --- Parse parameters ---
-
-        let name = try requireString(args, "name")
-        let location = try requireString(args, "location")
-        let wing = args["wing"]?.stringValue
-        let sensitivity = try decodeSensitivity(args["sensitivity"])
-
-        // columns: array of {name, type?} objects.
-        // Required when using inline rows; optional for csv_path (inferred from header).
-        let columnSpecs = try parseColumnSpecs(args["columns"])
-
-        // Source: exactly one of `rows` or `csv_path` (or neither → error).
-        let hasCsvPath = args["csv_path"] != nil
-        let hasRows = args["rows"] != nil
-
-        if hasCsvPath && hasRows {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "moot_file_dataset: supply either rows or csv_path, not both")
+        let name = try requireString(arguments, "name")
+        let location = try requireString(arguments, "location")
+        let wing = arguments["wing"]?.stringValue
+        let sensitivity = try decodeSensitivity(arguments["sensitivity"])
+        let columnSpecs = try parseColumnSpecs(arguments["columns"])
+        let hasCSV = arguments["csv_path"] != nil
+        let hasRows = arguments["rows"] != nil
+        guard !(hasCSV && hasRows) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "moot_file_dataset: supply either rows or csv_path, not both")
+        }
+        for column in columnSpecs {
+            try validateDatasetColumnIdentifier(column.name)
         }
 
-        // --- Validate all column identifiers BEFORE any DDL ---
-        // Rejection fails the whole import — no sanitize-and-continue path.
-        let colNames = columnSpecs.map(\.name)
-        for colName in colNames {
-            do {
-                try validateDatasetColumnIdentifier(colName)
-            } catch {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "moot_file_dataset: invalid column identifier \"\(colName)\". " +
-                    "Column names must match [A-Za-z_][A-Za-z0-9_]*.")
-            }
-        }
-
-        // --- Parse rows and build schema ---
         let schema: DatasetSchema
-        let typedRows: [[String: TypedValue]]
-        let sourceDescription: String
-
-        if let csvPathValue = args["csv_path"]?.stringValue {
-            // csv_path path: canonicalize → security-check → size-check → parse.
-            let resolved = try resolveCSVPath(csvPathValue)
-            let result = try parseCSV(at: resolved, columnHints: columnSpecs)
-            schema = result.schema
-            typedRows = result.rows
-            // A2: Provenance path redaction (MX-TAB-SEC-1 A2).
-            //
-            // sourceDescription is stored in the handle drawer and visible to the
-            // client. To avoid leaking the full canonical filesystem path (which can
-            // reveal personal directory layout to a prompt-injected client),
-            // sourceDescription carries only the basename.
-            //
-            // The full resolved path goes to the server-side audit channel (OSLog)
-            // ONLY — never to the client-facing response body or stored drawer content.
-            Logging.osLog.info("csv_import: audit resolved=\(resolved, privacy: .public)")
-            sourceDescription = "csv:\(URL(fileURLWithPath: resolved).lastPathComponent)"
-        } else if let rowsValue = args["rows"] {
-            guard !colNames.isEmpty else {
-                throw JSONRPCError(
-                    code: JSONRPCErrorCode.invalidParams,
-                    message: "moot_file_dataset: columns is required when using inline rows")
+        let rows: [[String: TypedValue]]
+        let source: String
+        if let csv = arguments["csv_path"]?.stringValue {
+            let resolved = try resolveCSVPath(csv)
+            let parsed = try parseCSV(at: resolved, columnHints: columnSpecs)
+            schema = parsed.schema
+            rows = parsed.rows
+            source = "csv:\(URL(fileURLWithPath: resolved).lastPathComponent)"
+        } else if let inline = arguments["rows"] {
+            guard !columnSpecs.isEmpty else {
+                throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "moot_file_dataset: columns is required when using inline rows")
             }
-            let result = try parseInlineRows(rowsValue, columnSpecs: columnSpecs)
-            schema = result.schema
-            typedRows = result.rows
-            sourceDescription = "inline_rows:\(name)"
+            let parsed = try parseInlineRows(inline, columnSpecs: columnSpecs)
+            schema = parsed.schema
+            rows = parsed.rows
+            source = "inline_rows:\(name)"
         } else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "moot_file_dataset: either rows or csv_path is required")
+            throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "moot_file_dataset: either rows or csv_path is required")
         }
 
-        // --- Obtain the DatasetStore ---
-        let datasetId = UUID()
-        let datasetStore: any DatasetStore
-        do {
-            datasetStore = try await kit.datasetStore(for: handle)
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_file_dataset: estate storage does not support datasets: " +
-                error.localizedDescription)
-        }
-
-        // --- Create the backend table ---
-        // On failure nothing has been committed yet; no cleanup needed.
-        do {
-            try await datasetStore.createDataset(id: datasetId, schema: schema, indexes: [])
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_file_dataset: failed to create dataset table: " +
-                error.localizedDescription)
-        }
-
-        // --- Append rows in one transaction ---
-        // On failure, drop the table so no orphaned backend table persists without
-        // a matching handle (atomic intent: either both succeed or neither persists).
-        if !typedRows.isEmpty {
-            do {
-                try await datasetStore.appendRows(id: datasetId, rows: typedRows)
-            } catch {
-                // Drop the orphaned table before returning the error.
-                try? await datasetStore.dropDataset(id: datasetId)
-                return ToolDispatcher.errorResult(
-                    "moot_file_dataset: failed to append rows (table dropped): " +
-                    error.localizedDescription)
-            }
-        }
-
-        // --- Capture the dataset handle drawer ---
-        // captureDatasetHandle is the ONLY authorised creation path for .dataset drawers.
+        let datasetID = UUID()
         let columnSummaries = schema.columns.map {
             DatasetColumnSummary(name: $0.name, dataType: $0.type.rawValue.uppercased())
         }
-        let estate: LocusKit.Estate
-        do {
-            estate = try await kit.estate(for: handle)
-        } catch {
-            // Drop the table if we cannot obtain the estate for the handle call.
-            try? await datasetStore.dropDataset(id: datasetId)
-            return ToolDispatcher.errorResult(
-                "moot_file_dataset: estate not accessible: " +
-                error.localizedDescription)
-        }
+        let drawer = try await kit.fileDataset(handle, DatasetFilingFrame(
+            datasetID: datasetID,
+            schema: schema,
+            rows: rows,
+            columns: columnSummaries,
+            sourceDescription: source,
+            wing: wing,
+            room: location,
+            addedBy: "aria-v2",
+            sensitivity: sensitivity,
+            udcCode: "000"))
 
-        let drawer: Drawer
-        do {
-            drawer = try await estate.captureDatasetHandle(
-                datasetId: datasetId,
-                columns: columnSummaries,
-                rowCount: typedRows.count,
-                sourceDescription: sourceDescription,
-                wing: wing,
-                room: location,
-                addedBy: serverIdentity.isEmpty ? "aria-mcp-server" : serverIdentity,
-                sensitivity: sensitivity,
-                // Dataset handles get UDC "000" (fallback/unclassified). The dataset
-                // table itself is a raw backend artefact below the belief layer; its
-                // FDC classification is deferred to VaultKit integration (MX-TAB-7 §6).
-                latticeAnchor: LatticeAnchor.udc("000")
-            )
-        } catch {
-            // Drop the orphaned table if handle creation fails.
-            try? await datasetStore.dropDataset(id: datasetId)
-            return ToolDispatcher.errorResult(
-                "moot_file_dataset: handle creation failed (table dropped): " +
-                error.localizedDescription)
-        }
+        let store = try await kit.datasetStore(for: handle)
 
-        // --- Layered signatures (MX-TAB-5) ---
-        // Tier 1 (table) + tier 2 (column) signatures computed at import per
-        // spec §3: sample the first datasetSignatureSampleSize rows in backend
-        // order, gather per-column stats, and patch the handle drawer.
-        // NON-FATAL on failure: the dataset and handle are already committed —
-        // a filed dataset without signatures is recoverable (recompute later);
-        // dropping a loaded table over a signature error is not.
-        var signatureStatus = "computed"
+        var signatures = "computed"
         do {
-            let sampledRows = try await datasetStore.queryRows(
-                id: datasetId, predicate: nil, orderBy: [],
+            let sampled = try await store.queryRows(
+                id: datasetID, predicate: nil, orderBy: [],
                 limit: datasetSignatureSampleSize, offset: nil, columns: nil)
-            var stats: [String: ColumnStats] = [:]
+            var statistics: [String: ColumnStats] = [:]
             for column in schema.columns {
-                stats[column.name] = try await datasetStore.columnStats(
-                    id: datasetId, column: column.name)
+                statistics[column.name] = try await store.columnStats(id: datasetID, column: column.name)
             }
             _ = try await kit.computeDatasetSignatures(
-                handle: handle,
-                drawerId: drawer.id,
-                columns: columnSummaries,
-                columnStats: stats,
-                sampledRows: sampledRows,
-                now: Date())
+                handle: handle, drawerId: drawer.id, columns: columnSummaries,
+                columnStats: statistics, sampledRows: sampled, now: now)
         } catch {
-            signatureStatus = "pending (\(error.localizedDescription))"
+            signatures = "pending (\(error.localizedDescription))"
         }
-
-        return ToolDispatcher.textResult("""
-        dataset_filed:
-          id: \(datasetId.uuidString)
-          handle_id: \(drawer.id)
-          name: \(name)
-          location: \(location)\(wing.map { "\n  wing: \($0)" } ?? "")
-          columns: \(schema.columns.count)
-          rows: \(typedRows.count)
-          source: \(sourceDescription)
-          sensitivity: \(sensitivity)
-          signatures: \(signatureStatus)
-        """)
-    }
-
-    // MARK: - moot_dataset_query
-
-    private static func runDatasetQuery(
-        args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        handle: EstateHandle
-    ) async throws -> JSONValue {
-        let idStr = try requireString(args, "id")
-        guard let datasetId = UUID(uuidString: idStr) else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "moot_dataset_query: id must be a valid UUID")
-        }
-
-        // Resolve estate for handle lifecycle operations.
-        let estate: LocusKit.Estate
-        do {
-            estate = try await kit.estate(for: handle)
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_dataset_query: estate not accessible: " +
-                error.localizedDescription)
-        }
-
-        // resolveActiveDatasetHandle refuses withdrawn handles with a clear error.
-        let handleDrawer: Drawer
-        do {
-            handleDrawer = try await estate.resolveActiveDatasetHandle(datasetId: datasetId)
-        } catch let lke as LocusKitError {
-            // Map withdrawnDatasetHandle to a user-facing refusal, not an opaque error.
-            return ToolDispatcher.errorResult(
-                "moot_dataset_query: \(describeLocusKitError(lke))")
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_dataset_query: handle not found: " + error.localizedDescription)
-        }
-
-        // Parse query parameters.
-        let tableName = datasetTableName(datasetId)
-        let predicate = try parseWherePredicate(args["where"], tableName: tableName)
-        let orderBy = try parseOrderBy(args["order_by"], tableName: tableName)
-        // Limit: default 100, cap 1000 (prevents scan exhaustion on large datasets).
-        // JSONValue.integerValue returns Int64? (the integer case of the JSON number).
-        let rawLimit: Int
-        if let limitVal = args["limit"]?.integerValue {
-            rawLimit = Int(limitVal)
-        } else {
-            rawLimit = 100
-        }
-        let limit = min(max(1, rawLimit), 1000)
-        let projectedColumns: [String]? = args["columns"].flatMap {
-            $0.arrayValue?.compactMap { $0.stringValue }
-        }
-
-        // Obtain the DatasetStore and issue the query.
-        let datasetStore: any DatasetStore
-        do {
-            datasetStore = try await kit.datasetStore(for: handle)
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_dataset_query: estate storage does not support datasets: " +
-                error.localizedDescription)
-        }
-
-        let rows: [StorageRow]
-        do {
-            rows = try await datasetStore.queryRows(
-                id: datasetId,
-                predicate: predicate,
-                orderBy: orderBy,
-                limit: limit,
-                offset: nil,
-                columns: projectedColumns)
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_dataset_query: query failed: " + error.localizedDescription)
-        }
-
-        // Format output: handle metadata first, then rows.
-        let handleContent = try? DatasetHandleContent.decode(from: handleDrawer.content)
-        var lines: [String] = []
-        lines.append("dataset_query:")
-        lines.append("  id: \(datasetId.uuidString)")
-        lines.append("  handle_id: \(handleDrawer.id)")
-        if let hc = handleContent {
-            lines.append("  columns: \(hc.columns.map { $0.name }.joined(separator: ", "))")
-            lines.append("  handle_row_count: \(hc.rowCount)")
-        }
-        // Drawer.state is bits 0–5 of adjectiveBitmap (cookbook §2.3).
-        lines.append("  state: \(handleDrawer.state)")
-        // Drawer.adjectiveSensitivity is bits 6–11 of adjectiveBitmap (cookbook §2.3).
-        lines.append("  sensitivity: \(handleDrawer.adjectiveSensitivity)")
-        lines.append("  rows_returned: \(rows.count)")
-        lines.append("  limit: \(limit)")
-        if rows.isEmpty {
-            lines.append("  (no rows)")
-        } else {
-            lines.append("rows:")
-            for row in rows {
-                // Sort keys alphabetically for deterministic output across Swift/Rust legs.
-                let cols = row.values.keys.sorted()
-                let fields = cols.map { col in
-                    "\(col):\(typedValueToString(row.values[col] ?? .null))"
-                }
-                lines.append("  {\(fields.joined(separator: ", "))}")
-            }
-        }
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
-    }
-
-    // MARK: - moot_dataset_stats
-
-    private static func runDatasetStats(
-        args: [String: JSONValue],
-        kit: GeniusLocusKit,
-        handle: EstateHandle
-    ) async throws -> JSONValue {
-        let idStr = try requireString(args, "id")
-        guard let datasetId = UUID(uuidString: idStr) else {
-            throw JSONRPCError(
-                code: JSONRPCErrorCode.invalidParams,
-                message: "moot_dataset_stats: id must be a valid UUID")
-        }
-
-        // Resolve estate for handle lifecycle operations.
-        let estate: LocusKit.Estate
-        do {
-            estate = try await kit.estate(for: handle)
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_dataset_stats: estate not accessible: " +
-                error.localizedDescription)
-        }
-
-        // resolveActiveDatasetHandle refuses withdrawn handles.
-        let handleDrawer: Drawer
-        do {
-            handleDrawer = try await estate.resolveActiveDatasetHandle(datasetId: datasetId)
-        } catch let lke as LocusKitError {
-            return ToolDispatcher.errorResult(
-                "moot_dataset_stats: \(describeLocusKitError(lke))")
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_dataset_stats: handle not found: " + error.localizedDescription)
-        }
-
-        let requestedColumn = args["column"]?.stringValue
-        let handleContent = try? DatasetHandleContent.decode(from: handleDrawer.content)
-
-        let datasetStore: any DatasetStore
-        do {
-            datasetStore = try await kit.datasetStore(for: handle)
-        } catch {
-            return ToolDispatcher.errorResult(
-                "moot_dataset_stats: estate storage does not support datasets: " +
-                error.localizedDescription)
-        }
-
-        var lines: [String] = [
-            "dataset_stats:",
-            "  id: \(datasetId.uuidString)",
-            "  handle_id: \(handleDrawer.id)",
+        var data: [String: JSONValue] = [
+            "dataset_id": .string(datasetID.uuidString.lowercased()),
+            "handle_memory_id": .string(drawer.id),
+            "name": .string(name),
+            "location": .string(location),
+            "columns": .integer(Int64(schema.columns.count)),
+            "rows": .integer(Int64(rows.count)),
+            "source": .string(source),
+            "sensitivity": .string(String(describing: sensitivity)),
+            "signatures": .string(signatures),
         ]
+        if let wing { data["wing"] = .string(wing) }
+        return .object(data)
+    }
 
-        let columnsToStat: [String]
-        if let col = requestedColumn {
-            // Single-column mode: validate identifier before issuing the query.
-            do {
-                try validateDatasetColumnIdentifier(col)
-            } catch {
+    static func directDatasetQuery(
+        arguments: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let datasetID = try directDatasetID(arguments, tool: "moot_dataset_query")
+        let drawer: Drawer
+        do {
+            drawer = try await kit.resolveActiveDatasetHandle(in: handle, datasetId: datasetID)
+        } catch {
+            throw DirectFailure.datasetUnavailable
+        }
+        guard let content = try? DatasetHandleContent.decode(from: drawer.content),
+              content.datasetId == datasetID else {
+            throw DirectFailure.datasetUnavailable
+        }
+        let schema = try directDatasetSchema(content)
+        let tableName = datasetTableName(datasetID)
+        let predicate = try strictDirectPredicate(
+            arguments["where"], tableName: tableName, schema: schema)
+        let order = try strictDirectOrderBy(
+            arguments["order_by"], tableName: tableName, schema: schema)
+        let limit = Int(arguments["limit"]?.integerValue ?? 100)
+        guard (1...1_000).contains(limit) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "moot_dataset_query: limit must be between 1 and 1000")
+        }
+        let columns = try strictDirectColumns(arguments["columns"], schema: schema)
+        let store = try await kit.datasetStore(for: handle)
+        let rows = try await store.queryRows(
+            id: datasetID, predicate: predicate, orderBy: order, limit: limit, offset: nil, columns: columns)
+        var data: [String: JSONValue] = [
+            "dataset_id": .string(datasetID.uuidString.lowercased()),
+            "handle_memory_id": .string(drawer.id),
+            "state": .string(String(describing: drawer.state)),
+            "sensitivity": .string(String(describing: drawer.adjectiveSensitivity)),
+            "rows_returned": .integer(Int64(rows.count)),
+            "limit": .integer(Int64(limit)),
+            "rows": .array(rows.map { row in .object(row.values.mapValues(Self.directJSONValue)) }),
+        ]
+        data["columns"] = .array(content.columns.map { .string($0.name) })
+        data["handle_row_count"] = .integer(Int64(content.rowCount))
+        return .object(data)
+    }
+
+    static func directDatasetStats(
+        arguments: [String: JSONValue],
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async throws -> JSONValue {
+        let datasetID = try directDatasetID(arguments, tool: "moot_dataset_stats")
+        let drawer: Drawer
+        do {
+            drawer = try await kit.resolveActiveDatasetHandle(in: handle, datasetId: datasetID)
+        } catch {
+            throw DirectFailure.datasetUnavailable
+        }
+        let requested = arguments["column"]?.stringValue
+        if let requested { try validateDatasetColumnIdentifier(requested) }
+        let columns: [String]
+        if let requested {
+            columns = [requested]
+        } else {
+            columns = (try? DatasetHandleContent.decode(from: drawer.content))?.columns.map(\.name) ?? []
+        }
+        let store = try await kit.datasetStore(for: handle)
+        var stats: [String: JSONValue] = [:]
+        for column in columns {
+            let value = try await store.columnStats(id: datasetID, column: column)
+            stats[column] = .object([
+                "count": .integer(value.count),
+                "distinct_count": .integer(value.distinctCount),
+                "null_count": .integer(value.nullCount),
+                "min": directJSONValue(value.min),
+                "max": directJSONValue(value.max),
+            ])
+        }
+        return .object([
+            "dataset_id": .string(datasetID.uuidString.lowercased()),
+            "handle_memory_id": .string(drawer.id),
+            "stats": .object(stats),
+        ])
+    }
+
+    private static func directDatasetID(_ arguments: [String: JSONValue], tool: String) throws -> UUID {
+        let value = try requireString(arguments, "id")
+        guard let id = UUID(uuidString: value) else {
+            throw JSONRPCError(code: JSONRPCErrorCode.invalidParams, message: "\(tool): id must be a valid UUID")
+        }
+        return id
+    }
+
+    private enum DirectDatasetColumnKind {
+        case text
+        case integer
+        case float
+        case bool
+    }
+
+    /// Interpret the schema captured with the authorized dataset handle. The
+    /// selected v2 query path validates every referenced column and comparison
+    /// type against this schema before constructing a storage predicate. The
+    /// legacy v1 parser remains unchanged below.
+    private static func directDatasetSchema(
+        _ content: DatasetHandleContent
+    ) throws -> [String: DirectDatasetColumnKind] {
+        var schema: [String: DirectDatasetColumnKind] = [:]
+        for column in content.columns {
+            try validateDatasetColumnIdentifier(column.name)
+            guard schema[column.name] == nil else {
                 throw JSONRPCError(
                     code: JSONRPCErrorCode.invalidParams,
-                    message: "moot_dataset_stats: invalid column identifier \"\(col)\"")
+                    message: "moot_dataset_query: dataset schema contains duplicate column '\(column.name)'")
             }
-            columnsToStat = [col]
-        } else {
-            // All-columns mode: use schema summary from handle content.
-            columnsToStat = handleContent?.columns.map(\.name) ?? []
-            if columnsToStat.isEmpty {
-                return ToolDispatcher.textResult(
-                    lines.joined(separator: "\n") + "\n  (no column schema in handle)")
+            switch column.dataType.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() {
+            case "BOOL", "BOOLEAN": schema[column.name] = .bool
+            case "INT", "INTEGER": schema[column.name] = .integer
+            case "FLOAT", "REAL", "DOUBLE": schema[column.name] = .float
+            default: schema[column.name] = .text
             }
+        }
+        guard !schema.isEmpty else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "moot_dataset_query: dataset schema is unavailable")
+        }
+        return schema
+    }
+
+    private static func strictDirectPredicate(
+        _ value: JSONValue?,
+        tableName: String,
+        schema: [String: DirectDatasetColumnKind]
+    ) throws -> StoragePredicate? {
+        guard let value else { return nil }
+        var nodes = 0
+        return try strictDirectPredicate(
+            value, tableName: tableName, schema: schema, depth: 1, nodes: &nodes)
+    }
+
+    private static func strictDirectPredicate(
+        _ value: JSONValue,
+        tableName: String,
+        schema: [String: DirectDatasetColumnKind],
+        depth: Int,
+        nodes: inout Int
+    ) throws -> StoragePredicate {
+        guard depth <= 8 else { throw datasetQueryInvalid("predicate exceeds maximum depth") }
+        nodes += 1
+        guard nodes <= 128 else { throw datasetQueryInvalid("predicate exceeds maximum node count") }
+        guard let object = value.objectValue else {
+            throw datasetQueryInvalid("predicate values must be objects")
         }
 
-        lines.append("stats:")
-        for col in columnsToStat {
-            do {
-                let s = try await datasetStore.columnStats(id: datasetId, column: col)
-                // Float values: f64 shortest roundtrip to satisfy the MX-TABULAR parity law.
-                // TypedValue.float carries Double (f64 only); TypedValue.int carries Int64.
-                lines.append("  \(col):")
-                lines.append("    count: \(s.count)")
-                lines.append("    distinct_count: \(s.distinctCount)")
-                lines.append("    null_count: \(s.nullCount)")
-                lines.append("    min: \(typedValueToString(s.min))")
-                lines.append("    max: \(typedValueToString(s.max))")
-            } catch {
-                lines.append("  \(col): error: \(error.localizedDescription)")
-            }
+        if object.count == 1, let children = object["and"]?.arrayValue {
+            guard !children.isEmpty else { throw datasetQueryInvalid("predicate compound must not be empty") }
+            return .and(try children.map {
+                try strictDirectPredicate(
+                    $0, tableName: tableName, schema: schema, depth: depth + 1, nodes: &nodes)
+            })
         }
-        return ToolDispatcher.textResult(lines.joined(separator: "\n"))
+        if object.count == 1, let children = object["or"]?.arrayValue {
+            guard !children.isEmpty else { throw datasetQueryInvalid("predicate compound must not be empty") }
+            return .or(try children.map {
+                try strictDirectPredicate(
+                    $0, tableName: tableName, schema: schema, depth: depth + 1, nodes: &nodes)
+            })
+        }
+
+        guard let columnName = object["col"]?.stringValue else {
+            throw datasetQueryInvalid("comparison requires a column")
+        }
+        do { try validateDatasetColumnIdentifier(columnName) } catch {
+            throw datasetQueryInvalid("invalid predicate column")
+        }
+        guard let columnKind = schema[columnName] else {
+            throw datasetQueryInvalid("unknown predicate column")
+        }
+        guard let operation = object["op"]?.stringValue else {
+            throw datasetQueryInvalid("comparison requires an operator")
+        }
+        let column = Column(table: tableName, name: columnName)
+        if operation == "is_null" || operation == "is_not_null" {
+            guard object.count == 2, object["val"] == nil else {
+                throw datasetQueryInvalid("null predicate must contain only col and op")
+            }
+            return operation == "is_null" ? .isNull(column) : .isNotNull(column)
+        }
+
+        guard ["eq", "neq", "lt", "lte", "gt", "gte"].contains(operation),
+              object.count == 3, let raw = object["val"] else {
+            throw datasetQueryInvalid("comparison must contain only col, op, and val")
+        }
+        let typed = try strictDirectPredicateValue(raw, kind: columnKind, operation: operation)
+        switch operation {
+        case "eq": return .eq(column, typed)
+        case "neq": return .neq(column, typed)
+        case "lt": return .lt(column, typed)
+        case "lte": return .lte(column, typed)
+        case "gt": return .gt(column, typed)
+        case "gte": return .gte(column, typed)
+        default: preconditionFailure("operation was validated above")
+        }
+    }
+
+    private static func strictDirectPredicateValue(
+        _ value: JSONValue,
+        kind: DirectDatasetColumnKind,
+        operation: String
+    ) throws -> TypedValue {
+        switch (kind, value) {
+        case (.bool, .bool(let value)) where operation == "eq" || operation == "neq":
+            return .bool(value)
+        case (.integer, .integer(let value)):
+            return .int(value)
+        case (.float, .integer(let value)):
+            return .float(Double(value))
+        case (.float, .double(let value)):
+            return .float(value)
+        case (.text, .string(let value)):
+            return .text(value)
+        case (.bool, _):
+            throw datasetQueryInvalid("boolean columns permit only boolean eq or neq predicates")
+        case (.integer, _):
+            throw datasetQueryInvalid("integer columns require an integer comparison value")
+        case (.float, _):
+            throw datasetQueryInvalid("numeric columns require a numeric comparison value")
+        case (.text, _):
+            throw datasetQueryInvalid("text columns require a string comparison value")
+        }
+    }
+
+    private static func strictDirectOrderBy(
+        _ value: JSONValue?,
+        tableName: String,
+        schema: [String: DirectDatasetColumnKind]
+    ) throws -> [OrderClause] {
+        guard let value else { return [] }
+        guard let values = value.arrayValue else {
+            throw datasetQueryInvalid("order_by must be an array")
+        }
+        return try values.map { value in
+            guard let object = value.objectValue,
+                  Set(object.keys).isSubset(of: ["col", "dir"]),
+                  let columnName = object["col"]?.stringValue else {
+                throw datasetQueryInvalid("order_by entries require col and optional dir")
+            }
+            do { try validateDatasetColumnIdentifier(columnName) } catch {
+                throw datasetQueryInvalid("invalid order_by column")
+            }
+            guard schema[columnName] != nil else {
+                throw datasetQueryInvalid("unknown order_by column")
+            }
+            let direction: OrderDirection
+            switch object["dir"] {
+            case nil, .some(.string("asc")): direction = .ascending
+            case .some(.string("desc")): direction = .descending
+            default: throw datasetQueryInvalid("order_by dir must be asc or desc")
+            }
+            return OrderClause(column: Column(table: tableName, name: columnName), direction: direction)
+        }
+    }
+
+    private static func strictDirectColumns(
+        _ value: JSONValue?,
+        schema: [String: DirectDatasetColumnKind]
+    ) throws -> [String]? {
+        guard let value else { return nil }
+        guard let values = value.arrayValue else {
+            throw datasetQueryInvalid("projection columns must be an array")
+        }
+        if values.isEmpty { return nil }
+        return try values.map { value in
+            guard let columnName = value.stringValue, !columnName.isEmpty else {
+                throw datasetQueryInvalid("projection columns must be non-empty strings")
+            }
+            do { try validateDatasetColumnIdentifier(columnName) } catch {
+                throw datasetQueryInvalid("invalid projection column")
+            }
+            guard schema[columnName] != nil else {
+                throw datasetQueryInvalid("unknown projection column")
+            }
+            return columnName
+        }
+    }
+
+    private static func datasetQueryInvalid(_ reason: String) -> JSONRPCError {
+        JSONRPCError(
+            code: JSONRPCErrorCode.invalidParams,
+            message: "moot_dataset_query: \(reason)")
+    }
+
+    private static func directJSONValue(_ value: TypedValue) -> JSONValue {
+        switch value {
+        case .null: return .null
+        case .bool(let value): return .bool(value)
+        case .int(let value), .bitmap(let value): return .integer(value)
+        case .float(let value): return .double(value)
+        case .text(let value): return .string(value)
+        case .uuid(let value): return .string(value.uuidString.lowercased())
+        case .timestamp(let value): return .string(ISO8601DateFormatter().string(from: value))
+        default: return .string(typedValueToString(value))
+        }
     }
 
     // MARK: - CSV parsing

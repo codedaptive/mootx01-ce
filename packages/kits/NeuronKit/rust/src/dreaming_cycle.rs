@@ -442,6 +442,18 @@ pub trait DreamingProposalSink {
         // Default: no-op. Production adapters override; test fakes that do not
         // test OMEGA retirement inherit this and compile without changes.
     }
+
+    /// A3 (benchmark reset 2026-08-13): dream-cycle lifecycle bracket, start
+    /// side. The cycle mints one session id and calls this before step 1;
+    /// production adapters append a `dreamStart` audit marker. Default no-op
+    /// (fake compatibility). Infallible per the sync-port convention.
+    /// Mirrors Swift `DreamingProposalSink.dreamCycleWillStart`.
+    fn dream_cycle_will_start(&mut self, _session_id: &str, _now_epoch_secs: f64) {}
+
+    /// A3: end bracket — same session id as the matching start. An aborted
+    /// cycle emits no end marker, honestly recording the abort.
+    /// Mirrors Swift `DreamingProposalSink.dreamCycleDidEnd`.
+    fn dream_cycle_did_end(&mut self, _session_id: &str, _now_epoch_secs: f64) {}
 }
 
 /// Recall-trace retention window in calendar days. Rows older than this are
@@ -485,7 +497,7 @@ pub fn tunnel_key(link: &TunnelLink) -> Option<String> {
 /// Vocabulary-growth-and-retrain seam for the auto-reindex step. Mirrors the
 /// Swift `CorpusGrowthProbe` protocol (NeuronKit/Sources/NeuronKit/Dreaming/CorpusGrowthProbe.swift).
 ///
-/// Distributional embedding providers (RI / PPMI / LSA / NMF) freeze their
+/// Distributional embedding providers (RI / LSA) freeze their
 /// vocabulary at training time. Terms ingested after the last retrain are
 /// OOV and produce zero-vectors, silently missing novel content in dense
 /// recall. The daemon calls this trait after each cycle to measure VOCABULARY
@@ -558,6 +570,64 @@ pub const AUTO_REINDEX_VOCAB_GROWTH_FRACTION: f64 = 0.10;
 /// the fraction. Mirrors the Swift `autoReindexVocabGrowthFloor` (25 terms).
 /// Dominates at small vocabularies (avoids thrashing) and is the cold-start gate.
 pub const AUTO_REINDEX_VOCAB_GROWTH_FLOOR: i64 = 25;
+
+// ─── THETA-gate basis-retrain hook ───────────────────────────────────────────
+
+/// Seam for the THETA-gate daily corpus basis retrain. Mirrors the Swift
+/// `ThetaBasisRetrainHook` protocol (NEURONKIT_SPEC § 3.1 theta-retrain
+/// extension).
+///
+/// Injected into `run_theta_cycle_with_hook`. Returns `true` on success,
+/// `false` on a captured failure — the caller logs the failure and continues,
+/// matching Swift's non-fatal behaviour.
+///
+/// `now_epoch_secs` is the caller-injected cycle timestamp (deterministic;
+/// the implementor must NOT read the system clock).
+pub trait ThetaBasisRetrainHook {
+    /// Trigger a full corpus basis retrain. Returns `true` on success;
+    /// on failure, records the error out-of-band and returns `false`.
+    /// The boolean lets the gate match Swift's failure policy: the THETA
+    /// cycle continues regardless, but the failure is observable via logging.
+    ///
+    /// `now_epoch_secs` is the injected cycle timestamp (deterministic; the
+    /// hook must not read the system clock internally).
+    fn retrain(&mut self, now_epoch_secs: f64) -> bool;
+}
+
+/// In-memory `ThetaBasisRetrainHook` for tests. Records retrain calls without
+/// touching a live Corpus. Mirrors the Swift test `FakeThetaRetrainHook`.
+#[derive(Default)]
+pub struct InMemoryThetaBasisRetrainHook {
+    /// Timestamps (epoch-seconds) of successful `retrain()` calls, in call order.
+    pub retrain_calls: Vec<f64>,
+    /// When true, `retrain()` returns `false` (simulates a captured failure) and
+    /// records nothing — the gate then does not advance and retries on the next cycle.
+    pub error_on_retrain: bool,
+}
+
+impl InMemoryThetaBasisRetrainHook {
+    /// Construct a hook with the given initial error flag.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Construct a hook that always fails.
+    pub fn failing() -> Self {
+        Self { error_on_retrain: true, ..Default::default() }
+    }
+}
+
+impl ThetaBasisRetrainHook for InMemoryThetaBasisRetrainHook {
+    fn retrain(&mut self, now_epoch_secs: f64) -> bool {
+        if self.error_on_retrain {
+            // Simulate a captured failure: record nothing and report failure so
+            // the caller logs and continues (non-fatal, per-spec).
+            return false;
+        }
+        self.retrain_calls.push(now_epoch_secs);
+        true
+    }
+}
 
 // ─── DreamingDaemon ──────────────────────────────────────────────────────────
 
@@ -1043,6 +1113,58 @@ impl DreamingDaemon {
         })
     }
 
+    // ─── THETA-gate basis-retrain helper ─────────────────────────────────────
+
+    /// Run a THETA cycle and fire the daily basis-retrain hook (if provided).
+    ///
+    /// Wraps `run_theta_cycle` and calls `hook.retrain(now_epoch_secs)` once
+    /// per invocation — including on the early-return no-data path — so the
+    /// embedding basis stays current on a daily cadence regardless of whether
+    /// THETA had anything to consolidate. Mirrors Swift `DreamingDaemon`'s
+    /// `fireTheta(retrainHook:now:)` helper.
+    ///
+    /// Failures are non-fatal: a `false` return from `hook.retrain` is
+    /// logged out-of-band by the caller and the cycle result is returned
+    /// unchanged.
+    ///
+    /// DETERMINISM: `now_epoch_secs` is passed to the hook — the hook must
+    /// not read the system clock internally.
+    ///
+    /// Pass `hook: None` to skip the daily retrain (equivalent to calling
+    /// `run_theta_cycle` directly).
+    ///
+    /// Test-only seam in production terms: the shipped runtime path is the
+    /// AutonomicGovernor firing the retrain INLINE after `run_theta_cycle`
+    /// returns (on its already-held coordinator lock). This wrapper exists
+    /// so the gate/hook contract is testable without a governor. The Swift
+    /// port injects the hook into the daemon instead — an intentional
+    /// architectural asymmetry documented in NEURONKIT_SPEC §12.6.1.
+    pub fn run_theta_cycle_with_hook<R, S, H>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        sink: &mut S,
+        hook: Option<&mut H>,
+    ) -> Option<DreamingCycleReport>
+    where
+        R: DreamingSubstrateReader,
+        S: DreamingProposalSink,
+        H: ThetaBasisRetrainHook,
+    {
+        let result = self.run_theta_cycle(now_epoch_secs, reader, sink);
+
+        // Fire daily basis-retrain hook once per THETA gate invocation,
+        // including on the early-return no-data path (result == None). A stale
+        // basis degrades dense recall regardless of whether THETA consolidated.
+        if let Some(h) = hook {
+            // `false` = failure — the hook has already logged / recorded it.
+            // We continue and return the cycle result unchanged (non-fatal).
+            let _ = h.retrain(now_epoch_secs);
+        }
+
+        result
+    }
+
     // ─── REM-BETA cycle ──────────────────────────────────
 
     /// Confidence floor below which a `consolidated` entry is pruned by
@@ -1347,6 +1469,13 @@ impl DreamingDaemon {
         // — the same instant the caller observed. This keeps telemetry
         // deterministic in tests (no wall-clock jitter) and enforces the
         // conformance contract (cycle timestamps are not sourced from SystemTime).
+        // A3 dream-cycle bracket: one session id per cycle, start marker
+        // before step 1, end marker after the last write. Identity, not
+        // computation — cycle outputs stay a function of `now` and the
+        // substrate. Mirrors Swift runCycle's cycleSessionID.
+        let cycle_session_id = uuid::Uuid::new_v4().simple().to_string();
+        sink.dream_cycle_will_start(&cycle_session_id, now_epoch_secs);
+
         let cycle_start_ts = now_epoch_secs;
         {
             let mut start_tags = std::collections::HashMap::new();
@@ -1553,6 +1682,9 @@ impl DreamingDaemon {
         // corpus was just trained on first ingest or opened from a persisted basis.
         // See `autoReindexGrowthThreshold` in Swift for the vocabulary rationale.
 
+        // A3 end bracket — same session id as the start marker above.
+        sink.dream_cycle_did_end(&cycle_session_id, now_epoch_secs);
+
         let report = DreamingCycleReport {
             candidates_considered,
             proposals_emitted,
@@ -1622,6 +1754,205 @@ impl DreamingDaemon {
             // Advance only on success so a failed retrain re-fires next cycle.
             self.last_reindex_vocab = live_vocab;
         }
+    }
+
+    /// Returns true when the THETA daily basis-retrain gate warrants a retrain:
+    ///   - First cycle (`last_reindex_vocab == -1` sentinel): always fire —
+    ///     THETA acts as a backstop for a dormant ALPHA path on a fresh estate.
+    ///   - Subsequent cycles: fire only when vocabulary has grown by at least
+    ///     `max(reindex_vocab_growth_floor, ceil(fraction × baseline))` terms
+    ///     since the last retrain (same gate as `check_corpus_growth`).
+    ///
+    /// When returning `true`, the caller MUST retrain and then call
+    /// `advance_reindex_vocab(live_vocab)` on success, so a failed retrain
+    /// re-fires on the next THETA cycle. Keeping the check and advancement
+    /// separate lets the caller skip advancement on error.
+    ///
+    /// Mirrors Swift `DreamingDaemon.fireTheta`'s drift gate.
+    pub fn theta_retrain_warranted(&self, live_vocab: i64) -> bool {
+        if self.last_reindex_vocab == -1 {
+            // First-ever retrain: always fire (establish baseline + retrain
+            // in one shot, since ALPHA may not have run yet).
+            return true;
+        }
+        let fractional =
+            (self.last_reindex_vocab as f64 * self.reindex_vocab_growth_fraction).ceil() as i64;
+        let trigger = self.reindex_vocab_growth_floor.max(fractional);
+        live_vocab - self.last_reindex_vocab >= trigger
+    }
+
+    /// Advance the vocabulary baseline to `live_vocab` after a successful retrain.
+    ///
+    /// Call after both ALPHA and THETA successful retrains so both gates share
+    /// the same baseline. A shared baseline prevents double-retrain: an ALPHA
+    /// retrain advances the counter, so the next THETA cycle sees no drift.
+    ///
+    /// Mirrors Swift's `lastReindexVocab = liveVocab` assignment in
+    /// `DreamingDaemon.fireTheta`.
+    pub fn advance_reindex_vocab(&mut self, live_vocab: i64) {
+        self.last_reindex_vocab = live_vocab;
+    }
+
+    // ─── HNSW maintenance seam ───────────────────────────────────────────────
+    //
+    // Three `_with_hnsw` variants extend the ALPHA, THETA, and BETA cycle
+    // drivers to call the appropriate HNSWGraphMaintenance operation after
+    // the primary dreaming work completes. The base methods are unchanged so
+    // existing callers (and all existing tests) continue to compile and pass.
+    //
+    // Pass `hnsw: None::<&mut InMemoryHNSWGraphMaintenance>` to disable HNSW
+    // maintenance in tests that do not require a float index.
+
+    /// ALPHA vocabulary-growth check with HNSW seam parameter (VEC-HNSW-01 seam).
+    ///
+    /// Extends `check_corpus_growth` with an optional HNSW maintenance parameter.
+    /// When the vocabulary growth gate fires and `probe.reindex()` succeeds, no
+    /// separate HNSW clear fires here. `probe.reindex()` shadow-swaps the corpus
+    /// internally — `VectorStore.publishShadowGeneration` rebuilds the HNSW graph
+    /// from the new serving rows inside the same atomic operation. The graph is
+    /// coherent immediately after the swap; clearing it would destroy the
+    /// newly-published graph and reopen the serving gap the swap was designed to
+    /// close. (Reviewer ruling F-3, VEC-SHADOWSWAP-01 BRR.)
+    ///
+    /// The `hnsw` parameter is accepted for signature symmetry with the THETA and
+    /// BETA `_with_hnsw` variants. The ALPHA cadence has no HNSW duty on this seam.
+    ///
+    /// `now_epoch_secs` is the injected cycle timestamp; neither the probe nor the
+    /// maintenance seam may read the system clock internally.
+    pub fn check_corpus_growth_with_hnsw<P, M>(
+        &mut self,
+        now_epoch_secs: f64,
+        probe: &mut P,
+        _hnsw: Option<&mut M>,
+    ) where
+        P: CorpusGrowthProbe,
+        M: crate::hnsw_graph_maintenance::HNSWGraphMaintenance,
+    {
+        let live_vocab = probe.vocab_anchor();
+        if self.last_reindex_vocab == -1 {
+            // First cycle: establish baseline, do not retrain.
+            self.last_reindex_vocab = live_vocab;
+            return;
+        }
+        let fractional =
+            (self.last_reindex_vocab as f64 * self.reindex_vocab_growth_fraction).ceil() as i64;
+        let trigger = self.reindex_vocab_growth_floor.max(fractional);
+        if live_vocab - self.last_reindex_vocab >= trigger
+            && probe.reindex(now_epoch_secs)
+        {
+            // Advance only on success so a failed retrain re-fires next cycle.
+            self.last_reindex_vocab = live_vocab;
+            // ALPHA HNSW note: no separate HNSW clear fires here.
+            // probe.reindex() shadow-swaps the corpus internally —
+            // VectorStore.publishShadowGeneration rebuilds the HNSW graph
+            // from the new serving rows inside the same atomic operation.
+            // The graph is coherent immediately after the swap; clearing it
+            // would destroy the newly-published graph and reopen the serving
+            // gap the swap was designed to close.
+            // (Reviewer ruling F-3, VEC-SHADOWSWAP-01 BRR.)
+        }
+    }
+
+    /// THETA cycle with basis-retrain hook AND HNSW graph rebuild (VEC-HNSW-01 seam).
+    ///
+    /// Extends `run_theta_cycle_with_hook` with an optional HNSW rebuild step:
+    /// after the retrain hook fires (regardless of its success — matching Swift's
+    /// non-fatal policy), calls `hnsw.rebuild_float_index(now_epoch_secs)` so
+    /// the graph topology reflects the new embedding geometry.
+    ///
+    /// Failure of the HNSW rebuild is non-fatal. Mirrors Swift
+    /// `DreamingDaemon.fireThetaHNSWRebuild` called at both THETA exit paths.
+    ///
+    /// Pass `hook: None` to skip the daily retrain (equivalent to calling
+    /// `run_theta_cycle` directly). Pass `hnsw: None` to skip the graph rebuild.
+    #[allow(unused_variables)]
+    pub fn run_theta_cycle_with_hook_and_hnsw<R, S, H, M>(
+        &mut self,
+        now_epoch_secs: f64,
+        reader: &R,
+        sink: &mut S,
+        hook: Option<&mut H>,
+        hnsw: Option<&mut M>,
+    ) -> Option<DreamingCycleReport>
+    where
+        R: DreamingSubstrateReader,
+        S: DreamingProposalSink,
+        H: ThetaBasisRetrainHook,
+        M: crate::hnsw_graph_maintenance::HNSWGraphMaintenance,
+    {
+        let result = self.run_theta_cycle(now_epoch_secs, reader, sink);
+
+        // Fire daily basis-retrain hook — same non-fatal policy as
+        // `run_theta_cycle_with_hook`. `false` = captured failure; the cycle
+        // result is returned unchanged in either case.
+        if let Some(h) = hook {
+            let _ = h.retrain(now_epoch_secs);
+        }
+
+        // Rebuild HNSW graphs after the retrain: the new embedding space makes
+        // the old graph topology stale. Rebuild from the current float records
+        // so `find_nearest_float` queries immediately use the new geometry.
+        // Non-fatal on failure — falls back to exact scan.
+        // Rebuild the float index after every retrain; THETA skips this
+        // when `hnsw` is None (the caller did not wire a graph).
+        if let Some(m) = hnsw {
+            let _ = m.rebuild_float_index(now_epoch_secs);
+        }
+
+        result
+    }
+
+    /// BETA weekly prune/GC with HNSW tombstone compaction and vector-generation
+    /// reclamation (VEC-SHADOWSWAP-01 seam).
+    ///
+    /// Extends `run_beta_cycle` with two weekly storage-GC duties:
+    ///
+    /// 1. `hnsw.compact_float_index_tombstones` — discards tombstoned HNSW
+    ///    entries and dead edges accumulated since the last compaction, improving
+    ///    cache locality and reclaiming memory for stale node slots.
+    ///
+    /// 2. `hnsw.reclaim_superseded_generations` — deletes vector rows whose
+    ///    generation is neither the current serving generation nor an active
+    ///    `'building'` shadow (rows left `'pending-reclaim'` after a shadow-swap
+    ///    publish). Both operations share the same weekly cadence; running them
+    ///    together avoids a separate GC pass.
+    ///
+    /// Both steps are non-fatal on failure — correctness is unaffected.
+    /// Mirrors Swift `DreamingDaemon.runBetaCycle` (VEC-SHADOWSWAP-01 wiring).
+    pub fn run_beta_cycle_with_hnsw<M>(
+        &mut self,
+        now_epoch_secs: f64,
+        hnsw: Option<&mut M>,
+    ) -> Option<DreamingCycleReport>
+    where
+        M: crate::hnsw_graph_maintenance::HNSWGraphMaintenance,
+    {
+        // Run the base BETA cycle (consolidated + co_recall_counts prune,
+        // timestamp advance, None return). Reuse the existing implementation to
+        // keep the two code paths in sync.
+        let result = self.run_beta_cycle(now_epoch_secs);
+
+        // Compact HNSW tombstones: weekly GC mirrors the consolidated prune
+        // cadence. Non-fatal on failure — a non-compacted graph is correct but
+        // carries wasted memory from deleted-node slots.
+        //
+        // Reclaim superseded vector generations alongside compaction: both are
+        // weekly storage-GC duties. reclaim_superseded_generations deletes
+        // vector rows whose generation is neither the current serving generation
+        // nor an active 'building' shadow (rows left 'pending-reclaim' after a
+        // shadow-swap publish). Non-fatal on failure — reclaimable rows are
+        // invisible to queries; correctness is unaffected until the next cycle.
+        // Mirrors Swift DreamingDaemon REM-BETA (reclaimSupersededGenerations
+        // called alongside compactFloatIndexTombstones).
+        if let Some(m) = hnsw {
+            // Tombstone compaction and generation reclaim both run every BETA cycle.
+            {
+                let _ = m.compact_float_index_tombstones(now_epoch_secs);
+            }
+            let _ = m.reclaim_superseded_generations(now_epoch_secs);
+        }
+
+        result
     }
 }
 
@@ -1715,6 +2046,55 @@ mod tests {
         }
     }
 
+    /// A3: records lifecycle hook calls, mirroring Swift BracketRecordingSink.
+    #[derive(Default)]
+    struct BracketRecordingSink {
+        events: Vec<(String, String, f64)>,
+    }
+    impl DreamingProposalSink for BracketRecordingSink {
+        fn propose(&mut self, _frame: ProposeFrameOut) {}
+        fn record_cycle_diary(&mut self, _entry: DreamingDiaryEntry) {}
+        fn prune_recall_traces(&mut self, _cutoff_iso: &str) {}
+        fn dream_cycle_will_start(&mut self, session_id: &str, now_epoch_secs: f64) {
+            self.events.push(("start".to_string(), session_id.to_string(), now_epoch_secs));
+        }
+        fn dream_cycle_did_end(&mut self, session_id: &str, now_epoch_secs: f64) {
+            self.events.push(("end".to_string(), session_id.to_string(), now_epoch_secs));
+        }
+    }
+
+    /// A3: one cycle emits exactly one start/end pair sharing a session id,
+    /// both hooks receiving the cycle's deterministic `now`. Twin of Swift
+    /// `DreamCycleBracketTests.cycleBracketsShareSession`.
+    #[test]
+    fn dream_cycle_brackets_share_session() {
+        let reader = FakeReaderMut::new(vec![], vec![], vec![]);
+        let mut sink = BracketRecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        let _ = d.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink);
+
+        assert_eq!(sink.events.len(), 2, "exactly one start and one end per cycle");
+        assert_eq!(sink.events[0].0, "start");
+        assert_eq!(sink.events[1].0, "end");
+        assert_eq!(sink.events[0].1, sink.events[1].1, "both ends carry the same session id");
+        assert!(!sink.events[0].1.is_empty());
+        assert!(sink.events.iter().all(|e| e.2 == 1_000_000.0));
+    }
+
+    /// A3: two cycles mint distinct session ids. Twin of Swift
+    /// `DreamCycleBracketTests.cyclesMintDistinctSessions`.
+    #[test]
+    fn dream_cycle_brackets_distinct_sessions() {
+        let reader = FakeReaderMut::new(vec![], vec![], vec![]);
+        let mut sink = BracketRecordingSink::default();
+        let mut d = DreamingDaemon::new(DreamingPolicy::default());
+        let _ = d.run_cycle(1_000_000.0, &reader, &RecallTraceRewardSource, &mut sink);
+        let _ = d.run_cycle(1_000_060.0, &reader, &RecallTraceRewardSource, &mut sink);
+
+        assert_eq!(sink.events.len(), 4);
+        assert_ne!(sink.events[0].1, sink.events[2].1, "each cycle has its own session id");
+    }
+
     fn trace(target: &str, used: bool) -> RecallTraceItem {
         RecallTraceItem {
             target: target.to_string(),
@@ -1725,13 +2105,6 @@ mod tests {
     fn window(ids: &[&str]) -> Vec<String> {
         ids.iter().map(|s| s.to_string()).collect()
     }
-    fn link(a: &str, b: &str) -> TunnelLink {
-        TunnelLink {
-            source_drawer_id: Some(a.to_string()),
-            target_drawer_id: Some(b.to_string()),
-        }
-    }
-
     /// Build a DreamingTunnelItem (active dreamed tunnel) for ALPHA dedup tests.
     /// The id is synthetic — ALPHA only uses source/target for the candidate key.
     fn dreamed_link(a: &str, b: &str) -> DreamingTunnelItem {
@@ -2519,5 +2892,245 @@ mod tests {
         assert_eq!(state.cycle_count, 4);
         assert_eq!(state.consolidated["alpha|beta"], 0.8);
         assert_eq!(state.proposed_keys, vec!["alpha|beta".to_string()]);
+    }
+
+    // ── THETA-gate basis-retrain hook tests ────────────────────────────────────
+    //
+    // Mirrors Swift ThetaRetrainHookTests. Covers (per mission A1 spec):
+    //   TR-1: gate fires → hook invoked exactly once (consolidation path).
+    //   TR-2: gate fires → hook invoked exactly once (early-return / no-data path).
+    //   TR-3: nil hook (None) → no invocations, no crash.
+    //   TR-4: hook failure (false return) is non-fatal — cycle result is returned.
+    //   TR-5: hook receives the same now_epoch_secs passed to run_theta_cycle_with_hook.
+    //
+    // Timing is deterministic: `now_epoch_secs` is injected. The
+    // InMemoryThetaBasisRetrainHook records calls without touching a live corpus.
+
+    /// Helper: two RecallTraceItems both used, so the used-set has 2 entries
+    /// and THETA proceeds to the consolidation path (not the early-return path).
+    fn two_used_theta_traces() -> Vec<RecallTraceItem> {
+        vec![
+            trace("drawer-A", true),
+            trace("drawer-B", true),
+        ]
+    }
+
+    /// TR-1: consolidation path (2 used drawers) fires hook exactly once.
+    #[test]
+    fn tr1_hook_invoked_once_on_consolidation_path() {
+        let reader = FakeReaderMut::with_traces(two_used_theta_traces());
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hook = InMemoryThetaBasisRetrainHook::new();
+        let now = 1_000_000.0_f64;
+
+        daemon.run_theta_cycle_with_hook(now, &reader, &mut sink, Some(&mut hook));
+
+        assert_eq!(hook.retrain_calls.len(), 1, "hook must fire exactly once per THETA cycle");
+    }
+
+    /// TR-2: early-return / no-data path (0 used drawers) also fires hook once.
+    #[test]
+    fn tr2_hook_invoked_once_on_early_return_path() {
+        // Empty trace list → no used drawers → usedSet.count < 2 → early return (None).
+        let reader = FakeReaderMut::with_traces(vec![]);
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hook = InMemoryThetaBasisRetrainHook::new();
+        let now = 2_000_000.0_f64;
+
+        let result = daemon.run_theta_cycle_with_hook(now, &reader, &mut sink, Some(&mut hook));
+        assert!(result.is_none(), "early-return path must return None");
+        assert_eq!(hook.retrain_calls.len(), 1, "hook must still fire on early-return path");
+    }
+
+    /// TR-3: passing None for the hook is a safe no-op — no invocations, no crash.
+    #[test]
+    fn tr3_none_hook_is_no_op() {
+        let reader = FakeReaderMut::with_traces(two_used_theta_traces());
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let now = 3_000_000.0_f64;
+
+        // Type annotation required because None has no concrete type here.
+        daemon.run_theta_cycle_with_hook::<_, _, InMemoryThetaBasisRetrainHook>(
+            now, &reader, &mut sink, None,
+        );
+        // Must complete without error — no assertion on a None hook beyond "no crash".
+    }
+
+    /// TR-4: hook failure (false return) is non-fatal — cycle result is returned normally.
+    #[test]
+    fn tr4_hook_failure_is_non_fatal() {
+        let reader = FakeReaderMut::with_traces(two_used_theta_traces());
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hook = InMemoryThetaBasisRetrainHook::failing();
+        let now = 4_000_000.0_f64;
+
+        // Must not panic even though the hook returns false (simulates failure).
+        // The cycle result (Some or None) is still returned.
+        let _ = daemon.run_theta_cycle_with_hook(now, &reader, &mut sink, Some(&mut hook));
+
+        // The failing hook records nothing.
+        assert_eq!(hook.retrain_calls.len(), 0, "failing hook must record no successful calls");
+    }
+
+    /// TR-5: hook receives the exact now_epoch_secs timestamp from the caller.
+    #[test]
+    fn tr5_hook_receives_now_timestamp() {
+        let reader = FakeReaderMut::with_traces(two_used_theta_traces());
+        let mut sink = RecordingSink::default();
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hook = InMemoryThetaBasisRetrainHook::new();
+        let now = 5_000_000.0_f64;
+
+        daemon.run_theta_cycle_with_hook(now, &reader, &mut sink, Some(&mut hook));
+
+        assert_eq!(hook.retrain_calls.first(), Some(&now),
+            "hook must receive the injected now_epoch_secs");
+    }
+
+    // ─── theta_retrain_warranted / advance_reindex_vocab unit tests ────────────
+    //
+    // Pure method tests — no reader, sink, or hook infrastructure needed.
+    // These pin the drift gate logic added for CORPUS-SCOPE-01 § 4.
+
+    /// TR-R1: sentinel path — first-ever call (last_reindex_vocab == -1) always
+    /// returns true regardless of live_vocab magnitude.
+    #[test]
+    fn tr_r1_sentinel_always_warranted() {
+        let daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Sentinel value (-1) must fire immediately, even with a large corpus.
+        assert!(
+            daemon.theta_retrain_warranted(1_000),
+            "sentinel (last_reindex_vocab == -1) must always return true"
+        );
+        assert!(
+            daemon.theta_retrain_warranted(0),
+            "sentinel must return true even when live_vocab == 0"
+        );
+    }
+
+    /// TR-R2: after advancing the baseline, sub-floor growth returns false.
+    #[test]
+    fn tr_r2_below_floor_returns_false() {
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Set baseline to 100.
+        daemon.advance_reindex_vocab(100);
+
+        // Growth of 20 is below max(25, ceil(100 × 0.10)=10) = 25 → defer.
+        assert!(
+            !daemon.theta_retrain_warranted(120),
+            "growth of 20 (< floor 25) must not warrant a retrain"
+        );
+    }
+
+    /// TR-R3: growth exactly at the trigger threshold returns true.
+    #[test]
+    fn tr_r3_at_threshold_returns_true() {
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Baseline = 100; trigger = max(25, ceil(100 × 0.10)=10) = 25.
+        daemon.advance_reindex_vocab(100);
+
+        // live_vocab = 100 + 25 = 125: delta == trigger → warranted.
+        assert!(
+            daemon.theta_retrain_warranted(125),
+            "growth equal to the trigger threshold must return true"
+        );
+    }
+
+    /// TR-R4: advance_reindex_vocab shifts the baseline so the next check
+    /// measures delta from the new level, not the original.
+    #[test]
+    fn tr_r4_advance_shifts_baseline() {
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Cycle 1: advance from sentinel to 100.
+        daemon.advance_reindex_vocab(100);
+
+        // Grow by 25 → trigger fires; advance baseline to 125.
+        assert!(daemon.theta_retrain_warranted(125), "pre-condition: growth warranted at 125");
+        daemon.advance_reindex_vocab(125);
+
+        // From baseline 125, delta = 10 (vocab=135) < trigger 25 → defer.
+        // If baseline did NOT advance (stuck at 100), delta = 35 → fires (wrong).
+        assert!(
+            !daemon.theta_retrain_warranted(135),
+            "after advancing baseline to 125, growth of 10 (135-125) must defer"
+        );
+    }
+
+    /// TR-R5: proportional fraction dominates the floor at a large baseline.
+    /// At baseline 1000, fraction 0.10 × 1000 = 100, which exceeds floor 25.
+    /// Growth of 99 must defer; growth of 100 must trigger.
+    #[test]
+    fn tr_r5_fraction_dominates_at_large_baseline() {
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        daemon.advance_reindex_vocab(1_000);
+        // trigger = max(25, ceil(1000 × 0.10)=100) = 100.
+        assert!(
+            !daemon.theta_retrain_warranted(1_099),
+            "growth of 99 (< fraction-trigger 100) must not warrant retrain"
+        );
+        assert!(
+            daemon.theta_retrain_warranted(1_100),
+            "growth of 100 (== fraction-trigger 100) must warrant retrain"
+        );
+    }
+
+    // ── n4-rust: REM-BETA compact + reclaim ─────────────────────────────────
+    //
+    // Mirrors Swift n4 (REM-BETA compact + reclaim). Verifies that:
+    //   a) run_beta_cycle_with_hnsw calls compact_float_index_tombstones.
+    //   b) run_beta_cycle_with_hnsw calls reclaim_superseded_generations
+    //      (F-2 — an unwired reclaim is invisible without this assertion).
+    //   c) Both calls receive the injected now_epoch_secs timestamp.
+    //   d) Passing None for hnsw skips both steps (base BETA still runs).
+    //
+    // Uses InMemoryHNSWGraphMaintenance — no live VectorStore required.
+
+    #[test]
+    fn n4_beta_compact_and_reclaim_both_fire() {
+        use crate::hnsw_graph_maintenance::InMemoryHNSWGraphMaintenance;
+
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        let mut hnsw = InMemoryHNSWGraphMaintenance::new();
+        let ts = 1_755_000_000.0_f64;
+
+        // Pre-condition: no calls yet.
+        assert!(hnsw.compact_calls.is_empty(), "compact_calls must be empty before BETA");
+        assert!(hnsw.reclaim_calls.is_empty(), "reclaim_calls must be empty before BETA");
+
+        // Fire REM-BETA with the HNSW seam wired.
+        let _report = daemon.run_beta_cycle_with_hnsw(ts, Some(&mut hnsw));
+
+        // Reclaim fires exactly once with the injected ts in every build; the
+        // tombstone compaction runs on every BETA cycle.
+        {
+            assert_eq!(hnsw.compact_calls.len(), 1, "compact must fire once per BETA cycle");
+            assert_eq!(
+                hnsw.compact_calls[0], ts,
+                "compact_float_index_tombstones must receive the injected timestamp"
+            );
+        }
+        assert_eq!(hnsw.reclaim_calls.len(), 1, "reclaim must fire once per BETA cycle");
+        assert_eq!(
+            hnsw.reclaim_calls[0], ts,
+            "reclaim_superseded_generations must receive the injected timestamp"
+        );
+    }
+
+    #[test]
+    fn n4_beta_none_hnsw_skips_both_steps() {
+        use crate::hnsw_graph_maintenance::InMemoryHNSWGraphMaintenance;
+
+        let mut daemon = DreamingDaemon::new(DreamingPolicy::default());
+        // Passing None: HNSW seam absent — compact and reclaim are skipped.
+        let _report = daemon.run_beta_cycle_with_hnsw::<InMemoryHNSWGraphMaintenance>(
+            1_755_000_001.0,
+            None,
+        );
+        // No assertions on an absent HNSWGraphMaintenance — just confirm the
+        // call completes without panic (the base BETA prune still runs).
     }
 }

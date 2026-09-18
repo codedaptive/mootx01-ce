@@ -161,36 +161,16 @@ pub struct Drawer {
     /// with no internal whitespace.
     pub wikidata_qids_secondary: Option<String>,
 
-    /// The distilled representation of this drawer's content — a dense
-    /// parallel rendering (token-economical prose) of the same content
-    /// per SPEC_DISTILLATION_STORAGE §4/§5. A representation is a VIEW
-    /// of this one item: no independent identity, lifecycle, or
-    /// provenance. None means "no representation exists yet" and is the
-    /// sweep-eligibility predicate — no staleness flag, no bool; callers
-    /// test `distilled.is_some()`. The four `distilled*` fields are None
-    /// together or populated together (one atomic column write,
-    /// `set_distilled_representation`); every write that touches
-    /// `content` NULLs all four in the same statement (§7.3 regeneration
-    /// trigger + erasure scrub). Mirrors Swift `Drawer.distilled`.
-    pub distilled: Option<String>,
-
-    /// Identifier of the format + pipeline contract that produced
-    /// `distilled` (Phase 1 value: "p1"). A row whose value differs from
-    /// the current build's contract identifier is a regeneration
-    /// candidate for the sweep. None iff `distilled` is None.
-    pub distilled_pipeline_version: Option<String>,
-
-    /// Approximate token count of `distilled` (SPEC §6): deterministic,
-    /// vendor-neutral estimate so AI clients can budget context before
-    /// hydrating. Advisory only — never load-bearing. None iff
-    /// `distilled` is None.
-    pub distilled_token_count: Option<i64>,
-
-    /// When the representation was generated (epoch millis, stored as
-    /// TEXT ISO8601 by the timestamp column type). Audit and sweep-
-    /// observability only; carries no behavioral weight. None iff
-    /// `distilled` is None.
-    pub distilled_at: Option<i64>,
+    /// The SSC facts of this drawer's content (Encoder Rerank Program §6):
+    /// the grammar-v1 fact anchors as inner text without the `(*[` `]*)`
+    /// delimiters, pairs comma-separated, e.g. `kind: hobby, entity:
+    /// painting, place: brazil`. None when the content has no fact anchors
+    /// and None after every content write (the same statement that bumps
+    /// `content_hash` clears it), which is the enrichment stage's "needs
+    /// facts" predicate. Written by `DrawerStore::set_ssc_facts`; the BM25
+    /// document takes its tokens and the candidate row renders it. Rides the
+    /// structured hydration tier. Mirrors Swift `Drawer.sscFacts`.
+    pub ssc_facts: Option<String>,
 
     /// The one-sentence AI-FACING subject line for this drawer's content
     /// (progressive recall PR-01): telegraphic register, entities and
@@ -218,6 +198,7 @@ pub struct Drawer {
     /// ISO8601 by the timestamp column type). Audit and sweep
     /// observability only. None iff `subject` is None.
     pub subject_at: Option<i64>,
+
 }
 
 impl Drawer {
@@ -257,10 +238,7 @@ impl Drawer {
             udc_facets: None,
             wikidata_qid: None,
             wikidata_qids_secondary: None,
-            distilled: None,
-            distilled_pipeline_version: None,
-            distilled_token_count: None,
-            distilled_at: None,
+            ssc_facts: None,
             subject: None,
             subject_pipeline_version: None,
             subject_at: None,

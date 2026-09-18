@@ -31,7 +31,7 @@ AppVersion={#MyAppVersion}
 AppPublisher=Codedaptive LLC
 AppPublisherURL=https://github.com/codedaptive/mootx01-ce
 AppSupportURL=https://github.com/codedaptive/mootx01-ce/issues
-; Show the license agreement page (FSL-1.1-ALv2), matching the macOS .pkg's
+; Show the license agreement page (Apache-2.0), matching the macOS .pkg's
 ; license pane. Path resolves relative to this .iss (repo-root LICENSE).
 LicenseFile=..\..\LICENSE
 DefaultDirName={%USERPROFILE}\.mootx01\bin
@@ -58,6 +58,21 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Files]
 Source: "{#BinDir}\mootx01.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BinDir}\moot-mgr.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; The fact-extraction worker the daemon spawns as a sibling process.
+Source: "{#BinDir}\moot-nuextract-worker.exe"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+; Encoder model: packed alongside the binaries in the release zip at
+; share\mootx01\models\arctic-embed-s-w60\. Installed one level above {app}
+; so the Rust resolver's <exe>/../share/mootx01/models/<id>/ slot finds it.
+; {app} = {%USERPROFILE}\.mootx01\bin, so model lands at
+; {%USERPROFILE}\.mootx01\share\mootx01\models\arctic-embed-s-w60\.
+; NOT skipifsourcedoesntexist — a missing model dir is a packaging error.
+Source: "{#BinDir}\share\mootx01\models\arctic-embed-s-w60\*"; \
+  DestDir: "{app}\..\share\mootx01\models\arctic-embed-s-w60"; \
+  Flags: ignoreversion recursesubdirs createallsubdirs
+; Fact-extraction model (GGUF + tokenizer) in the same share slot.
+Source: "{#BinDir}\share\mootx01\models\nuextract-tiny-v1.5\*"; \
+  DestDir: "{app}\..\share\mootx01\models\nuextract-tiny-v1.5"; \
+  Flags: ignoreversion recursesubdirs createallsubdirs
 
 [InstallDelete]
 ; Migrate pre-1.0.6 beta installs that landed in Roaming AppData: remove
@@ -65,6 +80,7 @@ Source: "{#BinDir}\moot-mgr.exe"; DestDir: "{app}"; Flags: ignoreversion skipifs
 ; Roaming PATH entry (if any) is harmless once these are gone.
 Type: files; Name: "{userappdata}\.mootx01\bin\mootx01.exe"
 Type: files; Name: "{userappdata}\.mootx01\bin\moot-mgr.exe"
+Type: files; Name: "{userappdata}\.mootx01\bin\moot-nuextract-worker.exe"
 
 [Registry]
 ; Add the install dir to the user PATH (same effect as install.ps1).
@@ -90,14 +106,14 @@ Filename: "{app}\mootx01.exe"; Parameters: "uninstall --yes"; \
   Flags: runhidden waituntilterminated skipifdoesntexist
 
 [UninstallDelete]
-; Clean up the install directory. Estate data under %LOCALAPPDATA%\MOOTx01
+; Clean up the install directory. Estate data under %LOCALAPPDATA%\com.mootx01.ce
 ; is intentionally left intact (the uninstall message notes this).
 Type: filesandordirs; Name: "{app}"
 
 [Messages]
 WelcomeLabel1=Welcome to MOOTx01 Setup
 WelcomeLabel2=MOOTx01 gives your AI tools a persistent, private memory that lives on your machine.%n%nThis will install MOOTx01 and let you connect your AI clients.%n%nClick Next to continue.
-FinishedLabel=MOOTx01 has been installed.%n%nIf you checked "Connect AI clients," a terminal window will open to let you select which clients to wire.%n%nYour estate data is stored at %LOCALAPPDATA%\MOOTx01 and stays on this machine.
+FinishedLabel=MOOTx01 has been installed.%n%nIf you checked "Connect AI clients," a terminal window will open to let you select which clients to wire.%n%nYour estate data is stored at %LOCALAPPDATA%\com.mootx01.ce and stays on this machine.
 
 [Code]
 // Check whether the install dir is already on the user PATH.
@@ -146,7 +162,7 @@ begin
   if CurUninstallStep = usPostUninstall then
     if not UninstallSilent then
       MsgBox('MOOTx01 has been removed.' + #13#10 + #13#10 +
-             'Your estate data at %LOCALAPPDATA%\MOOTx01 was not deleted. ' +
+             'Your estate data at %LOCALAPPDATA%\com.mootx01.ce was not deleted. ' +
              'Remove that folder manually if you want to erase your data.',
              mbInformation, MB_OK);
 end;

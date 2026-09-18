@@ -20,7 +20,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use corpus_kit::CorpusContentEngine;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 use crate::brain::scheduler::api::*;
 
@@ -169,7 +169,7 @@ impl VectorSimilaritySignal {
         // Two-lane kNN scan via shared core (also used by associate_sweep verb).
         // proximity_scan_candidates applies within-pass symmetric pair dedup
         // and returns unique (a, b, weight) candidates.
-        let candidate_pairs = proximity_scan_candidates(
+        let (candidate_pairs, _non_unique_probes) = proximity_scan_candidates(
             vector_store,
             &item_ids,
             model_id,
@@ -249,8 +249,9 @@ pub(crate) fn proximity_scan_candidates(
     proximity_threshold: i32,
     corpus: Option<&CorpusContentEngine>,
     neighbours_per_probe: usize,
-) -> Vec<(String, String, f64)> {
+) -> (Vec<(String, String, f64)>, usize) {
     let mut result: Vec<(String, String, f64)> = Vec::new();
+    let mut non_unique_probes: usize = 0;
     // Canonical pair key: lexicographically smaller ID first so (A,B) and
     // (B,A) map to the same set element. Both lanes key on DRAWER ids.
     let mut seen_pairs: HashSet<String> = HashSet::new();
@@ -263,10 +264,13 @@ pub(crate) fn proximity_scan_candidates(
             _ => continue,
         };
 
-        let matches = match vector_store.find_nearest(&probe_engram, model_id, neighbours_per_probe) {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
+        let (matches, non_unique) =
+            ladder_neighbours(neighbours_per_probe, |limit| {
+                vector_store.find_nearest(&probe_engram, model_id, limit)
+            });
+        if non_unique {
+            non_unique_probes += 1;
+        }
 
         for m in matches {
             if m.item_id == *item_id {
@@ -298,14 +302,13 @@ pub(crate) fn proximity_scan_candidates(
                 Ok(Some(e)) => e,
                 _ => continue,
             };
-            let matches = match vector_store.find_nearest(
-                &probe_engram,
-                &corpus_model_id,
-                neighbours_per_probe,
-            ) {
-                Ok(m) => m,
-                Err(_) => continue,
-            };
+            let (matches, non_unique) =
+                ladder_neighbours(neighbours_per_probe, |limit| {
+                    vector_store.find_nearest(&probe_engram, &corpus_model_id, limit)
+                });
+            if non_unique {
+                non_unique_probes += 1;
+            }
             for m in matches {
                 if m.item_id == *item_id || m.distance > proximity_threshold {
                     continue;
@@ -323,5 +326,137 @@ pub(crate) fn proximity_scan_candidates(
         }
     }
 
-    result
+    (result, non_unique_probes)
 }
+
+/// Ladder cut (Bob ruling 2026-08-26): a per-probe neighbour list whose
+/// truncation NEVER lands inside a distance tie group, so the pair set is
+/// identical across estate provisionings even when candidates carry
+/// byte-identical vectors (a distance+vec_hash tie falls to the per-run
+/// random UUID — per-run stable, not cross-run stable; REPLAY_DRIFT_RCA
+/// final addendum). Twin of Swift `ProximityScanCore.ladderNeighbours`.
+///
+/// Rungs, with `units` = the caller's neighbour budget:
+///   1. Fetch units×3; cut at the FIRST distance boundary at or after
+///      `units` (keep everything above the cut).
+///   2. No boundary there → fetch units×6; look again.
+///   3. Still none → cut at the LAST distance boundary INSIDE `units`
+///      (the longest determinate prefix, shorter than the budget).
+///   4. No boundary anywhere (one giant tie group) → return NOTHING and
+///      flag non-unique; the caller surfaces the count. Zero pairs beats
+///      a run-dependent subset.
+/// A pool the store exhausts (fewer rows than requested) is complete —
+/// nothing was cut, so it is returned whole. Every rung is deterministic
+/// because the underlying order is (distance, vec_hash, key) and cuts
+/// land only on distance boundaries.
+fn ladder_neighbours<E>(
+    units: usize,
+    mut fetch: impl FnMut(usize) -> Result<Vec<synapsekit::VectorMatch>, E>,
+) -> (Vec<synapsekit::VectorMatch>, bool) {
+    for factor in [3usize, 6] {
+        let limit = units * factor;
+        let matches = match fetch(limit) {
+            Ok(m) => m,
+            Err(_) => return (Vec::new(), false),
+        };
+        // Exhausted pool: the store returned everything it has — the result
+        // is complete, no cut happened, nothing to disambiguate.
+        if matches.len() < limit {
+            return (matches, false);
+        }
+        // First distance boundary at or after `units`.
+        for i in units..matches.len() {
+            if matches[i].distance != matches[i - 1].distance {
+                return (matches[..i].to_vec(), false);
+            }
+        }
+        if factor == 6 {
+            // Rung 3: the longest determinate prefix INSIDE `units`.
+            for i in (1..units).rev() {
+                if matches[i].distance != matches[i - 1].distance {
+                    return (matches[..i].to_vec(), false);
+                }
+            }
+            // Rung 4: one giant tie group — non-unique neighbourhood.
+            return (Vec::new(), true);
+        }
+    }
+    unreachable!("the factor loop always returns on factor == 6")
+}
+
+#[cfg(test)]
+mod ladder_tests {
+    use super::ladder_neighbours;
+    use synapsekit::VectorMatch;
+
+    /// Synthetic match list: `groups` = (distance, count) runs in order.
+    /// Twin of Swift `AssociateSweepLadderTests.matches`.
+    fn matches(groups: &[(i32, usize)]) -> Vec<VectorMatch> {
+        let mut out = Vec::new();
+        let mut n = 0usize;
+        for &(distance, count) in groups {
+            for _ in 0..count {
+                out.push(VectorMatch {
+                    item_id: format!("{:04}", n),
+                    distance,
+                    model_id: "m".to_string(),
+                    generation: 0,
+                    score: None,
+                });
+                n += 1;
+            }
+        }
+        out
+    }
+
+    fn fetch(pool: &[VectorMatch]) -> impl FnMut(usize) -> Result<Vec<VectorMatch>, ()> + '_ {
+        move |limit| Ok(pool.iter().take(limit).cloned().collect())
+    }
+
+    /// Rung 1: a boundary inside the ×3 pool, at or after `units`, cuts there.
+    #[test]
+    fn rung1_boundary_after_units_cuts() {
+        let pool = matches(&[(0, 1), (1, 9), (2, 8)]); // 18 rows; boundary at 10
+        let (out, non_unique) = ladder_neighbours(5, fetch(&pool));
+        assert!(!non_unique);
+        assert_eq!(out.len(), 10, "cut lands at the d1→d2 boundary (index 10)");
+        assert!(out.iter().all(|m| m.distance <= 1));
+    }
+
+    /// Rung 2: no boundary in ×3, boundary appears in ×6.
+    #[test]
+    fn rung2_boundary_in_wider_pool_cuts() {
+        let pool = matches(&[(1, 20), (2, 12)]); // ×3=15 all d1; ×6=30 boundary at 20
+        let (out, non_unique) = ladder_neighbours(5, fetch(&pool));
+        assert!(!non_unique);
+        assert_eq!(out.len(), 20, "cut lands at the d1→d2 boundary (index 20)");
+    }
+
+    /// Rung 3: no boundary in ×6, but one INSIDE units.
+    #[test]
+    fn rung3_boundary_inside_units_cuts() {
+        let pool = matches(&[(0, 2), (1, 40)]); // boundary only at index 2
+        let (out, non_unique) = ladder_neighbours(5, fetch(&pool));
+        assert!(!non_unique);
+        assert_eq!(out.len(), 2, "the only boundary is inside units — cut there");
+    }
+
+    /// Rung 4: one giant tie group — nothing returned, flagged non-unique.
+    #[test]
+    fn rung4_one_tie_group_returns_nothing_flagged() {
+        let pool = matches(&[(1, 40)]);
+        let (out, non_unique) = ladder_neighbours(5, fetch(&pool));
+        assert!(non_unique);
+        assert!(out.is_empty());
+    }
+
+    /// Exhausted pool: complete result, returned whole, never flagged.
+    #[test]
+    fn exhausted_pool_returns_whole() {
+        let pool = matches(&[(1, 7)]); // fewer than units×3
+        let (out, non_unique) = ladder_neighbours(5, fetch(&pool));
+        assert!(!non_unique);
+        assert_eq!(out.len(), 7);
+    }
+}
+

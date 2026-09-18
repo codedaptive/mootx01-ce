@@ -496,7 +496,7 @@ fn storage_stats_reports_backend_health() {
         stats.blob_count.is_none(),
         "blob_count must be None for SQLite backend"
     );
-    // vector_count was removed from StorageStats in VectorKit-owned vector search (blast-radius miss fix).
+    // vector_count was removed from StorageStats in SynapseKit-owned vector search (blast-radius miss fix).
     // The field no longer exists on the struct; the InMemory-only assertion is gone.
 }
 
@@ -811,6 +811,40 @@ fn latest_metrics_by_names_and_dropboxes_group_count() {
             );
         }
     }
+}
+
+#[test]
+fn query_metrics_by_names_clamps_oversized_limit() {
+    // Store-level bound (PH-01): an oversized supplied limit is clamped to
+    // MAX_METRIC_ROWS_PER_NAMED_QUERY — the bound holds even when the
+    // handler edge check is bypassed. Mirrors Swift
+    // `queryMetricsByNamesClampsOversizedLimit`.
+    let store = make_store();
+    let cap = StatsStore::MAX_METRIC_ROWS_PER_NAMED_QUERY;
+    let total = cap + 8;
+    for i in 0..total {
+        store
+            .insert_metric("clamp-metric", i as f64, &BTreeMap::new(), i as f64, "clamp-box")
+            .unwrap();
+    }
+
+    // Oversized limit → clamped to the cap; DESC keeps the NEWEST rows.
+    let rows = store
+        .query_metrics_by_names(&["clamp-metric"], None, Some(usize::MAX))
+        .expect("clamped query must succeed");
+    assert_eq!(rows.len(), cap, "oversized limit must be clamped to the cap");
+    assert!(
+        (rows[0].ts_epoch - (total - 1) as f64).abs() < 1e-6,
+        "clamped result must keep the newest rows (DESC); got ts {}",
+        rows[0].ts_epoch
+    );
+
+    // A normal small limit is unaffected by the clamp.
+    let ten = store
+        .query_metrics_by_names(&["clamp-metric"], None, Some(10))
+        .expect("small-limit query must succeed");
+    assert_eq!(ten.len(), 10, "a limit below the cap must be honoured exactly");
+    assert!((ten[0].ts_epoch - (total - 1) as f64).abs() < 1e-6);
 }
 
 #[test]

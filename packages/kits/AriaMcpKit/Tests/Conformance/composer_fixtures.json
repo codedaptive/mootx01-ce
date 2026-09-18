@@ -1,0 +1,478 @@
+{
+  "version": "1.0",
+  "description": "Central conformance fixtures for ResultComposer \u2014 ARIA_MCP_SPEC 2.4.0 \u00a78.3 / ARIA_MCP_INTERFACE \u00a711 grammar, byte-exact for both Swift and Rust ports. Date: 2026-09-05. Row format: uuid \u00b7 subject \u00b7 bestSpan \u00b7 sscFacts \u00b7 eventTime \u00b7 score (S1) / uuid \u00b7 subject \u00b7 bestSpan \u00b7 sscFacts \u00b7 eventTime (S2).",
+  "cases": [
+    {
+      "name": "s2_listing",
+      "description": "S2 memory list: listing N memories in wing/room \u2014 filing order, unranked (no score column)",
+      "shape": "s2_listing",
+      "wing": "Agentic Memory",
+      "room": "recruiting",
+      "rows": [
+        {
+          "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+          "subject": "Entelo follow-up decided at TechFest",
+          "eventTime": "2026-01-01T00:07:52Z",
+          "bestSpan": "user: I'll definitely look into Entelo further.",
+          "sscFacts": "kind: decision, entity: Entelo"
+        },
+        {
+          "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
+          "subject": "AI recruitment tool exploration for company",
+          "eventTime": "2026-01-01T00:07:48Z",
+          "bestSpan": null
+        }
+      ],
+      "expectedText": "listing 2 memories in Agentic Memory / recruiting \u2014 filing order, unranked\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 \u00b7 Entelo follow-up decided at TechFest \u00b7 user: I'll definitely look into Entelo further. \u00b7 kind: decision, entity: Entelo \u00b7 2026-01-01T00:07:52Z\nE70A5761-152D-4ABB-B16A-964B06A09404 \u00b7 AI recruitment tool exploration for company \u00b7 - \u00b7 - \u00b7 2026-01-01T00:07:48Z"
+    },
+    {
+      "name": "s2_batch_get",
+      "description": "S2 batch get: resolved N of M in request order; 'not found: <uuid>' in place for missing IDs",
+      "shape": "s2_batch",
+      "requestedCount": 3,
+      "rows": [
+        {
+          "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+          "subject": "Entelo follow-up decided at TechFest",
+          "eventTime": "2026-01-01T00:07:52Z",
+          "found": true,
+          "bestSpan": null
+        },
+        {
+          "id": "DEADBEEF-0000-0000-0000-000000000000",
+          "found": false
+        },
+        {
+          "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
+          "subject": "AI recruitment tool exploration for company",
+          "eventTime": "2026-01-01T00:07:48Z",
+          "found": true,
+          "bestSpan": null
+        }
+      ],
+      "resolvedCount": 2,
+      "expectedText": "resolved 2 of 3 requested memories, in request order\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 \u00b7 Entelo follow-up decided at TechFest \u00b7 - \u00b7 - \u00b7 2026-01-01T00:07:52Z\nnot found: DEADBEEF-0000-0000-0000-000000000000\nE70A5761-152D-4ABB-B16A-964B06A09404 \u00b7 AI recruitment tool exploration for company \u00b7 - \u00b7 - \u00b7 2026-01-01T00:07:48Z"
+    },
+    {
+      "name": "s3_full_record",
+      "description": "S3 full record pinned to \u00a711.6 sample: sscFacts block present, tunnels listed",
+      "shape": "s3",
+      "record": {
+        "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+        "room": "recruiting",
+        "wing": "Agentic Memory",
+        "subject": "Entelo follow-up decided at TechFest",
+        "filedAt": "2026-01-02T10:15:00Z",
+        "eventTime": "2026-01-01T00:07:52Z",
+        "state": "active",
+        "trust": "verbatim",
+        "sensitivity": "normal",
+        "exportability": "exportable",
+        "confirmation": "unconfirmed",
+        "lineageID": "9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60",
+        "tunnels": [
+          {
+            "direction": "outgoing",
+            "targetID": "E70A5761-152D-4ABB-B16A-964B06A09404",
+            "label": "relates"
+          },
+          {
+            "direction": "incoming",
+            "targetID": "931F2411-95B7-4DE9-9B96-CF96DF66175E",
+            "label": "precedes"
+          }
+        ],
+        "content": "user: I'll definitely look into Entelo further. Sarah from Google walked me through it at TechFest and it fits the sourcing workflow we discussed."
+      },
+      "expectedText": "memory 30B1B3B0-945D-4C07-AE57-53D9FFC9B543\nroom: recruiting  wing: Agentic Memory\nsubject: Entelo follow-up decided at TechFest\nfiled_at: 2026-01-02T10:15:00Z\nevent_time: 2026-01-01T00:07:52Z\nstate: active\ntrust: verbatim\nsensitivity: normal\nexportability: exportable\nconfirmation: unconfirmed\nlineage: 9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60\ntunnels: 2\n  \u2192 E70A5761-152D-4ABB-B16A-964B06A09404  [relates]\n  \u2190 931F2411-95B7-4DE9-9B96-CF96DF66175E  [precedes]\ncontent:\nuser: I'll definitely look into Entelo further. Sarah from Google walked me through it at TechFest and it fits the sourcing workflow we discussed."
+    },
+    {
+      "name": "s3_no_subject_no_ssc",
+      "description": "S3 full record: subject line absent when drawer has none; sscFacts block absent when none active",
+      "shape": "s3",
+      "record": {
+        "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+        "room": "inbox",
+        "wing": "Default",
+        "subject": null,
+        "filedAt": "2026-01-02T10:15:00Z",
+        "eventTime": "2026-01-01T00:07:52Z",
+        "state": "active",
+        "trust": "verbatim",
+        "sensitivity": "normal",
+        "exportability": "exportable",
+        "confirmation": "unconfirmed",
+        "lineageID": "9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60",
+        "tunnels": [],
+        "content": "Some content."
+      },
+      "expectedText": "memory 30B1B3B0-945D-4C07-AE57-53D9FFC9B543\nroom: inbox  wing: Default\nfiled_at: 2026-01-02T10:15:00Z\nevent_time: 2026-01-01T00:07:52Z\nstate: active\ntrust: verbatim\nsensitivity: normal\nexportability: exportable\nconfirmation: unconfirmed\nlineage: 9D1E6B30-4C77-4A28-B5F0-2E83A1D97C60\ntunnels: 0\ncontent:\nSome content."
+    },
+    {
+      "name": "s4_fact_search",
+      "description": "S4 fact search: six fixed columns, '-' source for freestanding assertion",
+      "shape": "s4_search",
+      "facts": [
+        {
+          "factID": "FACT-001",
+          "subject": "Entelo",
+          "predicate": "is-tool-type",
+          "object": "AI recruitment",
+          "sourceDrawerID": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+          "filedAt": "2026-01-01T00:08:00Z"
+        },
+        {
+          "factID": "FACT-002",
+          "subject": "TechFest",
+          "predicate": "held-in",
+          "object": "2026",
+          "sourceDrawerID": null,
+          "filedAt": "2026-01-01T00:09:00Z"
+        }
+      ],
+      "expectedText": "found 2 facts, one per line\nFACT-001 \u00b7 Entelo \u00b7 is-tool-type \u00b7 AI recruitment \u00b7 30B1B3B0-945D-4C07-AE57-53D9FFC9B543 \u00b7 2026-01-01T00:08:00Z\nFACT-002 \u00b7 TechFest \u00b7 held-in \u00b7 2026 \u00b7 - \u00b7 2026-01-01T00:09:00Z"
+    },
+    {
+      "name": "s4_fact_search_normalization",
+      "description": "S4 normalization: embedded newline and middle-dot in object are mapped before emission",
+      "shape": "s4_search",
+      "facts": [
+        {
+          "factID": "FACT-NRM-001",
+          "subject": "Entelo",
+          "predicate": "note",
+          "object": "line one\nline two",
+          "sourceDrawerID": null,
+          "filedAt": "2026-01-01T00:00:00Z"
+        },
+        {
+          "factID": "FACT-NRM-002",
+          "subject": "TechFest",
+          "predicate": "note",
+          "object": "alpha \u00b7 beta",
+          "sourceDrawerID": null,
+          "filedAt": "2026-01-01T00:01:00Z"
+        }
+      ],
+      "expectedText": "found 2 facts, one per line\nFACT-NRM-001 \u00b7 Entelo \u00b7 note \u00b7 line one line two \u00b7 - \u00b7 2026-01-01T00:00:00Z\nFACT-NRM-002 \u00b7 TechFest \u00b7 note \u00b7 alpha - beta \u00b7 - \u00b7 2026-01-01T00:01:00Z"
+    },
+    {
+      "name": "s4_fact_timeline",
+      "description": "S4 fact timeline: seven columns, time-major, lifecycle tags",
+      "shape": "s4_timeline",
+      "facts": [
+        {
+          "filedAt": "2026-01-01T00:08:00Z",
+          "lifecycle": "active",
+          "factID": "FACT-001",
+          "subject": "Entelo",
+          "predicate": "is-tool-type",
+          "object": "AI recruitment",
+          "sourceDrawerID": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543"
+        },
+        {
+          "filedAt": "2026-01-01T00:09:00Z",
+          "lifecycle": "retired(B)",
+          "factID": "FACT-002",
+          "subject": "TechFest",
+          "predicate": "held-in",
+          "object": "2025",
+          "sourceDrawerID": null
+        }
+      ],
+      "expectedText": "fact timeline: 2 facts in filing order (active and retired)\n2026-01-01T00:08:00Z \u00b7 active \u00b7 FACT-001 \u00b7 Entelo \u00b7 is-tool-type \u00b7 AI recruitment \u00b7 30B1B3B0-945D-4C07-AE57-53D9FFC9B543\n2026-01-01T00:09:00Z \u00b7 retired(B) \u00b7 FACT-002 \u00b7 TechFest \u00b7 held-in \u00b7 2025 \u00b7 -"
+    },
+    {
+      "name": "s5_edge_rows",
+      "description": "S5 edge rows: tunnel id + kind/label + far endpoint S2 pick fields (no score)",
+      "shape": "s5",
+      "direction": "outgoing",
+      "edges": [
+        {
+          "tunnelID": "TUNNEL-001",
+          "kindLabel": "relates",
+          "lifecycle": null,
+          "farEndpoint": {
+            "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
+            "subject": "AI recruitment tool exploration for company",
+            "bestSpan": null,
+            "sscFacts": null,
+            "eventTime": "2026-01-01T00:07:48Z"
+          }
+        }
+      ],
+      "expectedText": "found 1 outgoing connection, one per line\nTUNNEL-001 \u00b7 relates \u00b7 E70A5761-152D-4ABB-B16A-964B06A09404 \u00b7 AI recruitment tool exploration for company \u00b7 - \u00b7 - \u00b7 2026-01-01T00:07:48Z"
+    },
+    {
+      "name": "s5_edge_rows_normalize_kind_label",
+      "description": "S5 edge rows: kindLabel containing U+00B7 middle-dot is normalized (separator injection prevention)",
+      "shape": "s5",
+      "direction": "outgoing",
+      "edges": [
+        {
+          "tunnelID": "TUNNEL-002",
+          "kindLabel": "type\u00b7A relation",
+          "lifecycle": null,
+          "farEndpoint": {
+            "id": "A1B2C3D4-0000-0000-0000-000000000001",
+            "subject": "target node",
+            "bestSpan": null,
+            "sscFacts": null,
+            "eventTime": "2026-01-01T00:08:00Z"
+          }
+        }
+      ],
+      "expectedText": "found 1 outgoing connection, one per line\nTUNNEL-002 \u00b7 type-A relation \u00b7 A1B2C3D4-0000-0000-0000-000000000001 \u00b7 target node \u00b7 - \u00b7 - \u00b7 2026-01-01T00:08:00Z"
+    },
+    {
+      "name": "s6_tabular_query_lossless",
+      "description": "S6 dataset query: lossless encoding \u2014 separator, embedded quote, newline, NULL, empty string, bool, numeric (\u00a711.9)",
+      "shape": "s6_query",
+      "datasetID": "DSET-0001-0000-0000-000000000001",
+      "datasetName": "test_dataset",
+      "returned": 3,
+      "total": 10,
+      "limit": 50,
+      "orderCol": "id",
+      "orderDir": "asc",
+      "columns": [
+        "id",
+        "note",
+        "flag",
+        "amount"
+      ],
+      "rows": [
+        [
+          1,
+          "plain text",
+          true,
+          3.14
+        ],
+        [
+          2,
+          "text with \u00b7 sep",
+          false,
+          null
+        ],
+        [
+          3,
+          "line one\nline two",
+          null,
+          0
+        ]
+      ],
+      "expectedText": "dataset DSET-0001-0000-0000-000000000001 \"test_dataset\": returned 3 of 10 matching rows (limit 50, ordered by id asc)\nid \u00b7 note \u00b7 flag \u00b7 amount\n1 \u00b7 plain text \u00b7 true \u00b7 3.14\n2 \u00b7 \"text with \u00b7 sep\" \u00b7 false \u00b7 \n3 \u00b7 \"line one\\nline two\" \u00b7  \u00b7 0"
+    },
+    {
+      "name": "s6_tabular_stats",
+      "description": "S6 dataset stats: per-column aggregate statistics format (\u00a711.9)",
+      "shape": "s6_stats",
+      "datasetID": "DSET-0001-0000-0000-000000000001",
+      "datasetName": "test_dataset",
+      "totalRows": 100,
+      "totalCols": 2,
+      "columns": [
+        {
+          "name": "id",
+          "count": 100,
+          "nulls": 0,
+          "distinct": 100
+        },
+        {
+          "name": "amount",
+          "count": 95,
+          "nulls": 5,
+          "distinct": 80,
+          "min": "0",
+          "max": "999.99",
+          "mean": "150.5",
+          "stddev": "42.1"
+        }
+      ],
+      "expectedText": "dataset DSET-0001-0000-0000-000000000001 \"test_dataset\": 100 rows, 2 columns\nid \u00b7 count=100 \u00b7 nulls=0 \u00b7 distinct=100\namount \u00b7 count=95 \u00b7 nulls=5 \u00b7 distinct=80 \u00b7 min=0 \u00b7 max=999.99 \u00b7 mean=150.5 \u00b7 stddev=42.1"
+    },
+    {
+      "name": "synthesis_with_cue",
+      "description": "Synthesis document: header, query cue line, summary paragraph, candidate section (\u00a711.4) \u2014 NO scaffold fields",
+      "shape": "synthesis",
+      "drawerCount": 2,
+      "cueTerms": [
+        "entelo",
+        "recruitment",
+        "techfest"
+      ],
+      "summary": "The user encountered Entelo at TechFest and plans to evaluate it as a recruitment tool.",
+      "rows": [
+        {
+          "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+          "subject": "Entelo follow-up decided at TechFest",
+          "eventTime": "2026-01-01T00:07:52Z",
+          "score": 0.5687,
+          "bestSpan": "user: I'll definitely look into Entelo further.",
+          "sscFacts": "kind: decision, entity: Entelo"
+        },
+        {
+          "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
+          "subject": "AI recruitment tool exploration for company",
+          "eventTime": "2026-01-01T00:07:48Z",
+          "score": 0.5562,
+          "bestSpan": "user: I'm looking to explore AI-powered recruitment tools for my company.",
+          "sscFacts": "kind: plan, entity: recruitment tools"
+        }
+      ],
+      "control": {
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
+      },
+      "expectedText": "grounded_synthesis: 2 drawers\nquery: entelo, recruitment, techfest\nThe user encountered Entelo at TechFest and plans to evaluate it as a recruitment tool.\nfound 2 candidate memories, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 \u00b7 Entelo follow-up decided at TechFest \u00b7 user: I'll definitely look into Entelo further. \u00b7 kind: decision, entity: Entelo \u00b7 2026-01-01T00:07:52Z \u00b7 0.5687\nE70A5761-152D-4ABB-B16A-964B06A09404 \u00b7 AI recruitment tool exploration for company \u00b7 user: I'm looking to explore AI-powered recruitment tools for my company. \u00b7 kind: plan, entity: recruitment tools \u00b7 2026-01-01T00:07:48Z \u00b7 0.5562",
+      "expectedStructuredTopLevel": {
+        "cues": [
+          "entelo",
+          "recruitment",
+          "techfest"
+        ],
+        "summary": "The user encountered Entelo at TechFest and plans to evaluate it as a recruitment tool."
+      }
+    },
+    {
+      "name": "synthesis_whole_estate_no_cue_line",
+      "description": "Synthesis whole-estate digest: NO query: line (absent in whole-estate form per \u00a711.4)",
+      "shape": "synthesis_whole_estate",
+      "drawerCount": 5,
+      "cueTerms": null,
+      "summary": "The estate contains memories about recruitment tools and TechFest.",
+      "rows": [],
+      "expectedText": "grounded_synthesis: 5 drawers\nThe estate contains memories about recruitment tools and TechFest.\nfound 0 candidate memories, one per line"
+    },
+    {
+      "name": "vague_recall_two_tiers",
+      "description": "Vague recall: two S1 sections under 'found N vague summaries' and 'found M hydrated originals' headers (\u00a711.2)",
+      "shape": "vague",
+      "summaries": [
+        {
+          "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+          "subject": "Entelo follow-up decided at TechFest",
+          "bestSpan": null,
+          "sscFacts": null,
+          "eventTime": "2026-01-01T00:07:52Z",
+          "score": 0.5687
+        }
+      ],
+      "originals": [
+        {
+          "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
+          "subject": "AI recruitment tool exploration for company",
+          "bestSpan": "user: I'm looking to explore AI-powered recruitment tools for my company.",
+          "sscFacts": null,
+          "eventTime": "2026-01-01T00:07:48Z",
+          "score": 0.5562
+        }
+      ],
+      "control": {
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
+      },
+      "expectedText": "found 1 vague summary, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 \u00b7 Entelo follow-up decided at TechFest \u00b7 - \u00b7 - \u00b7 2026-01-01T00:07:52Z \u00b7 0.5687\nfound 1 hydrated original, one per line\nE70A5761-152D-4ABB-B16A-964B06A09404 \u00b7 AI recruitment tool exploration for company \u00b7 user: I'm looking to explore AI-powered recruitment tools for my company. \u00b7 - \u00b7 2026-01-01T00:07:48Z \u00b7 0.5562"
+    },
+    {
+      "name": "distilled_recall_with_continuation",
+      "description": "Distilled recall: each row followed by 4-space indented inline distilled continuation rendered by ContextDistillLib at read time (\u00a711.2)",
+      "shape": "distilled",
+      "rows": [
+        {
+          "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+          "subject": "Entelo follow-up decided at TechFest",
+          "eventTime": "2026-01-01T00:07:52Z",
+          "score": 0.5687,
+          "distilled": "Decided at TechFest to evaluate Entelo as the recruitment tool; user owns the follow-up.",
+          "representation": "distilled",
+          "bestSpan": "user: I'll definitely look into Entelo further.",
+          "sscFacts": "kind: decision, entity: Entelo"
+        },
+        {
+          "id": "E70A5761-152D-4ABB-B16A-964B06A09404",
+          "subject": "AI recruitment tool exploration for company",
+          "eventTime": "2026-01-01T00:07:48Z",
+          "score": 0.5562,
+          "distilled": "I'm looking to explore AI-powered recruitment tools for my company. Sarah from Google suggested several options at TechFest three weeks ago.",
+          "representation": "distilled",
+          "bestSpan": "user: I'm looking to explore AI-powered recruitment tools for my company.",
+          "sscFacts": "kind: plan, entity: recruitment tools"
+        }
+      ],
+      "control": {
+        "discrimination": null,
+        "temporalNarration": null,
+        "walkStage": null,
+        "walkStoppedEarly": null,
+        "degraded": false,
+        "tieNote": false,
+        "hint": null
+      },
+      "expectedText": "found 2 candidate memories, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 \u00b7 Entelo follow-up decided at TechFest \u00b7 user: I'll definitely look into Entelo further. \u00b7 kind: decision, entity: Entelo \u00b7 2026-01-01T00:07:52Z \u00b7 0.5687\n    Decided at TechFest to evaluate Entelo as the recruitment tool; user owns the follow-up.\nE70A5761-152D-4ABB-B16A-964B06A09404 \u00b7 AI recruitment tool exploration for company \u00b7 user: I'm looking to explore AI-powered recruitment tools for my company. \u00b7 kind: plan, entity: recruitment tools \u00b7 2026-01-01T00:07:48Z \u00b7 0.5562\n    I'm looking to explore AI-powered recruitment tools for my company. Sarah from Google suggested several options at TechFest three weeks ago."
+    },
+    {
+      "name": "federated_search_per_estate_sections",
+      "description": "Federated search: one section per estate with estate header (\u00a711.2)",
+      "shape": "federated",
+      "estates": [
+        {
+          "estateName": "Work",
+          "estateID": "ESTATE-0001-0000-0000-000000000001",
+          "rows": [
+            {
+              "id": "30B1B3B0-945D-4C07-AE57-53D9FFC9B543",
+              "subject": "Entelo follow-up decided at TechFest",
+              "bestSpan": null,
+              "sscFacts": null,
+              "eventTime": "2026-01-01T00:07:52Z",
+              "score": 0.5687
+            }
+          ],
+          "control": {
+            "discrimination": null,
+            "temporalNarration": null,
+            "walkStage": null,
+            "walkStoppedEarly": null,
+            "degraded": false,
+            "tieNote": false,
+            "hint": null
+          }
+        },
+        {
+          "estateName": "Personal",
+          "estateID": "ESTATE-0002-0000-0000-000000000002",
+          "rows": [],
+          "control": {
+            "discrimination": null,
+            "temporalNarration": null,
+            "walkStage": null,
+            "walkStoppedEarly": null,
+            "degraded": false,
+            "tieNote": false,
+            "hint": null
+          }
+        }
+      ],
+      "expectedText": "estate: Work [ESTATE-0001-0000-0000-000000000001]\nfound 1 candidate memory, one per line\n30B1B3B0-945D-4C07-AE57-53D9FFC9B543 \u00b7 Entelo follow-up decided at TechFest \u00b7 - \u00b7 - \u00b7 2026-01-01T00:07:52Z \u00b7 0.5687\nestate: Personal [ESTATE-0002-0000-0000-000000000002]\nfound 0 candidate memories, one per line"
+    },
+    {
+      "name": "s2_listing_empty",
+      "description": "S2 listing 0 memories: 'listing 0 memories in \u2026' header only (no hint for listing)",
+      "shape": "s2_listing_empty",
+      "wing": "Agentic Memory",
+      "room": "recruiting",
+      "expectedText": "listing 0 memories in Agentic Memory / recruiting \u2014 filing order, unranked"
+    }
+  ]
+}

@@ -33,7 +33,7 @@
 //   concurrent execution WITHIN a suite. GlobalTestLock prevents
 //   interleaving ACROSS suites and with functional tests.
 //
-//   Lower-layer kits (VectorKit, SubstrateKernel via EngramLib) emit their
+//   Lower-layer kits (SynapseKit, SubstrateKernel via EngramLib) emit their
 //   own metrics when monitoring is enabled. Count assertions filter to the
 //   corpuskit.* namespace to avoid counting those emissions.
 
@@ -43,7 +43,7 @@ import EngramLib
 import PersistenceKit
 @testable import CorpusKit
 import IntellectusLib
-import VectorKit
+import SynapseKit
 
 // MARK: - Helper: capturing sink
 
@@ -254,7 +254,7 @@ struct CorpusKitTelemetryEnabledTests {
             )
 
             // Filter to corpuskit.* metrics only. Lower-layer kits
-            // (VectorKit, SubstrateKernel via EngramLib) may emit their
+            // (SynapseKit, SubstrateKernel via EngramLib) may emit their
             // own metrics into this sink when monitoring is enabled.
             let ckCount = sink.count(prefix: "corpuskit.")
             #expect(ckCount == 4,

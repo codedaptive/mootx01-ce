@@ -15,7 +15,7 @@ import GeniusLocusKit
 import GeniusLocusKitMigrations
 import LocusKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 import PersistenceKit
 import PersistenceKitInMemory
@@ -117,7 +117,40 @@ struct ContradictionHunterEndToEndTests {
         return id
     }
 
-    @Test func fullJourney_dream_lens_review_link_dedup() async throws {
+    // MARK: - Full journey — BLOCKED (v2 moot_link_memories dropped "proposed")
+    //
+    // The v1 journey's step 6 ("agent adjudication path: record a judged
+    // conflict as a PROPOSED link... then reject it") depends on
+    // `moot_link_memories proposed:true` filing a tunnel in the
+    // review-pending PROPOSED lifecycle rather than immediately active. v2's
+    // `AriaV2LinkMemoriesRequest` (AriaV2MemoryMutations.swift:145-186)
+    // decodes only `allowedKeys: ["from_id", "to_id", "relationship",
+    // "confidence", "evidence", "estate_id"]` (line 154-156) — there is no
+    // `proposed` argument at all, and `AriaV2MemoryMutations.link`
+    // (AriaV2MemoryMutations.swift:304-330) always calls `estate.capture(...)`
+    // with `originClass: .derived` and no lifecycle override, so every
+    // `moot_link_memories` tunnel in v2 is filed active immediately. The
+    // capability this step exercises — filing a link that starts PROPOSED
+    // and awaits `moot_review_tunnel` — does not exist on this tool in v2.
+    //
+    // The rest of the journey is independently reshaped and would need
+    // correction even were step 6 fixable: `moot_review_tunnel` takes
+    // `decision` (accept/endorse/reject), not v1's `verdict`
+    // (AriaV2MemoryMutations.swift:189-206); `moot_lens_contradiction`
+    // returns typed `data.contradictsTunnels[].lifecycle` ("proposed"/
+    // "active") with a generic compactText ("Found N contradiction tunnels
+    // and M conflicting fact groups.", AriaV2LensLower.swift:206-209)
+    // instead of the v1 "[proposed — review via moot_review_tunnel]" /
+    // "proposed (agent-derived, unreviewed)" text lines this journey greps
+    // for. But those are argument/shape renames a corrected brief could
+    // redirect; step 6's PROPOSED-link capability is gone outright, and the
+    // journey's remaining accept/reject/dedup assertions are contingent on
+    // it. Awaiting a catalog decision on whether moot_link_memories should
+    // regain a proposed-lifecycle argument. Do not delete; do not weaken to
+    // pass.
+
+    @Test(.disabled("CONVERSION PENDING (was BLOCKED). The capability is restored: moot_link_memories regained the optional `proposed` argument (default false = active) and moot_review_tunnel regained `reviewed_by` with the user-only accept gate, so step 6 — file an agent-adjudicated PROPOSED link, see it flagged, reject it — is reachable again. What remains is not a capability gap: this journey greps for the v1 TEXT lines \"[proposed — review via moot_review_tunnel]\" and \"proposed (agent-derived, unreviewed)\", and v2 answers structurally instead, via data.contradictsTunnels[].lifecycle and the tunnel payload\'s `lifecycle` field. Redirecting those greps to the structured fields is a like-for-like conversion, not a weakening, and belongs to the conversion lane. Do not delete; do not weaken to pass."))
+    func fullJourney_dream_lens_review_link_dedup() async throws {
         let (dispatcher, kit, handle) = try await makeDispatcher()
         defer { Task { try? await kit.close(handle) } }
 
@@ -148,7 +181,7 @@ struct ContradictionHunterEndToEndTests {
             name: "moot_review_tunnel",
             arguments: .object([
                 "tunnel_id": .string(huntTunnelID),
-                "verdict": .string("accept"),
+                "decision": .string("accept"),
             ])))
         #expect(accept.contains("accepted"))
         lens = text(of: try await dispatcher.dispatch(
@@ -161,7 +194,7 @@ struct ContradictionHunterEndToEndTests {
             name: "moot_review_tunnel",
             arguments: .object([
                 "tunnel_id": .string(huntTunnelID),
-                "verdict": .string("reject"),
+                "decision": .string("reject"),
             ])))
         #expect(rereview.contains("moot_review_tunnel:"))
         #expect(!rereview.contains("rejected —"), "settled tunnel must refuse re-review: \(rereview)")
@@ -176,12 +209,16 @@ struct ContradictionHunterEndToEndTests {
         // ── 6. Agent adjudication path: record a judged conflict as a
         // PROPOSED link, see it flagged in the lens, then reject it —
         // rejection withdraws it from the lens and settles the pair durably.
+        //
+        // BLOCKED: v2 moot_link_memories has no proposed argument (see the
+        // block reason above) — this call now files an immediately-active
+        // tunnel, not a proposed one, so the journey below no longer holds.
         let link = text(of: try await dispatcher.dispatch(
             name: "moot_link_memories",
             arguments: .object([
                 "from_id": .string(bobID),
                 "to_id": .string(budgetID),
-                "kind": .string("contradicts"),
+                "relationship": .string("contradicts"),
                 "proposed": .bool(true),
             ])))
         #expect(link.contains("[proposed — review via moot_review_tunnel]"), "link output: \(link)")
@@ -196,8 +233,8 @@ struct ContradictionHunterEndToEndTests {
             name: "moot_review_tunnel",
             arguments: .object([
                 "tunnel_id": .string(linkTunnelID),
-                "verdict": .string("reject"),
-                "reason": .string("not a real conflict"),
+                "decision": .string("reject"),
+                "note": .string("not a real conflict"),
             ])))
         #expect(reject.contains("rejected"))
         lens = text(of: try await dispatcher.dispatch(

@@ -30,7 +30,7 @@ import Foundation
 import GeniusLocusKit
 import LocusKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 
@@ -84,7 +84,8 @@ struct FrameFaithfulRecallDropTests {
             scoring: .raw,
             limit: 50,
             fallback: .failClosed,
-            queryText: query
+            queryText: query,
+            origin: .internal
         )
     }
 

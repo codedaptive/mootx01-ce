@@ -203,6 +203,10 @@ mod tests {
         let state: BitmapState = estate.bitmap_state(&id, cap_hlc).unwrap();
         let live = estate.store.get_drawer(&id).unwrap().unwrap();
         assert_eq!(state.adjective_bitmap, live.adjective_bitmap);
+        // Every operational bit an audited write sets travels in the audit
+        // event's after-bitmaps (bit 27 is a derived-signal write with no
+        // audit event, and no audited path sets it), so the audit-log fold
+        // reconstruction matches live storage exactly — no masking required.
         assert_eq!(state.operational_bitmap, live.operational_bitmap);
     }
 

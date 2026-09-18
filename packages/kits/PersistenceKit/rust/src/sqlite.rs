@@ -12,11 +12,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
+use std::thread::ThreadId;
 use std::time::Duration;
 
 use rusqlite::types::{Value as SqlValue, ValueRef};
-use rusqlite::{params_from_iter, Connection};
+use rusqlite::{params_from_iter, Connection, OptionalExtension};
 use substrate_types::hlc::HLC;
 use uuid::Uuid;
 
@@ -24,11 +25,15 @@ use crate::{
     AeadProvider, AesGcmAeadProvider, AuditEvent, AuditLog, BackendConfiguration, BlobStore,
     CachingRowStore, ColumnType, EstateConfiguration, EstateEncryptionConfig,
     ChangeOrigin, IndexDeclaration, IsolationLevel, OrderClause, OrderDirection, RowHandle,
-    RowKey, RowStore, SchemaDeclaration, Storage, StorageError, StorageEvent, StorageObserver,
-    StoragePredicate, StorageResult, StorageRow, StorageTransaction, TableChange,
-    TableDeclaration, TypedValue,
+    RowKey, RowStore, SchemaDeclaration, SchemaKitRenameOutcome, Storage, StorageError,
+    StorageEvent, StorageObserver, StoragePredicate, StorageResult, StorageRow,
+    StorageTransaction, TableChange, TableDeclaration, TypedValue,
 };
 use crate::error::validate_sql_identifier;
+use crate::inventory_snapshot::{
+    inventory_snapshot_columns, InventorySnapshot, InventorySnapshotBuilder, InventorySnapshotError, InventorySnapshotLimits,
+    InventorySnapshotResult, INVENTORY_SNAPSHOT_DRAWERS_TABLE, INVENTORY_SNAPSHOT_NODES_TABLE,
+};
 
 // ─────────────────────────────────────────────────────────────────────
 // Value codec — TypedValue <-> SQLite. Mirrors SQLiteConnection.swift's
@@ -672,23 +677,209 @@ impl ObserverRegistry {
 struct Inner {
     conn: Connection,
     schema: Option<SchemaDeclaration>,
+    /// Per-connection transaction nesting depth.
+    ///
+    /// Depth 0 means no active transaction. Depth 1 means inside a `BEGIN
+    /// IMMEDIATE` bracket. Depth 2+ means inside nested SAVEPOINTs
+    /// (`SAVEPOINT tx_1`, `SAVEPOINT tx_2`, …) opened on top of the outer
+    /// `BEGIN IMMEDIATE`. Each SAVEPOINT name is `tx_{depth_at_open}`.
+    ///
+    /// This counter alone only tracks HOW DEEP a bracket is nested, not
+    /// WHICH thread opened it — every mutation of it must be paired with a
+    /// `TxCoordinator` acquire/release so a concurrent caller on a
+    /// different thread cannot have its own independent bracket silently
+    /// merged into this one via the shared connection (SV-01). See
+    /// `TxCoordinator` for the ownership half of this invariant; do not
+    /// mutate `tx_depth` from `SqliteStorage::transaction`,
+    /// `SqliteRowStore::begin_transaction`/`commit_transaction`/
+    /// `rollback_transaction`, or `SqliteDatasetStoreShim::append_rows`
+    /// without going through the matching `tx_coord.acquire()` /
+    /// `tx_coord.release_if_closed()` pair.
+    tx_depth: usize,
+}
+
+impl Inner {
+    /// Open a transaction or a nested savepoint, depending on current depth.
+    ///
+    /// Depth 0 → `BEGIN IMMEDIATE` (acquires the SQLite write lock up front).
+    /// Depth ≥ 1 → `SAVEPOINT tx_{depth}`, which is re-entrant-safe on the
+    /// same connection: a SAVEPOINT nested inside an open `BEGIN` is legal
+    /// and uses the outer transaction's write lock.
+    fn nest_begin(&mut self) -> rusqlite::Result<()> {
+        if self.tx_depth == 0 {
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        } else {
+            let sp = format!("SAVEPOINT tx_{}", self.tx_depth);
+            self.conn.execute_batch(&sp)?;
+        }
+        self.tx_depth += 1;
+        Ok(())
+    }
+
+    /// Commit the innermost transaction bracket.
+    ///
+    /// Depth 1 → `COMMIT` (closes the outer `BEGIN IMMEDIATE`).
+    /// Depth ≥ 2 → `RELEASE SAVEPOINT tx_{depth-1}` (merges the innermost
+    /// savepoint into its parent bracket without closing the outer transaction).
+    fn nest_commit(&mut self) -> rusqlite::Result<()> {
+        if self.tx_depth == 0 {
+            // Mismatched commit — defensive no-op; the caller has a bug.
+            return Ok(());
+        }
+        self.tx_depth -= 1;
+        if self.tx_depth == 0 {
+            self.conn.execute_batch("COMMIT")?;
+        } else {
+            let sp = format!("RELEASE SAVEPOINT tx_{}", self.tx_depth);
+            self.conn.execute_batch(&sp)?;
+        }
+        Ok(())
+    }
+
+    /// Roll back the innermost transaction bracket.
+    ///
+    /// Depth 1 → `ROLLBACK` (discards the entire outer `BEGIN IMMEDIATE`).
+    /// Depth ≥ 2 → `ROLLBACK TO SAVEPOINT tx_{depth-1}` followed by
+    /// `RELEASE SAVEPOINT tx_{depth-1}`, which discards only the innermost
+    /// savepoint's changes and collapses it back into its parent bracket.
+    ///
+    /// `ROLLBACK TO` alone re-opens the savepoint (SQLite spec § 3.5.3);
+    /// `RELEASE` is required to fully close it, leaving the parent
+    /// transaction open for subsequent work.
+    fn nest_rollback(&mut self) {
+        if self.tx_depth == 0 {
+            // Mismatched rollback — defensive no-op; the caller has a bug.
+            return;
+        }
+        self.tx_depth -= 1;
+        if self.tx_depth == 0 {
+            let _ = self.conn.execute_batch("ROLLBACK");
+        } else {
+            let rollback_to = format!("ROLLBACK TO SAVEPOINT tx_{}", self.tx_depth);
+            let release = format!("RELEASE SAVEPOINT tx_{}", self.tx_depth);
+            let _ = self.conn.execute_batch(&rollback_to);
+            let _ = self.conn.execute_batch(&release);
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Transaction bracket ownership (SV-01).
+//
+// `Inner::tx_depth` alone tracks HOW DEEP a bracket is nested, but not
+// WHICH call chain opened it. Four separate entry points can each start a
+// bracket on the shared connection: `Storage::transaction`,
+// `RowStore::begin_transaction`, and `DatasetStore::append_rows`. Before
+// this fix, only `Storage::transaction` serialized itself against
+// concurrent callers (via the old `tx_lock: Mutex<()>`); the other three
+// took `Inner`'s mutex only for the duration of a single nest_begin/
+// nest_commit/nest_rollback call, not for the whole bracket. That let an
+// unrelated thread's independent begin_transaction()/commit_transaction()
+// pair interleave through the shared connection and get silently absorbed
+// as a SAVEPOINT nested inside another thread's still-open bracket —
+// discarded by that thread's later rollback even though the second
+// caller believed its own work had already committed. Confirmed by
+// reproduction: an outer `transaction()` block left open while a second
+// thread ran an independent begin/insert/commit sequence, then the outer
+// block rolled back — the second thread's committed row vanished too.
+//
+// `TxCoordinator` closes this: a bracket has an OWNING thread. The SAME
+// thread may re-enter (this is the call-stack reentrancy `vault_import`
+// needs — capture_batch's begin_transaction from inside an outer
+// transaction() block). A DIFFERENT thread blocks until the owner's
+// bracket depth returns to zero, then takes ownership itself — this is
+// what actually serializes unrelated concurrent callers instead of
+// letting them silently share one bracket's fate.
+//
+// Panic-safety note (Adams SV-01 post-flight finding #3): `acquire`/
+// `release_if_closed` are plain function calls, not an RAII guard — if
+// the owning thread panics after `acquire()` returns but before the
+// matching `release_if_closed()` runs (e.g. a poisoned `Inner` mutex
+// propagating through `self.inner.lock().unwrap()`), `owner` is left
+// set and every other thread blocks on `closed` forever instead of
+// observing a `PoisonError` the way the old `tx_lock: Mutex<()>` would
+// have. This mirrors the pre-existing panic posture of the rest of this
+// file (every `Inner` access is `.lock().unwrap()`; a poisoned `Inner`
+// mutex already means the connection is in an unknown state and the
+// process is expected to go down), so it does not introduce a new class
+// of failure — but it does convert that failure's signature from a loud
+// panic into a silent hang for OTHER threads waiting on the bracket.
+// Deliberately left as-is rather than adding a Drop-based guard: doing
+// so would restructure all four bracket-opening call sites for a
+// panic-recovery path this codebase does not otherwise support.
+struct TxCoordinator {
+    owner: Mutex<Option<ThreadId>>,
+    closed: Condvar,
+}
+
+impl TxCoordinator {
+    fn new() -> Self {
+        TxCoordinator {
+            owner: Mutex::new(None),
+            closed: Condvar::new(),
+        }
+    }
+
+    /// Claim the bracket for the current thread before touching `Inner`.
+    /// Blocks if another thread currently owns an open bracket. Re-entrant
+    /// for the thread that already owns it (returns immediately). Must be
+    /// followed by a matching `release_if_closed` call once the caller
+    /// knows the resulting `tx_depth` — including on the failure path,
+    /// since a failed `nest_begin` at depth 0 must not leak ownership.
+    fn acquire(&self) {
+        let this_thread = std::thread::current().id();
+        let mut owner = self.owner.lock().unwrap();
+        loop {
+            match *owner {
+                None => {
+                    *owner = Some(this_thread);
+                    return;
+                }
+                Some(o) if o == this_thread => return,
+                Some(_) => {
+                    // A different thread owns the open bracket — wait for it
+                    // to fully close rather than let this call bleed into
+                    // that thread's transaction via the shared connection.
+                    owner = self.closed.wait(owner).unwrap();
+                }
+            }
+        }
+    }
+
+    /// Release ownership once `Inner::tx_depth` has returned to zero
+    /// (either the whole bracket committed/rolled back, or a top-level
+    /// `nest_begin` failed before opening anything). No-op while the
+    /// bracket is still open at depth ≥ 1 — the owning thread keeps
+    /// ownership across its own nested calls.
+    fn release_if_closed(&self, tx_depth: usize) {
+        if tx_depth == 0 {
+            let mut owner = self.owner.lock().unwrap();
+            *owner = None;
+            self.closed.notify_all();
+        }
+    }
 }
 
 pub struct SqliteStorage {
     config: EstateConfiguration,
     inner: Arc<Mutex<Inner>>,
     observers: Arc<ObserverRegistry>,
-    /// Serializes whole `transaction` brackets against each other. There is
-    /// ONE connection per instance, and on the SAME connection a concurrent
-    /// second `BEGIN IMMEDIATE` is not SQLITE_BUSY (that applies across
-    /// connections) — it is "cannot start a transaction within a
+    /// Owns the whole transaction bracket — not just one nest_begin/
+    /// nest_commit/nest_rollback call — across ALL FOUR entry points that
+    /// can open one on this connection: `transaction()`, `begin_transaction`,
+    /// `commit_transaction`/`rollback_transaction`, and `append_rows`. There
+    /// is ONE connection per instance, and on the SAME connection a
+    /// concurrent second `BEGIN IMMEDIATE` is not SQLITE_BUSY (that applies
+    /// across connections) — it is "cannot start a transaction within a
     /// transaction". Two in-process threads legitimately share one instance
     /// (e.g. the corpus ingest queue's background drain loop + the
     /// foreground `await_ingest_drain` pump; the Swift twin is
-    /// actor-serialized), so the bracket must self-serialize. Distinct from
-    /// `inner`, which is released while the block runs (holding it across
-    /// the block would deadlock the block's own sub-store calls).
-    tx_lock: Arc<Mutex<()>>,
+    /// actor-serialized), so the bracket must self-serialize AND must not
+    /// let an unrelated thread's independent bracket silently nest inside
+    /// this one via the shared `tx_depth` counter (SV-01) — see
+    /// `TxCoordinator`. Cloned into `SqliteRowStore` and
+    /// `SqliteDatasetStoreShim` so every entry point shares one owner.
+    tx_coord: Arc<TxCoordinator>,
 }
 
 impl SqliteStorage {
@@ -844,9 +1035,9 @@ impl SqliteStorage {
         conn.set_prepared_statement_cache_capacity(128);
         Ok(SqliteStorage {
             config,
-            inner: Arc::new(Mutex::new(Inner { conn, schema: None })),
+            inner: Arc::new(Mutex::new(Inner { conn, schema: None, tx_depth: 0 })),
             observers: Arc::new(ObserverRegistry::default()),
-            tx_lock: Arc::new(Mutex::new(())),
+            tx_coord: Arc::new(TxCoordinator::new()),
         })
     }
 }
@@ -901,6 +1092,7 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
             })
     };
     exec(MIGRATIONS_TABLE)?;
+    normalize_legacy_migration_timestamps(conn)?;
     exec(AUDIT_TABLE)?;
     // Upgrade migration (#102): estates created before the reason column
     // need ALTER TABLE. CREATE TABLE IF NOT EXISTS does not add columns.
@@ -930,7 +1122,7 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
             params_from_iter(vec![
                 SqlValue::Text(schema.kit_id.clone()),
                 SqlValue::Integer(version as i64),
-                SqlValue::Text(iso8601(0)),
+                SqlValue::Text(iso8601(chrono::Utc::now().timestamp_millis())),
             ]),
         )
         .map_err(|e| StorageError::BackendError {
@@ -986,6 +1178,45 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
     Ok(())
 }
 
+/// Normalize migration-ledger values written before the Swift/Rust timestamp
+/// convergence. Version readers never decode `applied_at`, so an INTEGER
+/// epoch-millisecond value remains readable until schema application rewrites
+/// it as canonical TEXT. The Rust epoch sentinel carries no useful instant and
+/// is replaced with this migration's current timestamp. Both shapes disappear
+/// after one run, so later schema applications leave the value unchanged.
+fn normalize_legacy_migration_timestamps(conn: &rusqlite::Connection) -> StorageResult<()> {
+    conn.execute(
+        r#"UPDATE "_storagekit_migrations"
+           SET "applied_at" = CASE
+               WHEN typeof("applied_at") = 'integer'
+                   THEN strftime('%Y-%m-%dT%H:%M:%S',
+                       CASE WHEN "applied_at" < 0 AND "applied_at" % 1000 != 0
+                            THEN "applied_at" / 1000 - 1
+                            ELSE "applied_at" / 1000
+                       END,
+                       'unixepoch'
+                   ) || printf('.%03dZ',
+                       CASE WHEN "applied_at" < 0 AND "applied_at" % 1000 != 0
+                            THEN 1000 + "applied_at" % 1000
+                            ELSE "applied_at" % 1000
+                       END
+                   )
+               WHEN typeof("applied_at") = 'text'
+                   AND "applied_at" = '1970-01-01T00:00:00.000Z'
+                   THEN ?
+               ELSE "applied_at"
+           END
+           WHERE typeof("applied_at") = 'integer'
+              OR (typeof("applied_at") = 'text'
+                  AND "applied_at" = '1970-01-01T00:00:00.000Z')"#,
+        [iso8601(chrono::Utc::now().timestamp_millis())],
+    )
+    .map_err(|e| StorageError::BackendError {
+        underlying: format!("normalize migration timestamps: {e}"),
+    })?;
+    Ok(())
+}
+
 /// Execute one declared migration operation (Swift `applyOperation` parity).
 fn apply_migration_operation(
     conn: &rusqlite::Connection,
@@ -1038,9 +1269,29 @@ fn apply_migration_operation(
             }
         }
         Op::DropColumn { table, column_name } => {
-            exec(&format!(
-                "ALTER TABLE \"{table}\" DROP COLUMN \"{column_name}\""
-            ))?
+            // Idempotent, the AddColumn rule in reverse: a migration capsule
+            // replays a kit's ladder on estates that may already carry the
+            // drop (a fresh estate creates the latest layout, a re-run of the
+            // capsule finds the column gone). SQLite has no DROP COLUMN IF
+            // EXISTS, so probe the table's columns and skip when absent.
+            let exists: bool = conn
+                .prepare(&format!("PRAGMA table_info(\"{table}\")"))
+                .and_then(|mut stmt| {
+                    let mut rows = stmt.query([])?;
+                    while let Some(row) = rows.next()? {
+                        let name: String = row.get(1)?;
+                        if name == *column_name {
+                            return Ok(true);
+                        }
+                    }
+                    Ok(false)
+                })
+                .unwrap_or(false);
+            if exists {
+                exec(&format!(
+                    "ALTER TABLE \"{table}\" DROP COLUMN \"{column_name}\""
+                ))?;
+            }
         }
         Op::RenameColumn { table, from, to } => {
             exec(&format!(
@@ -1072,6 +1323,7 @@ impl Storage for SqliteStorage {
             observers: self.observers.clone(),
             encryption_config: self.config.encryption_config.clone(),
             aead_provider: Arc::new(AesGcmAeadProvider),
+            tx_coord: self.tx_coord.clone(),
         });
         // When cache is enabled, wrap with an LRU hot tier. Disabled (the
         // default) is a zero-change passthrough — identical to pre-mission
@@ -1096,6 +1348,53 @@ impl Storage for SqliteStorage {
         Arc::new(SqliteObserver {
             observers: self.observers.clone(),
         })
+    }
+
+    fn capture_inventory_snapshot(
+        &self,
+        limits: InventorySnapshotLimits,
+    ) -> InventorySnapshotResult<InventorySnapshot> {
+        // Snapshot reads must begin after any writer transaction ends. The
+        // coordinator blocks a different thread's bracket; a same-thread
+        // request inside one cannot wait for itself, so it fails closed.
+        self.tx_coord.acquire();
+        let mut inner = self.inner.lock().unwrap();
+        let result = (|| {
+            if inner.tx_depth != 0 {
+                return Err(InventorySnapshotError::from(StorageError::TransactionConflict {
+                    detail: "inventory snapshot requires a fresh SQLite read transaction".to_owned(),
+                }));
+            }
+            // This is deliberately a deferred read transaction, never the
+            // BEGIN IMMEDIATE writer helper used by Storage::transaction.
+            inner
+                .conn
+                .execute_batch("BEGIN")
+                .map_err(|error| InventorySnapshotError::from(map_sql_err(error, "inventory snapshot begin")))?;
+            match capture_sqlite_inventory_snapshot(
+                &mut inner,
+                &self.config.encryption_config,
+                limits,
+            ) {
+                Ok(snapshot) => {
+                    inner
+                        .conn
+                        .execute_batch("COMMIT")
+                        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, "inventory snapshot commit")))?;
+                    Ok(snapshot)
+                }
+                Err(error) => {
+                    let _ = inner.conn.execute_batch("ROLLBACK");
+                    Err(error)
+                }
+            }
+        })();
+        // Keep an enclosing same-thread writer bracket's coordinator claim
+        // intact when the snapshot correctly refuses to run inside it.
+        let depth = inner.tx_depth;
+        drop(inner);
+        self.tx_coord.release_if_closed(depth);
+        result
     }
 
     fn open(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
@@ -1131,6 +1430,58 @@ impl Storage for SqliteStorage {
             .unwrap_or(0);
         Ok(v as i32)
     }
+
+    /// Move the ledger row for `old_kit_id` to `new_kit_id` (SPEC I-7a). The
+    /// presence checks and the UPDATE run under the one connection lock, so
+    /// no other ledger write can interleave between the conflict check and
+    /// the rewrite; `kit_id` is the table's primary key and the check
+    /// guarantees the UPDATE cannot collide. `version` and `applied_at` are
+    /// untouched.
+    fn rename_schema_kit(
+        &self,
+        old_kit_id: &str,
+        new_kit_id: &str,
+    ) -> StorageResult<SchemaKitRenameOutcome> {
+        let guard = self.inner.lock().unwrap();
+        // "no row" and "row at version 0" must be told apart here, which is
+        // why this does not go through `current_schema_version_for`.
+        let ledger_version = |kit_id: &str| -> StorageResult<Option<i32>> {
+            guard
+                .conn
+                .query_row(
+                    r#"SELECT "version" FROM "_storagekit_migrations" WHERE "kit_id" = ?"#,
+                    [kit_id],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .map(|v| v.map(|v| v as i32))
+                .map_err(|e| StorageError::BackendError {
+                    underlying: format!("ledger version: {e}"),
+                })
+        };
+        let Some(old_version) = ledger_version(old_kit_id)? else {
+            return Ok(SchemaKitRenameOutcome::NoRow);
+        };
+        if let Some(new_version) = ledger_version(new_kit_id)? {
+            return Ok(SchemaKitRenameOutcome::Conflict {
+                old_version,
+                new_version,
+            });
+        }
+        guard
+            .conn
+            .execute(
+                r#"UPDATE "_storagekit_migrations" SET "kit_id" = ? WHERE "kit_id" = ?"#,
+                [new_kit_id, old_kit_id],
+            )
+            .map_err(|e| StorageError::BackendError {
+                underlying: format!("rename schema kit: {e}"),
+            })?;
+        Ok(SchemaKitRenameOutcome::Renamed {
+            version: old_version,
+        })
+    }
+
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {
         apply_schema(&mut self.inner.lock().unwrap(), schema)
     }
@@ -1146,44 +1497,55 @@ impl Storage for SqliteStorage {
         // before the block runs — the block's sub-stores re-lock per call, so
         // holding it across `block` would deadlock against them.
         //
-        // ISOLATION INVARIANT: `tx_lock` is held for the WHOLE bracket, so
-        // concurrent Rust callers on the same instance queue here instead of
-        // colliding. This is load-bearing: there is ONE connection per
-        // instance, and on the SAME connection a concurrent second
-        // BEGIN IMMEDIATE does not get SQLITE_BUSY (that is cross-connection
-        // arbitration) — it fails with "cannot start a transaction within a
-        // transaction" (observed: the corpus ingest queue's background drain
-        // loop racing the foreground await_ingest_drain pump on the shared
-        // queue.sqlite). Cross-process isolation still rests on SQLite's own
-        // file locking; non-transactional statements issued by other threads
-        // during the bracket join the open transaction as before. Production
-        // additionally serializes all estate access behind the coordinator
-        // lock, but shared side-stores (the per-estate queue.sqlite) are
-        // driven outside it — hence the self-serialization here.
+        // ISOLATION INVARIANT (SV-01): `tx_coord` owns the WHOLE bracket
+        // across every entry point on this connection — `transaction()`,
+        // `begin_transaction`, `commit_transaction`/`rollback_transaction`,
+        // and `append_rows` — not just this function. `acquire()` blocks
+        // until any OTHER thread's open bracket fully closes before this
+        // call proceeds, so an unrelated concurrent caller's independent
+        // begin/commit pair can never be silently absorbed as a SAVEPOINT
+        // inside this bracket and discarded by this bracket's rollback (the
+        // defect the old `tx_lock: Mutex<()>` allowed: it only guarded this
+        // function, not `begin_transaction`/`append_rows`, so those two
+        // could interleave with an open `transaction()` bracket from a
+        // different thread through the shared `tx_depth` counter).
         //
-        // No re-entrancy hazard: nothing calls `transaction` from inside a
-        // transaction block — same-connection BEGIN nesting always errored,
-        // so such a caller could never have worked.
-        let _tx_guard = self.tx_lock.lock().unwrap();
-        self.inner
-            .lock()
-            .unwrap()
-            .conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| map_sql_err(e, "transaction"))?;
+        // Same-thread reentrancy (a block that itself calls
+        // `begin_transaction` or reaches `append_rows`) is unaffected:
+        // `acquire()` returns immediately for the thread that already owns
+        // the bracket, and `Inner::nest_begin` takes the SAVEPOINT path
+        // whenever `tx_depth` is already ≥ 1.
+        self.tx_coord.acquire();
+        let mut inner = self.inner.lock().unwrap();
+        if let Err(e) = inner.nest_begin() {
+            // Failed before opening anything (or failed to add a further
+            // nested level) — release ownership if that leaves depth at 0,
+            // otherwise the owning thread keeps it for its still-open outer
+            // bracket.
+            let depth = inner.tx_depth;
+            drop(inner);
+            self.tx_coord.release_if_closed(depth);
+            return Err(map_sql_err(e, "transaction"));
+        }
+        drop(inner);
         match block(self) {
             Ok(()) => {
-                self.inner
-                    .lock()
-                    .unwrap()
-                    .conn
-                    .execute_batch("COMMIT")
-                    .map_err(|e| map_sql_err(e, "transaction"))?;
-                Ok(())
+                let mut inner = self.inner.lock().unwrap();
+                let result = inner
+                    .nest_commit()
+                    .map_err(|e| map_sql_err(e, "transaction"));
+                let depth = inner.tx_depth;
+                drop(inner);
+                self.tx_coord.release_if_closed(depth);
+                result
             }
             Err(e) => {
                 // Best-effort rollback; surface the block's error regardless.
-                let _ = self.inner.lock().unwrap().conn.execute_batch("ROLLBACK");
+                let mut inner = self.inner.lock().unwrap();
+                inner.nest_rollback();
+                let depth = inner.tx_depth;
+                drop(inner);
+                self.tx_coord.release_if_closed(depth);
                 Err(e)
             }
         }
@@ -1192,10 +1554,13 @@ impl Storage for SqliteStorage {
     /// Dataset store override: returns a `SqliteDatasetStoreShim` that shares
     /// the same `Arc<Mutex<Inner>>` connection as all other SQLite stores.
     /// This ensures dataset DDL and row operations are serialized on the same
-    /// connection and participate in the WAL write-lock protocol.
+    /// connection and participate in the WAL write-lock protocol. Shares
+    /// `tx_coord` too (SV-01) so `append_rows`'s transaction bracket is
+    /// owner-tracked the same as every other entry point.
     fn dataset_store(&self) -> StorageResult<Arc<dyn crate::dataset_store::DatasetStore>> {
         Ok(Arc::new(SqliteDatasetStoreShim {
             inner: self.inner.clone(),
+            tx_coord: self.tx_coord.clone(),
         }))
     }
 
@@ -1358,6 +1723,191 @@ impl Storage for SqliteStorage {
             duration_seconds: started.elapsed().as_secs_f64(),
         })
     }
+}
+
+fn capture_sqlite_inventory_snapshot(
+    inner: &mut Inner,
+    encryption_config: &EstateEncryptionConfig,
+    limits: InventorySnapshotLimits,
+) -> InventorySnapshotResult<InventorySnapshot> {
+    let drawer_count = sqlite_snapshot_row_count(&inner.conn, INVENTORY_SNAPSHOT_DRAWERS_TABLE, limits)?;
+    let node_count = sqlite_snapshot_row_count(&inner.conn, INVENTORY_SNAPSHOT_NODES_TABLE, limits)?;
+    let mut snapshot = InventorySnapshotBuilder::new(limits, drawer_count, node_count)?;
+    let drawer_columns = inventory_snapshot_columns(inner.schema.as_ref(), INVENTORY_SNAPSHOT_DRAWERS_TABLE)?;
+    let node_columns = inventory_snapshot_columns(inner.schema.as_ref(), INVENTORY_SNAPSHOT_NODES_TABLE)?;
+    // The lower-bound query reads only stored lengths. It cannot reject an
+    // exact-fit canonical row; when expansion is uncertain, the bounded row
+    // stream below performs exact accounting before retaining each row.
+    let drawer_preflight = sqlite_snapshot_raw_lower_bound_bytes(
+        &inner.conn,
+        INVENTORY_SNAPSHOT_DRAWERS_TABLE,
+        &drawer_columns,
+        encryption_config,
+    )?;
+    let node_preflight = sqlite_snapshot_raw_lower_bound_bytes(
+        &inner.conn,
+        INVENTORY_SNAPSHOT_NODES_TABLE,
+        &node_columns,
+        encryption_config,
+    )?;
+    if drawer_preflight
+        .checked_add(node_preflight)
+        .filter(|total| *total <= limits.max_serialized_bytes())
+        .is_none()
+    {
+        return Err(InventorySnapshotError::ByteLimitExceeded {
+            limit: limits.max_serialized_bytes(),
+        });
+    }
+    sqlite_snapshot_rows(
+        inner,
+        encryption_config,
+        INVENTORY_SNAPSHOT_DRAWERS_TABLE,
+        &drawer_columns,
+        &mut snapshot,
+        InventorySnapshotBuilder::push_drawer,
+    )?;
+    sqlite_snapshot_rows(
+        inner,
+        encryption_config,
+        INVENTORY_SNAPSHOT_NODES_TABLE,
+        &node_columns,
+        &mut snapshot,
+        InventorySnapshotBuilder::push_node,
+    )?;
+    Ok(snapshot.finish())
+}
+
+fn sqlite_snapshot_raw_lower_bound_bytes(
+    connection: &Connection,
+    table: &str,
+    columns: &[(String, ColumnType)],
+    encryption_config: &EstateEncryptionConfig,
+) -> InventorySnapshotResult<usize> {
+    let fields = columns.iter().map(|(name, column_type)| {
+        let column = format!("\"{name}\"");
+        let stored_bytes = format!("length(CAST({column} AS BLOB))");
+        let storage_class = format!("typeof({column})");
+        if encryption_config.uses_row_crypto()
+            && protected_cols_for_table(table).contains(&name.as_str())
+        {
+            // AES-GCM envelopes are plaintext plus a fixed 12-byte nonce and
+            // 16-byte tag. Subtracting 28 is a lower bound, never a final
+            // decision, and keeps exact-fit encrypted rows eligible.
+            format!(
+                "CASE WHEN {column} IS NULL THEN 0 WHEN typeof({column}) = 'blob' THEN MAX({stored_bytes} - 28, 0) ELSE {stored_bytes} END"
+            )
+        } else {
+            match column_type {
+                // A declared SQLite type is advisory. These expressions are
+                // typeof-aware so a corrupt TEXT/BLOB in a fixed-width column
+                // is bounded before ValueRef can expose its full body.
+                ColumnType::Uuid => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                // Canonical SQLite writes use the 24-byte millisecond UTC
+                // ISO-8601 shape, while the smallest canonical snapshot form
+                // is `s:0` (3 bytes). The 21-byte adjustment is the only
+                // fixed representation allowance; longer corrupt text still
+                // contributes enough raw bytes to block body acquisition.
+                ColumnType::Timestamp => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 WHEN 'text' THEN MAX({stored_bytes} - 21, 0) ELSE {stored_bytes} END"
+                ),
+                ColumnType::Float => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                ColumnType::Bool => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN 3 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                ColumnType::Bitmap => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                ColumnType::Int => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                ColumnType::Hlc => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN CASE WHEN {column} < -8446744073709551616 THEN 21 WHEN {column} < 0 THEN 22 ELSE {stored_bytes} + 2 END WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+                // Variable declared types preserve a textual/blob body's raw
+                // bytes or expand it on canonical encoding; raw is therefore
+                // a safe acquisition lower bound. Wrong numeric classes are
+                // decoded as their native TypedValue variants.
+                ColumnType::Text | ColumnType::Blob | ColumnType::Json | ColumnType::Fingerprint => format!(
+                    "CASE {storage_class} WHEN 'null' THEN 0 WHEN 'integer' THEN {stored_bytes} + 2 WHEN 'real' THEN 18 ELSE {stored_bytes} END"
+                ),
+            }
+        }
+    }).collect::<Vec<_>>().join(" + ");
+    let query = format!("SELECT COALESCE(SUM({fields}), 0) FROM \"{table}\"");
+    let total: i64 = connection
+        .query_row(&query, [], |row| row.get(0))
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+    usize::try_from(total).map_err(|_| InventorySnapshotError::from(StorageError::BackendError {
+        underlying: format!("inventory snapshot raw lower bound for {table} is outside usize"),
+    }))
+}
+
+fn sqlite_snapshot_row_count(
+    table_conn: &Connection,
+    table: &str,
+    limits: InventorySnapshotLimits,
+) -> InventorySnapshotResult<usize> {
+    let scan_limit = i64::try_from(limits.max_rows_per_table().saturating_add(1)).map_err(|_| {
+        InventorySnapshotError::from(StorageError::BackendError {
+            underlying: "inventory snapshot row limit is outside SQLite range".to_owned(),
+        })
+    })?;
+    let count: i64 = table_conn
+        .query_row(
+            &format!("SELECT COUNT(*) FROM (SELECT 1 FROM \"{table}\" LIMIT ?1)"),
+            [scan_limit],
+            |row| row.get(0),
+        )
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+    usize::try_from(count).map_err(|_| {
+        InventorySnapshotError::from(StorageError::BackendError {
+            underlying: format!("inventory snapshot count for {table} is outside usize"),
+        })
+    })
+}
+
+fn sqlite_snapshot_rows(
+    inner: &mut Inner,
+    encryption_config: &EstateEncryptionConfig,
+    table: &str,
+    columns: &[(String, ColumnType)],
+    snapshot: &mut InventorySnapshotBuilder,
+    push: fn(&mut InventorySnapshotBuilder, StorageRow) -> InventorySnapshotResult<()>,
+) -> InventorySnapshotResult<()> {
+    let mut statement = inner
+        .conn
+        .prepare(&format!(
+            "SELECT {} FROM \"{table}\"",
+            columns.iter().map(|(name, _)| format!("\"{name}\"")).collect::<Vec<_>>().join(", ")
+        ))
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+    let mut rows = statement
+        .query([])
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+    while let Some(row) = rows
+        .next()
+        .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?
+    {
+        let mut values = BTreeMap::new();
+        for (index, (name, column_type)) in columns.iter().enumerate() {
+            let value_ref = row
+                .get_ref(index)
+                .map_err(|error| InventorySnapshotError::from(map_sql_err(error, table)))?;
+            values.insert(
+                name.clone(),
+                read_value(value_ref, Some(*column_type), table, name).map_err(InventorySnapshotError::from)?,
+            );
+        }
+        let values = decrypted_for_read(values, table, encryption_config, &AesGcmAeadProvider)
+            .map_err(InventorySnapshotError::from)?;
+        push(snapshot, StorageRow::new(values))?;
+    }
+    Ok(())
 }
 
 /// Size on disk of `path`, or 0 when absent / in-memory.
@@ -1551,8 +2101,8 @@ pub(crate) const KEY_ID_COL: &str = "keyID";
 ///    plaintext on an encrypting estate discloses the substance of a sealed
 ///    row. A column that records only *how* or *when* a value was produced
 ///    is not content-derived and stays plaintext:
-///    `subject_pipeline_version`, `subject_at`, `distilled_pipeline_version`,
-///    `distilled_at`. Nor are the `content_hash` / `content_fingerprint`
+///    `subject_pipeline_version`, `subject_at`. Nor are the
+///    `content_hash` / `content_fingerprint`
 ///    digests, which are computed over content rather than carrying it, and
 ///    which index and deduplication read directly.
 ///
@@ -1598,7 +2148,7 @@ pub(crate) const KEY_ID_COL: &str = "keyID";
 /// itself; a test that restates the map cannot fail when the map gains a
 /// wrong entry.
 pub(crate) const ROW_CRYPTO_PROTECTED_COLUMNS_BY_TABLE: &[(&str, &[&str])] =
-    &[("drawers", &["content", "distilled", "subject"])];
+    &[("drawers", &["content", "ssc_facts", "subject"])];
 
 /// The protected text columns for `table`, or an empty slice when the
 /// table has none.
@@ -1663,7 +2213,7 @@ pub(crate) fn projection_needs_key_id(
 /// write in the schema is the expunge/zeroization scrub (`content = ""`),
 /// which must stay a plaintext-empty erasure marker — the same exemption
 /// `assert_content_key_id_invariant` documents (#76). A
-/// representation-only UPDATE (a value map with "distilled" but no
+/// representation-only UPDATE (a value map with "ssc_facts" but no
 /// "content") is sealed and keyID-stamped exactly like a content write.
 ///
 /// Mirrors Swift's `encryptedForWrite`.
@@ -1846,6 +2396,12 @@ struct SqliteRowStore {
     /// `AesGcmAeadProvider`; injectable for testing (e.g. a fixed-nonce
     /// wrapper for cross-port fixture verification).
     aead_provider: Arc<dyn AeadProvider>,
+    /// Shared with `SqliteStorage` and `SqliteDatasetStoreShim` (SV-01):
+    /// owns the transaction bracket across every entry point on this
+    /// connection so an unrelated thread's independent begin/commit pair
+    /// can never be silently absorbed into another thread's still-open
+    /// bracket. See `TxCoordinator`.
+    tx_coord: Arc<TxCoordinator>,
 }
 
 /// Collect the row keys for rows currently matching `predicate`.
@@ -2212,8 +2768,8 @@ impl RowStore for SqliteRowStore {
         predicate: &StoragePredicate,
     ) -> StorageResult<usize> {
         // At-rest encryption seam (Mode 2): UPDATE is a protected-text write
-        // path since the distilled-representation columns landed (a
-        // distillation write is an UPDATE carrying "distilled" text —
+        // path since ssc_facts joined the protected column set (an SSC-facts
+        // write is an UPDATE carrying "ssc_facts" text —
         // SPEC_DISTILLATION_STORAGE §2/§7.2). The seam seals non-empty
         // protected text and stamps keyID; it is a no-op for bitmap/timestamp
         // updates and for the expunge scrub (empty text is exempt). The
@@ -2797,33 +3353,57 @@ impl RowStore for SqliteRowStore {
     // Explicit transaction boundary (GLK_BATCH1)
     // ----------------------------------------------------------------
 
-    /// Open a serializable write transaction.
+    /// Open a serializable write transaction, or a nested SAVEPOINT when
+    /// already inside one (re-entrant-safe).
     ///
-    /// Issues `BEGIN IMMEDIATE` so the write lock is acquired upfront,
-    /// preventing "cannot start a transaction within a transaction" under WAL
-    /// mode. The `inner` `Mutex` serializes concurrent calls.
+    /// Delegates to `Inner::nest_begin`: depth 0 → `BEGIN IMMEDIATE`;
+    /// depth ≥ 1 → `SAVEPOINT tx_{depth}`. The depth counter is
+    /// per-connection, stored in `Inner`, so nesting is tracked correctly
+    /// across all four transaction-opening sites on the same connection.
+    ///
+    /// Claims `tx_coord` first (SV-01): blocks until any other thread's
+    /// open bracket fully closes, so a caller using only the explicit
+    /// begin/commit/rollback API — never `Storage::transaction` — still
+    /// cannot have its bracket silently merged into a concurrent thread's.
     fn begin_transaction(&self) -> StorageResult<()> {
-        let guard = self.inner.lock().unwrap();
-        guard
-            .conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| map_sql_err(e, "<transaction>"))
+        self.tx_coord.acquire();
+        let mut inner = self.inner.lock().unwrap();
+        let result = inner.nest_begin().map_err(|e| map_sql_err(e, "<transaction>"));
+        let depth = inner.tx_depth;
+        drop(inner);
+        if result.is_err() {
+            self.tx_coord.release_if_closed(depth);
+        }
+        result
     }
 
-    /// Commit the transaction opened by `begin_transaction`.
+    /// Commit or release the innermost transaction bracket.
+    ///
+    /// Delegates to `Inner::nest_commit`: depth 1 → `COMMIT`; depth ≥ 2 →
+    /// `RELEASE SAVEPOINT tx_{depth-1}`. Releases `tx_coord` ownership once
+    /// `tx_depth` returns to 0.
     fn commit_transaction(&self) -> StorageResult<()> {
-        let guard = self.inner.lock().unwrap();
-        guard
-            .conn
-            .execute_batch("COMMIT")
-            .map_err(|e| map_sql_err(e, "<transaction>"))
+        let mut inner = self.inner.lock().unwrap();
+        let result = inner.nest_commit().map_err(|e| map_sql_err(e, "<transaction>"));
+        let depth = inner.tx_depth;
+        drop(inner);
+        self.tx_coord.release_if_closed(depth);
+        result
     }
 
-    /// Roll back the transaction opened by `begin_transaction`.
+    /// Roll back or undo the innermost transaction bracket.
+    ///
+    /// Delegates to `Inner::nest_rollback`: depth 1 → `ROLLBACK`; depth ≥ 2
+    /// → `ROLLBACK TO SAVEPOINT tx_{depth-1}` then `RELEASE SAVEPOINT
+    /// tx_{depth-1}`, which discards only the innermost savepoint's changes
+    /// and collapses it back into its parent bracket. Releases `tx_coord`
+    /// ownership once `tx_depth` returns to 0.
     fn rollback_transaction(&self) -> StorageResult<()> {
-        let guard = self.inner.lock().unwrap();
-        // Use execute_batch; ignore the result (best-effort rollback).
-        let _ = guard.conn.execute_batch("ROLLBACK");
+        let mut inner = self.inner.lock().unwrap();
+        inner.nest_rollback();
+        let depth = inner.tx_depth;
+        drop(inner);
+        self.tx_coord.release_if_closed(depth);
         Ok(())
     }
 }
@@ -3175,6 +3755,9 @@ use crate::dataset_store::{
 /// Created by `Storage::dataset_store()` on `SqliteStorage`.
 pub struct SqliteDatasetStoreShim {
     inner: Arc<Mutex<Inner>>,
+    /// Shared with `SqliteStorage` and `SqliteRowStore` (SV-01) — see
+    /// `TxCoordinator`.
+    tx_coord: Arc<TxCoordinator>,
 }
 
 impl DatasetStore for SqliteDatasetStoreShim {
@@ -3247,66 +3830,86 @@ impl DatasetStore for SqliteDatasetStoreShim {
             return Ok(());
         }
 
-        let table_name = dataset_table_name(id);
-        let guard = self.inner.lock().unwrap();
+        // Claim the transaction bracket BEFORE touching `inner` (SV-01): if
+        // this locked `inner` first and then blocked waiting for `tx_coord`
+        // while a different thread's still-open bracket needed `inner` to
+        // close (via its own commit/rollback), the two would deadlock. See
+        // `TxCoordinator` for the full isolation rationale.
+        self.tx_coord.acquire();
 
-        // Validate column names from the first row.
-        if let Some(first) = rows.first() {
-            for key in first.keys() {
-                validate_dataset_column_identifier(key)?;
-            }
-        }
+        // Every path below — including early returns from column-identifier
+        // validation and the PK lookup, both of which run before
+        // `nest_begin` — must release the bracket it just claimed if it
+        // never actually opens one (depth unchanged). Running the append
+        // under one closure means there is exactly one release site instead
+        // of duplicating it at each `?`.
+        let outcome = (|| -> StorageResult<()> {
+            let table_name = dataset_table_name(id);
+            let mut guard = self.inner.lock().unwrap();
 
-        // Recover the declared PK column from PRAGMA table_info for pre-sort.
-        let pk_column = dataset_pk_column_for_table(&guard.conn, &table_name)?;
-
-        // Pre-sort ascending by PK when declared.
-        let mut sorted_rows: Vec<std::collections::BTreeMap<String, TypedValue>> =
-            rows.to_vec();
-        if let Some(ref pk) = pk_column {
-            sorted_rows.sort_by(|a, b| {
-                let av = a.get(pk).unwrap_or(&TypedValue::Null);
-                let bv = b.get(pk).unwrap_or(&TypedValue::Null);
-                if compare_typed_values_for_sort(av, bv) {
-                    std::cmp::Ordering::Less
-                } else if compare_typed_values_for_sort(bv, av) {
-                    std::cmp::Ordering::Greater
-                } else {
-                    std::cmp::Ordering::Equal
+            // Validate column names from the first row.
+            if let Some(first) = rows.first() {
+                for key in first.keys() {
+                    validate_dataset_column_identifier(key)?;
                 }
-            });
-        }
+            }
 
-        // BEGIN IMMEDIATE / INSERT all rows / COMMIT — GLK_BATCH1 pattern.
-        guard
-            .conn
-            .execute_batch("BEGIN IMMEDIATE")
-            .map_err(|e| StorageError::BackendError {
+            // Recover the declared PK column from PRAGMA table_info for pre-sort.
+            let pk_column = dataset_pk_column_for_table(&guard.conn, &table_name)?;
+
+            // Pre-sort ascending by PK when declared.
+            let mut sorted_rows: Vec<std::collections::BTreeMap<String, TypedValue>> =
+                rows.to_vec();
+            if let Some(ref pk) = pk_column {
+                sorted_rows.sort_by(|a, b| {
+                    let av = a.get(pk).unwrap_or(&TypedValue::Null);
+                    let bv = b.get(pk).unwrap_or(&TypedValue::Null);
+                    if compare_typed_values_for_sort(av, bv) {
+                        std::cmp::Ordering::Less
+                    } else if compare_typed_values_for_sort(bv, av) {
+                        std::cmp::Ordering::Greater
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                });
+            }
+
+            // GLK_BATCH1 pattern: wrap all inserts in a single transaction bracket.
+            // Uses Inner::nest_begin / nest_commit / nest_rollback so callers that
+            // already hold an outer transaction (depth ≥ 1) get a SAVEPOINT instead
+            // of a second BEGIN IMMEDIATE, which would fail on the same connection.
+            guard.nest_begin().map_err(|e| StorageError::BackendError {
                 underlying: format!("append_rows BEGIN: {e}"),
             })?;
 
-        let result = (|| -> StorageResult<()> {
-            for row in &sorted_rows {
-                dataset_insert_row(&guard.conn, &table_name, row)?;
+            let result = (|| -> StorageResult<()> {
+                for row in &sorted_rows {
+                    dataset_insert_row(&guard.conn, &table_name, row)?;
+                }
+                Ok(())
+            })();
+
+            match result {
+                Ok(()) => guard.nest_commit().map_err(|e| StorageError::BackendError {
+                    underlying: format!("append_rows COMMIT: {e}"),
+                }),
+                Err(e) => {
+                    guard.nest_rollback();
+                    Err(e)
+                }
             }
-            Ok(())
         })();
 
-        match result {
-            Ok(()) => {
-                guard
-                    .conn
-                    .execute_batch("COMMIT")
-                    .map_err(|e| StorageError::BackendError {
-                        underlying: format!("append_rows COMMIT: {e}"),
-                    })?;
-                Ok(())
-            }
-            Err(e) => {
-                let _ = guard.conn.execute_batch("ROLLBACK");
-                Err(e)
-            }
-        }
+        // Release tx_coord ownership once the bracket is fully closed
+        // (depth 0). Validation/PK-lookup failures before `nest_begin` and a
+        // failed `nest_begin` both leave depth unchanged from whatever it
+        // was on entry — `release_if_closed` handles both the top-level
+        // (depth back to 0) and same-thread-nested (depth still ≥ 1, owner
+        // keeps it) cases correctly.
+        let depth = self.inner.lock().unwrap().tx_depth;
+        self.tx_coord.release_if_closed(depth);
+
+        outcome
     }
 
     fn query_rows(
@@ -3616,8 +4219,8 @@ mod hlc_roundtrip_tests {
         // await_ingest_drain pump — collided with "cannot start a
         // transaction within a transaction" (same-connection BEGIN nesting;
         // SQLITE_BUSY arbitration only applies across connections). The
-        // tx_lock must queue the brackets instead. 2 threads × 50
-        // transactions reproduced the collision reliably pre-fix.
+        // tx_coord bracket owner must queue the brackets instead. 2 threads
+        // × 50 transactions reproduced the collision reliably pre-fix.
         let storage = std::sync::Arc::new(make_sqlite_storage());
         let mut handles = Vec::new();
         for t in 0..2i64 {

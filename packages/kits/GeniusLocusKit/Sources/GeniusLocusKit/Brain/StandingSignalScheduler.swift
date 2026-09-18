@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -77,7 +78,7 @@ public actor StandingSignalScheduler {
 
     /// Fleet-standard logger.
     private static let logger = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "StandingSignalScheduler")
 
     /// The estate this scheduler serves. One scheduler per estate so
@@ -410,6 +411,14 @@ public actor StandingSignalScheduler {
     }
 
     private func drainAll(now: Date) async throws {
+        // The signals stream lease is taken for the drain and heartbeated per
+        // batch (§ DUTY_LIFECYCLE): the GC sweep reclaims in-flight signal
+        // jobs only when no fresh lease is held, so a running job is never
+        // handed back mid-flight. Held by another drainer → stand down. The
+        // wall clock is used because the lease is infrastructure, not the
+        // deterministic engine `now`.
+        if let lease = drainLease, !lease.tryAcquire(now: Date()) { return }
+        defer { drainLease?.release() }
         // The serial-lane decision: a single drainer claims jobs at
         // `.serializable` isolation. We drain until empty so a tick
         // returns once all enqueued work has been applied — there is
@@ -420,6 +429,7 @@ public actor StandingSignalScheduler {
         // we never claim encode or future dreaming jobs that share
         // the same queue.sqlite (T1 stream-scoped drain).
         while true {
+            drainLease?.heartbeat(now: Date())
             let batch = try await queue.drain(stream: streamID)
             if batch.isEmpty { break }
             for entry in batch {

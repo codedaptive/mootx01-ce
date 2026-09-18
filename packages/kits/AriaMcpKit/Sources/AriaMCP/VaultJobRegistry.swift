@@ -1,9 +1,10 @@
+import AriaMCPWire
+
 // VaultJobRegistry.swift
 //
 // Actor-based registry of in-process vault import and export jobs.
-// Held by ToolDispatcher and injected into VaultTools.dispatch() so
-// moot_vault_import / moot_vault_export can return a job_id immediately
-// and moot_vault_job can poll the result.
+// Held by the selected v2 data-mobility provider so vault operations can
+// return a job_id immediately and later inspect the same lifecycle record.
 //
 // Jobs are retained for the process lifetime with no TTL eviction (v1).
 
@@ -67,7 +68,7 @@ struct VaultJob: Sendable {
     /// Wall-clock time the job was registered. Used to compute elapsed_s
     /// in moot_vault_job responses. Date() is correct here — start time
     /// is a real-time measurement (not a deterministic computation), the
-    /// same precedent as LensTools/VaultTools sampling Date() for manifests.
+    /// same precedent as VaultTools sampling Date() for manifests.
     let startedAt: Date
     var status: JobStatus
     var result: JobResult?
@@ -78,14 +79,42 @@ struct VaultJob: Sendable {
     var latestProgress: (processed: Int, total: Int)?
 }
 
+/// Typed lower-layer view of a vault job.  Both v1 text rendering and the v2
+/// structured provider read this value; neither reconstructs lifecycle state
+/// from a rendered job response.
+struct VaultJobSnapshot: Sendable {
+    enum State: Sendable {
+        case running(progress: (processed: Int, total: Int)?)
+        case imported(ImportResult)
+        case exported(ExportResult)
+        case failed(String)
+    }
+
+    let jobID: UUID
+    let kind: JobKind
+    let vaultPath: String
+    let elapsedSeconds: TimeInterval
+    let state: State
+}
+
+/// Immediate receipt for an accepted asynchronous vault launch.  The UUID is
+/// minted by `VaultJobRegistry`, not supplied by a caller, and remains the
+/// only identity that can later be polled.
+struct VaultJobLaunch: Sendable {
+    let jobID: UUID
+    let kind: JobKind
+    let vaultPath: String
+    let noteCount: Int?
+    let scope: String?
+}
+
 // MARK: - Registry
 
 /// Actor-isolated in-process registry for vault import and export jobs.
 ///
 /// A single instance is held by `ToolDispatcher` for the process lifetime.
-/// It is injected into `VaultTools.dispatch()` so the async launch tools
-/// (`moot_vault_import`, `moot_vault_export`) and the polling tool
-/// (`moot_vault_job`) share one authoritative store. Actor isolation makes
+/// The selected v2 data-mobility provider uses one registry for async vault
+/// launches and job inspection. Actor isolation makes
 /// all mutations and reads thread-safe without additional locking.
 actor VaultJobRegistry {
 
@@ -169,6 +198,32 @@ actor VaultJobRegistry {
     /// Return the job for `id`, or `nil` when no such job is registered.
     func job(for id: String) -> VaultJob? {
         jobs[id]
+    }
+
+    /// Returns the lifecycle state as typed data at one observation instant.
+    /// Unknown/non-UUID ids have no snapshot; registry keys are locally minted
+    /// UUID strings by `checkAndRegister`.
+    func snapshot(for id: UUID, now: Date = Date()) -> VaultJobSnapshot? {
+        guard let job = jobs[id.uuidString] else { return nil }
+        let state: VaultJobSnapshot.State
+        switch job.status {
+        case .running:
+            state = .running(progress: job.latestProgress)
+        case .complete:
+            switch job.result {
+            case .imported(let result): state = .imported(result)
+            case .exported(let result): state = .exported(result)
+            case nil: state = .failed("complete but no result recorded — unexpected state")
+            }
+        case .failed:
+            state = .failed(job.errorMessage ?? "(unknown error)")
+        }
+        return VaultJobSnapshot(
+            jobID: id,
+            kind: job.kind,
+            vaultPath: job.vaultPath,
+            elapsedSeconds: now.timeIntervalSince(job.startedAt),
+            state: state)
     }
 
 }

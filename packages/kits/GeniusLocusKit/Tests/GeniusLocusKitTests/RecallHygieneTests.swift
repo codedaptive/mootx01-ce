@@ -22,7 +22,7 @@ import LocusKit
 import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 @testable import GeniusLocusKit
 
 /// Number of default wings seeded by provision(). Hint drawers == one per wing.
@@ -95,7 +95,8 @@ struct RecallHygieneTests {
             scoring: .raw,
             limit: 100,
             fallback: .allowDegraded,
-            queryText: nil)
+            queryText: nil,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         let hintHits = result.hits.filter { hit in
@@ -120,7 +121,8 @@ struct RecallHygieneTests {
             scoring: .raw,
             limit: 100,
             fallback: .allowDegraded,
-            queryText: "user memory")
+            queryText: "user memory",
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         let hintHits = result.hits.filter { hit in
@@ -144,7 +146,8 @@ struct RecallHygieneTests {
             scoring: .raw,
             limit: 100,
             fallback: .allowDegraded,
-            queryText: nil)
+            queryText: nil,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         #expect(result.hits.count == totalCount,
@@ -165,7 +168,8 @@ struct RecallHygieneTests {
             scoring: .raw,
             limit: 100,
             fallback: .allowDegraded,
-            queryText: "user memory unique content")
+            queryText: "user memory unique content",
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         #expect(result.hits.count >= contentCount,
@@ -185,7 +189,8 @@ struct RecallHygieneTests {
             scoring: .raw,
             limit: 100,
             fallback: .allowDegraded,
-            queryText: nil)
+            queryText: nil,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         let ghostHits = result.hits.filter { $0.drawer == nil }
@@ -205,7 +210,8 @@ struct RecallHygieneTests {
             scoring: .raw,
             limit: 100,
             fallback: .allowDegraded,
-            queryText: "user memory unique content")
+            queryText: "user memory unique content",
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         let ghostHits = result.hits.filter { $0.drawer == nil }
@@ -241,7 +247,8 @@ struct RecallHygieneTests {
             scoring: .raw,
             limit: 1_000,
             fallback: .allowDegraded,
-            queryText: nil)
+            queryText: nil,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
         let hintInRecall = result.hits.filter { $0.drawer?.addedBy == LocusKit.hintAddedBy }
         #expect(hintInRecall.count == defaultWingCount,
@@ -263,7 +270,8 @@ struct RecallHygieneTests {
             scoring: .raw,
             limit: 100,
             fallback: .allowDegraded,
-            queryText: nil)
+            queryText: nil,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         let returnedIDs = Set(result.hits.compactMap { $0.drawer?.id })

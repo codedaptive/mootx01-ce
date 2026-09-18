@@ -6,7 +6,7 @@
 //
 // ── Why the daemon talks to seams, not to GLK verbs ──────────────────
 // MOOTx01 invariant B-1: NeuronKit never executes SQL and never calls
-// LocusKit / VectorKit / CorpusKit directly; the estate handle is the only
+// LocusKit / SynapseKit / CorpusKit directly; the estate handle is the only
 // write surface. The seam protocols decouple the daemon from the GLK surface
 // so the daemon can be constructed, tested, and reasoned about without a live
 // estate. The production adapters (`EstateMaintenanceSink`,
@@ -20,6 +20,43 @@
 
 import Foundation
 import GeniusLocusKit
+
+// MARK: - Daily performance-health duty seam (A7)
+
+/// Seam for the maintenance daemon's daily timing-derivation performance-health
+/// duty (NEURONKIT_SPEC § 12.6.1 performance-health extension, A7).
+///
+/// Injected into `MaintenanceDaemon`. The daemon calls `runHealthDuty(watermarkMs:now:)`
+/// once per 24 h (gated on `lastPerformanceHealthAt`) and persists the returned
+/// watermark in `MaintenanceDaemonState.performanceHealthWatermarkMs`. Each call
+/// pages the estate audit log from the watermark, derives INGEST and CYCLE timing
+/// samples via `NeuronKit.deriveTimings`, and emits the results through the existing
+/// `Intellectus.report(.metric(...))` path — the same `PersistenceStatsSink` write
+/// path the resident observer uses for live samples.
+///
+/// Mirrors the `ThetaBasisRetrainHook` seam pattern: the protocol is pure (the
+/// daemon carries no GLK import), and the production adapter
+/// (`EstatePerformanceHealthDuty`) imports GeniusLocusKit and pages
+/// `GeniusLocusKit.auditEvents(_:after:limit:)`. Nil safely disables the duty
+/// in test daemons that do not wire an audit source. Failures are caught and
+/// logged by the daemon — they do not abort the maintenance cycle.
+///
+/// - Returns: the HLC physical-time watermark (epoch ms) of the last event
+///   consumed. The daemon persists this and passes it on the next call so each
+///   audit event is measured exactly once across restarts (A6 watermark contract).
+public protocol PerformanceHealthDuty: Sendable {
+
+    /// Run the daily timing-derivation health duty.
+    ///
+    /// - Parameters:
+    ///   - watermarkMs: HLC physical-time watermark (epoch ms) of the last event
+    ///     consumed. 0 = start from the beginning of the log.
+    ///   - now: Deterministic timestamp from the caller (never `Date()` inside
+    ///     the engine; CLAUDE.md determinism rule).
+    /// - Returns: the new watermark (HLC physical-time of the last event consumed).
+    ///   Equal to `watermarkMs` when the audit log has no new events.
+    func runHealthDuty(watermarkMs: Int64, now: Date) async throws -> Int64
+}
 
 // MARK: - Scan-input observation value types
 
@@ -52,52 +89,17 @@ public struct LearnedReferenceObservation: Sendable, Equatable {
     }
 }
 
-/// One fingerprint-drift observation, the input to the fingerprint-drift
-/// scan (NEURONKIT_SPEC § 3.2 scan category 4). A container node
-/// (room-level under the node-tree model) carries a rolled-up fingerprint OR-aggregate
-/// of its drawers' bitmap lanes; the adapter computes `driftFraction` as
-/// the set-bit density of the OR-aggregate over the three bitmap lanes
-/// (192 bits; no baseline-persistence surface exists). The daemon proposes
-/// a fingerprint-drift review once `driftFraction` crosses the threshold.
-///
-/// Value type. Carries the node ID (parentNodeId of the drawers) as the
-/// scope key and the precomputed drift fraction.
-public struct FingerprintDriftObservation: Sendable, Equatable {
-
-    /// The parentNodeId (room-level container node under the node-tree model) whose
-    /// fingerprint has drifted. Used as the scope key for dedup and
-    /// as the basis for the proposal target.
-    public let scopeKey: String
-
-    /// The node ID of the container. Equal to `scopeKey` in the current
-    /// implementation; carried explicitly for forward compatibility with
-    /// multi-level node hierarchies.
-    public let nodeId: String
-
-    /// Fraction in `[0, 1]` of fingerprint bits that have drifted from
-    /// baseline (set-bit density / bit width). Compared to
-    /// `MaintenancePolicy.fingerprintDriftThreshold`.
-    public let driftFraction: Float
-
-    public init(scopeKey: String, nodeId: String, driftFraction: Float) {
-        self.scopeKey = scopeKey
-        self.nodeId = nodeId
-        self.driftFraction = driftFraction
-    }
-}
-
 // MARK: - Read seam
 
 /// Read surface the maintenance daemon scans (NEURONKIT_SPEC § 3.2). All
-/// six reads are pure inputs — the daemon mutates nothing through this
+/// five reads are pure inputs — the daemon mutates nothing through this
 /// protocol. Dependency seam; the production adapter binds each method to
 /// the corresponding estate read when the GLK surface exposes them.
 public protocol MaintenanceSubstrateReader: Sendable {
 
-    /// Active drawers, for the decay scan and the forbidden-combination
-    /// (invariant I-3) scan. "Active" means not tombstoned and in the
-    /// currently-believed state cluster; the adapter applies that
-    /// filter, the daemon consumes the result.
+    /// Active drawers, for the decay scan. "Active" means not tombstoned
+    /// and in the currently-believed state cluster; the adapter applies
+    /// that filter, the daemon consumes the result.
     func activeDrawers() async throws -> [Drawer]
 
     /// Tombstoned drawers (rows with `tombstonedAt != nil`), for the
@@ -106,9 +108,6 @@ public protocol MaintenanceSubstrateReader: Sendable {
 
     /// Learned-reference observations, for the byReference validity scan.
     func learnedReferences() async throws -> [LearnedReferenceObservation]
-
-    /// Fingerprint-drift observations, for the fingerprint-drift scan.
-    func fingerprintBaselines() async throws -> [FingerprintDriftObservation]
 
     /// The current unified audit log, fed to `AuditChainVerifier.verify`
     /// for the audit-chain integrity monitor (NEURONKIT_SPEC § 3.5).
@@ -166,6 +165,29 @@ public protocol MaintenanceProposalSink: Sendable {
     ) async throws
 }
 
+// MARK: - Cycle categories
+
+/// Which scan categories one maintenance cycle runs. The three standing
+/// signals (`maintenance-daemon`, `decay-sweep`, `by-reference-validity`)
+/// each drive one category on their own cadence; the audit-chain monitor,
+/// the QID-pending retry and the diary entry run on every cycle regardless.
+/// An unselected category is handed an empty input to the decision core,
+/// so its seam is not read and it emits nothing. Rust twin:
+/// `MaintenanceCategories` (three-flag struct).
+public struct MaintenanceCategories: OptionSet, Sendable {
+    public let rawValue: Int
+    /// Creates a category set from its raw bits.
+    public init(rawValue: Int) { self.rawValue = rawValue }
+    /// Tombstoned drawers past the expunge grace window.
+    public static let tombstone = MaintenanceCategories(rawValue: 1 << 0)
+    /// Active drawers past the decay window.
+    public static let decay = MaintenanceCategories(rawValue: 1 << 1)
+    /// LearnedReference rows whose source drift is at or above threshold.
+    public static let byReference = MaintenanceCategories(rawValue: 1 << 2)
+    /// Every category — what `pump(now:)` and `triggerMaintenanceCycle(now:)` run.
+    public static let all: MaintenanceCategories = [.tombstone, .decay, .byReference]
+}
+
 // MARK: - Cycle report
 
 /// What one maintenance cycle did. Returned by `triggerMaintenanceCycle`
@@ -193,13 +215,6 @@ public struct MaintenanceCycleReport: Sendable, Equatable {
 
     /// Tombstoned drawers past the expunge grace window this cycle.
     public let tombstoneCandidates: Int
-
-    /// Active drawers violating the forbidden-combination invariant
-    /// (I-3: secret AND public) this cycle.
-    public let forbiddenCombinations: Int
-
-    /// Fingerprint-drift observations at or above threshold this cycle.
-    public let fingerprintDrifts: Int
 
     /// byReference-drift observations at or above threshold this cycle.
     public let byReferenceDrifts: Int

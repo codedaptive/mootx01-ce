@@ -14,7 +14,8 @@ import PersistenceKitInMemory
 /// including a client typo — running a different scoring mode than asked and
 /// hiding the mistake. The fix mirrors the strict `ordering` decode: absent
 /// keeps the documented default (matrixAware); an unknown non-empty string
-/// throws invalidParams. Kept in lockstep with the Rust run_memory_search.
+/// throws invalidParams. Kept in lockstep with the Rust v2 scoring decode
+/// (core_memory.rs).
 ///
 /// ## What these tests prove
 ///   A. Unknown scoring throws invalidParams (fail-closed).
@@ -112,6 +113,7 @@ struct ScoringDispatchTests {
 
     // MARK: - B. Known scoring still succeeds
 
+    /// M3: `scoring=raw` must be accepted as a known value and succeed end-to-end.
     @Test func knownScoringRawSucceeds() async throws {
         let dispatcher = try await makeDispatcher()
         try await fileMemory(content: "scoring-raw-test", location: "test", dispatcher: dispatcher)
@@ -126,10 +128,28 @@ struct ScoringDispatchTests {
         #expect(!isError, "scoring=raw must succeed")
     }
 
+    /// M3: `scoring=discriminative` must be accepted as a known value and
+    /// succeed end-to-end through ToolDispatch → RecallDirector.
+    @Test func knownScoringDiscriminativeSucceeds() async throws {
+        let dispatcher = try await makeDispatcher()
+        try await fileMemory(content: "scoring-discriminative-test", location: "test", dispatcher: dispatcher)
+        let result = try await dispatcher.dispatch(
+            name: "moot_memory_search",
+            arguments: .object([
+                "query": .string("scoring-discriminative-test"),
+                "scoring": .string("discriminative"),
+            ])
+        )
+        let isError = result.objectValue?["isError"]?.boolValue ?? true
+        #expect(!isError, "scoring=discriminative must succeed end-to-end")
+    }
+
     // MARK: - C. Absent scoring defaults
 
-    /// Omitting `scoring` keeps the documented default (matrixAware) and must
-    /// succeed — only an unknown NON-EMPTY string errors.
+    /// Omitting `scoring` (and `door`) routes through the A1 per-corpus
+    /// DoorManifest and falls back to matrixAware when none is provisioned.
+    /// Must succeed — only an unknown NON-EMPTY string errors.
+    /// Full precedence: explicit door > explicit scoring > A1 manifest > matrixAware.
     @Test func absentScoringDefaultsAndSucceeds() async throws {
         let dispatcher = try await makeDispatcher()
         try await fileMemory(content: "absent-scoring-test", location: "test", dispatcher: dispatcher)
@@ -141,6 +161,10 @@ struct ScoringDispatchTests {
         #expect(!isError, "absent scoring must default to matrixAware and succeed")
     }
 
+    /// Omitting `filter` finds unconfirmed memories — the default recall path
+    /// must return freshly-filed drawers (confirmation state = unconfirmed).
+    /// Regression guard: an explicit filter:unconfirmed is NOT needed; absent filter
+    /// spans all confirmation states so new memories are always visible.
     @Test func omittedFilterFindsFreshUnconfirmedMemory() async throws {
         let dispatcher = try await makeDispatcher()
         try await fileMemory(content: "omitted-filter-unconfirmed-test", location: "test", dispatcher: dispatcher)
@@ -150,6 +174,7 @@ struct ScoringDispatchTests {
         )
         let text = result.objectValue?["content"]?
             .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
-        #expect(text.contains("found 1 memory(s)"), "omitted filter must find fresh captures; got: \(text)")
+        // COMPOSER-02B §11.1: S1 header is "found N candidate memory/memories"
+        #expect(text.contains("found 1 candidate memory"), "omitted filter must find fresh captures; got: \(text)")
     }
 }

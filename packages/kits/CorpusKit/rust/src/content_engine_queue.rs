@@ -25,7 +25,7 @@ use queuekit::{
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 use substrate_types::hlc::HLCGenerator;
@@ -110,7 +110,14 @@ impl CorpusContentEngine {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_queue = Arc::clone(&queue);
         let worker_stop = Arc::clone(&stop);
-        let worker_engine = Arc::clone(self);
+        // The worker holds the engine WEAKLY and upgrades for one pass at a
+        // time. A strong handle here would make the engine its own owner: a
+        // host that releases its last `Arc` without calling
+        // `drop_ingest_queue` would leave this thread indexing under an
+        // engine nobody can reach any more (its composition policy included).
+        // With the weak handle the last release runs `Drop`, which stops and
+        // joins the thread.
+        let worker_engine = Arc::downgrade(self);
         let handle = std::thread::Builder::new()
             .name("corpus-content-drain".to_string())
             .spawn(move || {
@@ -139,7 +146,7 @@ impl CorpusContentEngine {
         if let Some(mut state) = taken {
             state.stop.store(true, Ordering::SeqCst);
             if let Some(worker) = state.worker.take() {
-                let _ = worker.join();
+                join_unless_current(worker);
             }
         }
     }
@@ -267,6 +274,12 @@ impl CorpusContentEngine {
         if claimed.is_empty() {
             return Ok(0);
         }
+        // Keep the batch session: one session tags the whole single-pass claim,
+        // so it brackets this drain unit end-to-end (A2 marker input).
+        let unit_session_id = claimed
+            .first()
+            .map(|(_, session)| session.0.clone())
+            .unwrap_or_default();
         let batch: Vec<Job> = claimed.into_iter().map(|(job, _session)| job).collect();
 
         // One resident-index rebuild per burst.
@@ -276,7 +289,20 @@ impl CorpusContentEngine {
         // work. Mirrors Swift `drainIndexBatch` Phase 0 `batchTrainIfNeeded`.
         // Prevents a degenerate rank-1 basis from freezing when the queue drain
         // fires per-document (impatient inline encoding path).
-        let batch_now_millis = (drain_now() * 1000.0) as i64;
+        //
+        // The batch instant is DERIVED FROM THE JOBS, never from the wall
+        // clock: the MAX of the batch's submission HLC physical times (each
+        // job's capture instant). A wall-clock read here stamped drain-worker
+        // training with load-dependent times, breaking the pass-`now`-in
+        // determinism rule for every caller whose clock is pinned (the
+        // bench-clock seam rides tool calls; this background worker never
+        // sees it) — REPLAY_DRIFT_RCA 2026-08-26. Falls back to drain_now()
+        // only for an empty batch (nothing derived is stamped then anyway).
+        let batch_now_millis = batch
+            .iter()
+            .map(|job| job.submitted_at.physical_time)
+            .max()
+            .unwrap_or_else(|| (drain_now() * 1000.0) as i64);
         self.batch_train_if_needed(batch_now_millis)?;
 
         // Pre-scan upsert jobs and batch-fetch all source records in one WHERE…IN
@@ -307,6 +333,14 @@ impl CorpusContentEngine {
         let mut counts_updates: Vec<(String, i64, String, String)> = Vec::new();
         let mut checkpoints: Vec<CorpusIndexState> = Vec::new();
         let mut prepared_upserts: HashSet<(String, i64, String)> = HashSet::new();
+        // Per-record write amplification on this path is held down inside
+        // InvertedIndexStore::index itself (one savepoint per record —
+        // DRAIN-BATCH-TXN, 2026-08-29). A loop-level index-store bracket is
+        // WRONG here: that store holds a private connection whose
+        // BEGIN IMMEDIATE takes the FILE write lock, and this loop's
+        // prepare_queue_job also writes through the storage connection —
+        // holding the bracket across the loop starves those writes into
+        // "database is locked".
         for job in &batch {
             let payload: ContentIndexJob = match serde_json::from_slice(&job.payload) {
                 Ok(p) => p,
@@ -377,7 +411,6 @@ impl CorpusContentEngine {
                 completions.push((job.id.clone(), ObservationStatus::Blocked));
             }
         }
-
         // Batch-boundary last write: maintained counts and the checkpoints
         // proving those folds are committed atomically (never per record —
         // that was O(N·vocab) write amplification). It MUST precede terminal
@@ -403,7 +436,7 @@ impl CorpusContentEngine {
         // barrier instead of a race. Mirrors the Swift
         // drainContentQueueOnce ordering.
         if !encoded_ids.is_empty() {
-            self.fire_on_encoded(&encoded_ids);
+            self.fire_on_encoded(&encoded_ids, &unit_session_id);
         }
         // Post-ingest young-basis settle: fires only when nothing further is
         // pending (this batch is committed above; it may still be in-flight
@@ -425,8 +458,30 @@ impl CorpusContentEngine {
     }
 }
 
+/// Join a drain worker unless the caller IS that worker. `Drop` can run on
+/// the worker thread: the pass's upgraded handle may be the engine's last
+/// owner, so releasing it at the end of the pass tears the queue down from
+/// inside the loop. A thread cannot join itself; that worker observes the
+/// stop flag on its next pass and exits on its own.
+pub(crate) fn join_unless_current(worker: JoinHandle<()>) {
+    if worker.thread().id() != std::thread::current().id() {
+        let _ = worker.join();
+    }
+}
+
+/// The safety net for a host that releases its last `Arc` without calling
+/// `drop_ingest_queue`: stop and join the drain worker so no thread outlives
+/// the engine. Reachable because the worker holds the engine weakly (see
+/// `mount_ingest_queue`); idempotent with the explicit teardown. Twin of
+/// Swift `CorpusContentEngine.deinit`.
+impl Drop for CorpusContentEngine {
+    fn drop(&mut self) {
+        self.drop_ingest_queue();
+    }
+}
+
 fn run_content_drain_loop(
-    engine: Arc<CorpusContentEngine>,
+    engine: Weak<CorpusContentEngine>,
     queue: Arc<ContentQueue>,
     stop: Arc<AtomicBool>,
     lease: Option<DrainLease>,
@@ -471,6 +526,12 @@ fn run_content_drain_loop(
                 }
             }
         }
+        // One pass, one upgrade: the engine is held only while it works and
+        // released before the sleep. A failed upgrade means every owner has
+        // let the engine go, so the worker exits.
+        let Some(engine) = engine.upgrade() else {
+            break;
+        };
         match engine.drain_content_with_queue(&queue) {
             Ok(n) if n > 0 => {
                 pending_publish = true;
@@ -493,7 +554,13 @@ fn run_content_drain_loop(
                 eprintln!("mootx01 content drain loop error: {e:?}");
             }
         }
+        drop(engine);
         std::thread::sleep(Duration::from_millis(15));
+    }
+    // Release the lease on exit so a successor process can take over without
+    // waiting out the TTL, as the legacy loop and Swift `dropIngestQueue` do.
+    if let Some(lease) = &lease {
+        lease.release();
     }
 }
 
@@ -518,7 +585,7 @@ mod tests {
         documents: u64,
     }
 
-    impl vectorkit::EmbeddingProvider for RetryCountsProvider {
+    impl synapsekit::EmbeddingProvider for RetryCountsProvider {
         fn model_id(&self) -> &str {
             "retry-counts-v1"
         }
@@ -527,11 +594,11 @@ mod tests {
             "1.0.0"
         }
 
-        fn embed(&self, _text: &str) -> Result<engram_lib::Engram, vectorkit::VectorKitError> {
+        fn embed(&self, _text: &str) -> Result<engram_lib::Engram, synapsekit::SynapseKitError> {
             Ok(engram_lib::Engram::ZERO)
         }
 
-        fn embed_float(&self, _text: &str) -> Result<Vec<f32>, vectorkit::VectorKitError> {
+        fn embed_float(&self, _text: &str) -> Result<Vec<f32>, synapsekit::SynapseKitError> {
             Ok(vec![1.0])
         }
     }
@@ -554,7 +621,7 @@ mod tests {
         fn reconstruct_basis(
             &self,
             basis: &[u8],
-        ) -> Result<Box<dyn vectorkit::EmbeddingProvider>, CorpusKitError> {
+        ) -> Result<Box<dyn synapsekit::EmbeddingProvider>, CorpusKitError> {
             Ok(Box::new(Self::from_bytes(basis)?))
         }
 
@@ -706,13 +773,13 @@ mod tests {
             .expect_err("terminal completion failure must surface");
         assert!(format!("{error:?}").contains("content reply batch"));
         assert_eq!(queue.in_flight().expect("in-flight").len(), 1);
+        // The drained content stays searchable after the terminal reply failure:
+        // the lexical index written by the same drain job serves the record.
         assert!(engine
-            .float_nearest_per_signal("completion failure remains durable", 5)
+            .bm25_top_k("completion failure remains durable", 5)
+            .expect("bm25_top_k")
             .iter()
-            .any(|(model_id, outcome)| {
-                model_id == "corpus-deterministic-v1"
-                    && matches!(outcome, crate::FloatLaneOutcome::Hits(hits) if !hits.is_empty())
-            }));
+            .any(|(id, _)| id == "drawer-reply"));
     }
 
     #[test]

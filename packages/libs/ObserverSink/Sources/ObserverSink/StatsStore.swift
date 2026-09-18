@@ -39,6 +39,7 @@
 //   per MANAGER_1.0_PLAN.md §5 item 3, Bob 2026-06-06).
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import PersistenceKitSQLite
@@ -172,7 +173,7 @@ public final class StatsStore: Sendable {
     // MARK: - Private state
 
     private let storage: SQLiteStorage
-    private let logger = Logger(subsystem: "com.mootx01.kit", category: "ObserverSink")
+    private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ObserverSink")
 
     // MARK: - Schema version
 
@@ -889,6 +890,24 @@ public final class StatsStore: Sendable {
         return rows.compactMap(MetricRow.init(storageRow:))
     }
 
+    /// Hard cap on the row count of any bounded `queryMetricsByNames` call.
+    ///
+    /// A supplied `limit` larger than this is clamped, so no single named-set
+    /// query can materialize more than this many rows even if a caller passes
+    /// an oversized (or attacker-influenced) limit. The value is justified by
+    /// legitimate production rates, not picked round: the perf-health duty
+    /// (the largest bounded consumer) writes 11 metric rows per estate per
+    /// 24 h cadence, and the default retention window is 7 days
+    /// (`ManagerConfig.defaultRetentionWindow`) — steady state ≈ 77 rows per
+    /// estate. 8192 gives headroom for >100 estates at default retention, or
+    /// ~2 estate-years of daily samples with retention disabled. Mirrors the
+    /// Rust port (`MAX_METRIC_ROWS_PER_NAMED_QUERY`).
+    ///
+    /// The nil-limit path is NOT affected by this cap — it keeps the legacy
+    /// unbounded ascending behavior for full-history consumers (tracked as a
+    /// follow-up finding; see PH-01 blast radius report).
+    public static let maxMetricRowsPerNamedQuery = 8_192
+
     /// Query metric samples whose `name` is in `names`.
     ///
     /// Issues a `WHERE name IN (...)` predicate — reads only the named rows
@@ -898,7 +917,12 @@ public final class StatsStore: Sendable {
     /// - Parameters:
     ///   - names: The set of metric names to retrieve. If empty, returns [] immediately.
     ///   - dropboxID: Optional additional filter by dropbox. nil = all dropboxes.
-    /// - Returns: Matching rows ordered by ts ascending (oldest first).
+    ///   - limit: Optional row cap. When supplied, ordering flips to ts
+    ///     descending (most-recent first) and the effective limit is clamped
+    ///     to `maxMetricRowsPerNamedQuery` — the store enforces the bound even
+    ///     if the caller passes an oversized value.
+    /// - Returns: Matching rows ordered by ts ascending (oldest first) when
+    ///   `limit` is nil, descending (newest first, capped) when supplied.
     /// - Throws: `StorageError` on I/O failure.
     public func queryMetricsByNames(
         _ names: Set<String>,
@@ -928,9 +952,19 @@ public final class StatsStore: Sendable {
         // (it dedups to latest-per-key downstream), so order DESCENDING and
         // cap — this bounds an otherwise unbounded historical scan (a stats
         // store with many retained samples would otherwise materialize every
-        // matching row). Without a limit the legacy ascending, unbounded
-        // behavior is preserved for callers that consume full history.
+        // matching row). The supplied limit is clamped to
+        // `maxMetricRowsPerNamedQuery` so the bound holds AT THE STORE: a
+        // future caller passing an oversized limit cannot drive unbounded
+        // work (Codex finding #30 / mission PH-01). Without a limit the
+        // legacy ascending, unbounded behavior is preserved for callers that
+        // consume full history.
         let direction: OrderDirection = limit == nil ? .ascending : .descending
+        // Two-sided clamp: the upper side enforces the row cap; the lower side
+        // floors negatives to 0 because SQLite treats `LIMIT -1` as NO limit —
+        // a negative caller value would otherwise bypass the cap entirely.
+        // `limit: 0` stays "zero rows" (bounded, unchanged). The Rust twin
+        // needs no lower clamp: `usize` cannot be negative.
+        let effectiveLimit = limit.map { min(max($0, 0), Self.maxMetricRowsPerNamedQuery) }
         let rows = try await storage.rowStore.query(
             table: StatsStoreSchema.metricSamplesTable,
             where: predicate,
@@ -938,7 +972,7 @@ public final class StatsStore: Sendable {
                 table: StatsStoreSchema.metricSamplesTable,
                 name: StatsStoreSchema.tsColumn
             ), direction: direction)],
-            limit: limit,
+            limit: effectiveLimit,
             offset: nil
         )
         return rows.compactMap(MetricRow.init(storageRow:))

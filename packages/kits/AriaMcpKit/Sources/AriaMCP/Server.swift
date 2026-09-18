@@ -1,4 +1,7 @@
+import AriaMCPWire
 import Foundation
+import GeniusLocusKit
+import LocusKit
 import OSLog
 
 /// The ARIA_MCP stdio server.
@@ -17,6 +20,194 @@ import OSLog
 /// produces compact JSON by default). This matches what every MCP
 /// host implementation (Claude Desktop, Claude Code, MemPalace's own
 /// MCP server) expects on the wire.
+
+/// A community-contract tool handler that MootCommunityDaemon injects into
+/// ARIA_MCPDispatcher without creating a circular dependency.
+///
+/// Defined here (in AriaMCP) so conformers in MootCommunityDaemon can import
+/// AriaMCP and satisfy the protocol — the dependency direction is correct.
+/// MootDaemonProvider is frozen; this protocol lives in AriaMCP which
+/// MootCommunityDaemon already imports for Wave A1b.
+///
+/// Community tools use the `moot_community_` name prefix. The dispatcher calls
+/// `isCommunityTool(_:)` before falling through to the `ToolDispatcher`, so
+/// community tools are served without a GeniusLocusKit actor.
+public protocol CommunityToolHandler: Sendable {
+    /// True when `name` is a community tool this handler owns.
+    func isCommunityTool(_ name: String) -> Bool
+    /// The ProjectedTool entries for tools/list.
+    var communityToolList: [ProjectedTool] { get }
+    /// Dispatch one community tool call. Throws JSONRPCError on failure.
+    func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue
+}
+
+/// Dynamic tools contributed by a product attached to the resident daemon.
+/// The dispatcher consults this surface only on a successfully authenticated
+/// first-party request; the ordinary HTTP lane strips it before dispatch.
+public protocol FirstPartyToolHandler: Sendable {
+    func isFirstPartyTool(_ name: String) async -> Bool
+    var firstPartyToolList: [ProjectedTool] { get async }
+    func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue
+}
+
+/// A first-party handler that owns resident-process lifecycle.
+public protocol FirstPartyToolHost: FirstPartyToolHandler {
+    func start() async throws
+    func stop() async
+}
+
+/// A daemon-owned estate session made available only to a stable first-party
+/// provider's executor.  It is never a public MCP parameter or a ProductDock
+/// capability.
+public struct FirstPartyProviderEstateSession: Sendable {
+    public let kit: GeniusLocusKit
+    public let handle: EstateHandle
+
+    public init(kit: GeniusLocusKit, handle: EstateHandle) {
+        self.kit = kit
+        self.handle = handle
+    }
+}
+
+/// Resolves the daemon-owned estate for a stable first-party provider.  The
+/// provider owns its own long-lived executor, including session and ledger
+/// state; this context only supplies the current daemon session when that
+/// executor needs to refresh after a close/reopen.
+public protocol FirstPartyProviderExecutorContext: Sendable {
+    func currentEstateSession() async throws -> FirstPartyProviderEstateSession
+}
+
+/// Fixed, daemon-installed first-party catalog. This is separate from the
+/// frozen Community namespace and dynamic product handlers; an authenticated
+/// route may expose all three, while the ordinary public lane exposes none.
+public protocol FirstPartyProvider: Sendable {
+    func isFirstPartyProviderTool(_ name: String) async -> Bool
+    var firstPartyProviderToolList: [ProjectedTool] { get async }
+    func dispatchFirstPartyProviderTool(
+        name: String,
+        arguments: JSONValue,
+        context: FirstPartyProviderCallContext
+    ) async throws -> JSONValue
+}
+
+public enum FirstPartyRecallExportability: Sendable, Equatable {
+    /// No exportability restriction. This preserves the existing no-grant behavior.
+    case any
+    /// Recall may include only material explicitly marked exportable.
+    case exportableOnly
+}
+
+/// The recall authority applied to one authenticated first-party call.
+/// Sensitivity and exportability stay independent: exportability cannot widen
+/// the sensitivity ceiling.
+public struct FirstPartyRecallPolicy: Sendable, Equatable {
+    public let maximumSensitivity: AdjectiveSensitivity
+    public let exportability: FirstPartyRecallExportability
+
+    public init(
+        maximumSensitivity: AdjectiveSensitivity,
+        exportability: FirstPartyRecallExportability
+    ) {
+        self.maximumSensitivity = maximumSensitivity
+        self.exportability = exportability
+    }
+
+    /// Existing ordinary recall: elevated ceiling and no exportability filter.
+    public static let noGrant = FirstPartyRecallPolicy(
+        maximumSensitivity: .elevated,
+        exportability: .any
+    )
+
+    func restricted(by other: Self) -> Self {
+        Self(
+            // Sensitivity grants remain the configured authority's decision.
+            // The transport restriction contributes only exportability.
+            maximumSensitivity: other.maximumSensitivity,
+            exportability: exportability == .exportableOnly || other.exportability == .exportableOnly
+                ? .exportableOnly : .any
+        )
+    }
+}
+
+/// Daemon-owned source for the policy attached to a verified provider call.
+/// It must not read request arguments, so callers cannot select recall authority.
+public protocol FirstPartyRecallPolicyAuthority: Sendable {
+    func currentFirstPartyRecallPolicy(
+        for caller: FirstPartyProviderCallContext
+    ) async -> FirstPartyRecallPolicy
+}
+
+/// Default for compositions with no explicit first-party grant authority.
+public struct FirstPartyNoGrantRecallPolicyAuthority: FirstPartyRecallPolicyAuthority {
+    public init() {}
+
+    public func currentFirstPartyRecallPolicy(
+        for caller: FirstPartyProviderCallContext
+    ) async -> FirstPartyRecallPolicy {
+        caller.recallPolicy
+    }
+}
+
+/// Verified transport facts bound to one first-party call.  `HTTPServer`
+/// constructs this only after the request MAC and replay window succeed; it is
+/// never decoded from caller parameters or retained as a global session.
+public struct FirstPartyProviderCallContext: Sendable, Equatable {
+    public let sessionIdentifier: [UInt8]
+    public let sequence: UInt64
+    public let instanceIdentifier: UUID
+    public let estateIdentifier: UUID
+    public let recallPolicy: FirstPartyRecallPolicy
+
+    init(
+        authenticated: FirstPartyAuthenticatedRequest,
+        identity: FirstPartyServerIdentity,
+        recallPolicy: FirstPartyRecallPolicy = .noGrant
+    ) {
+        self.sessionIdentifier = authenticated.sessionIdentifier
+        self.sequence = authenticated.sequence
+        self.instanceIdentifier = identity.instanceIdentifier
+        self.estateIdentifier = identity.estateIdentifier
+        self.recallPolicy = authenticated.restrictsRecallToExportable
+            ? FirstPartyRecallPolicy(
+                maximumSensitivity: .elevated,
+                exportability: .exportableOnly
+            )
+            : recallPolicy
+    }
+
+    func withRecallPolicy(_ recallPolicy: FirstPartyRecallPolicy) -> Self {
+        Self(
+            sessionIdentifier: sessionIdentifier,
+            sequence: sequence,
+            instanceIdentifier: instanceIdentifier,
+            estateIdentifier: estateIdentifier,
+            recallPolicy: recallPolicy
+        )
+    }
+
+    private init(
+        sessionIdentifier: [UInt8],
+        sequence: UInt64,
+        instanceIdentifier: UUID,
+        estateIdentifier: UUID,
+        recallPolicy: FirstPartyRecallPolicy
+    ) {
+        self.sessionIdentifier = sessionIdentifier
+        self.sequence = sequence
+        self.instanceIdentifier = instanceIdentifier
+        self.estateIdentifier = estateIdentifier
+        self.recallPolicy = recallPolicy
+    }
+}
+
+/// Optional provider capability for a future estate-backed executor.  The
+/// concrete provider owns the executor and its durable session/ledger state;
+/// Community injects only a resolver for its daemon-owned current estate.
+public protocol FirstPartyProviderExecutorContextConsumer: FirstPartyProvider {
+    func installFirstPartyProviderExecutorContext(
+        _ context: any FirstPartyProviderExecutorContext
+    ) async
+}
 
 /// The method router. Owns the tool registry and the estate
 /// dispatcher, calls each on the right inbound method, and converts
@@ -76,13 +267,173 @@ public struct ARIA_MCPDispatcher: Sendable {
     }
 
     public let info: ServerInfo
-    public let tools: [ProjectedTool]
-    public let tooling: ToolDispatcher
+    /// The effective tool list for tools/list.
+    ///
+    /// In the full (GLK-backed) dispatcher this is `ToolProjection.tools()`. In
+    /// community-only mode it is `communityHandler.communityToolList`. On the HTTP
+    /// plain lane (returned by `publicLane`) community tools are stripped so they
+    /// do not appear in the third-party client's tool list — `publicLane` filters
+    /// this array when it nils out the community handler.
+    ///
+    /// `private(set)` so `publicLane` can adjust the list without exposing a
+    /// general mutation surface. Callers read the list; they never write it.
+    public private(set) var tools: [ProjectedTool]
+    /// The GeniusLocusKit-backed dispatcher. Optional to support community-only mode
+    /// (Wave A1b) where only `moot_community_*` tools are served and no GeniusLocusKit
+    /// actor is available. When nil, non-community tool calls return methodNotFound.
+    public let tooling: ToolDispatcher?
+    /// Community-contract tool handler, or nil.
+    ///
+    /// When set, community tools are routed here BEFORE falling through to `tooling`.
+    /// Defined as an existential so MootCommunityDaemon can inject its conformer
+    /// without a circular dependency.
+    ///
+    /// On the HTTP plain (third-party) lane this is nil — `publicLane` strips it so
+    /// the plain lane behaves as if no community handler exists. Direct dispatcher
+    /// callers (unit tests, community-only mode via `(info:communityHandler:)`) are
+    /// unaffected; they never call `publicLane`.
+    ///
+    /// `private(set)` so `publicLane` can nil it without exposing a general mutation
+    /// surface. Callers read the handler; they never write it.
+    public private(set) var communityHandler: (any CommunityToolHandler)?
 
-    public init(info: ServerInfo, tooling: ToolDispatcher) {
+    /// Dynamic product-tool surface. Nil on the ordinary HTTP lane.
+    public private(set) var firstPartyHandler: (any FirstPartyToolHandler)?
+
+    /// Fixed provider surface for authenticated native callers. It is separate
+    /// from the selected public catalog and is stripped from the HTTP public
+    /// lane with the verified caller context.
+    public private(set) var firstPartyProvider: (any FirstPartyProvider)?
+
+    /// The authenticated first-party identity this dispatcher reports, or `nil`
+    /// on the ordinary third-party lane.
+    ///
+    /// **This is NOT a configuration knob and must never be set by a caller.**
+    /// It is `internal(set)` and is populated in exactly one place —
+    /// `HTTPServer.routeFirstParty`, from the live `FirstPartyAuthServer`'s own
+    /// identity, for the duration of one authenticated dispatch.
+    ///
+    /// It was previously a public initializer parameter, which was a defect:
+    /// the identity and the authenticator were two independent knobs that had to
+    /// agree, and `HTTPServer` handed the SAME dispatcher to both lanes. Setting
+    /// the identity therefore made the UNAUTHENTICATED public lane advertise
+    /// `authenticated-first-party` and publish the daemon's instance and estate
+    /// identifiers; leaving it unset made the authenticated lane fail to report
+    /// them. Deriving it from the authenticator removes the second knob, so the
+    /// two can no longer diverge.
+    public internal(set) var firstPartyIdentity: FirstPartyServerIdentity?
+
+    /// Verified per-request facts. This is populated only by the authenticated
+    /// HTTP router and is never decoded from a tool argument.
+    private var firstPartyProviderCallContext: FirstPartyProviderCallContext?
+
+    /// Daemon authority resolved after transport verification, before a stable
+    /// provider call. It cannot be selected by an MCP client.
+    private let firstPartyRecallPolicyAuthority: any FirstPartyRecallPolicyAuthority
+
+    /// Full-mode initializer: GeniusLocusKit-backed dispatcher, no community handler.
+    /// This is the existing production path; the `tooling` parameter is non-optional
+    /// here to preserve every existing call site unchanged.
+    public init(
+        info: ServerInfo,
+        tooling: ToolDispatcher,
+        firstPartyRecallPolicyAuthority: any FirstPartyRecallPolicyAuthority = FirstPartyNoGrantRecallPolicyAuthority()
+    ) {
         self.info = info
         self.tools = ToolProjection.tools()
         self.tooling = tooling
+        self.communityHandler = nil
+        self.firstPartyHandler = nil
+        self.firstPartyProvider = nil
+        self.firstPartyIdentity = nil
+        self.firstPartyProviderCallContext = nil
+        self.firstPartyRecallPolicyAuthority = firstPartyRecallPolicyAuthority
+    }
+
+    /// Community-only initializer (Wave A1b): no GeniusLocusKit actor required.
+    /// Community tools become reachable only when the first-party HTTP router
+    /// attaches a verified request. A direct instance still advertises no tools.
+    public init(
+        info: ServerInfo,
+        communityHandler: any CommunityToolHandler,
+        firstPartyHandler: (any FirstPartyToolHandler)? = nil,
+        firstPartyProvider: (any FirstPartyProvider)? = nil,
+        firstPartyRecallPolicyAuthority: any FirstPartyRecallPolicyAuthority = FirstPartyNoGrantRecallPolicyAuthority()
+    ) {
+        self.info = info
+        self.tools = []
+        self.tooling = nil
+        self.communityHandler = communityHandler
+        self.firstPartyHandler = firstPartyHandler
+        self.firstPartyProvider = firstPartyProvider
+        self.firstPartyIdentity = nil
+        self.firstPartyProviderCallContext = nil
+        self.firstPartyRecallPolicyAuthority = firstPartyRecallPolicyAuthority
+    }
+
+    /// This dispatcher, carrying a first-party identity, for one authenticated
+    /// dispatch.
+    ///
+    /// `internal` on purpose: only the first-party router may call it, and only
+    /// with an identity taken from the `FirstPartyAuthServer` that just
+    /// authenticated the request. Value copy preserves `communityHandler`.
+    func withFirstPartyIdentity(_ identity: FirstPartyServerIdentity) -> ARIA_MCPDispatcher {
+        var copy = self
+        copy.firstPartyIdentity = identity
+        copy.firstPartyProviderCallContext = nil
+        return copy
+    }
+
+    /// Attach facts that were verified by the first-party HTTP router. This is
+    /// internal so product composition cannot manufacture a trusted caller.
+    func withVerifiedFirstPartyRequest(
+        _ authenticated: FirstPartyAuthenticatedRequest,
+        identity: FirstPartyServerIdentity
+    ) -> ARIA_MCPDispatcher {
+        var copy = self
+        copy.firstPartyIdentity = identity
+        copy.firstPartyProviderCallContext = FirstPartyProviderCallContext(
+            authenticated: authenticated,
+            identity: identity
+        )
+        return copy
+    }
+
+    /// This dispatcher as the HTTP plain (third-party) lane sees it.
+    ///
+    /// Two changes from `self`:
+    ///   1. `firstPartyIdentity` is stripped unconditionally so the public lane
+    ///      cannot advertise `authenticated-first-party` or leak the daemon's
+    ///      instance and estate identifiers even if `self` carries an identity.
+    ///   2. `communityHandler` is set to nil and community tools are removed from
+    ///      `tools` (F1 fix). Community tools are an authenticated-first-party-only
+    ///      surface; a plain-lane client that reads tools/list must never see them,
+    ///      and a plain-lane tools/call for a community tool name must receive
+    ///      methodNotFound. Stripping the handler here — rather than gating inside
+    ///      toolsCall() — keeps dispatch logic simple: nil communityHandler means
+    ///      "no community surface", regardless of which lane is active.
+    ///
+    /// A direct community-only dispatcher also has no protected surface until
+    /// the internal first-party router attaches a verified request. `publicLane`
+    /// is called only from `HTTPServer.route()` for the plain HTTP lane.
+    ///
+    /// Cheap: `ARIA_MCPDispatcher` is a value type; the copy is stack-allocated.
+    var publicLane: ARIA_MCPDispatcher {
+        var copy = self
+        copy.firstPartyIdentity = nil
+        copy.firstPartyProviderCallContext = nil
+        // Strip community tools from the plain lane (F1).  The tools array is
+        // filtered rather than set to empty so non-community GLK tools remain
+        // visible on the plain lane. In community-only mode (tooling == nil) all
+        // tools have the "moot_community_" prefix, so this produces an empty list
+        // — correct: no tools are advertised to unauthenticated third-party clients.
+        if copy.communityHandler != nil {
+            copy.communityHandler = nil
+            copy.tools = copy.tools.filter { !$0.name.hasPrefix("moot_community_") }
+        }
+        copy.firstPartyHandler = nil
+        copy.firstPartyProvider = nil
+        return copy
     }
 
     /// Handle one parsed inbound request. Returns the response or `nil`
@@ -134,7 +485,7 @@ public struct ARIA_MCPDispatcher: Sendable {
             // The keep-alive shape is fixed by the spec.
             return .object([:])
         case "tools/list":
-            return toolsList()
+            return await toolsList()
         case "tools/call":
             return try await toolsCall(params: request.params)
         case "resources/list":
@@ -189,9 +540,57 @@ public struct ARIA_MCPDispatcher: Sendable {
             // field. Respond with our latest per the MCP spec §3 mandate.
             negotiated = Self.latestSupportedProtocolVersion
         }
+        // First-party lane only: the identity the client will compare against
+        // the descriptor it already verified. Every value is drawn from that
+        // same verified descriptor, so a truthful serverInfo and a verified
+        // descriptor cannot disagree — if they could, the client would have no
+        // way to tell which was lying.
+        //
+        // On the third-party lane `firstPartyIdentity` is nil, no extra key is
+        // emitted, and the response bytes are exactly what they were before this
+        // capability existed.
+        var serverInfoFields: [String: JSONValue] = [
+            "name": .string(info.name),
+            "version": .string(info.version),
+        ]
+        var capabilityFields: [String: JSONValue] = [:]
+        if let identity = firstPartyIdentity {
+            serverInfoFields["name"] = .string(identity.name)
+            serverInfoFields["version"] = .string(identity.binaryVersion)
+            serverInfoFields["instanceIdentifier"] = .string(identity.instanceIdentifier.uuidString)
+            serverInfoFields["estateIdentifier"] = .string(identity.estateIdentifier.uuidString)
+            // Generations are UInt64 and are emitted as DECIMAL STRINGS.
+            //
+            // `Int64(someUInt64)` traps above `Int64.max`, and those are legal
+            // generation values — a monotonic counter has no business being
+            // capped by the signed range of a JSON encoder. JSON numbers cannot
+            // carry them either: `.integer` is `Int64`, and even a double-typed
+            // JSON number loses exactness above 2^53, so any numeric encoding is
+            // lossy or trapping at the top of the range. A decimal string is
+            // exact for every `UInt64` and never traps.
+            serverInfoFields["descriptorGeneration"] = .string(String(identity.descriptorGeneration))
+            serverInfoFields["credentialGeneration"] = .string(String(identity.credentialGeneration))
+            // `contractRevision` is an `Int` and small by contract, so it stays
+            // a JSON number; `Int64(_:)` from `Int` is total on 64-bit.
+            serverInfoFields["contractRevision"] = .integer(Int64(identity.contractRevision))
+            serverInfoFields["mcpProtocolVersion"] = .string(identity.mcpProtocolVersion)
+            // Advertised only here, and only because reaching this branch means
+            // a validated root, an active descriptor, a bounded session store,
+            // and the request/response MAC middleware are all present — the
+            // `FirstPartyAuthServer` that supplied this identity is what proves
+            // each of them exists.
+            capabilityFields["authenticated-first-party"] = .object([:])
+            if firstPartyProvider != nil {
+                // This discovery record describes the fixed native-provider
+                // contract. It is deliberately independent of the public v2
+                // selected-release registry.
+                serverInfoFields["first_party_provider"] = FirstPartyProviderCatalog.discovery.jsonValue
+            }
+        }
+
         let result: JSONValue = .object([
             "protocolVersion": .string(negotiated),
-            "capabilities": .object([
+            "capabilities": .object(capabilityFields.merging([
                 "tools": .object([:]),
                 // Resources and prompts are advertised (v1.0 conformance per
                 // ARIA_MCP_SPEC_v0.2 §9). Lists are empty until v1.1 implements
@@ -205,19 +604,38 @@ public struct ARIA_MCPDispatcher: Sendable {
                 "prompts": .object(["listChanged": .bool(false)]),
                 // Logging is advertised; the server logs to stderr per §5.
                 "logging": .object([:]),
-            ]),
-            "serverInfo": .object([
-                "name": .string(info.name),
-                "version": .string(info.version),
-            ]),
+            ]) { current, _ in current }),
+            "serverInfo": .object(serverInfoFields),
         ])
         return result
     }
 
     // MARK: - tools/list
 
-    private func toolsList() -> JSONValue {
-        let entries: [JSONValue] = tools.map { tool in
+    private func toolsList() async -> JSONValue {
+        // The authenticated HTTP lane composes two independent namespaces.
+        // The stable provider remains its fixed 26-operation agreement and the
+        // Community contract remains its frozen 35-operation agreement; neither
+        // falls through to the public selected-v2 dispatcher. Requiring the
+        // verified request context keeps an identity-only value copy from
+        // advertising either protected namespace.
+        if firstPartyIdentity != nil, firstPartyProviderCallContext != nil {
+            var authenticatedTools: [ProjectedTool] = []
+            if let firstPartyProvider {
+                authenticatedTools.append(contentsOf: await firstPartyProvider.firstPartyProviderToolList)
+            }
+            if let communityHandler {
+                authenticatedTools.append(contentsOf: communityHandler.communityToolList)
+            }
+            return toolsListEntries(authenticatedTools)
+        }
+        // The public selected release remains the complete public v2 surface.
+        // Community and provider additions are not wired into selected v2 lanes.
+        return toolsListEntries(tools)
+    }
+
+    private func toolsListEntries(_ effectiveTools: [ProjectedTool]) -> JSONValue {
+        let entries: [JSONValue] = effectiveTools.map { tool in
             var entry: [String: JSONValue] = [
                 "name": .string(tool.name),
                 "description": .string(tool.description),
@@ -227,6 +645,9 @@ public struct ARIA_MCPDispatcher: Sendable {
             // the key — text-only tool entries stay byte-identical.
             if let outputSchema = tool.outputSchema {
                 entry["outputSchema"] = outputSchema
+            }
+            if let annotations = tool.annotations {
+                entry["annotations"] = annotations
             }
             return .object(entry)
         }
@@ -257,6 +678,60 @@ public struct ARIA_MCPDispatcher: Sendable {
             }
         }
         let arguments = object["arguments"] ?? .object([:])
+        if firstPartyIdentity != nil {
+            guard let verifiedContext = firstPartyProviderCallContext else {
+                throw JSONRPCError(
+                    code: JSONRPCErrorCode.methodNotFound,
+                    message: "Method not found: \(name)"
+                )
+            }
+
+            // Community is a separate authenticated namespace. Its frozen
+            // transport grammar does not carry the stable provider tuple.
+            if let communityHandler, communityHandler.isCommunityTool(name) {
+                return try await communityHandler.dispatch(name: name, arguments: arguments)
+            }
+
+            if let firstPartyProvider, await firstPartyProvider.isFirstPartyProviderTool(name) {
+                let contractVersion = try Self.validateFirstPartyProviderCompatibility(object)
+                if contractVersion == FirstPartyProviderCatalog.legacyContractVersion {
+                    guard let stableArguments = arguments.objectValue else {
+                        throw JSONRPCError(
+                            code: JSONRPCErrorCode.invalidParams,
+                            message: "tools/call arguments must be an object"
+                        )
+                    }
+                    try FirstPartyProviderCatalog.validateArguments(
+                        name: name,
+                        arguments: stableArguments,
+                        contractVersion: contractVersion
+                    )
+                }
+                let authorityPolicy = await firstPartyRecallPolicyAuthority
+                    .currentFirstPartyRecallPolicy(for: verifiedContext)
+                let context = verifiedContext.withRecallPolicy(
+                    verifiedContext.recallPolicy.restricted(by: authorityPolicy)
+                )
+                return try await firstPartyProvider.dispatchFirstPartyProviderTool(
+                    name: name,
+                    arguments: arguments,
+                    context: context
+                )
+            }
+
+            // An authenticated name never falls through to a public selected
+            // operation. The namespaces are disjoint and unknown names deny.
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.methodNotFound,
+                message: "Method not found: \(name)"
+            )
+        }
+        guard let tooling else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.methodNotFound,
+                message: "Method not found: \(name)"
+            )
+        }
         return try await tooling.dispatch(name: name, arguments: arguments)
     }
 
@@ -286,6 +761,20 @@ public struct ARIA_MCPDispatcher: Sendable {
         let parts = version.split(separator: ".", maxSplits: 2, omittingEmptySubsequences: false)
         guard parts.count == 3, parts[0] == "geniuslocus" else { return false }
         return true
+    }
+
+    /// Stable provider calls pin the exact discovery tuple observed during
+    /// authenticated initialization. A mismatch is rejected before it reaches
+    /// executor state or an estate mutation.
+    private static func validateFirstPartyProviderCompatibility(_ params: [String: JSONValue]) throws -> String {
+        guard let compatibility = params["first_party_provider"]?.objectValue,
+              let version = FirstPartyProviderCatalog.admittedContractVersion(compatibility) else {
+            throw JSONRPCError(
+                code: JSONRPCErrorCode.invalidParams,
+                message: "stable FirstPartyProvider calls require a matching first_party_provider compatibility record"
+            )
+        }
+        return version
     }
 }
 

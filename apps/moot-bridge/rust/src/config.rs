@@ -81,6 +81,14 @@ pub struct VerbMap {
     /// How this server encodes the result of `query` / `write`.
     #[serde(rename = "resultFormat", default)]
     pub result_format: ResultFormat,
+    /// The argument key under which `write` requires a one-sentence subject, or
+    /// `None` when the write tool takes none. mootx01's `moot_file_memory`
+    /// requires `subject` (≤120 characters) and refuses a call without it, so a
+    /// mirrored write from a server that has no subject notion must carry one
+    /// the bridge derives from the content (its first line, cut to the limit).
+    /// MemPalace's `mempalace_add_drawer` takes none. Default: `None`.
+    #[serde(rename = "subjectArg", default)]
+    pub subject_arg: Option<String>,
 }
 
 fn default_content_arg() -> String {
@@ -91,13 +99,15 @@ fn default_query_arg() -> String {
 }
 fn default_constant_args() -> BTreeMap<String, String> {
     let mut m = BTreeMap::new();
-    m.insert("location".to_string(), "bridge/mirror".to_string());
+    m.insert("wing".to_string(), "bridge".to_string());
+    m.insert("location".to_string(), "mirror".to_string());
     m
 }
 
 /// One MCP backend the bridge fans out to. `command` is the full stdio launch
-/// command (an env-var prefix is honored, e.g.
-/// `MOOTX01_DATA_DIR=/tmp/x mootx01 serve`). Treated at CLI-argument trust level.
+/// command (an env-var prefix is honored, e.g. `LOG=/tmp/x.log some-mcp`; a
+/// mootx01 backend selects its estate with `mootx01 serve --db <dir>/<name>`).
+/// Treated at CLI-argument trust level.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct BackendConfig {
     pub name: String,

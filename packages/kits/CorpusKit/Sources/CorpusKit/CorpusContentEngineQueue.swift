@@ -20,6 +20,7 @@
 // Rust twin: the queue integration lands with the Rust coordinator cutover.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import PersistenceKitInMemory
@@ -27,7 +28,7 @@ import PersistenceKitSQLite
 import QueueKit
 import SubstrateTypes
 
-private let contentEngineLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let contentEngineLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
 
 public extension CorpusContentEngine {
 
@@ -77,9 +78,17 @@ public extension CorpusContentEngine {
         ingestQueue = queue
         drainLease = newLease
 
+        // The worker resolves `self` for ONE pass at a time and releases it
+        // before sleeping (see `Corpus.mountIngestQueue`): the engine is never
+        // its own owner, so a host that releases its last reference without
+        // calling `dropIngestQueue` still gets `deinit`, and this task returns.
         ingestDrainWorker = Task { [weak self] in
-            guard let self else { return }
-            await self.runContentDrainLoop()
+            var state = DrainLoopState()
+            while !Task.isCancelled {
+                guard let next = await self?.contentDrainPass(state) else { return }
+                state = next.state
+                if next.pause > .zero { try? await Task.sleep(for: next.pause) }
+            }
         }
     }
 
@@ -95,8 +104,10 @@ public extension CorpusContentEngine {
         ingestQueue = nil
     }
 
-    /// Install (or clear) the `onEncoded` coordination callback.
-    func setOnEncoded(_ callback: (@Sendable ([String]) async -> Void)?) {
+    /// Install (or clear) the `onEncoded` coordination callback. The second
+    /// parameter is the queue session id that tagged the drain unit's batch
+    /// claim — the A2 encode-completion marker's `session=<id>` bracket.
+    func setOnEncoded(_ callback: (@Sendable ([String], String) async -> Void)?) {
         onEncoded = callback
     }
 
@@ -157,58 +168,59 @@ public extension CorpusContentEngine {
 
     // MARK: - Drain worker
 
-    private func runContentDrainLoop() async {
-        var pendingPublish = false
-        var heldLeaseAt: Date? = nil
-        var reclaimedOnMount = false
-        while !Task.isCancelled {
-            if let lease = drainLease {
-                let now = Date()
-                let refreshDue = heldLeaseAt.map {
-                    now.timeIntervalSince($0) >= DrainLease.heartbeatInterval
-                } ?? true
-                if refreshDue {
-                    if lease.tryAcquire(now: now) {
-                        heldLeaseAt = now
-                        if !reclaimedOnMount, let queue = ingestQueue {
-                            do {
-                                let n = try await queue.reclaimInFlight(stream: Self.encodeStreamID)
-                                if n > 0 {
-                                    contentEngineLog.info(
-                                        "content drain mount: reclaimed \(n) orphaned in-flight job(s)")
-                                }
-                            } catch {
-                                contentEngineLog.error(
-                                    "content drain mount: reclaimInFlight failed: \(error, privacy: .public)")
+    /// One pass of the engine's drain loop: lease bookkeeping, one
+    /// `drainContentQueueOnce`, then the deferred resident-index publish once
+    /// a burst has drained to empty. Returns the updated bookkeeping and the
+    /// pause before the next pass (nothing mid-burst, the standby interval
+    /// while another process holds the lease, the poll cadence otherwise).
+    /// The worker task holds `self` only for the pass (see `mountIngestQueue`).
+    private func contentDrainPass(_ input: DrainLoopState) async -> (state: DrainLoopState, pause: Duration) {
+        var state = input
+        if let lease = drainLease {
+            let now = Date()
+            let refreshDue = state.heldLeaseAt.map {
+                now.timeIntervalSince($0) >= DrainLease.heartbeatInterval
+            } ?? true
+            if refreshDue {
+                if lease.tryAcquire(now: now) {
+                    state.heldLeaseAt = now
+                    if !state.reclaimedOnMount, let queue = ingestQueue {
+                        do {
+                            let n = try await queue.reclaimInFlight(stream: Self.encodeStreamID)
+                            if n > 0 {
+                                contentEngineLog.info(
+                                    "content drain mount: reclaimed \(n) orphaned in-flight job(s)")
                             }
-                            reclaimedOnMount = true
+                        } catch {
+                            contentEngineLog.error(
+                                "content drain mount: reclaimInFlight failed: \(error, privacy: .public)")
                         }
-                    } else {
-                        heldLeaseAt = nil
-                        try? await Task.sleep(for: .seconds(3))
-                        continue
+                        state.reclaimedOnMount = true
                     }
-                } else if let held = heldLeaseAt,
-                          now.timeIntervalSince(held) >= DrainLease.heartbeatInterval {
-                    lease.heartbeat(now: now)
-                    heldLeaseAt = now
+                } else {
+                    state.heldLeaseAt = nil
+                    return (state, .seconds(3))
                 }
+            } else if let held = state.heldLeaseAt,
+                      now.timeIntervalSince(held) >= DrainLease.heartbeatInterval {
+                lease.heartbeat(now: now)
+                state.heldLeaseAt = now
             }
-            do {
-                let drained = try await drainContentQueueOnce()
-                if drained > 0 {
-                    pendingPublish = true
-                    continue
-                }
-                if pendingPublish {
-                    try await publishVectorIndex()
-                    pendingPublish = false
-                }
-            } catch {
-                contentEngineLog.error("content drain loop error: \(error, privacy: .public)")
-            }
-            try? await Task.sleep(for: .milliseconds(15))
         }
+        do {
+            let drained = try await drainContentQueueOnce()
+            if drained > 0 {
+                state.pendingPublish = true
+                return (state, .zero)
+            }
+            if state.pendingPublish {
+                try await publishVectorIndex()
+                state.pendingPublish = false
+            }
+        } catch {
+            contentEngineLog.error("content drain loop error: \(error, privacy: .public)")
+        }
+        return (state, .milliseconds(15))
     }
 
     /// Drain the encode stream once, embedding all upsert jobs in bounded
@@ -262,7 +274,10 @@ public extension CorpusContentEngine {
         // callback is bounded by the same lease-reclaim discipline that
         // covers a hung encode.
         if !result.encodedIDs.isEmpty, let callback = onEncoded {
-            await callback(result.encodedIDs)
+            // claimed[0].1 is the session that tagged this drain unit's batch
+            // claim — one session per unit, so it brackets the unit end-to-end
+            // (A2 encode-completion marker input).
+            await callback(result.encodedIDs, claimed[0].1.rawValue)
         }
         // Post-ingest young-basis settle: fires only when nothing further is
         // pending (this batch is committed above; it may still be in-flight

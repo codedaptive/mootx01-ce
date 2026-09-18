@@ -61,8 +61,7 @@ public struct CorpusIndexState: Sendable, Equatable {
 /// singleton (the global basis-generation counter for coverage invalidation).
 public actor CorpusIndexStateStore {
 
-    /// Checkpoint schema — v2 adds `operational_bitmap` and the
-    /// `corpus_bitmap_generation` singleton.
+    /// Checkpoint schema — v4 drops `composition_policy`.
     ///
     /// Version history:
     ///   v1 — Initial layout: (content_id, revision, digest, index_version,
@@ -70,9 +69,16 @@ public actor CorpusIndexStateStore {
     ///   v2 — Bitmap adoption: adds `operational_bitmap BITMAP NOT NULL DEFAULT 0`
     ///        to corpus_index_state; creates corpus_bitmap_generation singleton
     ///        for the global basis-generation counter.
+    ///   v3 — added `composition_policy TEXT NOT NULL DEFAULT ''` to
+    ///        corpus_index_state: the index composition policy id, a knob that
+    ///        retired when every id came to compose the same document.
+    ///   v4 — drops `composition_policy`. Populated estates reach v4 only
+    ///        through the GLK 1.5 → 1.6 migration capsule, which `mootx01
+    ///        upgrade` runs (the composite estate declarations carry no
+    ///        migrations); a fresh estate is created without the column.
     public static let schemaDeclaration = SchemaDeclaration(
         kitID: "CorpusKitIndexState",
-        version: 2,
+        version: 4,
         tables: [
             TableDeclaration(
                 name: "corpus_index_state",
@@ -126,6 +132,23 @@ public actor CorpusIndexStateStore {
                                 defaultValue: .int(0))
                         ],
                         primaryKey: ["singleton_id"]))
+            ]),
+            // v2 → v3: the composition_policy column (see the version history
+            // above); the step stays so a v2 estate walks the same ladder a
+            // v3 estate did. PersistenceKit addColumn is idempotent.
+            Migration(fromVersion: 2, toVersion: 3, operations: [
+                .addColumn(
+                    table: "corpus_index_state",
+                    column: ColumnDeclaration(
+                        name: "composition_policy",
+                        type: .text, nullable: false,
+                        defaultValue: .text("")))
+            ]),
+            // v3 → v4: drop it again. PersistenceKit dropColumn is idempotent,
+            // so a fresh estate (created at v4, ladder replayed from 0) and a
+            // capsule re-run both pass through this step without error.
+            Migration(fromVersion: 3, toVersion: 4, operations: [
+                .dropColumn(table: "corpus_index_state", columnName: "composition_policy")
             ])
         ]
     )

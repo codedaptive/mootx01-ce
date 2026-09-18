@@ -40,6 +40,14 @@ import ConvergenceKit
 /// PullCycle receives this from `CloudKitDatabaseProtocol.fetchZoneChanges` rather
 /// than from `CKDatabase.recordZoneChanges` directly. This lets test fakes script
 /// pull-cycle responses without a live container.
+///
+/// PAGINATION: `moreComing` mirrors the real CloudKit `moreComing` signal on
+/// `CKDatabase.RecordZoneChanges`. When `true`, the caller should issue another
+/// `fetchZoneChanges` call with the returned `changeToken` to retrieve the next page.
+/// When `false` (the default for all existing callers), the result is the final page.
+/// Existing conformers that construct `CloudKitZoneChanges` without the `moreComing`
+/// parameter keep compiling; they default to `false`, which is the correct behavior
+/// for a single-shot or final-page result.
 public struct CloudKitZoneChanges: Sendable {
 
     /// Records modified or inserted on the server since the last change token.
@@ -49,20 +57,40 @@ public struct CloudKitZoneChanges: Sendable {
     /// These carry no record type; PullCycle routes them via the legacy
     /// fan-out path (D1 fallback for external deletions not produced by
     /// our engine's tombstone path).
+    ///
+    /// TRUTHFULNESS NOTE: `deletedRecordIDs` carries NO HLC. CloudKit does not
+    /// provide per-deletion timestamps on the `recordZoneChanges` path. Snapshot
+    /// consumers (e.g. `takeZoneSnapshot`) remove the deleted entries from the
+    /// live inventory but cannot include them in the HLC floor computation.
     public let deletedRecordIDs: [CKRecord.ID]
 
     /// New server change token to persist after this batch applies.
     /// Nil on a fresh pull (no prior token → zone history start).
     public let changeToken: CKServerChangeToken?
 
+    /// True when additional pages remain after this batch.
+    ///
+    /// Mirrors the real CloudKit `moreComing` signal on
+    /// `CKDatabase.RecordZoneChanges`. Callers that loop until `moreComing == false`
+    /// correctly paginate large zones without missing records.
+    ///
+    /// Default is `false` so all existing constructors (fakes, tests, production
+    /// bridges that did not yet thread moreComing through) compile unchanged and
+    /// behave as single-shot results. The `CKDatabase` retroactive bridge passes
+    /// the real CloudKit signal; test fakes that want to simulate multi-page zones
+    /// should set this to `true` on all but the last page.
+    public let moreComing: Bool
+
     public init(
         modifiedRecords: [CKRecord],
         deletedRecordIDs: [CKRecord.ID],
-        changeToken: CKServerChangeToken?
+        changeToken: CKServerChangeToken?,
+        moreComing: Bool = false
     ) {
         self.modifiedRecords = modifiedRecords
         self.deletedRecordIDs = deletedRecordIDs
         self.changeToken = changeToken
+        self.moreComing = moreComing
     }
 }
 
@@ -243,6 +271,10 @@ extension CKDatabase: CloudKitDatabaseProtocol {
     /// per-record failure entries (throttle or partial CloudKit errors) are dropped —
     /// they remain on the server and arrive on the next pull cycle. All deletions
     /// are forwarded without filtering.
+    ///
+    /// MORCOMING: `changes.moreComing` is forwarded unchanged. Callers that loop
+    /// on `moreComing == true` (e.g. `takeZoneSnapshot`) correctly paginate large
+    /// zones by passing the returned `changeToken` to the next call.
     public func fetchZoneChanges(
         inZoneWith zoneID: CKRecordZone.ID,
         since token: CKServerChangeToken?
@@ -258,7 +290,12 @@ extension CKDatabase: CloudKitDatabaseProtocol {
         return CloudKitZoneChanges(
             modifiedRecords: modifiedRecords,
             deletedRecordIDs: deletedIDs,
-            changeToken: changes.changeToken
+            changeToken: changes.changeToken,
+            // Thread the real CloudKit moreComing signal through so paginating callers
+            // (e.g. takeZoneSnapshot) know when to stop fetching. PullCycle ignores this
+            // field today (it processes one page per pull cycle and reschedules); snapshot
+            // consumers use it to drain the complete zone into a single ZoneSnapshotResult.
+            moreComing: changes.moreComing
         )
     }
 }

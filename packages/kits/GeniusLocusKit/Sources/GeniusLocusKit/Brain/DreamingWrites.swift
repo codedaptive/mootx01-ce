@@ -18,6 +18,23 @@ import LocusKit
 /// so writes are serialised at the `Storage` layer.
 public extension GeniusLocusKit {
 
+    /// Append a dream-cycle bracket marker to the estate audit log (A3,
+    /// benchmark reset 2026-08-13). Flag-gated with the A2 encode markers
+    /// (`MOOTX01_ENCODE_MARKERS=off` disables both — they are one recording
+    /// facility). Called by `EstateDreamingSink`'s lifecycle hooks; the
+    /// daemon mints one session id per cycle and both ends carry it.
+    func appendDreamCycleMarker(
+        in handle: EstateHandle,
+        phase: DrawerStore.DreamCyclePhase,
+        sessionID: String,
+        now: Date
+    ) async throws {
+        guard Self.encodeMarkersEnabled else { return }
+        let estate = try estate(for: handle)
+        try await estate.appendDreamCycleMarker(
+            phase: phase, unitSessionID: sessionID, at: now)
+    }
+
     /// Write a diary entry to the estate addressed by `handle`.
     ///
     /// Used by `EstateDreamingSink` to record the dreaming daemon's per-cycle

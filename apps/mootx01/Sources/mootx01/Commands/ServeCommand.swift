@@ -20,10 +20,17 @@ import GeniusLocusKit
 import GeniusLocusKitMigrations
 import LocusKit
 import PersistenceKit
+import PersistenceKitInMemory
 import PersistenceKitSQLite
 import MootInstallerCore
+import MootEstateOpen
+import MootProductIdentity
 import AriaResident
+import FactExtractionKit
+import FactExtractionKitProviders
+import MootFactExtractorActivation
 import Darwin
+
 
 struct ServeCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -31,70 +38,106 @@ struct ServeCommand: AsyncParsableCommand {
         abstract: "Start the ARIA MCP server (stdio, or resident HTTP when --http / MOOTX01_HTTP_PORT is set)."
     )
 
-    @Option(name: .long, help: "Named estate to serve. Default: active estate.")
+    @Option(name: .long, help: "Estate to serve: a registered name, or <dir>/<name> for a transient estate. Default: the active estate.")
     var db: String?
 
-    @Option(name: .long, help: "Resident HTTP port on 127.0.0.1 (also MOOTX01_HTTP_PORT). When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.")
-    var http: Int?
+    /// Either a decimal port number (exact — fails if busy) or the literal
+    /// string "auto" (hunts upward from the default port, same as Rust).
+    /// Also readable from MOOTX01_HTTP_PORT (numeric only from the environment).
+    @Option(name: .long, help: "Resident HTTP port on 127.0.0.1, or 'auto' to hunt from \(MootPaths.defaultResidentPort) upward (also MOOTX01_HTTP_PORT). When set, runs the resident daemon (HTTP + autonomic governor + telemetry) instead of stdio.")
+    var http: String?
+
+    @Flag(name: .long, help: "Serve the estate as a read-only snapshot (also MOOTX01_FROZEN=1): no background workers, no recall traces or reward marks, mutating tools refused. stdio only — refused with --http.")
+    var frozen = false
+
+    /// Benchmark harness posture (C1): the estate is served from the InMemory
+    /// backend and exists only for this process. An explicit flag, never an
+    /// environment value; a durable estate never selects it.
+    @Flag(name: .customLong("in-memory"), help: "Serve the estate from the in-memory backend: same protocol and algorithms, no filesystem, the estate lives and dies with this process. Accuracy sweeps only.")
+    var inMemory = false
 
     func run() async throws {
         let environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: environment,
-            homeDirectory: home
-        )
 
-        // Resolve estate name: --db flag overrides the active estate pointer.
-        let estateName: String
-        if let dbFlag = db {
-            estateName = dbFlag
-        } else {
-            estateName = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
+        // The catalog is the one place that knows which estates exist and
+        // where. `--db` selects a registered estate by name or attaches a
+        // transient one by path; absent, the active estate serves. Nothing
+        // here computes a path.
+        let catalog: EstateCatalog
+        do {
+            catalog = try EstateOpen.catalog(selecting: db)
+        } catch {
+            Logging.stderr.log("mootx01 serve fatal: \(error)")
+            throw ExitCode.failure
         }
-
-        let estateURL: URL
-        if let envPath = environment["ARIA_MCP_SQLITE_PATH"], !envPath.isEmpty {
-            estateURL = URL(fileURLWithPath: envPath)
-            Logging.stderr.log("estate path override via ARIA_MCP_SQLITE_PATH: \(envPath)")
-        } else {
-            estateURL = DatabaseManager.estateURL(for: estateName, in: dataDir)
-        }
+        let estate = catalog.active
+        let estateName = estate.name
+        let estateURL = estate.databaseURL
+        // Install-wide files (resident port, bundled models) live in the
+        // configuration directory; estate files live with the estate.
+        let dataDir = EstateCatalog.configurationDirectory
 
         // Resident HTTP transport when a port is configured (--http flag or
         // MOOTX01_HTTP_PORT); otherwise stdio (the default — existing client
         // configs that run `mootx01` keep working unchanged).
-        let residentPort = Self.resolveResidentPort(flag: http, environment: environment)
-        Logging.stderr.log("mootx01 serve starting (estate: \(estateName), data dir: \(dataDir.path), transport: \(residentPort.map { "HTTP :\($0)" } ?? "stdio"))")
+        let residentPort = try Self.resolveResidentPort(flag: http, environment: environment)
+        Logging.stderr.log("mootx01 serve starting (estate: \(estateName) [\(estate.kind.rawValue)] at \(estate.directory.path), transport: \(residentPort.map { "HTTP :\($0)" } ?? "stdio"))")
 
-        // PID + served-estate markers (resident-only, written below).
-        let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
-        let estateMarkerURL = dataDir.appendingPathComponent("mootx01.estate", isDirectory: false)
+        // Frozen posture: `--frozen` wins, else MOOTX01_FROZEN=1. A frozen serve
+        // is a read-only, side-effect-free snapshot: no detached dreamer or
+        // drainer, no periodic dreamer, `moot_memory_search` with internal
+        // origin (no trace rows, no dreaming enqueue), no reward mark on
+        // dereference, every mutating tool refused. The resident daemon's
+        // autonomic governor is a background worker by definition, so the
+        // combination with HTTP is refused rather than served half-frozen.
+        let posture = EstatePosture.resolve(frozenFlag: frozen, environment: environment)
+        if posture == .frozen {
+            if residentPort != nil {
+                Logging.stderr.log("mootx01 serve fatal: --frozen / MOOTX01_FROZEN=1 cannot be combined with --http / MOOTX01_HTTP_PORT — the resident daemon runs background workers. Serve a frozen estate over stdio.")
+                throw ExitCode.failure
+            }
+            Logging.stderr.log("mootx01 serve: \(EstatePosture.frozenLogLine)")
+        }
+
+        // The resident's PID marker lives with the estate it serves (resident-only,
+        // written below). "Is this estate served" is a fact about the estate.
+        let pidURL = estate.pidURL
+        // PID writes, the T4 forward probe, and the dreamer apply only when the
+        // estate lives on disk as SQLite. An in-memory estate is ephemeral: the
+        // estate directory never holds a pid file, no dreamer persists its output,
+        // and T4 forwarding is irrelevant — there is no resident to forward to.
+        let onDisk = !inMemory && estate.backend == .sqlite
 
         // T4 — forward, don't collide. If a LIVE resident already serves THIS
         // estate, an stdio `serve` must not open the same estate as a second
         // direct writer (that would desync the resident's in-RAM derived state).
         // Instead it forwards its stdin JSON-RPC to the resident over loopback
         // HTTP — the same bridge `mootx01 proxy` uses — so all traffic funnels
-        // through the one resident writer. "Same estate" = the resident's recorded
-        // estate path matches ours; liveness = its PID file is alive. If no live
-        // resident serves this estate, fall through and open it directly (joining
-        // the WAL pool; the drain lease (T3) keeps multiple direct stdio writers
-        // from double-draining).
+        // through the one resident writer. "Same estate" = a live PID marker in
+        // THIS estate's directory. If no live resident serves this estate, fall
+        // through and open it directly (joining the WAL pool; the drain lease
+        // (T3) keeps multiple direct stdio writers from double-draining).
         #if os(macOS)
-        if residentPort == nil,
-           Self.residentServesEstate(estateURL, markerURL: estateMarkerURL) {
+        if residentPort == nil, onDisk,
+           Self.residentServesEstate(pidURL: pidURL) {
             let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
             if await Self.residentReachable(port: port) {
+                // A frozen serve never forwards: the resident is a live, mutating
+                // server and forwarding would hand the client exactly what the
+                // flag promised it would not get.
+                if posture == .frozen {
+                    Logging.stderr.log("mootx01 serve fatal: a live resident already serves this estate on 127.0.0.1:\(port); a frozen serve cannot forward to a live daemon. Stop the resident or freeze a clone.")
+                    throw ExitCode.failure
+                }
                 Logging.stderr.log("mootx01 serve: a live resident already serves this estate — forwarding stdio to the daemon on 127.0.0.1:\(port) instead of opening a second writer (T4)")
                 var proxy = ProxyCommand()
                 proxy.http = "http://127.0.0.1:\(port)"
                 try await proxy.run()
                 return
             }
-            // Marker present but nothing is answering on the port: the resident
-            // exited uncleanly and left a stale marker. Open the estate directly.
-            Logging.stderr.log("mootx01 serve: estate marker present but no resident reachable on 127.0.0.1:\(port) (stale marker) — opening the estate directly")
+            // A live PID marker but nothing answering on the port: the resident is
+            // between states or wedged. Open the estate directly.
+            Logging.stderr.log("mootx01 serve: a live resident PID is recorded for this estate but none is reachable on 127.0.0.1:\(port) — opening the estate directly")
         }
         #endif
         // Single-writer guard (resident only): the estate has exactly one writer —
@@ -111,7 +154,7 @@ struct ServeCommand: AsyncParsableCommand {
         // launchd that is a crash loop. A recycled PID fails the identity
         // check and its stale file is removed here so status stops
         // reporting a phantom "running" server.
-        if residentPort != nil,
+        if residentPort != nil, onDisk,
            let existing = try? String(contentsOf: pidURL, encoding: .utf8),
            let existingPID = Int32(existing.trimmingCharacters(in: .whitespacesAndNewlines)),
            existingPID != ProcessInfo.processInfo.processIdentifier {
@@ -122,132 +165,182 @@ struct ServeCommand: AsyncParsableCommand {
             Logging.stderr.log("mootx01 serve: stale PID file (PID \(existingPID) is not a live mootx01 process) — clearing the writer lock and starting")
             try? FileManager.default.removeItem(at: pidURL)
         }
-        // PID + served-estate markers are RESIDENT-only: together they are the
-        // signal a stdio `serve` reads (T4) to decide it should forward to the
-        // live resident for THIS estate instead of opening a second writer. stdio
-        // writes neither — it is either forwarding or an ephemeral direct opener.
-        if residentPort != nil {
+        // The PID marker is RESIDENT-only: it is the signal a stdio `serve` reads
+        // (T4) to decide it should forward to the live resident for THIS estate
+        // instead of opening a second writer. stdio writes nothing — it is either
+        // forwarding or an ephemeral direct opener. In-memory estates never write
+        // a PID marker: the estate directory may not exist and there is no
+        // on-disk resident to forward to.
+        if residentPort != nil, onDisk {
             try? String(ProcessInfo.processInfo.processIdentifier).write(
                 to: pidURL, atomically: true, encoding: .utf8)
-            try? estateURL.path.write(to: estateMarkerURL, atomically: true, encoding: .utf8)
         }
         defer {
-            if residentPort != nil {
+            if residentPort != nil, onDisk {
                 try? FileManager.default.removeItem(at: pidURL)
-                try? FileManager.default.removeItem(at: estateMarkerURL)
             }
         }
 
         // The SQLite backend creates parent dirs and the file on first open;
         // check pre-existence to decide whether to call create (first-run only).
-        let isFirstRun = !FileManager.default.fileExists(atPath: estateURL.path)
+        // An in-memory estate is ALWAYS first-run: nothing persists between
+        // processes, so create-then-open every time.
+        let isFirstRun = !FileManager.default.fileExists(atPath: estateURL.path) || inMemory
+        if isFirstRun && posture == .frozen {
+            throw EstateError.substrateUnavailable("frozen serve requires an existing estate")
+        }
 
         // Estate key-material lifetime (estate-key-lifetime fix, 2026-07-29).
-        // MOOTX01_ESTATE_LIFETIME=ephemeral is the DECLARED throwaway posture for
-        // agent/test loops that provision and destroy estates in bulk: the db key
-        // is generated in process memory (file still SQLCipher-encrypted, key
-        // never persisted — unrecoverable after process exit, which is correct
-        // for a throwaway estate) and the Ed25519 identity key lives in an
-        // in-memory store. NOTHING touches the Keychain. Declaration, never
-        // path inference: absent the variable, behavior is exactly the durable
-        // posture below. An ephemeral estate is single-process by design —
-        // drain/dream cannot reopen it (no recoverable key).
-        let lifetimeIsEphemeral =
-            (ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? "")
-                .lowercased() == "ephemeral"
+        // The catalog decided what kind of estate this is, and the kind decides
+        // every Keychain question. A REGISTERED estate is owned by this machine:
+        // its Ed25519 identity lives in the Keychain and it may be encrypted with
+        // a Keychain-held key. A TRANSIENT estate (`--db <dir>/<name>`) never
+        // touches the Keychain: identity store in memory, no federation, opened
+        // plaintext (or with the harness key file beside it in harness builds),
+        // and no charter drawers seeded into it.
+        //
+        // `--in-memory` is served as a transient estate whatever the record
+        // says (R8, 2026-09-08). Nothing survives the process, so there is no
+        // identity for a peer to address later and no charter map to outlive
+        // the run — and a benchmark RAM arm measures the pool it imported and
+        // nothing else. The record is still resolved first, so a `--db` naming
+        // no estate is refused before the backend is chosen. Same rule in the
+        // Rust port and in both ports of `aria-mcp`.
+        let registered = estate.kind == .registered && !inMemory
         let identityKeyStore: (any EstateIdentityKeyStore)? =
-            lifetimeIsEphemeral ? InMemoryEstateIdentityKeyStore() : nil
+            registered ? nil : InMemoryEstateIdentityKeyStore()
 
-        // At-rest posture. A new estate is created encrypted; an already-encrypted
-        // estate loads its existing key; a plaintext estate keeps opening as
-        // plaintext. serve runs under launchd with NO TTY, so this must never
-        // prompt and never migrate — migration is `mootx01 upgrade` only.
-        let encryption: EstateEncryptionConfig
-        if lifetimeIsEphemeral {
-            // Lifetime and at-rest posture are ORTHOGONAL: ephemeral governs
-            // key RESIDENCE (everything in process memory, zero Keychain
-            // contact — identity store above is already in-memory), while
-            // the no-encrypt marker governs the DB posture. An ephemeral
-            // estate WITH the marker opens plaintext — the benchmark
-            // harness's unencrypted lane declares ephemeral for exactly this:
-            // before this branch honored the marker, unencrypted scratch
-            // estates could not declare ephemeral without silently flipping
-            // encrypted, so their Ed25519 identity keys landed in the REAL
-            // login Keychain — one orphan per scratch estate (971 measured,
-            // 2026-08-06). Marker checks are explicit, never path-inferred.
-            if FileManager.default.fileExists(
-                atPath: EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path) {
-                encryption = .plaintext
-                Logging.stderr.log(
-                    "mootx01 serve: EPHEMERAL lifetime + no-encrypt marker — plaintext throwaway estate, keys in-memory only, no Keychain writes.")
-            } else {
-                var keyBytes = [UInt8](repeating: 0, count: 32)
-                guard SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes) == errSecSuccess else {
-                    Logging.stderr.log("mootx01 serve fatal: cannot generate ephemeral db key")
-                    throw ExitCode.failure
-                }
-                encryption = .fullDatabase(key: Data(keyBytes))
-                Logging.stderr.log(
-                    "mootx01 serve: EPHEMERAL estate lifetime declared (MOOTX01_ESTATE_LIFETIME) — keys are in-memory only, no Keychain writes; estate is unrecoverable after this process exits.")
-            }
-        } else {
-        do {
-            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
-            encryption = resolved.encryption
-            // A plaintext-by-marker open must never be silent: name the posture
-            // AND its source, so a downgrade caused by a stale or planted
-            // no-encrypt marker is visible in the serve log instead of being
-            // discovered months later (Codex fe2cf887).
-            if resolved.posture == .newPlaintextByOptOut {
-                Logging.stderr.log(
-                    "mootx01 serve: creating estate UNENCRYPTED — opt-out marker present at \(EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path). Run `mootx01 upgrade` to encrypt.")
-            }
-        } catch {
-            // Fail closed, in the same style the SQLite open failure below uses.
-            // Never fall back to a plaintext open: that would silently downgrade
-            // at-rest protection, and for an encrypted estate it would look like
-            // the estate had vanished.
-            Logging.stderr.log("mootx01 serve fatal: estate encryption key unavailable: \(error)")
-            throw ExitCode.failure
-        }
-        }
-
-        let configuration = EstateConfiguration(
-            estateID: UUID(),
-            backend: .sqlite(url: estateURL, busyTimeout: 5.0),
-            encryptionConfig: encryption
+        // MOOTX01_RESIDENCY controls both the residency hint and the resident-index
+        // admission budget. See `parseResidencyConfig` for the full grammar.
+        // Default: ram-resident with a 25% ceiling on physical RAM.
+        let (residencyHint, residentIndexBudget) = Self.parseResidencyConfig(
+            rawValue: environment["MOOTX01_RESIDENCY"] ?? ""
         )
-        let storage: SQLiteStorage
-        do {
-            storage = try SQLiteStorage(configuration: configuration)
-        } catch {
-            Logging.stderr.log("mootx01 serve fatal: SQLite open failed: \(error)")
-            throw ExitCode.failure
+
+        // Backend selection and at-rest posture. The in-memory branch is entered
+        // before the posture block so that --in-memory never contacts the Keychain.
+        // The record was already resolved above, so a bad --db is refused before
+        // this branch is reached. The on-disk path resolves the at-rest posture
+        // before opening SQLite; the in-memory path skips it entirely.
+        //
+        // encryption is the resolved on-disk posture, nil for an in-memory serve.
+        // EstateManifestRefresh.afterPrepare below runs only when it is non-nil,
+        // so an in-memory serve writes nothing into the estate directory. The
+        // Rust port never refreshes the manifest from serve either.
+        let encryption: EstateEncryptionConfig?
+        let storage: any Storage
+        if inMemory {
+            // C1 (benchmark reset, RAM accuracy shape): --in-memory serves the
+            // estate from PersistenceKit's InMemory backend — same protocol, same
+            // algorithms, no filesystem in the measurement path. The estate lives
+            // and dies with this process (accuracy sweeps only; timing always
+            // measures the real disk path). No Keychain contact: the .inMemory
+            // backend resolves the in-memory identity key store, and no db key
+            // exists to mint. Intended for the benchmark harness; a durable estate
+            // never selects it, and no environment value turns it on.
+            // No on-disk posture: nothing is loaded and nothing is written back.
+            encryption = nil
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .inMemory,
+                residencyHint: residencyHint,
+                residentIndexBudget: residentIndexBudget
+            )
+            storage = InMemoryStorage(configuration: configuration)
+            Logging.stderr.log(
+                "mootx01 serve: IN-MEMORY backend (--in-memory) — "
+                + "estate exists only for this process; accuracy-measurement posture "
+                + "(transient: identity in memory, no federation, no charters, no Keychain writes).")
+        } else {
+            // At-rest posture. A new registered estate is created encrypted; an
+            // already-encrypted one loads its existing key; a plaintext one keeps
+            // opening as plaintext. serve runs under launchd with NO TTY, so this
+            // must never prompt and never migrate — migration is `mootx01 upgrade`.
+            let resolved: (encryption: EstateEncryptionConfig, posture: EstateOpenPosture.Posture)
+            do {
+                resolved = try EstateOpenPosture.resolve(for: estate)
+            } catch {
+                // Fail closed. Never fall back to a plaintext open of an encrypted
+                // estate: that would silently downgrade at-rest protection.
+                Logging.stderr.log("mootx01 serve fatal: estate encryption posture unavailable: \(error)")
+                throw ExitCode.failure
+            }
+            encryption = resolved.encryption
+            if !registered {
+                Logging.stderr.log("mootx01 serve: transient estate — identity in memory, no federation, no Keychain writes")
+            } else if resolved.posture == .newPlaintextDeclared {
+                // A declared-plaintext open must never be silent: name the posture
+                // AND its source, so a downgrade caused by an altered manifest is
+                // visible in the serve log (Codex fe2cf887).
+                Logging.stderr.log(
+                    "mootx01 serve: creating estate UNENCRYPTED — its manifest \(estate.manifestURL.path) declares plaintext. Run `mootx01 upgrade` to encrypt.")
+            }
+            let configuration = EstateConfiguration(
+                estateID: UUID(),
+                backend: .sqlite(url: estateURL, busyTimeout: 5.0),
+                encryptionConfig: resolved.encryption,
+                residencyHint: residencyHint,
+                residentIndexBudget: residentIndexBudget
+            )
+            do {
+                storage = try SQLiteStorage(configuration: configuration)
+            } catch {
+                Logging.stderr.log("mootx01 serve fatal: SQLite open failed: \(error)")
+                throw ExitCode.failure
+            }
         }
 
         let owner = OwnerCredentials(
             ownerIdentifier: MootPaths.defaultOwnerIdentifier
         )
         let kit = GeniusLocusKit()
+        // Production model-directory resolver, installed before the estate is
+        // opened and wired: `wireGLKSubstores` acts on the manifest's
+        // `embedding_provider = "encoder"` by building the span encoder from
+        // the active registry row, and it can only find the bundled model
+        // through this resolver (the kit's default answers nil for every id,
+        // which leaves recall lexical-only).
+        await kit.setModelDirectoryResolver(BundledModelDirectoryResolver(dataDirectory: dataDir))
         let handle: EstateHandle
         do {
             if isFirstRun {
                 Logging.stderr.log("first-run: creating estate '\(estateName)' at \(estateURL.path)")
                 _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
             }
-            // identityKeyStore is nil for durable estates (resolved per storage
-            // backend — Keychain for SQLite) and the in-memory store under the
-            // declared ephemeral lifetime, so the Ed25519 signing key never
-            // touches the Keychain.
-            handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
-            _ = try await GLKMigrationCatalog.prepare(
+            // identityKeyStore is nil for a registered estate (resolved per storage
+            // backend — Keychain for SQLite) and in memory for a transient one, so
+            // a transient estate's Ed25519 key never touches the Keychain and it
+            // never federates.
+            handle = try await kit.open(storage: storage, owner: owner,
+                                        identityKeyStore: identityKeyStore, federate: registered, frozen: posture == .frozen)
+            // A fresh estate is born with the span encoder as its default recall
+            // stage; existing estates get the key from `mootx01 upgrade`, never
+            // from a serve open (an operator who cleared it stays lexical-only).
+            if isFirstRun {
+                try await kit.provisionDefaultEncoderIfAbsent(for: handle)
+            }
+            if posture == .frozen {
+                guard try await EstateFormatStore(storage: storage).readIfPresent() == .current else {
+                    throw EstateError.substrateUnavailable("frozen estate requires migration before serving")
+                }
+            } else {
+            let preparation = try await GLKMigrationCatalog.prepare(
                 kit: kit, handle: handle, now: Date())
+            // The manifest must say what is on disk: after a migration, or for an
+            // estate that predates manifests, rewrite estate.json. Only an on-disk
+            // serve has a posture to record; an in-memory serve (encryption nil)
+            // writes nothing into the estate directory.
+            if let encryption, try EstateManifestRefresh.afterPrepare(
+                preparation, estate: estate, encryption: encryption, now: Date()) {
+                Logging.stderr.log("mootx01 serve: estate manifest refreshed (format \(preparation.format), schema \(GeniusLocusKitSchema.version))")
+            }
+            }
             // `open` admits a BARE estate — it does not register a Corpus or
             // VectorStore, so dense vector recall and distillation are dark. Wire
             // the GLK semantic layer (Corpus + VectorStore + encode queue) here so
             // a served estate is fully live. Idempotent on reopen; does not
             // re-stamp the manifest (which is why we wire rather than `provision`).
-            try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage, frozen: posture == .frozen)
             // Seed the seven default wings if they are not already present.
             // `seedDefaultWings` is idempotent: it reads existing charter drawers
             // and skips wings that are already seeded, so calling it on every open
@@ -272,6 +365,9 @@ struct ServeCommand: AsyncParsableCommand {
                         "mootx01 serve: subject rider unavailable — continuing without it (\(error))\n".utf8))
                 }
             }
+            // Charters seed only into a registered estate. A transient estate
+            // holds exactly what was imported into it (2026-08-24 ruling).
+            if registered && posture != .frozen {
             do {
                 try await kit.seedDefaultWings(for: handle, now: Date())
             } catch {
@@ -282,27 +378,26 @@ struct ServeCommand: AsyncParsableCommand {
                 // open of an existing estate is not.)
                 Logging.stderr.log("mootx01 serve warning: default wing seeding failed: \(error) — continuing")
             }
+            }
             // Load the derived accelerators (matrix tier) in the background so the
             // server starts accepting MCP calls immediately. Matrix recall returns
             // zeros until the load finishes — correct degradation. The dreaming
             // cycle refreshes and re-persists it later.
             //
-            // rebuildDerivedAccelerators LOADS the persisted on-disk matrix snapshot
-            // (MatrixSnapshotStore) and folds only the audit tail past its watermark
-            // forward — it does NOT recompute the whole matrix from the audit log on
-            // every launch. The first launch on a fresh estate full-rebuilds once and
-            // persists; every launch after that is a cheap load + tail fold.
+            // The isolated GLK worker loads normalized records, folds counts
+            // forward, recomputes time-dependent decay, and publishes a complete
+            // generation. No whole-matrix BLOB is decoded or rewritten.
             //
             // RESIDENT ONLY: the matrix tier is a long-lived brain-layer structure
             // that only the resident daemon's recall scoring + dreaming consume. A
             // one-shot stdio `query` subprocess does NOT need it, so skip it in stdio
             // mode — stdio recall runs with degraded (zero) matrix scoring, which is
             // correct one-shot behaviour, and a one-shot must not pay even the load
-            // cost or write a snapshot it will never reuse.
-            if residentPort != nil {
+            // cost or write records it will never reuse.
+            if residentPort != nil, onDisk {
                 Task {
                     do {
-                        try await kit.rebuildDerivedAccelerators(for: handle)
+                        try await kit.rebuildDerivedAccelerators(for: handle, frozen: posture == .frozen)
                         Logging.stderr.log("derived accelerators rebuilt (background)")
                     } catch {
                         Logging.stderr.log("warning: derived accelerator rebuild failed: \(error)")
@@ -325,7 +420,7 @@ struct ServeCommand: AsyncParsableCommand {
         let versionSkewAdvisory = VersionSkewAdvisory.compute(
             pluginID: "mootx01@mootx01",
             binaryVersion: Mootx01.currentVersion,
-            homeDirectory: home
+            homeDirectory: FileManager.default.homeDirectoryForCurrentUser
         )
         // Upstream-release advisory (`update_available` in ping/status):
         // resident daemons only. A resident outlives releases, so this must
@@ -348,29 +443,106 @@ struct ServeCommand: AsyncParsableCommand {
         } else {
             updateAdvisoryProvider = nil
         }
+
         // Server identity injected so facts/memories filed via this host are
         // stamped "mootx01" — the product binary running mootx01 serve.
         let tooling = ToolDispatcher(
             kit: kit, handle: handle, serverIdentity: "mootx01",
             versionSkewAdvisory: versionSkewAdvisory,
-            updateAdvisoryProvider: updateAdvisoryProvider
+            updateAdvisoryProvider: updateAdvisoryProvider,
+            posture: posture
         )
         let dispatcher = ARIA_MCPDispatcher(info: info, tooling: tooling)
 
         if let port = residentPort {
+            // FIRST-PARTY LANE: DELIBERATELY DARK HERE.
+            //
+            // This command is the raw CLI/resident host. It is NOT an eligible
+            // first-party provider and must never present itself as one: a raw,
+            // unsigned, Homebrew-built, or self-built executable cannot claim the
+            // team Keychain access group, so it cannot hold the installation root
+            // that the authenticated lane's whole argument rests on.
+            //
+            // It therefore passes NO first-party root, NO provider, and NO
+            // descriptor. The lane stays closed structurally rather than by
+            // convention: `AriaResident.runResidentDaemon` builds its `HTTPServer`
+            // with `firstPartyAuth` defaulted to nil, and its dispatcher with
+            // `firstPartyIdentity` defaulted to nil. With those nil the entire
+            // `/mcp/first-party` subtree 404s and `initialize` never claims the
+            // `authenticated-first-party` capability — there is no flag to
+            // misconfigure and no branch to take by accident.
+            //
+            // This host remains fully eligible for the existing third-party MCP
+            // lane, whose behaviour is unchanged.
+            //
+            // MACD-2c supplies the signed, provisioned daemon bundle that IS an
+            // eligible provider, along with the provider lock and descriptor
+            // publication. MACD-3 performs the atomic production routing
+            // conversion. Neither is in scope here, and enabling this lane in the
+            // raw resident host is explicitly not authorized.
+            //
             // Resident daemon: HTTP transport + autonomic governor + telemetry/monitoring
             // gate via the shared AriaResident runner (identical wiring to
             // aria-mcp). The estate is the durable SQLite opened above, so dreaming
-            // persists. Telemetry store from ARIA_MCP_STATS_STORE (set by the
-            // launchd plist at install).
+            // persists. Telemetry store at the canonical path computed by
+            // MootPaths.daemonStatsStorePath — the same location moot-mgr reads
+            // and the launchd plist no longer needs to carry the path in its env
+            // (R6: ARIA_MCP_STATS_STORE moves from env to configuration).
+            // The master switch and selected provider are estate-owned. A
+            // transient benchmark estate reads only its own optional config;
+            // registered estates read the product configuration directory.
+            // `provisionedPreference` returns the key's default for an absent
+            // value, so the only error it can raise is a storage error; that
+            // error is fatal here and never substituted with a default, because
+            // a daemon running on defaults it was never configured with would
+            // silently misreport what the estate asked for.
+            let factSettingsDirectory = estate.kind == .registered
+                ? EstateCatalog.configurationDirectory : estate.directory
+            guard let workerExecutableURL = Self.resolvedCurrentExecutableURL() else {
+                Logging.stderr.log("mootx01 serve fatal: could not resolve current executable path for fact extraction")
+                throw ExitCode.failure
+            }
+            // F2/F12: a factory, not a built value — a value captured HERE (at
+            // daemon start) stays nil forever once the operator turns
+            // fact_extraction on later, or stages a model asset after launch,
+            // because a resident daemon never restarts on a preference edit.
+            // The factory re-reads both preferences and re-runs
+            // FactExtractorBuilder.build fresh every time AriaResident calls
+            // it — at daemon start and again at each off→on edge the
+            // preference-reconciliation loop detects.
+            let factExtractorFactory: @Sendable () async -> (any FactExtractor)? = {
+                do {
+                    let factExtractionSetting = try await kit.provisionedPreference(
+                        .factExtraction, for: handle)
+                    let factExtractorSetting = try await kit.provisionedPreference(
+                        .factExtractor, for: handle)
+                    return FactExtractorBuilder.build(
+                        masterSetting: factExtractionSetting,
+                        extractorSetting: factExtractorSetting,
+                        settingsDirectory: factSettingsDirectory,
+                        workerExecutableURL: workerExecutableURL)
+                } catch {
+                    Logging.stderr.log("mootx01 serve: fact-extraction preference read failed (\(error)); extractor stays inert this cycle")
+                    return nil
+                }
+            }
+            // Batch limits and the Signal 14 cadence come from the same settings
+            // directory (§ DUTY_LIFECYCLE); the stdio path installs the limits
+            // here, the resident path hands them to the daemon config below.
+            let dutySettings = MootProductIdentity.Settings.load(configurationDirectory: factSettingsDirectory)
+            await kit.configureDutyLimits(DutyLimits(settings: dutySettings), for: handle)
+
             let config = AriaResident.ResidentConfig(
                 port: port,
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(env: environment),
                 brainTickMs: AriaResident.brainTickMs(env: environment),
                 monitoringPollMs: AriaResident.monitoringPollMs(env: environment),
-                statsStorePath: environment["ARIA_MCP_STATS_STORE"],
+                statsStorePath: MootPaths.daemonStatsStorePath(dataDir: dataDir),
                 vaultPath: AriaResident.vaultPath(env: environment),
-                vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds(env: environment)
+                vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds(env: environment),
+                factExtractorFactory: factExtractorFactory,
+                factExtractionCadenceSeconds: TimeInterval(dutySettings.dutyFactExtractionCadenceSeconds),
+                dutyLimits: DutyLimits(settings: dutySettings)
             )
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, resident HTTP on 127.0.0.1:\(port))")
             do {
@@ -383,129 +555,18 @@ struct ServeCommand: AsyncParsableCommand {
             }
             Logging.stderr.log("mootx01 serve exiting (HTTP transport stopped)")
         } else {
-            //  — on-startup dreaming trigger: if the
-            // dreaming queue already has pending items from a prior session
-            // (jobs in queue.sqlite that were not processed before the last
-            // serve exited), fork a detached dreamer immediately so they are
-            // not left stale until the next autonomic governor cycle.
-            // This is stdio-only: the resident daemon's autonomic governor
-            // handles this path for HTTP serves via its timer-gated pump.
-            //
-            // `mountDreamingQueue` force-mounts the queue from queue.sqlite so
-            // `dreamingQueuePendingCount` reflects the persisted backlog rather
-            // than the in-session state (which is zero at startup). Idempotent.
-            await kit.mountDreamingQueue(for: handle)
-            if let startupPending = await kit.dreamingQueuePendingCount(for: handle),
-               startupPending > 0 {
-                Logging.stderr.log(
-                    "mootx01 serve: \(startupPending) dreaming job(s) pending from prior session — " +
-                    "spawning a detached dreamer (T10 on-startup trigger)"
-                )
-                Self.spawnDetachedDream(estateName: estateName, environment: environment)
-            }
+            // A stdio serve spawns no background process (§ DUTY_LIFECYCLE):
+            // no startup, exit, or periodic dreamer, no exit drainer. A caller
+            // that wants debt paid runs `mootx01 drain` or `mootx01 dream`.
+            // `mountDreamingQueue` mounts the persisted queue so the drain
+            // report's dreaming lane reads the real backlog. Idempotent.
+            if onDisk { await kit.mountDreamingQueue(for: handle) }
 
             let server = StdioServer(dispatcher: dispatcher)
             Logging.stderr.log("mootx01 serve ready (\(dispatcher.tools.count) tools, stdio)")
             await server.run()
 
-            // T5 — this is a DIRECT-open stdio serve (the forward path returned
-            // earlier). The client may SIGKILL us the moment stdin closes, which
-            // would kill the in-process encode drain mid-flight. If encode work is
-            // still pending, hand it to a detached `drain` finisher that outlives
-            // us (it takes the T3 lease and drains to empty, or stands by if a
-            // resident has since taken over). Skip when nothing is pending.
-            //
-            // Keyed on the ENCODE drain only via `DrainStatus.encodeSettled`
-            // (PERF_W1_DRAIN_RIDER Finding 3): the "distillation" entry does
-            // not settle under the drain command — spawning on it would hand
-            // the finisher a wait it can never win while it holds the encode
-            // lease. Rationale on the helper.
-            let remaining = (try? await kit.drainStatuses(handle)) ?? []
-            if !DrainStatus.encodeSettled(remaining) {
-                Logging.stderr.log("mootx01 serve: encode work still pending at stdio exit — spawning a detached drainer to finish (T5)")
-                Self.spawnDetachedDrain(estateName: estateName, environment: environment)
-            }
-
-            //  — on-exit dreaming trigger: if the dreaming
-            // queue has pending items at stdio exit (from recall events during this
-            // session, or from a prior session not yet processed), fork a detached
-            // dreamer to run one REM-ALPHA cycle before the estate closes. Mirrors
-            // the T5 encode on-exit pattern.
-            //
-            // Post-recall corollary: if any recall verb during this session
-            // co-recalled ≥ 2 drawers and enqueued a dreaming item, that item is
-            // now in the dreaming queue. The on-exit check catches it here — we
-            // do not need a per-request hook in the stdio dispatcher because all
-            // in-session dreaming jobs are collected and handed off on exit.
-            //
-            // Note: `dreamingQueuePendingCount` returns nil when the dreaming queue
-            // was never mounted (no qualifying recall in this session AND no prior
-            // session backlog). In that case, no dreamer is spawned.
-            if let exitPending = await kit.dreamingQueuePendingCount(for: handle),
-               exitPending > 0 {
-                Logging.stderr.log(
-                    "mootx01 serve: \(exitPending) dreaming job(s) pending at stdio exit — " +
-                    "spawning a detached dreamer to finish (T10 on-exit trigger)"
-                )
-                Self.spawnDetachedDream(estateName: estateName, environment: environment)
-            }
-
             Logging.stderr.log("mootx01 serve exiting (stdin closed)")
-        }
-    }
-
-    /// Launch a detached `mootx01 drain` to finish the encode queue after a
-    /// direct-open stdio serve exits (T5). The child `setsid`s itself into its own
-    /// session so a process-group kill aimed at this serve does not reach it; we
-    /// do not wait on it. The estate is passed via `--db` and the inherited
-    /// environment (so an `ARIA_MCP_SQLITE_PATH` override targets the same file).
-    static func spawnDetachedDrain(estateName: String, environment: [String: String]) {
-        guard let executableURL = resolvedCurrentExecutableURL() else {
-            Logging.stderr.log("mootx01 serve: failed to spawn detached drainer: could not resolve current executable path")
-            return
-        }
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = ["drain", "--db", estateName]
-        process.environment = environment
-        // Detach the child's stdio from our pipes.
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()  // fire-and-forget — never `waitUntilExit`
-        } catch {
-            Logging.stderr.log("mootx01 serve: failed to spawn detached drainer: \(error)")
-        }
-    }
-
-    /// Launch a detached `mootx01 dream` to run one REM-ALPHA dreaming cycle
-    /// after a direct-open stdio serve exits or starts with pending dreaming
-    /// queue items. The child `setsid`s itself into its
-    /// own session so a process-group kill aimed at this serve does not reach it;
-    /// we do not wait on it. The estate is passed via `--db` and the inherited
-    /// environment (so an `ARIA_MCP_SQLITE_PATH` override targets the same file).
-    ///
-    /// The dreamer acquires its own `"dreaming"` DrainLease — independent of the
-    /// encode drain's `"encode.drain.lease"` — so both can run concurrently
-    /// without blocking each other.
-    static func spawnDetachedDream(estateName: String, environment: [String: String]) {
-        guard let executableURL = resolvedCurrentExecutableURL() else {
-            Logging.stderr.log("mootx01 serve: failed to spawn detached dreamer: could not resolve current executable path")
-            return
-        }
-        let process = Process()
-        process.executableURL = executableURL
-        process.arguments = ["dream", "--db", estateName]
-        process.environment = environment
-        // Detach the child's stdio from our pipes.
-        process.standardInput = FileHandle.nullDevice
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()  // fire-and-forget — never `waitUntilExit`
-        } catch {
-            Logging.stderr.log("mootx01 serve: failed to spawn detached dreamer: \(error)")
         }
     }
 
@@ -529,20 +590,26 @@ struct ServeCommand: AsyncParsableCommand {
         }
         guard result == 0 else { return nil }
 
-        let path = String(cString: buffer)
+        // Decode up to the NUL terminator; the buffer is sized by the first
+        // _NSGetExecutablePath call and is always terminated.
+        let bytes = buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }
+        let path = String(decoding: bytes, as: UTF8.self)
         guard path.first == "/" else { return nil }
         return URL(fileURLWithPath: path)
     }
 
-    /// True when the live resident's recorded estate path matches the estate this
-    /// stdio `serve` would open (T4). Guards against forwarding to a resident that
-    /// serves a DIFFERENT estate (e.g. under an `ARIA_MCP_SQLITE_PATH` override).
-    /// macOS only (stdio→resident forwarding is a desktop concern; iOS has no
-    /// resident daemon).
+    /// True when a live resident serves this estate (T4): the estate's own PID
+    /// marker names a live, identity-verified mootx01 process other than us. The
+    /// marker lives in the estate directory, so it can only ever describe THIS
+    /// estate. macOS only (stdio→resident forwarding is a desktop concern; iOS
+    /// has no resident daemon).
     #if os(macOS)
-    static func residentServesEstate(_ estateURL: URL, markerURL: URL) -> Bool {
-        guard let served = try? String(contentsOf: markerURL, encoding: .utf8) else { return false }
-        return served.trimmingCharacters(in: .whitespacesAndNewlines) == estateURL.path
+    static func residentServesEstate(pidURL: URL) -> Bool {
+        guard let text = try? String(contentsOf: pidURL, encoding: .utf8),
+              let pid = Int32(text.trimmingCharacters(in: .whitespacesAndNewlines)),
+              pid != ProcessInfo.processInfo.processIdentifier
+        else { return false }
+        return ProcessIdentity.isLiveProcess(pid)
     }
 
     /// True when a resident is actually answering on the loopback port — one quick
@@ -561,13 +628,146 @@ struct ServeCommand: AsyncParsableCommand {
     }
     #endif
 
+    /// Parse the `MOOTX01_RESIDENCY` environment variable into a residency hint and
+    /// a resident-index admission budget.
+    ///
+    /// This is the entire operator-facing contract for the residency feature.
+    /// Grammar (case-insensitive):
+    ///
+    ///   unset, or "ram"      — ram-resident, default budget (25% of physical RAM).
+    ///   "disk"               — disk-backed; no float-lane index held in heap.
+    ///                          Behaves exactly as the original `MOOTX01_RESIDENCY=disk`.
+    ///   "ram:<N>mb"          — ram-resident, explicit ceiling of N mebibytes.
+    ///                          N must be a positive integer.
+    ///   "ram:<N>gb"          — ram-resident, explicit ceiling of N gibibytes.
+    ///                          N must be a positive integer.
+    ///   "ram:<N>%"           — ram-resident, ceiling of N percent of physical RAM.
+    ///                          N must be a positive integer from 1 to 100 inclusive.
+    ///   "ram:unbounded"      — ram-resident, no admission bound (pre-RS-01 behaviour).
+    ///
+    /// Reject conditions (malformed → warn to stderr, then fall back to the default):
+    ///   — a zero or negative N
+    ///   — a non-numeric N
+    ///   — a percentage above 100
+    ///   — any value that matches none of the patterns above
+    ///
+    /// Silent fallback is not acceptable: an operator who mistypes a ceiling must
+    /// not believe a cap is in force when it is not. The warning names the value
+    /// that was rejected so the operator can correct it.
+    static func parseResidencyConfig(
+        rawValue: String
+    ) -> (hint: ResidencyHint, budget: ResidentIndexBudget) {
+        let lowered = rawValue.lowercased()
+
+        // Disk-backed: exact match. The budget is irrelevant when no index is
+        // loaded into RAM, but carry the default to keep the type consistent.
+        if lowered == "disk" {
+            return (.diskBacked, .systemFraction(0.25))
+        }
+
+        // Plain "ram" or unset: ram-resident with the 25% default budget.
+        if lowered.isEmpty || lowered == "ram" {
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        // All remaining valid values begin with the "ram:" prefix.
+        guard lowered.hasPrefix("ram:") else {
+            Logging.stderr.log(
+                "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' is not recognised; "
+                + "expected one of: disk, ram, ram:<N>mb, ram:<N>gb, ram:<N>%, ram:unbounded. "
+                + "Falling back to ram-resident with the default 25% budget.")
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        let suffix = String(lowered.dropFirst("ram:".count))
+
+        // Explicit opt-out of the admission bound (pre-RS-01 behaviour).
+        if suffix == "unbounded" {
+            return (.ramResident, .unbounded)
+        }
+
+        // Percentage ceiling: ram:<N>%
+        if suffix.hasSuffix("%") {
+            let numStr = String(suffix.dropLast())
+            if let n = Int(numStr), n > 0, n <= 100 {
+                return (.ramResident, .systemFraction(Double(n) / 100.0))
+            }
+            Logging.stderr.log(
+                "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' has a malformed percentage "
+                + "(must be a positive integer from 1 to 100); "
+                + "falling back to ram-resident with the default 25% budget.")
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        // Mebibyte ceiling: ram:<N>mb  (1 MiB = 1,048,576 bytes)
+        if suffix.hasSuffix("mb") {
+            let numStr = String(suffix.dropLast(2))
+            // `n * 1024 * 1024` TRAPS on overflow in Swift, and `n` comes straight
+            // from operator-supplied environment text, so an absurd value such as
+            // "ram:99999999999999999mb" would abort the daemon at startup. Use the
+            // reporting multiply and treat an overflow as malformed input.
+            if let n = Int(numStr), n > 0 {
+                let (bytes, overflow) = n.multipliedReportingOverflow(by: 1024 * 1024)
+                if !overflow {
+                    return (.ramResident, .bytes(bytes))
+                }
+            }
+            Logging.stderr.log(
+                "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' has a malformed mebibyte value "
+                + "(must be a positive integer); "
+                + "falling back to ram-resident with the default 25% budget.")
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        // Gibibyte ceiling: ram:<N>gb  (1 GiB = 1,073,741,824 bytes)
+        if suffix.hasSuffix("gb") {
+            let numStr = String(suffix.dropLast(2))
+            // Same overflow guard as the mebibyte branch above: the multiply traps
+            // on overflow and the operand is operator-supplied text.
+            if let n = Int(numStr), n > 0 {
+                let (bytes, overflow) = n.multipliedReportingOverflow(by: 1024 * 1024 * 1024)
+                if !overflow {
+                    return (.ramResident, .bytes(bytes))
+                }
+            }
+            Logging.stderr.log(
+                "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' has a malformed gibibyte value "
+                + "(must be a positive integer); "
+                + "falling back to ram-resident with the default 25% budget.")
+            return (.ramResident, .systemFraction(0.25))
+        }
+
+        // Unrecognised suffix after "ram:".
+        Logging.stderr.log(
+            "mootx01 serve: MOOTX01_RESIDENCY='\(rawValue)' is not recognised; "
+            + "expected one of: disk, ram, ram:<N>mb, ram:<N>gb, ram:<N>%, ram:unbounded. "
+            + "Falling back to ram-resident with the default 25% budget.")
+        return (.ramResident, .systemFraction(0.25))
+    }
+
     /// Resolve the resident HTTP port: the `--http` flag wins, else
     /// `MOOTX01_HTTP_PORT` from the environment (the launchd plist sets it). nil →
     /// stdio. An out-of-range value is rejected (logged) and falls back to stdio.
-    static func resolveResidentPort(flag: Int?, environment: [String: String]) -> UInt16? {
+    static func resolveResidentPort(flag: String?, environment: [String: String]) throws -> UInt16? {
         if let flag {
-            guard flag > 0, let port = UInt16(exactly: flag) else {
-                Logging.stderr.log("mootx01 serve: --http \(flag) is not a valid TCP port (1–65535); using stdio")
+            if flag == "auto" {
+                // Hunt from the default port upward until a free socket is found.
+                // Delegates to ServePortHunt (MootInstallerCore) so the probe and
+                // hunt logic are exercised by unit tests without importing this
+                // executable target. Mirrors Rust serve.rs §3.
+                let base = MootPaths.defaultResidentPort
+                if let port = ServePortHunt.hunt(from: UInt16(base)) {
+                    if port != UInt16(base) {
+                        Logging.stderr.log("mootx01 serve: port \(base) busy; hunted to \(port)")
+                    }
+                    return port
+                }
+                // No free port found: exit 1, matching Rust serve.rs exhaustion.
+                Logging.stderr.log("mootx01: no free port in \(base)–\(Int(base) + Int(ServePortHunt.huntRange))")
+                throw ExitCode.failure
+            }
+            guard let port = UInt16(flag), port > 0 else {
+                Logging.stderr.log("mootx01 serve: --http '\(flag)' is not a valid TCP port (1–65535) or 'auto'; using stdio")
                 return nil
             }
             return port
@@ -580,4 +780,5 @@ struct ServeCommand: AsyncParsableCommand {
         return port
     }
 }
+
 #endif

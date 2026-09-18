@@ -4,7 +4,7 @@
 //! package. Closed-enum predicate algebra, typed values, schema
 //! declaration, Storage + RowStore + BlobStore + AuditLog +
 //! StorageObserver traits. PersistenceKit owns no vector-search
-//! engine — dense-embedding k-NN lives in VectorKit; every
+//! engine — dense-embedding k-NN lives in SynapseKit; every
 //! backend instead accommodates vector workloads' storage needs
 //! through the general RowStore / BlobStore surfaces. InMemory,
 //! SQLite, and PostgreSQL backends all ship at v1.0. PostgreSQL
@@ -35,6 +35,7 @@ pub mod generated_column;
 pub mod hashing_row_store;
 pub mod inmemory;
 pub mod introspection;
+pub mod inventory_snapshot;
 // Canonical schema layout signatures + deterministic table inventories
 // (GLK shared-content 1.1, P0). Accessed via module path or the re-exports
 // below.
@@ -58,6 +59,12 @@ pub mod storage;
 // report_storage_stats wraps StorageIntrospection::stats and emits persistence.db.*
 // metrics. Off by default — zero cost when monitoring is disabled.
 pub mod telemetry;
+// Faulting Storage/RowStore decorator for fail-closed pre-read tests.
+// Gated behind the `test-support` feature so the types are absent from
+// production binaries. Enable via dev-dep:
+//   persistence-kit = { features = ["test-support"] }
+#[cfg(feature = "test-support")]
+pub mod test_support;
 pub mod types;
 
 pub use audit_log::*;
@@ -74,6 +81,7 @@ pub use encryption::{
 pub use error::*;
 pub use generated_column::*;
 pub use introspection::{StorageIntrospection, StorageStats};
+pub use inventory_snapshot::*;
 pub use layout_signature::{layout_signature_digest, layout_signature_text};
 pub use database_inventory::{capture_inventory, TableInventory};
 pub use telemetry::report_storage_stats;

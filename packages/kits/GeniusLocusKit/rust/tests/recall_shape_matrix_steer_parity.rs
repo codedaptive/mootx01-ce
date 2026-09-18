@@ -31,6 +31,8 @@ use genius_locus_kit::audit::UnifiedAuditValue;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, GraphCache,
     PreferenceStore, RecallShape,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -128,8 +130,12 @@ fn seed_matrix_tier(
     let d2_op = drawers.iter().find(|d| d.id == d2).map(|d| d.operational_bitmap as u64).unwrap_or(0);
     let mut seeded = false;
     if d1_op != 0 && d2_op != 0 && d1_op != d2_op {
-        let src = MatrixValueCoord::new("operational", UnifiedAuditValue::Bitmap(d1_op));
-        let tgt = MatrixValueCoord::new("operational", UnifiedAuditValue::Bitmap(d2_op));
+        // locusSlice orders by filedAt DESC, so d2 (captured at NOW+1, later)
+        // is first and becomes the recall query. Seed T[d2_op → d1_op] so
+        // the scorer's T[(query=d2_op, candidate=d1_op, lag)] lookup finds
+        // the prior and returns a non-zero temporal score.
+        let src = MatrixValueCoord::new("operational", UnifiedAuditValue::Bitmap(d2_op));
+        let tgt = MatrixValueCoord::new("operational", UnifiedAuditValue::Bitmap(d1_op));
         tier.apply_temporal_event(src, tgt, 2, 1000);
         seeded = true;
     }
@@ -138,10 +144,14 @@ fn seed_matrix_tier(
 }
 
 fn matrix_req(shape: Option<RecallShape>) -> GLKRecallRequest {
-    let mut req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::MatrixAware)
-        .with_limit(10);
+    let mut req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::MatrixAware,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    );
     if let Some(s) = shape {
         req = req.with_recall_shape(s);
     }
@@ -247,16 +257,21 @@ fn temporal_up_ranks_relevant_no_lower() {
     );
 
     if seeded {
-        let up_rank = up.hits.iter().position(|hit| hit.id == d2);
-        let down_rank = down.hits.iter().position(|hit| hit.id == d2);
+        // d1 is the temporal target (candidate boosted by the seeded prior).
+        // locusSlice puts d2 first (byCaptureTimeDesc since d2 is captured at
+        // NOW+1), making d2 the query (query_coord=d2_op). The seeded prior is
+        // T[d2_op → d1_op], so d1 gets a non-zero temporal score. Under
+        // temporal-up, d1's rank must be no worse than under temporal-down.
+        let up_rank = up.hits.iter().position(|hit| hit.id == d1);
+        let down_rank = down.hits.iter().position(|hit| hit.id == d1);
         if let (Some(u), Some(d)) = (up_rank, down_rank) {
             assert!(
                 u <= d,
                 "temporal-up must rank the temporally-relevant drawer no lower than temporal-down; up={u} down={d}"
             );
         }
-        let up_final = up.hits.iter().find(|hit| hit.id == d2).map(|hit| hit.score.final_score);
-        let down_final = down.hits.iter().find(|hit| hit.id == d2).map(|hit| hit.score.final_score);
+        let up_final = up.hits.iter().find(|hit| hit.id == d1).map(|hit| hit.score.final_score);
+        let down_final = down.hits.iter().find(|hit| hit.id == d1).map(|hit| hit.score.final_score);
         if let (Some(uf), Some(df)) = (up_final, down_final) {
             assert!(
                 uf != df,

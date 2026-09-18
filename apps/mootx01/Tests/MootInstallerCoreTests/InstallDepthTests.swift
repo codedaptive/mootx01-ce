@@ -33,6 +33,8 @@ struct InstallDepthTests {
     func bundleDecodes() {
         let b = InstallBundle.embedded
         #expect(b.skillMarkdown.contains("name: mootx01-memory"))
+        #expect(b.ariaVersion == InstallBundle.selectedARIAReleaseVersion)
+        #expect(b.ariaBundleIdentity.hasPrefix("mootx01/\(b.ariaVersion)/"))
         // Ten matrix hosts — assert the exact set, not a bare count, so a
         // failure names the drifted host when one is added or removed.
         let expected: Set<String> = [
@@ -44,6 +46,25 @@ struct InstallDepthTests {
         #expect(b.host(forClientID: "claude-desktop") == nil)
         #expect(b.host(forClientID: "continue") == nil)
         #expect(b.host(forClientID: "kiro") == nil)
+    }
+
+    @Test("selected v2 embedded bundle identity agrees with the ARIA Registry")
+    func v2EmbeddedBundleIdentityMatchesRegistry() throws {
+        let root = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .deletingLastPathComponent()
+        let registryURL = root.appendingPathComponent(
+            "packages/kits/AriaMcpKit/Registry/aria-v2-selected-release.json")
+        let registry = try #require(try JSONSerialization.jsonObject(
+            with: Data(contentsOf: registryURL)) as? [String: String])
+        let catalogIdentity = try #require(registry["catalogIdentity"])
+        let bundle = InstallBundle.embedded
+        #expect(registry["ariaVersion"] == "v2")
+        #expect(bundle.ariaVersion == "v2")
+        #expect(bundle.ariaBundleIdentity == "mootx01/v2/\(catalogIdentity)")
     }
 
     @Test("manifest-bundle hosts support plugin; module/ide hosts ceil at skills")
@@ -68,7 +89,33 @@ struct InstallDepthTests {
         }
         // The package SKILL.md is byte-identical to the canonical skill (§0.4).
         let pkgSkill = b.packageFiles(forHostID: "claude-code")["skills/mootx01-memory/SKILL.md"]
-        #expect(pkgSkill == b.skillMarkdown)
+        #expect(pkgSkill == b.skillMarkdown(forHostID: "claude-code"))
+    }
+
+    @Test("staged bundle selects the host payload and writes only in a fixture home")
+    func stagedBundleSelectsHostPayload() throws {
+        let bundle = try InstallBundle(json: stagedBundleJSON(version: InstallBundle.selectedARIAReleaseVersion))
+        #expect(bundle.ariaBundleIdentity == "mootx01/fixture/selected")
+        #expect(bundle.skillMarkdown(forHostID: "codex") == "codex teaching")
+        #expect(bundle.skillMarkdown(forHostID: "unknown") == "shared teaching")
+
+        let home = sandbox()
+        defer { cleanup(home) }
+        let host = try #require(bundle.host(forClientID: "codex"))
+        _ = try DepthInstaller.writeSkill(host: host, bundle: bundle, homeDirectory: home)
+        let written = try String(
+            contentsOf: home.appendingPathComponent(".codex/skills/mootx01-memory/SKILL.md"),
+            encoding: .utf8
+        )
+        #expect(written == "codex teaching")
+    }
+
+    @Test("staged bundle rejects a release not selected by the executable")
+    func stagedBundleRejectsUnselectedRelease() {
+        let other = InstallBundle.selectedARIAReleaseVersion == "v1" ? "v2" : "v1"
+        #expect(throws: InstallBundleError.self) {
+            try InstallBundle(json: stagedBundleJSON(version: other))
+        }
     }
 
     // MARK: - apply()
@@ -93,7 +140,7 @@ struct InstallDepthTests {
         }
         #expect(path == dest.path)
         let written = try String(contentsOf: dest, encoding: .utf8)
-        #expect(written == InstallBundle.embedded.skillMarkdown)
+        #expect(written == InstallBundle.embedded.skillMarkdown(forHostID: "claude-code"))
     }
 
     @Test("plugin depth installs the package tree for a manifest-bundle host")
@@ -172,6 +219,22 @@ struct InstallDepthTests {
         #expect(!FileManager.default.fileExists(atPath: cursorDir.path))
     }
 
+    @Test("hosts sharing the ~/.agents root get their own plugin directory; a host with its own root keeps the plain name")
+    func hostsSharingTheAgentsRootGetTheirOwnDirectory() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        let codex = try #require(InstallBundle.embedded.host(forClientID: "codex"))
+        let copilot = try #require(InstallBundle.embedded.host(forClientID: "github-copilot"))
+        let claude = try #require(InstallBundle.embedded.host(forClientID: "claude-code"))
+        let codexDir = DepthInstaller.pluginInstallDirectory(host: codex, homeDirectory: home)
+        let copilotDir = DepthInstaller.pluginInstallDirectory(host: copilot, homeDirectory: home)
+        #expect(codexDir != copilotDir, "two hosts on ~/.agents must not share one package directory")
+        #expect(codexDir.lastPathComponent == "mootx01-plugin-codex")
+        #expect(copilotDir.lastPathComponent == "mootx01-plugin-github-copilot")
+        #expect(DepthInstaller.pluginInstallDirectory(host: claude, homeDirectory: home)
+                == home.appendingPathComponent(".claude/mootx01-plugin", isDirectory: true))
+    }
+
     @Test("MCP-only client (claude-desktop) degrades to server at any depth")
     func mcpOnlyDegradesToServer() throws {
         let home = sandbox()
@@ -242,6 +305,8 @@ struct InstallDepthTests {
     /// still gets `MOOTX01_VAULT=0` injected; an HTTP-shaped entry does not.
     @Test("injectVaultEnv still patches a command-shaped entry; skips an HTTP-shaped one")
     func injectVaultEnvShapeCheck() {
+        // Entries are keyed under pluginServerName ("memory") — injectVaultEnv looks
+        // up by MCPClients.pluginServerName; entries under any other key are untouched.
         let commandEntry = """
         {"mcpServers":{"memory":{"command":"mootx01","args":["proxy"]}}}
         """
@@ -369,6 +434,71 @@ struct InstallDepthTests {
         #expect(unwrapped.contains("✓"))
     }
 
+    @Test("stranded cache: a cache stale under the same version is reinstalled; a matching cache is left alone")
+    func strandedCacheStaleUnderSameVersionIsReinstalled() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home, version: "1.1.0-rc1")
+        let package = home.appendingPathComponent(".claude/mootx01-plugin", isDirectory: true)
+        let cache = home.appendingPathComponent(".claude/plugins/cache/mootx01/mootx01/1.1.0-rc1", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try #"{"mcpServers":{"memory":{}}}"#.write(to: package.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        try #"{"mcpServers":{"mootx01":{}}}"#.write(to: cache.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+
+        let fake = FakeClaudeCLIRunner(shouldSucceed: true)
+        let line = try #require(DepthInstaller.refreshStrandedPluginCache(homeDirectory: home, claudeCLIRunner: fake))
+        #expect(fake.invokedArguments == [
+            ["plugin", "update", "mootx01@mootx01"],
+            ["plugin", "uninstall", "mootx01@mootx01"],
+            ["plugin", "install", "mootx01@mootx01"],
+        ], "a stale cache under the same version is rebuilt by reinstalling")
+        #expect(line.contains("✓"))
+
+        try #"{"mcpServers":{"memory":{}}}"#.write(to: cache.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        let quiet = FakeClaudeCLIRunner(shouldSucceed: true)
+        _ = DepthInstaller.refreshStrandedPluginCache(homeDirectory: home, claudeCLIRunner: quiet)
+        #expect(quiet.invokedArguments == [["plugin", "update", "mootx01@mootx01"]], "a matching cache is left alone")
+    }
+
+    @Test("stranded cache: a rebuild keeps the enablement the user recorded")
+    func strandedCacheRebuildHonoursRecordedEnablement() throws {
+        let home = sandbox()
+        defer { cleanup(home) }
+        try writeInstalledPlugins(home: home, version: "1.1.0-rc1")
+        let package = home.appendingPathComponent(".claude/mootx01-plugin", isDirectory: true)
+        let cache = home.appendingPathComponent(".claude/plugins/cache/mootx01/mootx01/1.1.0-rc1", isDirectory: true)
+        try FileManager.default.createDirectory(at: package, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
+        try #"{"mcpServers":{"memory":{}}}"#.write(to: package.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        try #"{"mcpServers":{"mootx01":{}}}"#.write(to: cache.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        let settings = home.appendingPathComponent(".claude/settings.json", isDirectory: false)
+        func enabledState() throws -> Any? {
+            let root = try JSONSerialization.jsonObject(with: Data(contentsOf: settings)) as? [String: Any]
+            return (root?["enabledPlugins"] as? [String: Any])?["mootx01@mootx01"]
+        }
+
+        // A recorded disable survives the uninstall + install the rebuild runs.
+        try #"{"enabledPlugins":{"mootx01@mootx01":false,"other@m":true},"theme":"dark"}"#
+            .write(to: settings, atomically: true, encoding: .utf8)
+        let line = try #require(DepthInstaller.refreshStrandedPluginCache(
+            homeDirectory: home, claudeCLIRunner: FakeClaudeCLIRunner(shouldSucceed: true)))
+        #expect(try enabledState() as? Bool == false, "the recorded disable is put back after the reinstall")
+        #expect(line.contains("stays disabled"), "the line says the plugin stayed off: \(line)")
+        #expect(line.contains("mootx01 install"), "the line names how to turn it back on: \(line)")
+        let root = try #require(JSONSerialization.jsonObject(with: Data(contentsOf: settings)) as? [String: Any])
+        #expect(root["theme"] as? String == "dark", "other settings keys are kept")
+        #expect((root["enabledPlugins"] as? [String: Any])?["other@m"] as? Bool == true, "other plugins are kept")
+
+        // No recorded disable: the rebuild's install stands and the line is the plain success.
+        try #"{"mcpServers":{"mootx01":{}}}"#.write(to: cache.appendingPathComponent(".mcp.json"), atomically: true, encoding: .utf8)
+        try #"{"enabledPlugins":{"mootx01@mootx01":true}}"#.write(to: settings, atomically: true, encoding: .utf8)
+        let plain = try #require(DepthInstaller.refreshStrandedPluginCache(
+            homeDirectory: home, claudeCLIRunner: FakeClaudeCLIRunner(shouldSucceed: true)))
+        #expect(try enabledState() as? Bool == true, "an enabled plugin is left enabled")
+        #expect(!plain.contains("stays disabled"))
+    }
+
     @Test("stranded cache: refresh is a no-op when the plugin is not yet installed")
     func strandedCacheRefreshNoopWhenNotInstalled() {
         let home = sandbox()
@@ -426,7 +556,9 @@ struct InstallDepthTests {
             clientID: "claude-code", depth: .plugin, homeDirectory: home,
             binaryPath: "/safe/bin/mootx01", claudeCLIRunner: fake
         )
-        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]])
+        // The fixture's cache carries no .mcp.json, so after the version-only
+        // update the refresh reads it as stale and rebuilds it by reinstalling.
+        #expect(fake.invokedArguments.map { $0[1] } == ["update", "uninstall", "install"])
     }
 
     @Test("stranded cache refresh does not fire for a client other than claude-code")
@@ -479,8 +611,8 @@ struct InstallDepthTests {
         let mcpText = try String(contentsOf: pluginDir.appendingPathComponent(".mcp.json"), encoding: .utf8)
         #expect(mcpText.contains("\"type\" : \"http\""), "converged package must be HTTP-shaped")
         #expect(!mcpText.contains("\"serve\""), "stdio-era serve entry must not survive rematerialization")
-        #expect(fake.invokedArguments == [["plugin", "update", "mootx01@mootx01"]],
-                "the stranded cache must be refreshed as part of convergence")
+        #expect(fake.invokedArguments.map { $0[1] } == ["update", "uninstall", "install"],
+                "the stranded cache must be refreshed as part of convergence; the fixture's cache has no manifest, so it is rebuilt")
     }
 
     // MARK: - sandbox helpers
@@ -494,5 +626,35 @@ struct InstallDepthTests {
 
     private func cleanup(_ url: URL) {
         try? FileManager.default.removeItem(at: url)
+    }
+
+    private func stagedBundleJSON(version: String) -> String {
+        """
+        {
+          "schemaVersion": 1,
+          "ariaVersion": "\(version)",
+          "ariaBundleIdentity": "mootx01/fixture/selected",
+          "skillMarkdown": "shared teaching",
+          "skillMarkdownByHost": {
+            "claude-code": "claude teaching",
+            "codex": "codex teaching"
+          },
+          "installMap": {
+            "hosts": [
+              {
+                "id": "codex",
+                "displayName": "Codex",
+                "family": "manifestBundle",
+                "mcpMapKey": "mcpServers",
+                "mcpUserFormat": "json",
+                "mcpUserPath": "~/.codex/config.json",
+                "roadmap": "now",
+                "skillUserPath": "~/.codex/skills/mootx01-memory/SKILL.md"
+              }
+            ]
+          },
+          "packages": {}
+        }
+        """
     }
 }

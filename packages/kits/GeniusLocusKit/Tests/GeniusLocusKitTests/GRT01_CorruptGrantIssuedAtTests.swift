@@ -44,7 +44,7 @@ struct GRT01_CorruptGrantIssuedAtTests {
         let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
         let storage = InMemoryStorage(configuration: config)
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, federate: true)
         // Seed issue to initialise the GrantStore actor inside the kit.
         let seedOpts = GrantOptions(
             granteeEstateID: UUID(),

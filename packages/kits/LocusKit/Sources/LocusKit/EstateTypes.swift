@@ -31,9 +31,13 @@ public struct FrameFilteredDrawers: Sendable {
     /// Every id whose row was returned by storage, regardless of frame filter.
     public let loadedIDs: Set<String>
 
-    public init(admissible: [Drawer], loadedIDs: Set<String>) {
+    /// Default-sensitivity exclusions among the requested, physically loaded IDs.
+    public let withheldBySensitivity: Int
+
+    public init(admissible: [Drawer], loadedIDs: Set<String>, withheldBySensitivity: Int = 0) {
         self.admissible = admissible
         self.loadedIDs = loadedIDs
+        self.withheldBySensitivity = withheldBySensitivity
     }
 }
 

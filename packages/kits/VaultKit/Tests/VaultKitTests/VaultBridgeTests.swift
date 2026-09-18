@@ -106,8 +106,7 @@ struct VaultBridgeTests {
     private func resolveNames(
         _ drawers: [Drawer], kit: GeniusLocusKit, handle: EstateHandle
     ) async throws -> [String: (wing: String, room: String)] {
-        let estate = try await kit.estate(for: handle)
-        return try await estate.resolveNodeNames(parentNodeIds: drawers.map(\.parentNodeId))
+        return try await kit.resolveNodeNames(handle, parentNodeIds: drawers.map(\.parentNodeId))
     }
 
     /// Resolve display names for a single drawer.
@@ -1699,7 +1698,6 @@ struct VaultBridgeTests {
 
         // Create the _distilled_from provenance tunnel (factoid → source),
         // exactly as DistillationCycle does.
-        let estate = try await kit.estate(for: handle)
         // Resolve display names for the captured drawers.
         let sourceNames = try await resolveNames(sourceDrawer, kit: kit, handle: handle)
         let factoidNames = try await resolveNames(factoidDrawer, kit: kit, handle: handle)
@@ -1715,7 +1713,7 @@ struct VaultBridgeTests {
             kind: .references,
             originClass: .derived
         )
-        _ = try await estate.capture(provenanceFrame)
+        _ = try await kit.captureTunnel(handle, provenanceFrame)
 
         // Export the estate to the vault.
         let bridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
@@ -1945,5 +1943,55 @@ struct VaultBridgeTests {
                 "both notes must be written: \(report)")
         #expect(report.enqueuedForEncode > 0,
                 "bulk import must enqueue imported drawers for encoding; enqueuedForEncode=\(report.enqueuedForEncode)")
+    }
+
+    // MARK: - VR-01 review gate: selection equivalence
+
+    /// VR-01 Finding B, bridge level: `reconcileSelection` (the dry-run's
+    /// surfaced set) and `importVaultReconciling` (apply's imported set) must
+    /// return the identical selection for identical inputs — the review gate
+    /// holds because both run one shared missing-set computation. Also
+    /// asserts `reconcileSelection` imports nothing.
+    @Test func reconcileSelectionMatchesApplySelectedPaths() async throws {
+        let (kit, handle) = try await openEstate()
+        let vaultURL = makeTempVault()
+        defer { try? FileManager.default.removeItem(at: vaultURL) }
+
+        // Two foreign notes the estate does not hold, plus one candidate
+        // (caller-declared changed path) that is also on disk.
+        try write("# Foreign one", to: vaultURL.appendingPathComponent("ForeignOne.md"))
+        try write("# Foreign two", to: vaultURL.appendingPathComponent("ForeignTwo.md"))
+        try write("# Changed", to: vaultURL.appendingPathComponent("Changed.md"))
+        let allPaths: Set<String> = ["ForeignOne.md", "ForeignTwo.md", "Changed.md"]
+        let candidates: Set<String> = ["Changed.md"]
+
+        let bridge = VaultBridge(kit: kit)
+
+        // Dry-run half: selection only, no import.
+        let surfaced = try await bridge.reconcileSelection(
+            allPaths: allPaths, candidatePaths: candidates, into: handle)
+        #expect(surfaced == allPaths,
+                "empty estate: candidates ∪ missing must be every vault path; got \(surfaced)")
+        let afterDryRun = try await kit.recall(
+            handle, RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured))
+        #expect(afterDryRun.isEmpty, "reconcileSelection must import nothing")
+
+        // Apply half: identical selection, and the import actions exactly it.
+        let outcome = try await bridge.importVaultReconciling(
+            at: vaultURL,
+            allPaths: allPaths,
+            candidatePaths: candidates,
+            into: handle,
+            now: Date())
+        #expect(outcome.selectedPaths == surfaced,
+                "apply must import exactly the surfaced set; surfaced \(surfaced), imported \(outcome.selectedPaths)")
+        #expect(outcome.report.drawersWritten == 3)
+
+        // Once the estate holds the notes, the selection collapses to the
+        // caller's candidates alone — the missing set converged to empty.
+        let converged = try await bridge.reconcileSelection(
+            allPaths: allPaths, candidatePaths: [], into: handle)
+        #expect(converged.isEmpty,
+                "estate now holds every path; missing set must be empty, got \(converged)")
     }
 }

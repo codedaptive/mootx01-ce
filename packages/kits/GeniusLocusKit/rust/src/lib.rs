@@ -45,14 +45,46 @@
 
 pub mod audit;
 pub mod brain;
+pub use brain::fact_extraction_duty::FactExtractionBatchResult;
+
+/// The product's active read-time converter: complete-form v6.
+/// Compacts the complete source rather than selecting passages. Twin of Swift
+/// `GeniusLocusKit.distillationConverter`. Every distilled rendering is
+/// computed inline at read time from the verbatim content
+/// (`hydration_representation::distilled_rendering`); nothing stores it.
+/// Readers below GLK (CognitionKit, the CLI) take the converter from here,
+/// never from the library directly, so the choice of converter lives in
+/// exactly one place. The v23.2 ruleset stays in the library; nothing here
+/// routes between converters.
+pub const DISTILLATION_CONVERTER: context_distill_lib::converter::ContextDistillConverter =
+    context_distill_lib::converter::ContextDistillConverter::CompleteFormV6;
+// packager.rs — GLKResultsPackager Rust port (PACKAGER mission). Post-recall,
+// pre-presentation packager: gate signals, confidence levels, cliff cutoff,
+// and the packed result type consumed by the ARIA boundary. Mirrors
+// GeniusLocusKit/RecallDirector/GLKResultsPackager.swift.
+pub mod packager;
 // dataset_signatures.rs — MX-TAB-5 layered dataset signatures.
 // Tier-1 table SHA-256 + tier-2 per-column SHA-256 fingerprints computed from
 // schema + sampled content. Byte-identical mirror of
 // GeniusLocusKit/Sources/GeniusLocusKit/Intake/DatasetSignatures.swift.
 pub mod dataset_signatures;
+pub mod estate_catalog;
+pub mod estate_open_posture;
 pub mod estate_format;
+pub mod estate_preference;
+pub use estate_preference::*;
 pub mod branches;
 pub mod coordinator;
+// recall_router.rs — estate recall route list: one ordered list consulted once
+// per recall before the directive is read. Route 1 is the cross-encoder
+// strict-transcript path gated on `cross_encoder_routing`. Mirrors
+// RecallRouter.swift.
+pub mod recall_router;
+pub mod span_content_version;
+pub mod encoder_activation;
+pub use encoder_activation::{
+    BundledModelDirectoryResolver, ModelDirectoryResolving, NilModelDirectoryResolver,
+};
 // telemetry.rs — per-estate rollup metrics (GLK_ROLLUPS_001). Metric name
 // constants and the `glk_emit!` macro. Emit sites live in coordinator.rs at
 // open/close/provision/quiesce/drain and the verb-error remap boundary.
@@ -65,8 +97,8 @@ pub mod handle;
 // `composite_schema` declaration. Also adds `open_hydrating` to
 // `EstateCoordinator` via an impl block.
 pub mod hydration;
-// The SPEC_DISTILLATION_STORAGE §10.1 recall-hydration representation
-// selector (content/distilled/tokenized variants, computed at read).
+// The recall-hydration representation selector (content/distilled/tokenized
+// variants, every one computed at read from the verbatim content).
 pub mod hydration_representation;
 // intake.rs — Dual-Path Intake (G7): WriteMode and mode-aware capture (D-A),
 // the capture→encode ORCHESTRATION. The encode queue + drain + worker pool +
@@ -75,10 +107,18 @@ pub mod hydration_representation;
 // Rust twin of EncodeIntake.swift.
 pub mod intake;
 pub mod matrix;
+pub mod kg_fact_search_projection_backfill_gateway;
 pub mod migration;
 pub mod node_topology;
 pub mod substrate_node_topology_provider;
 pub mod recall;
+pub mod similar_recall;
+pub mod recall_explainer;
+pub mod span_rerank;
+// The retrieval-time cross-encoder stage (fusion rule, span selection,
+// report). Twin of Swift RecallDirector/CrossEncoderStage.swift.
+pub mod cross_encoder_stage;
+pub mod recall_signal_budget;
 pub mod training;
 pub mod verbs;
 
@@ -115,10 +155,10 @@ pub use brain::scheduler::{
 #[cfg(any(test, feature = "test-seams"))]
 pub use brain::scheduler::NoopDispatcher as SchedulerNoopDispatcher;
 pub use brain::signals::{
-    default_standing_signal_names, default_standing_signal_specs, AssociationEdgeChecker,
-    ByReferenceValiditySignal, ConsolidationSignal, DecaySweepSignal, DistillationSignal,
-    DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal, TemporalCausalitySignal,
-    TrainingSignal, VectorSimilaritySignal,
+    default_standing_signal_names, default_standing_signal_specs, FactExtractionSignal, SpanEncodeSignal,
+    AssociationEdgeChecker, ByReferenceValiditySignal, ConsolidationSignal, DecaySweepSignal,
+    DreamingSignal, EndOfDayTournamentSignal, MaintenanceSignal,
+    TemporalCausalitySignal, TrainingSignal, VectorSimilaritySignal,
 };
 pub use migration::{
     run_parallel, verify_migration, ExternalCorpus, ExternalEntry, MigrationDivergence,
@@ -136,18 +176,26 @@ pub use hydration::{
 };
 // GLK_PROVISION_001: estate provisioning and lifecycle types.
 pub use coordinator::{
-    EstateCoordinator, GeniusLocusKitError, VerbDispatchError,
+    DatasetFilingError, EstateCoordinator, GeniusLocusKitError, VerbDispatchError,
     EstateKind, EstateLifetime, EstateMountState, EstateProvisionParams, SyncMode,
     FederatedRecallResult, FederatedReadRefusalReason,
     SyncEngineEntry, format_sync_state_token,
     ExpungeIntegritySweepResult, ExpungeVerbOutcome, DrainStatus,
     SubjectProducer, SubjectBackfillReport,
-    // dreaming-queue job payload. Public so the  drainer
+    // dreaming-queue job payload. Public so the drainer
     // (a downstream crate) and integration tests can decode queue.sqlite payloads.
     DreamingItem,
+    // W4: optimizer-owned recall tuning envelope. Public so NeuronKit and the
+    // ARIA boundary can read/write it without reaching into coordinator internals.
+    RecallTuningManifest,
 };
 pub use fan_out::{EstateRecallContribution, LatticeRegion};
 pub use handle::EstateHandle;
+pub use estate_open_posture::{EstateOpenPosture, EstateOpenPostureError, EstateOpenPostureKind};
+pub use estate_catalog::{
+    EstateBackend, EstateCatalog, EstateCatalogError, EstateCatalogNames, EstateManifest,
+    EstateManifestEncryption, EstateRecord, EstateRecordKind, EstateSelector,
+};
 // Re-export the encode-speed knob so consumers that depend on GeniusLocusKit
 // (VaultKit's PalaceBridge, AriaMcpKit) can name it without a direct CorpusKit
 // dependency. `.foreground` / `.background` select the drain's embedding QoS;
@@ -162,11 +210,12 @@ pub use locus_kit::container_fingerprint_store::{ContainerFingerprint, RoomLevel
 pub use locus_kit::drawer::Drawer;
 pub use locus_kit::recall_trace_item::RecallTraceItem;
 pub use locus_kit::tunnel::Tunnel;
+pub use locus_kit::frames::TunnelCaptureFrame;
+pub use locus_kit::dataset_handle::DatasetColumnSummary;
 pub use matrix::{
     MatrixCalibrationBucket, MatrixCalibrationCurve, MatrixCalibrationOutcome,
     MatrixCalibrationRegistry, MatrixCoOccurKey, MatrixFieldCell, MatrixNMF,
-    MatrixNMFFactorization, MatrixPersistenceBackend, MatrixPersistenceError,
-    MatrixPersistenceMode, MatrixSnapshot, MatrixTemporalKey, MatrixTier, MatrixValueCoord,
+    MatrixNMFFactorization, MatrixTemporalKey, MatrixTier, MatrixValueCoord,
 };
 pub use training::{
     EnrichmentPassResult, EnrichmentPipeline, TrainingDaemon, TrainingDaemonReport,
@@ -175,10 +224,20 @@ pub use training::{
 pub use node_topology::{MemoryTopologyProvider, NodeTopologyProvider};
 pub use substrate_node_topology_provider::SubstrateNodeTopologyProvider;
 pub use recall::{
-    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring,
+    GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, GLKSubSpanScoring,
     GraphCache, PreferenceStore,
     RecallEvidencePath, RecallFallbackPolicy, RecallHit, RecallLane,
     RecallOrigin, RecallPlan, RecallScoreVector, RecallShape, RecallUnionProfile, RecallWeights,
+};
+/// Request-borne rerank contract re-exported for recipes.  This keeps
+/// CognitionKit downstream of GLK rather than adding a direct CorpusKit edge.
+pub use corpus_kit::encoder::RerankDirective;
+// PACKAGER mission: GLKResultsPackager public surface. Re-exported from
+// packager.rs so downstream crates (AriaMcpKit) import from `genius_locus_kit`
+// without reaching into module internals.
+pub use packager::{
+    GLKAnswerBlock, GLKConfidenceSignals, GLKPackagedResult, GLKResponseLevel,
+    GLKResultsPackager, PackagerAnswerMode, PackagerConfidenceLevel, PackagerThresholds,
 };
 pub use verbs::{
     Acceptance, Adjective, AssociateFrame, CaptureFrame, ExpungeFrame, LatticeAnchor, LearnFrame,

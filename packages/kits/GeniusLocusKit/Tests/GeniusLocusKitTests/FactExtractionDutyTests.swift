@@ -1,0 +1,322 @@
+import FactExtractionKit
+import FactExtractionKitProviders
+import Foundation
+import LocusKit
+import PersistenceKit
+import PersistenceKitInMemory
+import Testing
+@testable import GeniusLocusKit
+
+@Suite("Source-grounded fact extraction duty", .serialized)
+struct FactExtractionDutyTests {
+    private let now = Date(timeIntervalSince1970: 1_700_000_000)
+
+    private func openEstate(
+        owner: String
+    ) async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        let credentials = OwnerCredentials(ownerIdentifier: owner)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: credentials)
+        let handle = try await kit.open(
+            storage: storage, owner: credentials,
+            identityKeyStore: InMemoryEstateIdentityKeyStore())
+        return (kit, handle)
+    }
+
+    private func spec(_ kind: FactExtractorKind = .specializedModel) -> FactExtractorModelSpec {
+        FactExtractorModelSpec(
+            providerID: "test-provider", modelID: "nuextract-test",
+            modelVersion: "q8", schemaVersion: "kgfact-extraction-v1",
+            extractorKind: kind, maximumInputCharacters: 16_384,
+            maximumFactsPerSource: 8)
+    }
+
+    private func capture(
+        _ kit: GeniusLocusKit, _ handle: EstateHandle, content: String
+    ) async throws -> Drawer {
+        try await kit.capture(handle, CaptureFrame(
+            content: content, channel: .typed, room: "facts",
+            latticeAnchor: LatticeAnchor(udcCode: "000"), addedBy: "test",
+            embeddingModelID: "test-v1", eventTime: now))
+    }
+
+    @Test("files a grounded KGFact with provenance and settles debt")
+    func filesGroundedFact() async throws {
+        let (kit, handle) = try await openEstate(owner: "fact-grounded")
+        let source = "Jack's birthday is June 20th."
+        let drawer = try await capture(kit, handle, content: source)
+        let model = spec()
+        let extractor = ClosureFactExtractor(spec: model) { request in
+            #expect(request.sourceText.contains("Jack"))
+            #expect(!request.eligibleSourceSpans.isEmpty)
+            return FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion,
+                candidates: [FactCandidate(
+                    subject: "Jack", predicate: "birthday", object: "June 20th",
+                    evidenceQuote: source, confidence: 0.97,
+                    searchAliases: ["Jack birthday", "when is Jack's birthday"])])
+        }
+        _ = try await kit.activateFactExtractor(
+            extractor, recipeID: "nuextract-b1-q8-v1", for: handle)
+        let report = try await kit.runFactExtractionBatch(handle, now: now)
+        #expect(report.completedSources == 1 && report.factsFiled == 1)
+        #expect(report.candidatesRejected == 0 && report.failedSources == 0)
+
+        let estate = try await kit.estate(for: handle)
+        let fact = try #require(try await estate.allKGFacts().first)
+        #expect(UUID(uuidString: fact.id) != nil)
+        #expect(fact.sourceDrawerID == drawer.id)
+        #expect(fact.evidenceQuote == source)
+        #expect(fact.evidenceStart == 0 && fact.evidenceEnd == source.unicodeScalars.count)
+        #expect(fact.sourceDigest.count == 64)
+        #expect(fact.extractorModelID == model.modelID)
+        #expect(fact.searchProjection.contains("when is Jack's birthday"))
+        #expect(fact.searchProjectionVersion == FactSearchProjection.version)
+        #expect(fact.extractorClass == .specializedModel)
+        #expect(fact.confidenceBand == .certain)
+        #expect(try await estate.getDrawers(ids: [drawer.id]).first?.areFactsExtracted == true)
+
+        let replay = try await kit.runFactExtractionBatch(handle, now: now)
+        #expect(replay.completedSources == 0 && replay.factsFiled == 0)
+    }
+
+    @Test("valid empty settles; unusable output retries once then remains rejected")
+    func zeroAndUngroundedOutcomes() async throws {
+        let (zeroKit, zeroHandle) = try await openEstate(owner: "fact-zero")
+        let zeroDrawer = try await capture(zeroKit, zeroHandle, content: "A friendly hello.")
+        let model = spec(.foundationModel)
+        let empty = ClosureFactExtractor(spec: model) { request in
+            FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion,
+                candidates: [])
+        }
+        _ = try await zeroKit.activateFactExtractor(
+            empty, recipeID: "apple-system-v1", for: zeroHandle)
+        let zero = try await zeroKit.runFactExtractionBatch(zeroHandle, now: now)
+        #expect(zero.completedSources == 1 && zero.factsFiled == 0)
+        let zeroEstate = try await zeroKit.estate(for: zeroHandle)
+        #expect(try await zeroEstate.getDrawers(ids: [zeroDrawer.id]).first?.areFactsExtracted == true)
+        #expect(try await zeroEstate.allKGFacts().isEmpty)
+
+        let (badKit, badHandle) = try await openEstate(owner: "fact-bad")
+        let badDrawer = try await capture(
+            badKit, badHandle, content: "Jack's birthday is June 20th.")
+        let bad = ClosureFactExtractor(spec: model) { request in
+            FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion,
+                candidates: [FactCandidate(
+                    subject: "Jack", predicate: "birthday", object: "July 4th",
+                    evidenceQuote: "Jack's birthday is July 4th.", confidence: 0.99)])
+        }
+        _ = try await badKit.activateFactExtractor(
+            bad, recipeID: "apple-system-v1", for: badHandle)
+        let rejected = try await badKit.runFactExtractionBatch(badHandle, now: now)
+        #expect(rejected.completedSources == 0 && rejected.failedSources == 1
+                    && rejected.factsFiled == 0 && rejected.candidatesRejected == 1)
+        let badEstate = try await badKit.estate(for: badHandle)
+        #expect(try await badEstate.getDrawers(ids: [badDrawer.id]).first?.areFactsExtracted == false)
+        #expect(try await badKit.factExtractionWorkStatus(badHandle, now: now).retrying == 1)
+        #expect(try await badKit.runFactExtractionBatch(badHandle, now: now).failedSources == 0)
+        let later = now.addingTimeInterval(31)
+        #expect(try await badKit.runFactExtractionBatch(badHandle, now: later).rejectedSources == 1)
+        #expect(try await badKit.factExtractionWorkStatus(badHandle, now: later).rejected == 1)
+        #expect(try await badKit.payDutyUntilSettled(.factExtraction, in: badHandle, now: later) == 0)
+        #expect(try await badEstate.allKGFacts().isEmpty)
+    }
+
+    @Test("recipe replacement retires prior machine facts but preserves manual facts")
+    func recipeReplacementPreservesManualFacts() async throws {
+        let (kit, handle) = try await openEstate(owner: "fact-recipe-replacement")
+        let source = "Jack's birthday is June 20th."
+        let drawer = try await capture(kit, handle, content: source)
+        let firstModel = spec()
+        let first = ClosureFactExtractor(spec: firstModel) { request in
+            FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: firstModel.providerID, modelID: firstModel.modelID,
+                modelVersion: firstModel.modelVersion,
+                schemaVersion: firstModel.schemaVersion,
+                candidates: [FactCandidate(
+                    subject: "Jack", predicate: "birthday", object: "June 20th",
+                    evidenceQuote: source, confidence: 0.97)])
+        }
+        _ = try await kit.activateFactExtractor(
+            first, recipeID: "nuextract-b1-q8-v1", for: handle)
+        _ = try await kit.runFactExtractionBatch(handle, now: now)
+        let estate = try await kit.estate(for: handle)
+        let oldMachineID = try #require(try await estate.allKGFacts().first).id
+
+        let manual = try await kit.captureKGFact(
+            handle, id: "manual-jack-birthday-note", subject: "Jack",
+            predicate: "birthday-note", object: "confirmed by Bob",
+            sourceDrawerID: drawer.id, addedBy: "human", now: now)
+
+        let replacementModel = FactExtractorModelSpec(
+            providerID: "test-provider", modelID: "nuextract-replacement",
+            modelVersion: "q8", schemaVersion: "kgfact-extraction-v2",
+            extractorKind: .specializedModel, maximumInputCharacters: 16_384,
+            maximumFactsPerSource: 8)
+        let replacement = ClosureFactExtractor(spec: replacementModel) { request in
+            FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: replacementModel.providerID,
+                modelID: replacementModel.modelID,
+                modelVersion: replacementModel.modelVersion,
+                schemaVersion: replacementModel.schemaVersion,
+                candidates: [FactCandidate(
+                    subject: "Jack", predicate: "birthday", object: "June 20th",
+                    evidenceQuote: source, confidence: 0.97)])
+        }
+        #expect(try await kit.activateFactExtractor(
+            replacement, recipeID: "nuextract-replacement-v2", for: handle) == 1)
+        let report = try await kit.runFactExtractionBatch(handle, now: now)
+        #expect(report.completedSources == 1 && report.factsFiled == 1)
+
+        let active = try await estate.allKGFacts()
+        #expect(active.contains(where: { $0.id == manual.id }))
+        #expect(!active.contains(where: { $0.id == oldMachineID }))
+        #expect(active.contains(where: {
+            $0.extractorModelID == replacementModel.modelID
+        }))
+        let history = try await estate.allKGFactsIncludingRetired()
+        #expect(history.count == 3)
+        #expect(history.contains(where: { $0.id == oldMachineID }))
+
+        // A later valid empty result must not retract either grounded or manual facts.
+        let empty = ClosureFactExtractor(spec: replacementModel) { request in
+            FactExtractionResponse(sourceDigest: request.sourceDigest,
+                providerID: replacementModel.providerID, modelID: replacementModel.modelID,
+                modelVersion: replacementModel.modelVersion, schemaVersion: replacementModel.schemaVersion,
+                candidates: [])
+        }
+        _ = try await kit.activateFactExtractor(empty, recipeID: "empty-generation", for: handle)
+        #expect(try await kit.runFactExtractionBatch(handle, now: now).completedSources == 1)
+        #expect(Set(try await estate.allKGFacts().map(\.id)) == Set(active.map(\.id)))
+    }
+
+    /// F6: a checkpoint that carries STAGED, UNPUBLISHED grounded-fact
+    /// evidence (`state.candidates` non-empty, `readyToPublish == false`
+    /// because more chunks remain) must not survive an expunge of its
+    /// source. Before the fix, expunge never touched the fact-extraction
+    /// checkpoint stream at all — the debt scan that would otherwise
+    /// revisit and settle it excludes tombstoned drawers, so the retained
+    /// row (and the evidence quotes inside it) would have stayed forever
+    /// with no future pass ever looking at it again.
+    @Test("expunge deletes a staged, unpublished fact-extraction checkpoint")
+    func expungeDeletesStagedCheckpoint() async throws {
+        let (kit, handle) = try await openEstate(owner: "fact-expunge-checkpoint")
+        let factText = "Jack's birthday is June 20th."
+        let tail = String(repeating: "é😀 trailing filler content. ", count: 40)
+        let source = factText + tail
+        let drawer = try await capture(kit, handle, content: source)
+        let model = FactExtractorModelSpec(
+            providerID: "test-provider", modelID: "nuextract-test",
+            modelVersion: "q8", schemaVersion: "kgfact-extraction-v1",
+            extractorKind: .specializedModel, maximumInputCharacters: 700,
+            maximumFactsPerSource: 8)
+        let extractor = ClosureFactExtractor(spec: model) { request in
+            let candidates = request.sourceText.contains(factText) ? [FactCandidate(
+                subject: "Jack", predicate: "birthday", object: "June 20th",
+                evidenceQuote: factText, confidence: 0.97)] : []
+            return FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion,
+                candidates: candidates)
+        }
+        _ = try await kit.activateFactExtractor(
+            extractor, recipeID: "nuextract-expunge-checkpoint-v1", for: handle)
+
+        let report = try await kit.runFactExtractionBatch(handle, now: now)
+        #expect(report.chunksProcessed == 1, "precondition: only the first chunk ran this batch")
+        #expect(try await kit.estate(for: handle).getDrawers(ids: [drawer.id]).first?.areFactsExtracted == false,
+            "precondition: not yet published — more chunks remain, so the checkpoint stays partial")
+
+        let checkpoints = try await kit.factCheckpoints(handle)
+        let checkpointID = GeniusLocusKit.factWorkID(drawer.id)
+        let stream = GeniusLocusKit.factWorkStream
+        let stagedPayload = try #require(
+            try await checkpoints.read(id: checkpointID, stream: stream),
+            "precondition: a checkpoint row exists for this source")
+        let staged = try JSONDecoder().decode(FactExtractionProgress.self, from: stagedPayload)
+        #expect(!staged.candidates.isEmpty, "precondition: the checkpoint holds a staged, unpublished candidate")
+
+        _ = try await kit.expunge(handle, ExpungeFrame(
+            rowID: drawer.id, reason: "F6 test expunge", confirmation: true))
+
+        #expect(try await checkpoints.read(id: checkpointID, stream: stream) == nil,
+            "expunge must delete the retained checkpoint, not leave the staged evidence forever")
+    }
+
+    @Test("source-exact chunking reaches a fact beyond the first model window")
+    func extractsTailFactFromOriginalBody() async throws {
+        let (kit, handle) = try await openEstate(owner: "fact-original-body")
+        let factText = "Jack's birthday is June 20th."
+        let prefix = String(repeating: "é😀 Background material. ", count: 40)
+        let source = prefix + factText
+        let drawer = try await capture(kit, handle, content: source)
+        let model = FactExtractorModelSpec(
+            providerID: "test-provider", modelID: "nuextract-test",
+            modelVersion: "q8", schemaVersion: "kgfact-extraction-v1",
+            extractorKind: .specializedModel, maximumInputCharacters: 700,
+            maximumFactsPerSource: 8)
+        let extractor = ClosureFactExtractor(spec: model) { request in
+            let candidates = request.sourceText.contains(factText) ? [FactCandidate(
+                subject: "Jack", predicate: "birthday", object: "June 20th",
+                evidenceQuote: factText, confidence: 0.97)] : []
+            return FactExtractionResponse(
+                sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion,
+                candidates: candidates)
+        }
+        _ = try await kit.activateFactExtractor(
+            extractor, recipeID: "nuextract-original-body-v1", for: handle)
+
+        let report = try await kit.runFactExtractionBatch(handle, now: now)
+        #expect(report.completedSources == 0 && report.factsFiled == 0 && report.chunksProcessed == 1)
+        #expect(try await kit.estate(for: handle).getDrawers(ids: [drawer.id]).first?.areFactsExtracted == false)
+        #expect(try await kit.payDutyUntilSettled(.factExtraction, in: handle, now: now) == 1)
+        let fact = try #require(try await kit.estate(for: handle).allKGFacts().first)
+        #expect(fact.sourceDrawerID == drawer.id)
+        #expect(fact.evidenceQuote == factText)
+        #expect(fact.evidenceStart == prefix.unicodeScalars.count)
+        #expect(fact.evidenceStartUTF8Byte == prefix.utf8.count)
+    }
+
+    @Test("stale recipe cannot publish; blocked head does not starve later sources")
+    func staleRecipeAndFairCursor() async throws {
+        let (kit, handle) = try await openEstate(owner: "fact-fencing")
+        let a = try await capture(kit, handle, content: "Jack's birthday is June 20th.")
+        let b = try await capture(kit, handle, content: "Bob's birthday is July 4th.")
+        let firstID = [a.id, b.id].sorted()[0]
+        let model = spec()
+        let empty = ClosureFactExtractor(spec: model) { request in
+            FactExtractionResponse(sourceDigest: request.sourceDigest,
+                providerID: model.providerID, modelID: model.modelID,
+                modelVersion: model.modelVersion, schemaVersion: model.schemaVersion, candidates: [])
+        }
+        _ = try await kit.activateFactExtractor(empty, recipeID: "old", for: handle)
+        let stale = try #require(try await kit.prepareFactExtractionBatch(handle, limit: 2, now: now))
+        let blocked = ClosureFactExtractor(spec: model) { request in
+            if request.sourceID == firstID { throw FactExtractionError.unavailable("model unavailable") }
+            return try await empty.extract(request)
+        }
+        _ = try await kit.activateFactExtractor(blocked, recipeID: "new", for: handle)
+        #expect(try await stale.run().completedSources == 0)
+        let estate = try await kit.estate(for: handle)
+        #expect(try await estate.countFactExtractionDebt() == 2)
+        #expect(try await kit.runFactExtractionBatch(handle, limit: 1, now: now).failedSources == 1)
+        #expect(try await kit.runFactExtractionBatch(handle, limit: 1, now: now).completedSources == 1)
+        let status = try await kit.factExtractionWorkStatus(handle, now: now)
+        #expect(status.blocked == 1 && status.runnable == 0 && status.completedEmpty == 1)
+    }
+}

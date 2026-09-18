@@ -204,6 +204,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "context-distill-lib"
+version = "0.1.0"
+dependencies = [
+ "moot-product-identity",
+ "serde",
+ "serde_json",
+ "substrate-kernel",
+]
+
+[[package]]
 name = "core-foundation"
 version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -373,6 +383,13 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys",
+]
+
+[[package]]
+name = "estate-encryption"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
 ]
 
 [[package]]
@@ -652,6 +669,7 @@ dependencies = [
 name = "lattice-lib"
 version = "0.1.0"
 dependencies = [
+ "moot-product-identity",
  "serde",
  "serde_json",
  "substrate-kernel",
@@ -724,6 +742,7 @@ dependencies = [
  "substrate-ml",
  "substrate-types",
  "unicode-normalization",
+ "unicode-segmentation",
  "uuid",
 ]
 
@@ -758,6 +777,13 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys",
+]
+
+[[package]]
+name = "moot-product-identity"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -904,6 +930,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "chrono",
+ "estate-encryption",
  "intellectus-lib",
  "libc",
  "native-tls",
@@ -1330,6 +1357,7 @@ dependencies = [
 name = "substrate-ml"
 version = "1.0.0-skeleton"
 dependencies = [
+ "context-distill-lib",
  "intellectus-lib",
  "substrate-kernel",
  "substrate-types",

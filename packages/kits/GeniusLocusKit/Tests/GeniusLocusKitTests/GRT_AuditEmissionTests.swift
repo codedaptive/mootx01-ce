@@ -38,7 +38,7 @@ struct GRT_AuditEmissionTests {
         let owner = OwnerCredentials(ownerIdentifier: "owner-fupc")
         let storage = makeStorage()
         _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-        let handle = try await kit.open(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner, federate: true)
         return (kit, handle)
     }
 

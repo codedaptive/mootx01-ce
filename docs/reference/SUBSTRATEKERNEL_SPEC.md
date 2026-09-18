@@ -1,9 +1,9 @@
 ---
 title: SubstrateKernel Specification
-version: 1.2.0
+version: 1.3.0
 status: active
-date: 2026-07-16
-description: "Behavioral specification for SubstrateKernel: invariants, conformance requirements, and the contract it guarantees."
+date: 2026-09-06
+description: "Behavioral specification for SubstrateKernel: invariants, conformance requirements, and the contract it guarantees. 1.3.0: § 5.9 Int8Vec — symmetric per-vector absmax int8 quantisation policy, conformance fixture, and Swift/Rust concordance."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -66,6 +66,9 @@ This specification defines:
 - The `FloatVecOps` primitive — IEEE-754 scalar float-vector operations
   (`l2Norm`, `l2Normalize`, `dot`, `cosine`); the canonical reference
   for embedding normalization and similarity, consumed by `SubstrateML`.
+- The `Int8Vec` primitive — symmetric per-vector absmax int8 quantisation
+  (`quantize`, `dequantize`, `dotQuery`); the encoder span-vector storage
+  and similarity contract ratified by the Encoder Rerank Program.
 
 This specification does NOT define:
 
@@ -260,7 +263,7 @@ Accumulates `sum(x*x)` in coordinate order then takes `sqrt`. Returns
 `0.0` for an empty vector.
 
 `FloatVecOps.l2Normalize(_ v:[Float]) -> [Float]` — L2-normalise.
-Returns the zero vector unchanged when the norm is zero (the honest
+Returns the zero vector unchanged when the norm is zero (the
 "no information" signal that projects to `Engram.zero` through
 `FloatSimHash`). Operation sequence is fixed: sum-of-squares →
 guard on zero → `invNorm = 1.0 / sqrt(normSq)` → element-wise
@@ -281,6 +284,47 @@ The Rust `float_vec_ops` module (`l2_norm`, `l2_normalize`, `dot`,
 `l2_normalize` uses `1.0 / norm_sq.sqrt()` explicitly (not `.recip()`)
 to guarantee the same bit pattern as Swift's
 `1.0 / normSq.squareRoot()`.
+
+### § 5.9 Int8Vec
+
+Symmetric per-vector int8 quantisation for encoder span vectors, ratified
+by the Encoder Rerank Program (ENCODER_RERANK_CONTRACT §4, SYNAPSEKIT_SPEC
+§ I-4a). The quantised bytes are persisted in SynapseKit's `vectors` rows
+(`kind = 2`) and compared across ports, so `q` and `scale` are
+bit-for-bit conformance-gated on the shared fixture
+`packages/kits/SynapseKit/Tests/Fixtures/encoder/int8_vectors.json`.
+
+**Quantisation policy — the bit-identity contract:**
+
+```
+quantize(v):                    v is an L2-normalised float32 vector
+  max   = max_i |v_i|           (exact comparisons only, no arithmetic)
+  scale = max / 127             (one IEEE-754 float32 division;
+                                 scale = 1 when max == 0, q all zero)
+  q_i   = clamp(round(v_i / scale), −127, 127)
+          round = half away from zero (Swift Float.rounded() default,
+          Rust f32::round); one float32 division per element.
+  Why 127 not 128: symmetric ±127 keeps −128 out of the codebook so
+  negation is closed and no value saturates asymmetrically.
+
+dequantize(q, scale):  v̂_i = Float(q_i) × scale  (one float32 multiply)
+
+dotQuery(u, q, scale):          u is an L2-normalised float32 query
+  acc = 0; for i: acc += u_i × Float(q_i)  (float32, in index order,
+                                             no fused multiply-add)
+  return acc × scale
+  The single multiply by scale after the loop is the contract: cheaper
+  than scaling every term and the operation order the fixture's
+  dot_query values were produced with. No renormalisation; the
+  quantisation error is accepted by design (§4).
+```
+
+Preconditions are caller bugs checked with `precondition` / `assert_eq!`:
+`dotQuery` / `dot_query` requires `u.count == q.count`.
+
+The Rust port is the `int8_vec` module (`int8_vec.rs`) with free
+functions `quantize`, `dequantize`, `dot_query`. Both ports are
+bit-identical on the shared fixture and `dotQuery` agrees within 1e-5.
 
 ## § 6 — Error model (conceptual)
 
@@ -354,6 +398,18 @@ on another in-repo kit when a recorded decision requires it. The telemetry it en
 the single `substrate.kernel.backend_selected` metric described in § 8.1.
 
 ## Changelog
+
+### 1.3.0 -- 2026-09-06
+
+Added § 5.9 Int8Vec: symmetric per-vector absmax int8 quantisation
+policy (scale = max|v|/127; q = clamp(round-half-away(v/scale), −127,
+127); dotQuery = Σ u_i q_i × scale), the conformance fixture path, and
+the Swift/Rust concordance note. Added `Int8Vec.swift` /
+`int8_vec.rs` to the § 2 scope list.
+
+### 1.2.1 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
 
 ### 1.2.0 -- 2026-07-16
 Added § 5.8 FloatVecOps behavioral spec (`l2Norm`, `l2Normalize`, `dot`,

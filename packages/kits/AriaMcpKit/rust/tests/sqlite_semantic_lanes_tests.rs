@@ -12,8 +12,9 @@
 //!
 //! # Per-backend wiring policy (mirrors Swift AriaMCPMain.swift)
 //!
-//! - SQLite (ARIA_MCP_SQLITE_PATH set): semantic recall wired via the DrawerStore's
-//!   shared `Storage` connection (passed as `shared_storage` to `wire_sqlite_semantic_recall`).
+//! - SQLite (a SQLite catalog record): semantic recall wired via the DrawerStore's
+//!   shared `Storage` connection (the storage `EstateRegistry` hands to GLK
+//!   `wire_glk_substores`).
 //!   One connection for ALL sub-stores — LocusKit, Corpus, VectorStore. Matches the
 //!   Swift `wireGLKSubstores(for: handle, backingStorage: storage)` pattern exactly.
 //!   Fixes the Windows-ARM NOTADB bug where a second independent SqliteStorage handle
@@ -47,11 +48,12 @@
 
 use std::collections::BTreeMap;
 
+mod test_support;
+use test_support::SelectedV2Session;
+
 use aria_mcp::{
-    dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
 };
 use uuid::Uuid;
 
@@ -70,10 +72,6 @@ macro_rules! args {
 
 fn is_success(result: &serde_json::Value) -> bool {
     result["isError"] == serde_json::json!(false)
-}
-
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
 }
 
 /// Generate a unique temp path for a SQLite estate, in its OWN subdirectory.
@@ -107,9 +105,10 @@ fn temp_sqlite_path(label: &str) -> String {
 #[test]
 fn sqlite_impatient_capture_then_search_returns_result() {
     let path = temp_sqlite_path("impatient_e2e");
-    let registry = EstateRegistry::new_sqlite(&path, "test-owner")
-        .expect("new_sqlite must succeed on a fresh path");
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(
+        EstateRegistry::new_sqlite(&path, "test-owner")
+            .expect("new_sqlite must succeed on a fresh path"),
+    );
 
     // File a memory using impatient mode — inlines directly into the Corpus.
     let capture_args = args![
@@ -118,7 +117,7 @@ fn sqlite_impatient_capture_then_search_returns_result() {
         "location" => "memories/birds",
         "impatient" => true,
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail");
     assert!(
         is_success(&capture_result),
@@ -132,23 +131,18 @@ fn sqlite_impatient_capture_then_search_returns_result() {
         "query" => "kingfisher willow",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail");
     assert!(
         is_success(&search_result),
         "moot_memory_search should succeed; got: {search_result:?}"
     );
 
-    // The search result text must report at least 1 hit and contain the content.
-    let text = content_text(&search_result);
-    assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result; got: {text}"
-    );
-    assert!(
-        text.contains("kingfisher"),
-        "search result should contain captured content; got: {text}"
-    );
+    let rows = search_result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("selected-v2 search rows");
+    assert!(rows.iter().any(|row| row["subject"].as_str().unwrap_or("").contains("kingfisher")),
+        "search result should contain captured subject; got: {search_result}");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -163,9 +157,10 @@ fn sqlite_impatient_capture_then_search_returns_result() {
 #[test]
 fn sqlite_regular_capture_drain_then_search_returns_result() {
     let path = temp_sqlite_path("regular_e2e");
-    let registry = EstateRegistry::new_sqlite(&path, "test-owner")
-        .expect("new_sqlite must succeed on a fresh path");
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(
+        EstateRegistry::new_sqlite(&path, "test-owner")
+            .expect("new_sqlite must succeed on a fresh path"),
+    );
 
     // Regular (non-impatient) capture — enqueues a job to the encode queue.
     let capture_args = args![
@@ -173,7 +168,7 @@ fn sqlite_regular_capture_drain_then_search_returns_result() {
         "subject" => "the osprey circles above the reservoir",
         "location" => "memories/birds",
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail");
     assert!(
         is_success(&capture_result),
@@ -184,9 +179,9 @@ fn sqlite_regular_capture_drain_then_search_returns_result() {
     // before the search. The Rust port has no background drain thread — caller
     // drives drain via await_encode_drain (pump-based, same contract as Swift).
     {
-        let mut coord = registry.default.coord.lock().unwrap();
+        let mut coord = session.coord.lock().unwrap();
         coord
-            .await_encode_drain(&registry.default.handle)
+            .await_encode_drain(&session.default.handle)
             .expect("await_encode_drain must succeed");
     }
 
@@ -195,22 +190,18 @@ fn sqlite_regular_capture_drain_then_search_returns_result() {
         "query" => "osprey reservoir",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail");
     assert!(
         is_success(&search_result),
         "moot_memory_search should succeed; got: {search_result:?}"
     );
 
-    let text = content_text(&search_result);
-    assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result; got: {text}"
-    );
-    assert!(
-        text.contains("osprey"),
-        "search result should contain captured content; got: {text}"
-    );
+    let rows = search_result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("selected-v2 search rows");
+    assert!(rows.iter().any(|row| row["subject"].as_str().unwrap_or("").contains("osprey")),
+        "search result should contain captured subject; got: {search_result}");
 
     let _ = std::fs::remove_file(&path);
 }
@@ -225,15 +216,14 @@ fn sqlite_regular_capture_drain_then_search_returns_result() {
 /// no dark lanes on any backend (no deferrals).
 #[test]
 fn inmemory_semantic_recall_is_wired() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Verify the coordinator has a corpus registered for the default handle.
     // In-memory wiring uses a second InMemoryStorage handle dedicated to the
     // Corpus + VectorStore tables — disjoint from the LocusKit DrawerStore tables.
-    let coord = registry.default.coord.lock().unwrap();
+    let coord = session.coord.lock().unwrap();
     assert!(
-        coord.has_corpus(&registry.default.handle),
+        coord.has_corpus(&session.default.handle),
         "in-memory estate must have a Corpus registered (all-backends semantic recall wiring)"
     );
     drop(coord);
@@ -245,7 +235,7 @@ fn inmemory_semantic_recall_is_wired() {
         "location" => "memories/birds",
         "impatient" => true,
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail");
     assert!(is_success(&capture_result), "got: {capture_result:?}");
 
@@ -254,19 +244,15 @@ fn inmemory_semantic_recall_is_wired() {
         "query" => "heron water marshland",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail");
     assert!(is_success(&search_result), "got: {search_result:?}");
 
-    let text = content_text(&search_result);
-    assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result from in-memory BM25 lane; got: {text}"
-    );
-    assert!(
-        text.contains("heron"),
-        "search result should contain captured content; got: {text}"
-    );
+    let rows = search_result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("selected-v2 search rows");
+    assert!(rows.iter().any(|row| row["subject"].as_str().unwrap_or("").contains("heron")),
+        "search result should contain captured subject; got: {search_result}");
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +266,6 @@ fn inmemory_semantic_recall_is_wired() {
 fn sqlite_semantic_lanes_lit_after_register_sqlite() {
     // Start with an in-memory default estate.
     let mut registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
 
     // Register a second SQLite-backed estate.
     let path = temp_sqlite_path("register_sqlite_e2e");
@@ -356,18 +341,22 @@ fn sqlite_semantic_lanes_lit_after_register_sqlite() {
     let hits = {
         use genius_locus_kit::recall::{
             GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy,
-        };
+    RecallOrigin,
+};
         use locus_kit::filter::{HydrationLevel, RecallFrame};
 
         let mut frame = RecallFrame::new(vec![]);
         // Full hydration: content blob required for the content-contains assertion below.
         frame.hydration_level = HydrationLevel::Full;
 
-        let request = GLKRecallRequest::new(frame)
-            .with_mode(GLKRecallMode::UnionBest)
-            .with_scoring(GLKRecallScoring::Rrf)
-            .with_limit(20)
-            .with_fallback(RecallFallbackPolicy::AllowDegraded)
+        let request = GLKRecallRequest::new(
+            frame,
+            GLKRecallMode::UnionBest,
+            GLKRecallScoring::Rrf,
+            20,
+            RecallFallbackPolicy::AllowDegraded,
+            RecallOrigin::Internal,
+        )
             .with_query_text("egret marshland".to_string());
 
         let now = aria_mcp::dispatch::wall_now();
@@ -396,10 +385,10 @@ fn sqlite_semantic_lanes_lit_after_register_sqlite() {
 
 /// Prove that an encrypted SQLite estate (db.key sibling present) wires
 /// semantic recall — Corpus + VectorStore share the DrawerStore's already-keyed
-/// `Storage` connection via `wire_sqlite_semantic_recall`.
+/// `Storage` connection, which `EstateRegistry` hands to GLK `wire_glk_substores`.
 ///
 /// This is the regression test for the Windows-ARM NOTADB bug: before the fix,
-/// `wire_sqlite_semantic_recall` opened a SECOND `SqliteStorage` handle on the
+/// the registry's SQLite wiring opened a SECOND `SqliteStorage` handle on the
 /// encrypted file. On Windows ARM the second handle failed to apply `PRAGMA key`,
 /// returning NOTADB on the first SQL executed by `Corpus::open_many`. The fix
 /// shares the DrawerStore's storage (which already received `PRAGMA key`) with
@@ -424,17 +413,18 @@ fn sqlite_encrypted_estate_semantic_lanes_lit() {
     ensure_install_key(&dir).expect("ensure_install_key must succeed");
 
     // new_sqlite on an encrypted estate: DrawerStore opens the file with
-    // PRAGMA key (via resolve_install_encryption), then wire_sqlite_semantic_recall
-    // passes that already-keyed storage to Corpus::open_many + VectorStore.
-    let registry = EstateRegistry::new_sqlite(&path, "test-owner-enc")
-        .expect("new_sqlite must succeed on an encrypted estate");
-    let ledger = SurfacedRecallLedger::new();
+    // PRAGMA key (via resolve_install_encryption), then the registry passes
+    // that already-keyed storage to GLK wire_glk_substores (Corpus + VectorStore).
+    let session = SelectedV2Session::new(
+        EstateRegistry::new_sqlite(&path, "test-owner-enc")
+            .expect("new_sqlite must succeed on an encrypted estate"),
+    );
 
     // Verify the Corpus is registered — semantic recall lanes are live.
     {
-        let coord = registry.default.coord.lock().unwrap();
+        let coord = session.coord.lock().unwrap();
         assert!(
-            coord.has_corpus(&registry.default.handle),
+            coord.has_corpus(&session.default.handle),
             "encrypted SQLite estate must have a Corpus registered (shared-storage wiring)"
         );
     }
@@ -446,7 +436,7 @@ fn sqlite_encrypted_estate_semantic_lanes_lit() {
         "location" => "memories/birds",
         "impatient" => true,
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail on encrypted estate");
     assert!(
         is_success(&capture_result),
@@ -457,22 +447,18 @@ fn sqlite_encrypted_estate_semantic_lanes_lit() {
         "query" => "barn owl dusk",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail on encrypted estate");
     assert!(
         is_success(&search_result),
         "moot_memory_search must succeed on encrypted estate; got: {search_result:?}"
     );
 
-    let text = content_text(&search_result);
-    assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result from encrypted estate BM25 lane; got: {text}"
-    );
-    assert!(
-        text.contains("barn owl"),
-        "search result must contain captured content from encrypted estate; got: {text}"
-    );
+    let rows = search_result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("selected-v2 search rows");
+    assert!(rows.iter().any(|row| row["subject"].as_str().unwrap_or("").contains("barn owl")),
+        "search result must contain captured subject; got: {search_result}");
 
     // Cleanup — remove the per-estate dir (estate.sqlite, db.key, WAL sidecars).
     let _ = std::fs::remove_dir_all(&dir);

@@ -75,10 +75,8 @@ public enum MindOverlapLens {
         // Shared family key + DP seed from both estate UUIDs
         // (symmetric), so both sides fingerprint into the same space and
         // add comparable DP noise.
-        let estateA = try await kit.estate(for: handleA)
-        let estateB = try await kit.estate(for: handleB)
-        let uuidA = await estateA.estateUUID.uuidString
-        let uuidB = await estateB.estateUUID.uuidString
+        let uuidA = handleA.estateUUID.uuidString
+        let uuidB = handleB.estateUUID.uuidString
         let sharedKey = uuidA <= uuidB ? "\(uuidA)|\(uuidB)" : "\(uuidB)|\(uuidA)"
         let seed = FNV.hash64(sharedKey)
         let families = EstateFingerprintFamilies(estateUUID: sharedKey)

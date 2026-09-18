@@ -11,6 +11,7 @@
 // resumable (kill and re-run to continue from the persisted record).
 
 import CorpusKit
+import CorpusKitWholeRecordDense
 import CorpusKitProviders
 import Foundation
 import GeniusLocusKit
@@ -26,7 +27,7 @@ func q(_ label: String, _ value: Any) { print("QUAL \(label)=\(value)") }
 /// Cross-port diagnostic over the exact ordered token stream consumed by the
 /// distributional trainers. Length prefixes make the fold unambiguous. This is
 /// deliberately independent of provider math: if it differs, investigate the
-/// content source/tokenizer before RI/PPMI accumulation.
+/// content source/tokenizer before RI/LSA accumulation.
 func tokenStreamFingerprint(
     source: any CorpusContentSource
 ) async throws -> (digest: String, tokenCount: Int) {
@@ -115,8 +116,7 @@ q("status.state", status.state?.rawValue ?? "nil")
 q("status.reclaimed_bytes", status.reclaimedBytes ?? -1)
 
 // Post-migration recall qualification.
-let estate = try await kit.estate(for: handle)
-let contentSource = LocusDrawerCorpusContentSource(estate: estate)
+let contentSource = try await LocusDrawerCorpusContentSource(kit: kit, handle: handle)
 let engine = try await CorpusContentEngine(
     storage: storage,
     configuration: CorpusContentConfiguration(mode: .attached, indexUnit: .wholeContent),
@@ -138,6 +138,7 @@ let queries = ["project planning decisions",
                "release engineering process",
                "memory estate"]
 for (i, query) in queries.enumerated() {
+    // Whole-record float lane probe.
     let tF = Date()
     let perSignal = await engine.floatNearestPerSignal(query: query, limit: 5)
     q("recall.q\(i).float_all_signals_ms",
@@ -155,7 +156,9 @@ for (i, query) in queries.enumerated() {
       String(format: "%.1f", Date().timeIntervalSince(tQ) * 1000))
     q("recall.q\(i).hits", hits.count)
     if let top = hits.first {
-        let hydrated = (try? await estate.drawerById(rowID: top.id)) != nil
+        let hydrated = (try? await kit.getDrawers(
+            in: handle, ids: [top.id], hydrationLevel: .full
+        ).first) != nil
         q("recall.q\(i).top_score", String(format: "%.3f", top.score))
         q("recall.q\(i).top_hydrates_directly", hydrated)
     }

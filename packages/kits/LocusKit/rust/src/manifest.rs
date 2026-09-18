@@ -39,7 +39,7 @@ pub enum ManifestKey {
     BitmapLayoutVersion,
     ProvenanceBitmapVersion,
 
-    // Optional keys (7)
+    // Optional keys (8)
     FederationGroupID,
     MiningPatternsHash,
     TinyModelID,
@@ -157,7 +157,9 @@ impl ManifestKey {
         ManifestKey::ProvenanceBitmapVersion,
     ];
 
-    /// The 7 optional keys. Absent means "not configured".
+    /// The 7 optional keys. Absent means "not configured". A manifest row
+    /// under the retired key `index_composition_policy` (GeniusLocusKit
+    /// 2.15.0 to 2.22.0) is not a key: it is left in place and ignored.
     pub const OPTIONAL: [ManifestKey; 7] = [
         ManifestKey::FederationGroupID,
         ManifestKey::MiningPatternsHash,
@@ -319,11 +321,13 @@ mod tests {
         assert_eq!(ManifestKey::from_str("Manifest_Version"), None); // case sensitive
     }
 
-    /// 18 required keys, 7 optional, 25 total.
+    /// 18 required keys, 7 optional, 25 total. The retired
+    /// `index_composition_policy` row is not a key.
     #[test]
     fn key_counts() {
         assert_eq!(ManifestKey::REQUIRED.len(), 18);
         assert_eq!(ManifestKey::OPTIONAL.len(), 7);
+        assert_eq!(ManifestKey::from_str("index_composition_policy"), None);
     }
 
     /// Required and optional sets are disjoint.

@@ -11,7 +11,7 @@
 //
 // METRIC NAMESPACE
 // All metrics are under `geniuslocus.estate.*` to distinguish these per-estate
-// rollups from per-kit metrics emitted by LocusKit, VectorKit, and CorpusKit.
+// rollups from per-kit metrics emitted by LocusKit, SynapseKit, and CorpusKit.
 //
 // TIMESTAMPS
 // Rust is synchronous; timestamps are produced via
@@ -99,6 +99,18 @@ pub mod metric_names {
     /// `Rrf` requested on `UnionBest` (no distinct RRF fusion) → raw lane score.
     /// Mirrors Swift `GLKMetricName.unionBestRRFFallback`. Tagged: `estate_id`.
     pub const UNION_BEST_RRF_FALLBACK: &str = "glk.recall.unionBest.rrf_degraded";
+
+    /// `Discriminative` requested on `LocusOnly` (no dense lane) → raw bitmap order.
+    /// Mirrors Swift `GLKMetricName.locusOnlyDiscriminativeFallback`. Tagged: `estate_id`.
+    pub const LOCUS_ONLY_DISCRIMINATIVE_FALLBACK: &str = "glk.recall.locusOnly.discriminative_degraded";
+
+    /// `Discriminative` requested on `CorpusOnly` (no discrimination pass) → RRF.
+    /// Mirrors Swift `GLKMetricName.corpusOnlyDiscriminativeFallback`. Tagged: `estate_id`.
+    pub const CORPUS_ONLY_DISCRIMINATIVE_FALLBACK: &str = "glk.recall.corpusOnly.discriminative_degraded";
+
+    /// `Discriminative` requested on `Hybrid` (no discrimination pass) → three-way RRF.
+    /// Mirrors Swift `GLKMetricName.hybridDiscriminativeFallback`. Tagged: `estate_id`.
+    pub const HYBRID_DISCRIMINATIVE_FALLBACK: &str = "glk.recall.hybrid.discriminative_degraded";
 }
 
 /// Produce the current time as epoch seconds (f64) for telemetry timestamps.

@@ -3,7 +3,7 @@ name = "corpus-kit-providers"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Rust port of Swift's CorpusKitProviders target: concrete vectorkit::EmbeddingProvider and Tokenizer implementations. Ships the named text providers (MiniLM, mpnet, EmbeddingGemma) over a host-supplied inference seam plus the DeterministicTokenizer fallback. No model weights or ML-runtime crates are bundled; the host injects the inference pass on every platform (CoreML on Apple, host-chosen runtime on Windows/Linux)."
+description = "Rust port of Swift's CorpusKitProviders target: concrete synapsekit::EmbeddingProvider and Tokenizer implementations. Ships the named text providers (MiniLM, mpnet, EmbeddingGemma) over a host-supplied inference seam plus the DeterministicTokenizer fallback. No model weights or ML-runtime crates are bundled; the host injects the inference pass on every platform (CoreML on Apple, host-chosen runtime on Windows/Linux)."
 license = "MIT OR Apache-2.0"
 publish = false
 
@@ -23,22 +23,73 @@ substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 # is downstream of substrate-kernel — no inversion.
 # Repository-owned dependencies use local package paths.
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
-# B2-5: the named text providers conform to vectorkit::EmbeddingProvider
+# B2-5: the named text providers conform to synapsekit::EmbeddingProvider
 # and project pooled vectors through substrate_ml::float_simhash::project
 # (the conformance-gated, bit-identical Swift/Rust SimHash). engram-lib
 # supplies the Engram type the providers return. These mirror the deps
-# Swift's CorpusKitProviders target carries (VectorKit, SubstrateML,
+# Swift's CorpusKitProviders target carries (SynapseKit, SubstrateML,
 # EngramLib); the seam shape is identical across ports.
-vectorkit = { path = "../../VectorKit/rust" }
+synapsekit = { path = "../../SynapseKit/rust" }
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 engram-lib = { path = "../../../libs/EngramLib/rust" }
-# FDCProvider: text → FDC code via lattice-lib's Fdc::encode (the Rust port
-# of LatticeLib's FDC runtime). eidetic-lib is not needed directly (FDCProvider
-# calls the lattice-lib surface only) but is declared here for structural
-# parity with Swift's CorpusKitProviders depending on EideticLib.
+# lattice-lib: FDC runtime (Fdc::encode, FDCFrame derivation).
+# eidetic-lib is declared here for structural parity with Swift's CorpusKitProviders
+# depending on EideticLib; NLEmbeddingProvider uses the same NL-tagger pattern.
 # Authority: honest semantic fusion (FDC co-classification signal).
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
+# sha2: sha256 for ModelDirectoryResolver vocab.txt integrity check.
+# Already approved in the project graph (used by mootx01-cli for upgrade
+# verification). No new external dependency introduced.
+sha2 = { version = "0.10" }
+
+# C-1 APPROVED: candle crates — Bob ruling 2026-08-21.
+# Gated behind the `candle` feature so the default build (and cargo test
+# without --features candle) stays dependency-free. Enable with
+# `--features candle` to compile CandleNLProvider.
+#
+# Version: 0.9.2 (proven by the tools/neural-embed backend crate; the C-1 audit
+# recommends 0.11.0 with tokenizers 0.22 — a version bump is a follow-up
+# mission that must re-run the §7.3 bench after changing versions).
+#
+# No hf-hub anywhere in this crate: model weights load exclusively from
+# local files; fetch-model.sh in tools/neural-embed is the only network
+# path (design doc §7.6 and §4 no-new-network requirement).
+[features]
+# Enable Candle-based in-process ML inference (CandleNLProvider).
+# Requires model assets on disk (see tools/neural-embed/fetch-model.sh).
+candle = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:serde_json",
+]
+
+[dependencies.candle-core]
+version = "=0.9.2"
+optional = true
+
+[dependencies.candle-nn]
+version = "=0.9.2"
+optional = true
+
+[dependencies.candle-transformers]
+version = "=0.9.2"
+optional = true
+
+[dependencies.tokenizers]
+version = "=0.21.4"
+default-features = false
+features = ["onig"]
+optional = true
+
+# serde_json for parsing BERT config.json in the candle feature path.
+# Named "serde_json-candle" in the feature list to avoid conflicts with the
+# dev-dependency serde_json (which is only for tests).
+[dependencies.serde_json]
+version = "1"
+optional = true
 
 [dev-dependencies]
 # B2-5: the embedding conformance test deserialises the shared canonical
@@ -48,3 +99,9 @@ eidetic-lib = { path = "../../../libs/EideticLib/rust" }
 # dependency is introduced to the project.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# The cross-encoder candle tests name the candle types directly; without the
+# feature they would not compile.
+[[test]]
+name = "cross_encoder_candle_tests"
+required-features = ["candle"]

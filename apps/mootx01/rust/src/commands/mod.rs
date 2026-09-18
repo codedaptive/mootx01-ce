@@ -7,9 +7,9 @@
 use std::process::ExitCode;
 
 use crate::cli::Command;
-use crate::core::paths;
 
 pub mod db;
+pub mod codex_memory;
 pub mod drain;
 pub mod dream;
 /// `enable`/`disable` feature toggles and `hook-capture` entry point.
@@ -18,21 +18,26 @@ pub mod enable;
 /// MOOTx01 estate via a PreToolUse hook and settings.json merge.
 pub mod harness_memory;
 pub mod install;
+pub mod botlink;
+/// `preference` — the user-owned on/off estate switches, read and written through the estate manifest.
+pub mod preference;
 pub mod proxy;
 pub mod query;
 pub mod serve;
 pub mod status;
 pub mod uninstall;
 pub mod upgrade;
+/// The span-encode batch function `upgrade` runs until the NeuronKit duty lands.
+pub mod span_encode_backfill;
 /// out-of-band sensitivity grants unlock/lock commands (password-based, Rust/Linux/Windows path).
 pub mod unlock;
 
 pub fn dispatch(command: Command) -> ExitCode {
     match command {
-        Command::Serve { db, http } => serve::run(db, http),
+        Command::Serve { db, http, frozen, in_memory } => serve::run(db, http, frozen, in_memory),
         Command::Install {
-            target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db,
-        } => install::run(target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db),
+            target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db, no_encrypt,
+        } => install::run(target, location, yes, grant_permissions, no_permissions, no_mgr, no_daemon, vault_on, depth, db, no_encrypt),
         Command::Uninstall {
             target,
             location,
@@ -40,22 +45,21 @@ pub fn dispatch(command: Command) -> ExitCode {
             purge,
         } => uninstall::run(target, location, yes, purge),
         Command::Db(sub) => db::run(sub),
+        Command::Preference(sub) => preference::run(sub),
         Command::Status => status::run(),
         Command::Query { verb, db, json, args } => query::run(verb, db, json, args),
+        Command::BotLink { sub, http, db } => botlink::run(sub, http, db),
         Command::Proxy { daemon_url } => proxy::run(daemon_url),
         Command::Drain { db } => drain::run(db),
         Command::Dream { db } => dream::run(db),
-        Command::Upgrade { from, check, yes, no_restart, converge_only } => {
-            upgrade::run(from, check, yes, no_restart, converge_only)
+        Command::Upgrade { from, db, check, yes, no_restart, converge_only, backfill_only } => {
+            upgrade::run(from, db, check, yes, no_restart, converge_only, backfill_only)
         }
         // sensitivity unlock / lock.
-        Command::Unlock { tier, db: _ } => {
-            // Resolve the data directory for the sidecar and daemon-port files.
-            // The `--db` flag (estate override) is accepted by the parser but the
-            // daemon itself owns grant-issuance — the estate name affects which
-            // estate is opened by `serve`, not which port to unlock on. The port
-            // is always resolved via the standard daemon-port-file mechanism.
-            let data_dir = paths::data_dir();
+        Command::Unlock { tier } => {
+            // The port is always resolved via the standard daemon-port-file
+            // mechanism; unlock always targets the active estate's daemon.
+            let data_dir = genius_locus_kit::EstateCatalog::configuration_directory();
             ExitCode::from(unlock::run_unlock(&tier, &data_dir) as u8)
         }
         Command::Lock => ExitCode::from(unlock::run_lock() as u8),
@@ -69,6 +73,9 @@ pub fn dispatch(command: Command) -> ExitCode {
         // PreToolUse capture hook entry point (called by the hook script installed
         // at ~/.mootx01/hooks/capture-harness-memory.sh).
         Command::HookCapture => enable::run_hook_capture(),
+        Command::CodexHook { event } => codex_memory::run_hook(&event),
+        Command::CodexMemoryDoctor => codex_memory::run_doctor(),
+        Command::CodexMemoryImportChronicle { yes } => codex_memory::run_import_chronicle(yes),
         // Version/Help/HelpFor are handled in main before dispatch.
         Command::Version | Command::Help | Command::HelpFor(_) => {
             unreachable!("handled in main")

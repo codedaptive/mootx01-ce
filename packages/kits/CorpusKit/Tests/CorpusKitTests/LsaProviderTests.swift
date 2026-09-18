@@ -26,7 +26,7 @@ import CorpusKit
 import CorpusKitProviders
 import EngramLib
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // MARK: - Canonical corpus fixture
 
@@ -67,6 +67,31 @@ struct LsaProviderTests {
         #expect(p.effectiveRank >= 1)
     }
 
+    @Test("bounded retraining refuses an oversized corpus without publishing a basis")
+    func retrainingDocumentCap() {
+        let provider = LsaProvider(rank: 3, svdSweeps: 30)
+        let outcome = provider.trainOnCorpus(
+            texts: lsaCanonicalCorpus,
+            budget: RetrainingBudget(maxDocuments: 4, maxSweeps: 30))
+        #expect(outcome == .skipped(.documentLimit(actual: 5, limit: 4)))
+        #expect(!provider.isFinalized)
+        #expect(provider.documentCount == 0)
+    }
+
+    @Test("bounded retraining observes task cancellation before training")
+    func retrainingCancellation() async {
+        let provider = LsaProvider(rank: 3, svdSweeps: 30)
+        let task = Task { () -> RetrainingOutcome in
+            while !Task.isCancelled { await Task.yield() }
+            return provider.trainOnCorpus(
+                texts: lsaCanonicalCorpus,
+                budget: RetrainingBudget(maxDocuments: 10, maxSweeps: 30))
+        }
+        task.cancel()
+        #expect(await task.value == .skipped(.cancelled))
+        #expect(!provider.isFinalized)
+    }
+
     @Test("embedFloat returns a unit-length vector")
     func embedFloatReturnsUnitVector() async throws {
         let p = trainedProvider()
@@ -85,7 +110,7 @@ struct LsaProviderTests {
         do {
             let v = try await p.embedFloat("xyz999 qqq111")
             Issue.record("expected embedFloatVocabMiss throw for all-OOV query; got \(v)")
-        } catch VectorKitError.embedFloatVocabMiss {
+        } catch SynapseKitError.embedFloatVocabMiss {
             // Expected — trained provider + all-OOV query → vocabMiss.
         } catch {
             Issue.record("expected embedFloatVocabMiss but got unexpected error: \(error)")
@@ -214,13 +239,12 @@ struct LsaProviderTests {
         _ = eng
     }
 
-    @Test("projection seed differs from RI and PPMI seeds")
+    @Test("projection seed differs from RI seed")
     func projectionSeedIsolation() {
-        // lsaProjectionSeed must differ from riProjectionSeed and
-        // ppmiProjectionSeed so LSA engrams key to a separate bucket.
+        // lsaProjectionSeed must differ from riProjectionSeed so LSA engrams
+        // key to a separate bucket. (PPMI was retired in the dense-lane-trim
+        // mission; only RI and LSA remain as default-ensemble signals.)
         #expect(lsaProjectionSeed != riProjectionSeed,
                 "LSA and RI projection seeds must differ for bucket isolation")
-        #expect(lsaProjectionSeed != ppmiProjectionSeed,
-                "LSA and PPMI projection seeds must differ for bucket isolation")
     }
 }

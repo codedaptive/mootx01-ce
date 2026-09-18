@@ -67,6 +67,9 @@ pub struct Estate {
     /// Wrapped in Arc so Estate remains Clone.
     pub(crate) node_store: Option<Arc<NodeStore>>,
 
+    /// Frozen opens rebuild pruning aggregates only in private memory.
+    pub(crate) frozen_fingerprints: Option<Arc<crate::container_fingerprint_store::ContainerFingerprintStore>>,
+
     /// Parsed UUID form of the manifest's `estate_uuid` row. Cached at
     /// init time because the value never changes for the lifetime of
     /// the backing store (the manifest's `estate_uuid` is set once at
@@ -159,9 +162,35 @@ impl Estate {
     ///   be read.
     /// - `EstateError::ManifestMismatch` if the bitmap layout version
     ///   is incompatible, or `estate_uuid` does not parse as a UUID.
+    ///
+    /// Opens without federation: the Swift `federate:` parameter's default.
+    /// Federation is the caller's explicit choice per open; the product passes
+    /// true for a registered estate through `open_with_federation`.
     pub fn open(
         store: Arc<dyn DrawerStore>,
         owner: OwnerCredentials,
+    ) -> Result<Estate, EstateError> {
+        Estate::open_with_federation(store, owner, false)
+    }
+
+    /// `open` with the federation posture supplied explicitly. Twin of the
+    /// Swift `Estate.open(storage:owner:identityKeyStore:federate:)`
+    /// parameter. `federate == false` skips the identity-establishment step
+    /// entirely — no keypair, no manifest public key (see `from_manifest`).
+    /// Off by default because minting is additive cost and, on the Swift
+    /// side, a Keychain write; the product passes true for a registered
+    /// estate, the one this machine owns, and never for a transient one.
+    pub fn open_with_federation(
+        store: Arc<dyn DrawerStore>,
+        owner: OwnerCredentials,
+        federate: bool,
+    ) -> Result<Estate, EstateError> {
+        Self::open_with_policy(store, owner, federate, false)
+    }
+
+    /// Open without persistent maintenance when serving a frozen snapshot.
+    pub fn open_with_policy(
+        store: Arc<dyn DrawerStore>, owner: OwnerCredentials, federate: bool, frozen: bool,
     ) -> Result<Estate, EstateError> {
         if owner.owner_identifier.is_empty() {
             return Err(EstateError::EmptyOwnerIdentifier);
@@ -181,7 +210,7 @@ impl Estate {
                 expected: EXPECTED_BITMAP_LAYOUT_VERSION.to_string(),
             });
         }
-        Estate::from_manifest(store, manifest)
+        Estate::from_manifest(store, manifest, federate, frozen)
     }
 
     // -----------------------------------------------------------------
@@ -233,7 +262,9 @@ impl Estate {
         let manifest = store
             .read_manifest()
             .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
-        Estate::from_manifest(store, manifest)
+        // Create never mints the federation identity; the open that follows
+        // decides, per `open_with_federation`. Twin of Swift `create`.
+        Estate::from_manifest(store, manifest, false, false)
     }
 
     // -----------------------------------------------------------------
@@ -329,6 +360,8 @@ impl Estate {
     fn from_manifest(
         store: Arc<dyn DrawerStore>,
         manifest: ManifestValues,
+        federate: bool,
+        frozen: bool,
     ) -> Result<Estate, EstateError> {
         let uuid =
             Uuid::parse_str(&manifest.estate_uuid).map_err(|_| EstateError::ManifestMismatch {
@@ -347,7 +380,14 @@ impl Estate {
         // a normal key/value table and row encryption does not protect
         // manifest.value, so storing raw key bytes here would expose the
         // estate identity to database/backup readers. Mirrors Swift Estate.open.
-        if manifest.ed25519_public_key.is_none() {
+        // Federation is the caller's explicit choice, per open. Grant
+        // issuance is the only consumer of the estate identity, so a
+        // non-federating open (a transient estate: benchmark artifacts,
+        // scratch) skips the mint entirely — no keypair, no manifest public
+        // key. Never a persistent estate property: a non-federating open
+        // followed by a federating one mints then. Twin of the Swift
+        // `federate:` parameter.
+        if !frozen && federate && manifest.ed25519_public_key.is_none() {
             use base64::Engine;
             let b64 = base64::engine::general_purpose::STANDARD;
             let signing_key = SigningKey::generate(&mut OsRng);
@@ -364,9 +404,24 @@ impl Estate {
         // `now` is sourced from the manifest's `last_modified` row rather than
         // a system clock, honouring the deterministic-engine rule: the
         // aggregate's `updatedAt` stamp is reproducible from on-disk state.
-        store
-            .rebuild_container_fingerprints(manifest.last_modified)
-            .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+        let frozen_fingerprints = if frozen {
+            let build = || -> Result<_, crate::error::LocusKitError> {
+                let active: Vec<_> = store.all_drawers_bounded_projected(None)?
+                    .into_iter().filter(|d| d.tombstoned_at.is_none()).collect();
+                let ids: Vec<_> = active.iter().map(|d| d.parent_node_id.clone()).collect();
+                let names = store.resolve_node_names(&ids)?;
+                let memory: Arc<dyn persistence_kit::Storage> = Arc::new(
+                    persistence_kit::inmemory::InMemoryStorage::with_estate(uuid));
+                let fingerprints = crate::container_fingerprint_store::ContainerFingerprintStore::new(memory)?;
+                fingerprints.rebuild_all(&active, &names, manifest.last_modified)?;
+                Ok(Arc::new(fingerprints))
+            };
+            Some(build().map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?)
+        } else {
+            store.rebuild_container_fingerprints(manifest.last_modified)
+                .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+            None
+        };
         // node-tree integrity NT-L2: construct NodeStore from the same storage that
         // backs the DrawerStore. The `storage()` trait method returns the
         // underlying Storage so NodeStore shares the same connection.
@@ -374,12 +429,19 @@ impl Estate {
         // seed root node. create_root is idempotent — returns
         // existing root if already seeded.
         if let Some(ref ns) = node_store {
-            ns.create_root("Estate", manifest.last_modified)
-                .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+            if frozen {
+                if ns.root_node().map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?.is_none() {
+                    return Err(EstateError::SubstrateUnavailable("frozen estate has no root node".into()));
+                }
+            } else {
+                ns.create_root("Estate", manifest.last_modified)
+                    .map_err(|e| EstateError::SubstrateUnavailable(e.to_string()))?;
+            }
         }
         Ok(Estate {
             store,
             node_store,
+            frozen_fingerprints,
             estate_uuid: uuid,
             #[cfg(any(test, feature = "test-seams"))]
             test_force_internal_read_error: std::sync::Arc::new(
@@ -1132,7 +1194,7 @@ mod tests {
             "v1.0",
             "55555555-5555-5555-5555-555555555555",
         ));
-        let estate = Estate::open(store.clone(), OwnerCredentials::new("alice")).unwrap();
+        let estate = Estate::open_with_federation(store.clone(), OwnerCredentials::new("alice"), true).unwrap();
         let m = estate.manifest().unwrap();
         assert!(m.ed25519_public_key.is_some(), "public key should be minted");
         assert!(
@@ -1155,12 +1217,12 @@ mod tests {
             "v1.0",
             "66666666-6666-6666-6666-666666666666",
         ));
-        let estate1 = Estate::open(store.clone(), OwnerCredentials::new("alice")).unwrap();
+        let estate1 = Estate::open_with_federation(store.clone(), OwnerCredentials::new("alice"), true).unwrap();
         let m1 = estate1.manifest().unwrap();
         let pub1 = m1.ed25519_public_key.clone().unwrap();
 
         // Second open: public key should be identical.
-        let estate2 = Estate::open(store.clone(), OwnerCredentials::new("alice")).unwrap();
+        let estate2 = Estate::open_with_federation(store.clone(), OwnerCredentials::new("alice"), true).unwrap();
         let m2 = estate2.manifest().unwrap();
         assert_eq!(
             m2.ed25519_public_key.as_ref().unwrap(),
@@ -1170,6 +1232,36 @@ mod tests {
         assert!(
             m2.ed25519_private_key_wrapped.is_none(),
             "private key remains absent across re-opens"
+        );
+    }
+
+    /// A declared non-federating open skips the identity step entirely:
+    /// no public key lands in the manifest, and a later federating open
+    /// of the same store mints then (per-open declaration, not a
+    /// persistent estate property). Twin of the Swift
+    /// `EstateKeyLifetimeTests` federate-false coverage.
+    #[test]
+    fn open_with_federation_false_skips_identity_mint() {
+        let store = Arc::new(FakeStore::new(
+            "v1.0",
+            "77777777-7777-7777-7777-777777777777",
+        ));
+        let estate =
+            Estate::open_with_federation(store.clone(), OwnerCredentials::new("alice"), false)
+                .unwrap();
+        let m = estate.manifest().unwrap();
+        assert!(
+            m.ed25519_public_key.is_none(),
+            "non-federating open must not mint a public key"
+        );
+        // A later federating open of the same store mints normally.
+        let estate2 =
+            Estate::open_with_federation(store.clone(), OwnerCredentials::new("alice"), true)
+                .unwrap();
+        let m2 = estate2.manifest().unwrap();
+        assert!(
+            m2.ed25519_public_key.is_some(),
+            "federating reopen mints the identity"
         );
     }
 

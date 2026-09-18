@@ -2,15 +2,15 @@
 //! embedding provider be trained on a corpus and serialized to (and
 //! reconstructed from) a basis blob, without a layering inversion.
 //!
-//! ## Why this trait lives in core `corpus-kit` (not `vectorkit`)
+//! ## Why this trait lives in core `corpus-kit` (not `synapsekit`)
 //!
 //! Training-on-corpus is a corpus-kit concern, not a generic embedding
-//! concern. `vectorkit::EmbeddingProvider` is the universal embed surface; it
+//! concern. `synapsekit::EmbeddingProvider` is the universal embed surface; it
 //! must stay narrow so a future pre-trained encoder can conform WITHOUT being
 //! forced to declare a training method it cannot honour. `TrainableEmbeddingBasis`
-//! is the opt-in capability for the distributional providers (RI/PPMI/LSA/NMF)
-//! that genuinely train on the estate's own content. FDC (stateless taxonomic)
-//! and the deterministic/named-model providers do NOT implement it; their
+//! is the opt-in capability for the distributional providers (RI/LSA)
+//! that genuinely train on the estate's own content. The deterministic
+//! and `CandleNL` providers do NOT implement it; their
 //! opt-out is surfaced to callers as `CorpusKitError::NotTrainable`.
 //!
 //! ## Why this is the honest dispatch for type erasure
@@ -34,19 +34,48 @@
 //! (stable trait upcasting) wherever the corpus needs the embed surface. The
 //! trainable `EmbeddingModelConfig` cases carry `Box<dyn TrainableEmbeddingBasis>`
 //! directly, so `reconstruct` calls `reconstruct_basis` with no downcast and no
-//! `Any`; the non-trainable cases (Deterministic / named / FDC) carry
+//! `Any`; the non-trainable cases (Deterministic / CandleNL) carry
 //! `Box<dyn EmbeddingProvider>` and report `NotTrainable`.
 //!
 //! Swift port: packages/kits/CorpusKit/Sources/CorpusKit/TrainableEmbeddingBasis.swift
 
 use crate::error::CorpusKitError;
-use vectorkit::EmbeddingProvider;
+use synapsekit::EmbeddingProvider;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::time::Instant;
+
+#[derive(Debug, Clone)]
+pub struct RetrainingBudget {
+    pub max_documents: usize,
+    pub max_sweeps: usize,
+    pub deadline: Option<Instant>,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl RetrainingBudget {
+    pub fn new(max_documents: usize, max_sweeps: usize, deadline: Option<Instant>) -> Self {
+        Self { max_documents: max_documents.max(1), max_sweeps: max_sweeps.max(1), deadline, cancelled: Arc::new(AtomicBool::new(false)) }
+    }
+    pub fn unbounded() -> Self { Self::new(usize::MAX, usize::MAX, None) }
+    pub fn cancel(&self) { self.cancelled.store(true, Ordering::Release); }
+    pub fn cancellation_reason(&self) -> Option<RetrainingSkipReason> {
+        if self.cancelled.load(Ordering::Acquire) { return Some(RetrainingSkipReason::Cancelled); }
+        if self.deadline.is_some_and(|deadline| Instant::now() >= deadline) { return Some(RetrainingSkipReason::DeadlineExceeded); }
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetrainingSkipReason { DocumentLimit { actual: usize, limit: usize }, Cancelled, DeadlineExceeded }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RetrainingOutcome { Completed, Skipped(RetrainingSkipReason) }
 
 /// A provider whose embedding basis is trained from a corpus and can be
 /// serialized to / reconstructed from a versioned basis blob.
 ///
-/// Implementors are the corpus-kit distributional providers (RI, PPMI, LSA,
-/// NMF) in `corpus-kit-providers`. The trait is the type-erasure seam that lets
+/// Implementors are the corpus-kit distributional providers (RI, LSA)
+/// in `corpus-kit-providers`. The trait is the type-erasure seam that lets
 /// `Corpus` drive training and serialization without core depending on
 /// `corpus-kit-providers`.
 ///
@@ -60,9 +89,9 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// The implementor is responsible for the FULL train+finalize sequence
     /// specific to its method:
     ///   - it tokenizes each text with the canonical `default_keyword_tokens`
-    ///     where its training API consumes term sequences (RI, PPMI), or passes
-    ///     raw text where its API consumes documents (LSA, NMF);
-    ///   - it runs any required finalization pass (PPMI/LSA/NMF; RI has none).
+    ///     where its training API consumes term sequences (RI), or passes
+    ///     raw text where its API consumes documents (LSA);
+    ///   - it runs any required finalization pass (LSA; RI has none).
     ///
     /// Deterministic: training is a pure function of `texts` and the provider's
     /// fixed seeds, so the same corpus yields a byte-identical basis on every
@@ -70,6 +99,15 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     ///
     /// `texts` are raw document texts (NOT pre-tokenized term arrays).
     fn train_on_corpus(&mut self, texts: &[&str]);
+
+    fn train_on_corpus_with_budget(&mut self, texts: &[&str], budget: &RetrainingBudget) -> RetrainingOutcome {
+        if texts.len() > budget.max_documents {
+            return RetrainingOutcome::Skipped(RetrainingSkipReason::DocumentLimit { actual: texts.len(), limit: budget.max_documents });
+        }
+        if let Some(reason) = budget.cancellation_reason() { return RetrainingOutcome::Skipped(reason); }
+        self.train_on_corpus(texts);
+        budget.cancellation_reason().map_or(RetrainingOutcome::Completed, RetrainingOutcome::Skipped)
+    }
 
     /// Streamed-training page (GLK shared-content 1.1 corrective pass): fold
     /// one page of raw document texts into the SAME accumulation
@@ -82,7 +120,7 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     fn accumulate_training(&mut self, texts: &[&str]);
 
     /// Run the method-specific finalization pass over the accumulated state
-    /// (PPMI/LSA/NMF; RI has none — no-op). Call exactly once, after the
+    /// (LSA; RI has none — no-op). Call exactly once, after the
     /// last `accumulate_training` page.
     fn finalize_training(&mut self);
 
@@ -150,7 +188,7 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     // instead of rebuilding them from scratch by re-reading the whole corpus on
     // every reindex. `Corpus` holds the provider as `Box<dyn ...>`, so these
     // uniform methods are the bridge: each implementor routes them to its own
-    // method-specific accumulation (RI/PPMI fold term sequences; LSA/NMF fold
+    // method-specific accumulation (RI folds term sequences; LSA folds
     // documents). Persistence is the caller's job and happens at BATCH
     // boundaries, never per chunk: re-serializing the whole counts blob on every
     // chunk would be O(N·vocab) over an import — the very wall this removes.
@@ -161,8 +199,8 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// Fold one chunk's raw text into the maintained accumulated counts.
     ///
     /// The implementor tokenizes with the canonical `default_keyword_tokens`
-    /// where its accumulation consumes term sequences (RI, PPMI), or folds the
-    /// raw document where it consumes documents (LSA, NMF). This is the per-chunk
+    /// where its accumulation consumes term sequences (RI), or folds the
+    /// raw document where it consumes documents (LSA). This is the per-chunk
     /// half of the same additive logic `train_on_corpus` runs over a whole
     /// corpus. Deterministic; does NOT finalize.
     fn add_to_counts(&mut self, text: &str);
@@ -185,8 +223,8 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
     /// persist me as one blob" — so every provider whose counts are small keeps
     /// that behavior with no code. Only providers whose counts scale with
     /// vocabulary override it: RandomIndexing's map reached 1,009,861,855 bytes
-    /// on a real estate and exceeded SQLite's bind ceiling (ee#49), while Nmf
-    /// and Lsa sit at ~2 MB and gain nothing from a split.
+    /// on a real estate and exceeded SQLite's bind ceiling (ee#49), while Lsa
+    /// sits at ~2 MB and gains nothing from a split.
     ///
     /// The header MUST remain a valid counts blob on its own — same magic and
     /// format version, empty term map — so `corpus_provider_counts.counts` is
@@ -211,6 +249,93 @@ pub trait TrainableEmbeddingBasis: EmbeddingProvider {
         Err(CorpusKitError::DecodingFailure(
             "provider does not support term-decomposed counts".to_string(),
         ))
+    }
+
+    /// Derive the finalized serving basis from restored (and optionally augmented)
+    /// maintained counts, reading NO corpus text.
+    ///
+    /// ## Contract
+    ///
+    /// The caller MUST have already restored maintained counts via
+    /// `restore_counts` or `restore_counts_from_parts` (and MAY have folded
+    /// additional delta texts via `add_to_counts`) before calling this method.
+    /// `finalize_from_counts` converts that accumulated state into the finalized
+    /// serving basis in place, without re-reading any corpus text.
+    ///
+    /// ## Return value
+    ///
+    /// Returns `true` when the provider's maintained counts fully determine its
+    /// basis and the derivation has been applied:
+    ///
+    /// - **RandomIndexing** (`true`): the maintained counts payload IS the basis
+    ///   vocabulary (term → context vectors). Restoring the counts already
+    ///   reconstructs the basis; finalization is a no-op, so this call is a
+    ///   lossless promotion with no compute cost.
+    ///
+    /// - A provider whose maintained counts hold the full raw accumulation state
+    ///   its `finalize_training` consumes (`true`): this method runs that
+    ///   finalize pass over the restored state and returns `true` once the
+    ///   basis is populated. No default provider takes this route today.
+    ///
+    /// Returns `false` when the maintained counts are insufficient to derive a
+    /// basis and the provider's state is left UNCHANGED:
+    ///
+    /// - **LSA** (`false`): maintained counts hold only the vocabulary and
+    ///   `documentCount` trigger anchors. The per-document TF rows and per-term DF
+    ///   that drive the matrix factorization are deliberately NOT persisted — by
+    ///   design those are re-tokenized from corpus text at refactor time (see
+    ///   design-doc open decision 1). No counts-only basis exists for these
+    ///   providers; the caller MUST keep the full corpus path.
+    ///
+    /// ## Acceptance contract (digest gate)
+    ///
+    /// For providers returning `true`, the byte output of `serialize_basis()`
+    /// after this call MUST be identical to a `train_on_corpus` run over the same
+    /// accumulated corpus. This digest-gate equality is the acceptance criterion
+    /// that the incremental path and the from-scratch path produce the same basis.
+    ///
+    /// ## Determinism
+    ///
+    /// Never reads wall-clock time. The result is a pure function of the
+    /// accumulated counts state at the time of the call.
+    ///
+    /// ## Default
+    ///
+    /// Returns `false`. Counts-only basis derivation is an explicit per-provider
+    /// opt-in. A conformer that has not audited its counts payload MUST NOT be
+    /// silently eligible; the conservative default ensures it isn't.
+    fn finalize_from_counts(&mut self) -> bool {
+        false
+    }
+
+    /// Whether folding additional texts into RESTORED maintained counts produces
+    /// bytes identical to a from-scratch fold over the same corpus in canonical order.
+    ///
+    /// ## Contract
+    ///
+    /// `true` only for providers whose raw accumulation is commutative — i.e.,
+    /// fold order does not affect the byte output of `finalize_from_counts` →
+    /// `serialize_basis`. This is the provider-side discriminator the retrain
+    /// wiring (Part 3) reads to decide whether a delta-fold after restore is safe.
+    ///
+    /// - A provider whose accumulation is integer count maps (`true`):
+    ///   integer addition is commutative and a finalize pass that sorts keys by
+    ///   raw UTF-8 bytes before iterating derives vectors independent of the
+    ///   fold order. No default provider qualifies.
+    ///
+    /// - **RandomIndexing** (`false` — Finding F-3): context vectors are running
+    ///   f32 sums. f32 addition is NOT associative; folding additional texts into
+    ///   restored counts in a different order than the original corpus changes the
+    ///   byte output of `serialize_basis`. The counts path for RI is therefore
+    ///   restore-only with an EMPTY delta.
+    ///
+    /// ## Default
+    ///
+    /// `false`. Delta-fold eligibility after restore is an explicit, audited
+    /// opt-in. A conformer that has not audited its accumulation semantics MUST NOT
+    /// be silently eligible; the conservative default ensures it isn't.
+    fn counts_delta_fold_safe(&self) -> bool {
+        false
     }
 
     /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain

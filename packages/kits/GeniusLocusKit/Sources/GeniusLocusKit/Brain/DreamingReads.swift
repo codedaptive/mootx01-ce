@@ -1,4 +1,7 @@
 import Foundation
+import os
+import CorpusKit
+import MootProductIdentity
 import LocusKit
 import QueueKit
 
@@ -244,14 +247,71 @@ public extension GeniusLocusKit {
     ///     never call `Date()` inside the engine (CLAUDE.md determinism rule).
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale;
     ///   a `CorpusKitError` if the retrain or re-embed fails.
-    func reindexCorpus(handle: EstateHandle, now: Date) async throws {
+    /// The document backstop for the LSA retrain; see `reindexCorpus`. Read
+    /// by the estate ping to declare a degraded estate. Both ports.
+    public static let lsaRetrainingDocumentBackstop = 10_000_000
+
+    /// Rebuild every derived lane of the estate's corpus (BM25 and dense)
+    /// from the current content.
+    ///
+    /// F11: returns `true` for a full retrain and `false` when a backstop was
+    /// reached and the serving basis was kept (DEGRADED). Callers that track
+    /// a vocabulary baseline (`NeuronKit.DreamingDaemon`'s ALPHA/THETA cycles)
+    /// MUST NOT advance it on `false` — the vocabulary drift the backstop was
+    /// hit under must still be there on the next cycle, not silently accepted
+    /// as caught up. Before this fix the function returned `Void`, so a
+    /// degraded retrain was indistinguishable from a full one at every call
+    /// site; both looked like plain success. Also recorded on
+    /// `lastReindexCompleted[handle]` so `EstateThetaBasisRetrainHook.retrain`
+    /// (NeuronKit), which reaches this through `payDutyUntilSettled(.retrainBasis,
+    /// ...)` rather than calling it directly, can read the outcome after that
+    /// call returns (its own return value — units paid — cannot carry the
+    /// distinction).
+    @discardableResult
+    func reindexCorpus(handle: EstateHandle, now: Date) async throws -> Bool {
         guard registry[handle] != nil else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
         guard let corpus = corpusKits[handle] else {
-            // No Corpus registered — LocusOnly estate; nothing to reindex.
-            return
+            // No Corpus registered — LocusOnly estate; nothing to reindex,
+            // nothing was skipped.
+            lastReindexCompleted[handle] = true
+            return true
         }
-        try await corpus.reindex(now: now)
+        // moot_rebuild_status span: the basis retrain + re-embed window.
+        derivedRebuildSpan(handle, open: true)
+        defer { derivedRebuildSpan(handle, open: false) }
+        // BACKSTOPS AGAINST THE ABSURD, not working limits (Bob, 2026-09-16).
+        // The dense basis must be learned from every document, so the retrain
+        // is never capped in normal use: if the data is there it is processed.
+        // Ten million documents is more than an order of magnitude past a
+        // decade of heavy filing plus palace imports; a retrain running past a
+        // day on a daily cadence is a broken system, not a slow one. Thirty
+        // sweeps is the SVD's fixed iteration count, unchanged since it
+        // shipped. An estate that reaches the document backstop is declared
+        // LSA-degraded on every estate ping (`lsaRetrainingDocumentBackstop`).
+        let budget = RetrainingBudget(
+            maxDocuments: Self.lsaRetrainingDocumentBackstop,
+            maxSweeps: 30,
+            deadline: ContinuousClock.now.advanced(by: .seconds(24 * 60 * 60)))
+        let report = try await corpus.reindex(now: now, budget: budget)
+        // Reaching a backstop keeps the serving basis and vectors and is an
+        // error-level event: the estate is degraded until it is looked at.
+        let completed = report.skippedModelIDs.isEmpty
+        if !completed {
+            Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit").error(
+                "reindexCorpus: LSA retraining DEGRADED, a backstop was reached and the serving basis was kept: \(String(describing: report.skippedModelIDs), privacy: .public)")
+        }
+        lastReindexCompleted[handle] = completed
+        return completed
+    }
+
+    /// Whether the MOST RECENT `reindexCorpus(handle:now:)` call for `handle`
+    /// fully completed. `true` when the estate has never retrained (nothing
+    /// to have skipped). See `lastReindexCompleted`'s doc comment for why
+    /// this query exists as a separate seam from `reindexCorpus`'s own
+    /// return value.
+    func reindexCompleted(for handle: EstateHandle) -> Bool {
+        lastReindexCompleted[handle] ?? true
     }
 }

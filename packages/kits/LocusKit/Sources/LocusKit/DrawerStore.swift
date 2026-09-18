@@ -33,6 +33,8 @@
 // per the deterministic-engine rule.
 
 import Foundation
+import CryptoKit
+import MootProductIdentity
 import OSLog
 import IntellectusLib
 import SubstrateKernel
@@ -53,7 +55,72 @@ import SubstrateLib
 import SubstrateTypes
 import PersistenceKit
 
-private let drawerStoreLog = Logger(subsystem: "com.mootx01.kit", category: "LocusKit")
+private let drawerStoreLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "LocusKit")
+
+/// Input for one contradiction proposal that must be checked and filed under
+/// the same serializable store transaction.  Higher layers retain only these
+/// digests; they never provide a cached drawer body to the write path.
+public struct AtomicConflictProposalRequest: Sendable {
+    public let sourceDrawerID: String
+    public let targetDrawerID: String
+    public let pairKey: String
+    public let tier: Int
+    public let renewalKey: String
+    public let evidenceID: String
+    public let sourceDigest: String
+    public let targetDigest: String
+    public let evidenceDigest: String
+    public let label: String
+    public let addedBy: String
+    public let filedAt: Date
+    public let declinePolicy: @Sendable ([(tier: Int, label: String)]) -> Bool
+
+    public init(
+        sourceDrawerID: String, targetDrawerID: String, pairKey: String,
+        tier: Int, renewalKey: String, evidenceID: String,
+        sourceDigest: String, targetDigest: String, evidenceDigest: String,
+        label: String, addedBy: String, filedAt: Date,
+        declinePolicy: @escaping @Sendable ([(tier: Int, label: String)]) -> Bool
+    ) {
+        self.sourceDrawerID = sourceDrawerID
+        self.targetDrawerID = targetDrawerID
+        self.pairKey = pairKey
+        self.tier = tier
+        self.renewalKey = renewalKey
+        self.evidenceID = evidenceID
+        self.sourceDigest = sourceDigest
+        self.targetDigest = targetDigest
+        self.evidenceDigest = evidenceDigest
+        self.label = label
+        self.addedBy = addedBy
+        self.filedAt = filedAt
+        self.declinePolicy = declinePolicy
+    }
+
+    public static func drawerDigest(id: String, content: String) -> String {
+        hexDigest("\(id.lowercased())\u{0}\(content)")
+    }
+
+    public static func evidenceDigest(
+        pairKey: String, tier: Int, renewalKey: String, evidenceID: String,
+        sourceDigest: String, targetDigest: String
+    ) -> String {
+        hexDigest("\(pairKey)\u{0}\(tier)\u{0}\(renewalKey)\u{0}\(evidenceID)\u{0}\(sourceDigest)\u{0}\(targetDigest)")
+    }
+
+    private static func hexDigest(_ value: String) -> String {
+        SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+}
+
+/// A serializable contradiction filing has a distinct replay, settlement and
+/// creation result.  A settled decision deliberately carries no tunnel id.
+public enum AtomicConflictProposalOutcome: Sendable {
+    case created(Tunnel)
+    case existing(Tunnel)
+    case settled
+    case stale
+}
 
 public actor DrawerStore {
 
@@ -88,9 +155,10 @@ public actor DrawerStore {
     ///   mode), or `nil` to make this store its own clock (top mode).
     ///   When made here, the node id is derived from the estate uuid so
     ///   a standalone estate has a stable, estate-specific maker id.
-    public init(storage: any Storage, hlc: HLCGenerator? = nil) async throws {
+    public init(storage: any Storage, hlc: HLCGenerator? = nil, frozen: Bool = false) async throws {
         self.storage = storage
-        try await storage.open(schema: LocusKitSchema.schema)
+        if frozen { try await storage.openExisting(schema: LocusKitSchema.schema) }
+        else { try await storage.open(schema: LocusKitSchema.schema) }
         // Stored-property init order matters: vocabulary, then the
         // manifest, then the estate uuid read back from it, then the
         // clock keyed on that uuid. The manifest population is a static
@@ -108,7 +176,7 @@ public actor DrawerStore {
         // same value. This keeps the store's stamping uuid, the manifest
         // uuid, and the HLC maker node id all consistent on first open
         // (mirrors the Rust port's construction order).
-        try await Self.populateV1ManifestDefaults(storage: storage, now: Date())
+        if !frozen { try await Self.populateV1ManifestDefaults(storage: storage, now: Date()) }
         // Resolve the estate identity once, distinguishing two cases that
         // must NOT be conflated (P1-7):
         //   • ABSENT manifest value (fresh estate, key never written) →
@@ -127,6 +195,7 @@ public actor DrawerStore {
         case .present(let uuid, _):
             self.estateUuid = uuid
         case .absent:
+            if frozen { throw EstateError.substrateUnavailable("frozen estate has no persisted identity") }
             // Fresh estate: no persisted identity to honour. Mint one for
             // this store's stamping. A corrupt value never reaches here.
             self.estateUuid = UUID()
@@ -231,7 +300,14 @@ public actor DrawerStore {
 
         let defaults: [(String, String)] = [
             ("manifest_version", "1.0"),
-            ("schema_version", "1.0"),
+            // 1.1 since 2026-08-17. The value names the estate FORMAT, and
+            // the format moved twice after v1.0 ratification without this
+            // string following: the shared-content cutover retired the legacy
+            // `chunks` copy lane, and the shadow-generation swap (2026-08-15)
+            // added vector generations. An estate built by this binary has
+            // neither the copy lane nor the pre-generation vector table, so
+            // "1.0" named a shape it no longer had.
+            ("schema_version", "1.1"),
             ("estate_uuid", estateUUID),
             ("estate_name", ""),
             ("owner_identifier", ""),
@@ -531,29 +607,24 @@ public actor DrawerStore {
         try await getDrawers(ids: ids, hydrationLevel: .full)
     }
 
-    /// Every `drawers` column EXCEPT the text-bearing pair `content` and
-    /// `distilled` — the no-blob structured projection. A
-    /// `.structured`/`.bitmapOnly` load selects exactly these columns, so
-    /// neither text column is ever read out of storage. The set is the
-    /// column list `drawerValues(_:)` writes minus `"content"`/`"distilled"`;
-    /// a column added to the schema must be added here too or it reads as
-    /// absent at `.structured`. `drawerFromRow` decodes an absent `content`
-    /// to "" via `string(_:)` and an absent `distilled` to nil, so a
-    /// structured drawer carries an empty body by design. The small distilled
-    /// metadata columns (pipeline version, token count, generated-at) DO ride
-    /// the structured projection — they are the context-budgeting signal
-    /// (SPEC_DISTILLATION_STORAGE §6) and cost a few bytes per row.
+    /// Every `drawers` column EXCEPT `content` — the no-blob structured
+    /// projection. A `.structured`/`.bitmapOnly` load selects exactly these
+    /// columns, so the content blob is never read out of storage. The set is
+    /// the column list `drawerValues(_:)` writes minus `"content"`; a column
+    /// added to the schema must be added here too or it reads as absent at
+    /// `.structured`. `drawerFromRow` decodes an absent `content` to "" via
+    /// `string(_:)`, so a structured drawer carries an empty body by design.
+    /// `ssc_facts` and the subject trio are short derived text that exists
+    /// precisely so a candidate row can be judged and rendered without
+    /// hydrating content, so both ride the projection.
     private static let structuredDrawerColumns: [String] = [
         "id", "parent_node_id", "sourceFile", "chunkIndex", "addedBy",
         "filedAt", "eventTime", "embeddingModelID", "tombstonedAt",
         "removedByBatch", "provenance", "adjectiveBitmap", "operationalBitmap",
         "lineageID", "udcCode", "udcFacets", "wikidataQID",
         "wikidataQidsSecondary",
-        "distilled_pipeline_version", "distilled_token_count", "distilled_at",
-        // Subject trio (PR-01): the subject IS structured-tier data — it
-        // exists precisely so candidate rows can be judged without
-        // hydrating content, so the structured projection carries it.
-        "subject", "subject_pipeline_version", "subject_at"
+        "ssc_facts",
+        "subject", "subject_pipeline_version", "subject_at",
     ]
 
     /// Batch by-id load at a chosen hydration level — the dense-first candidate
@@ -624,7 +695,14 @@ public actor DrawerStore {
                 .in(Column(table: "drawers", name: "parent_node_id"), roomNodeIds.map { TypedValue.text($0) }),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
-            orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
+            orderBy: [
+                // Content-stable tie key (DECISION_SCORE_TRANSPARENT_ORDERING):
+                // without a secondary, filedAt-tied rows ordered by backend
+                // insertion order — deterministic per estate but not across
+                // same-data builds. Content is identical across builds.
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                OrderClause(column: Column(table: "drawers", name: "content"), direction: .ascending),
+            ],
             limit: nil, offset: nil, columns: nil
         )
         let result = try decodeDrawerRowsResilient(rows, scan: "drawersIn(wing:)")
@@ -660,7 +738,14 @@ public actor DrawerStore {
                 .eq(Column(table: "drawers", name: "parent_node_id"), .text(roomNodeId)),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
-            orderBy: [OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending)],
+            orderBy: [
+                // Content-stable tie key (DECISION_SCORE_TRANSPARENT_ORDERING):
+                // without a secondary, filedAt-tied rows ordered by backend
+                // insertion order — deterministic per estate but not across
+                // same-data builds. Content is identical across builds.
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                OrderClause(column: Column(table: "drawers", name: "content"), direction: .ascending),
+            ],
             limit: nil, offset: nil, columns: nil
         )
         let result = try decodeDrawerRowsResilient(rows, scan: "drawersIn(wing:room:)")
@@ -756,19 +841,25 @@ public actor DrawerStore {
         // millisecond epoch was stored where seconds were expected) are skipped
         // at the storage cursor level and do not abort the entire corpus scan.
         //
-        // Compound sort key: (filedAt, id) in `direction`. The id secondary
-        // term breaks ties within the same filedAt so the result is a
-        // deterministic total order — DESC is exactly reverse(ASC). `id` is
-        // the declared TEXT primary key of the drawers table, present in all
-        // three backends (SQLite, PostgreSQL, InMemory). This replaces the
-        // previous SQLite-only `rowid` pseudo-column, which is undefined in
-        // PostgreSQL and caused an undefined-column error on Postgres estates
-        // (c-recall-portable fix). Mirrors Rust's (filed_at, id) ordering.
+        // Compound sort key: (filedAt, content, id) in `direction` — a
+        // deterministic total order; DESC is exactly reverse(ASC).
+        // CONTENT is the tie key (DECISION_SCORE_TRANSPARENT_ORDERING,
+        // 2026-08-24): `id` is a UUID minted fresh per estate build, so an
+        // id tie-break made two estates built from the same data order
+        // filedAt-tied rows differently — batch-imported estates share ONE
+        // import instant across every row, so the entire candidate order was
+        // build-dependent (measured: 12/25 same-recipe synthesize outputs
+        // differed on this alone). Content is content-derived and identical
+        // across builds. `id` remains only as the last resort between
+        // identical-content duplicates, whose mutual order is meaningless
+        // (ruling 3). All clauses share `direction` so reversal stays exact.
+        // Rust twin mirrors this ordering (mission SCORE-ORDERING).
         let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: nil,
             orderBy: [
                 OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: direction),
+                OrderClause(column: Column(table: "drawers", name: "content"), direction: direction),
                 OrderClause(column: Column(table: "drawers", name: "id"), direction: direction),
             ],
             limit: limit.map { $0 }, offset: nil, columns: columns
@@ -827,6 +918,60 @@ public actor DrawerStore {
             offset: nil
         )
         return try decodeDrawerRowsResilient(rows, scan: "activeDrawersAfter(id:limit:)")
+    }
+
+    /// Active, non-dataset drawer IDs in deterministic training order.
+    /// The filter, ordering, projection, and limit all execute in storage so a
+    /// retraining budget probe never loads document bodies or enumerates the
+    /// full estate before applying its cap.
+    public func activeCorpusContentIDs(limit: Int) async throws -> [String] {
+        guard limit > 0 else { return [] }
+        let id = Column(table: "drawers", name: "id")
+        let filedAt = Column(table: "drawers", name: "filedAt")
+        let content = Column(table: "drawers", name: "content")
+        let operational = Column(table: "drawers", name: "operationalBitmap")
+        let embeddingModelID = Column(table: "drawers", name: "embeddingModelID")
+        let contentKindMask: Int64 = 0xFC0
+        let datasetKind = Int64(ContentKind.dataset.rawValue) << 6
+        let predicate = StoragePredicate.all([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .neq(content, .text("")),
+            .not(.bitwiseEq(operational, expected: datasetKind, mask: contentKindMask)),
+            .neq(embeddingModelID, .text(datasetHandleEmbeddingModelID)),
+        ])
+        let (rows, _) = try await storage.rowStore.querySkipCorrupt(
+            table: "drawers",
+            where: predicate,
+            orderBy: [
+                OrderClause(column: filedAt, direction: .ascending),
+                OrderClause(column: content, direction: .ascending),
+                OrderClause(column: id, direction: .ascending),
+            ],
+            limit: limit,
+            offset: nil,
+            columns: ["id"]
+        )
+        return rows.map { Self.string($0["id"]) }
+    }
+
+    /// Bounded active-drawer page for maintenance operations that must not
+    /// skip a corrupt row and then mistake a short decoded page for EOF.
+    /// Unlike the recall-facing resilient scan above, any malformed drawer
+    /// fails the maintenance operation before its cursor advances.
+    public func activeDrawersAfterStrict(id afterID: String?, limit: Int) async throws -> [Drawer] {
+        let idColumn = Column(table: "drawers", name: "id")
+        let tombstoneClause = StoragePredicate.isNull(Column(table: "drawers", name: "tombstonedAt"))
+        let predicate: StoragePredicate = afterID.map {
+            .and([tombstoneClause, .gt(idColumn, .text($0))])
+        } ?? tombstoneClause
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: predicate,
+            orderBy: [OrderClause(column: idColumn, direction: .ascending)],
+            limit: limit,
+            offset: nil
+        )
+        return try decodeDrawerRows(rows)
     }
 
     // MARK: - Provenance mutation
@@ -1003,11 +1148,17 @@ public actor DrawerStore {
         guard !drawers.isEmpty else { return }
         let estateID = estateUuid
         let vocab = vocabulary
-        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
 
         // Pre-compute HLC stamps and row UUIDs outside the @Sendable transaction
         // closure (both access actor-isolated state: hlc and UUID parsing).
-        let stamps = drawers.map { _ in hlc.send(now: nowMillis) }
+        // Each drawer's stamp derives from its own filedAt (not a single batch
+        // timestamp) so that per-record capture_date values (schema v1.2) produce
+        // distinct HLC physical times. For batches where all drawers share the
+        // same filedAt (no capture_date on any record), every stamp derives from
+        // the same millisecond.
+        let stamps = drawers.map { d in
+            hlc.send(now: Int64(d.filedAt.timeIntervalSince1970 * 1000))
+        }
         let rowUuids = try drawers.map { d in try Self.requireUuid(d.id, label: "id") }
         // One families instance for the whole batch (same estate); computed
         // once per drawer, outside the @Sendable closure. See gatedCaptureBody
@@ -1189,22 +1340,23 @@ public actor DrawerStore {
 
     /// Result of a lineage-wide gated expunge (`expungeGated`).
     ///
-    /// `refusedSiblingIDs` lists the lineage members whose
-    /// `accepted → tombstoned` transition the `AuditGate` refused
-    /// (S-3: audit-grade rows survive intact), in walk order. A
-    /// refused sibling was left byte-identical — content, state,
-    /// audit trail, and erasure-ledger absence — so a non-empty list
-    /// means the expunge was partial and the caller must not assume
-    /// the whole lineage was erased.
+    /// `refusedSiblingIDs` lists lineage members that were not tombstoned,
+    /// in walk order. A sibling is refused for one of two reasons: its
+    /// sensitivity exceeds the `sensitivityCeiling` (the ceiling check runs
+    /// before gate admission — a ceiling-refused sibling never reaches
+    /// `AuditGate.admit`), or the gate's transition table refused
+    /// `accepted → tombstoned` (S-3: audit-grade rows survive intact). A
+    /// refused sibling was left byte-identical — content, state, audit trail,
+    /// and erasure-ledger absence — so a non-empty list means the expunge was
+    /// partial and the caller must not assume the whole lineage was erased.
     public struct ExpungeOutcome: Sendable {
         /// The target drawer's gate-produced audit event when
         /// `sealAudit` was false (returned for deferred sealing);
         /// nil when the event was sealed atomically inside the
         /// transaction.
         public let auditEvent: AuditEvent?
-        /// IDs of lineage siblings the gate refused to tombstone,
-        /// in walk order. Empty means the expunge covered the full
-        /// lineage.
+        /// IDs of lineage siblings not tombstoned (ceiling- or gate-refused),
+        /// in walk order. Empty means the expunge covered the full lineage.
         public let refusedSiblingIDs: [String]
     }
 
@@ -1217,14 +1369,15 @@ public actor DrawerStore {
     /// erasure ledger entry ensured but are not re-gated.
     ///
     /// Routes the target drawer through `AuditGate.admit` (the primary
-    /// audit event). Lineage siblings are gated individually. The
-    /// gate's transition table refuses `accepted → tombstoned` (S-3:
-    /// audit-grade rows survive intact), and a refused sibling is left
-    /// byte-identical — no content write, no state write, no audit
-    /// append, no erasure-ledger record. Refused sibling ids are
-    /// carried in `ExpungeOutcome.refusedSiblingIDs` so the caller can
-    /// detect a partial expunge; the walk continues over the remaining
-    /// members.
+    /// audit event). Lineage siblings are filtered by two checks in order.
+    /// First, `sensitivityCeiling`: a sibling whose sensitivity exceeds the
+    /// ceiling is refused without reaching `AuditGate.admit`. Second, the
+    /// gate's transition table: `accepted → tombstoned` is refused (S-3 —
+    /// audit-grade rows survive intact). A refused sibling is left
+    /// byte-identical — no content write, no state write, no audit append,
+    /// no erasure-ledger record. Refused sibling ids are carried in
+    /// `ExpungeOutcome.refusedSiblingIDs` so the caller can detect a partial
+    /// expunge; the walk continues over the remaining members.
     ///
     /// When `sealAudit` is `true` (default), the audit event for the
     /// target drawer is appended atomically inside the transaction and
@@ -1243,6 +1396,7 @@ public actor DrawerStore {
         reason: String? = nil,
         now: Date = Date(),
         sealAudit: Bool = true,
+        sensitivityCeiling: AdjectiveSensitivity = .secret,
         commitmentKey: [UInt8]? = nil,
         commitmentKeyVersion: Int = 0
     ) async throws -> ExpungeOutcome {
@@ -1256,10 +1410,12 @@ public actor DrawerStore {
         let vocab = vocabulary
 
         // Resolve the full lineage chain before entering the
-        // transaction. Every member is walked; members whose tombstone
-        // transition the gate admits are scrubbed, and accepted members
-        // (refused per S-3) are left untouched and reported in the
-        // outcome.
+        // transaction. Every sibling is walked. The ceiling check
+        // (.elevated) runs first; a sibling above the ceiling never
+        // reaches the gate. A sibling the ceiling admits is then
+        // evaluated by the gate: admitted siblings are scrubbed,
+        // gate-refused siblings (S-3) are left untouched. Both
+        // causes of refusal are reported in the outcome.
         let lineageIds = try await lineageChain(for: drawerId)
 
         // Pre-stamp HLC values for each sibling outside the Sendable
@@ -1347,10 +1503,10 @@ public actor DrawerStore {
 
             // Materialized projection: write the merged adjective
             // snapshot, zero the content blob, stamp tombstonedAt. The
-            // distilled representation is content-derived text — the scrub
-            // clears it (and the has_current_representation bit) in the
-            // same statement (destruction contract, cookbook §2.4.1).
-            let clearedOp = priorOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+            // content-derived columns (ssc_facts, subject trio) are NULLed
+            // and the content-derived bits (19, 27, 28; factsExtracted) cleared in the same
+            // statement (destruction contract, cookbook §2.4.1).
+            let clearedOp = priorOperational & ~DrawerFeatureFlags.clearedOnContentWrite
             _ = try await txn.rowStore.update(
                 table: "drawers",
                 values: Self.withClearedRepresentation([
@@ -1409,10 +1565,12 @@ public actor DrawerStore {
 
             // ── Step 2: walk every lineage sibling ──
             // Siblings are predecessors (superseded versions) and any
-            // other members of the lineage chain. Already-tombstoned
-            // siblings have content re-zeroed as a defense-in-depth
-            // measure but are not re-gated. Siblings the gate refuses
-            // are left untouched and collected for the outcome.
+            // other members of the lineage chain. The ceiling check
+            // runs first; a sibling above the ceiling is left untouched
+            // without reaching the gate or the re-zero. Siblings the
+            // ceiling admits are evaluated by the gate: admitted
+            // siblings are scrubbed, gate-refused siblings are left
+            // untouched and collected for the outcome.
             var refused: [String] = []
             for (idx, siblingId) in siblingIds.enumerated() {
                 let sibRows = try await txn.rowStore.query(
@@ -1424,12 +1582,26 @@ public actor DrawerStore {
                 let sibBitmap = Self.int64(sibRow["adjectiveBitmap"])
                 let sibState = BitField.extractField(sibBitmap, shift: 0, width: 6)
 
+                // Sensitivity ceiling: a sibling whose tier exceeds the caller's ceiling
+                // is left byte-identical and recorded as refused. This matches the
+                // existing gate-refused accepted-row shape (S-3): no content write, no
+                // state write, no audit append, no erasure-ledger entry. The invariant
+                // (GLK-CEILING): a caller bounded at .elevated cannot erase rows above
+                // that tier through the lineage cascade, even when the cascade target is
+                // itself at or below the ceiling.
+                let sibTier = AdjectiveSensitivity(
+                    rawValue: Int(BitField.extractField(sibBitmap, shift: 6, width: 6))
+                ) ?? .normal
+                if sibTier.rawValue > sensitivityCeiling.rawValue {
+                    refused.append(siblingId)
+                    continue
+                }
+
                 if sibState == Int64(State.tombstoned.rawValue) {
                     // Already tombstoned — just ensure content is empty
-                    // (and the content-derived representation and the
-                    // has_current_representation bit with it).
+                    // (and the content-derived columns and bits with it).
                     let sibOpBitmap = Self.int64(sibRow["operationalBitmap"])
-                    let sibClearedOp = sibOpBitmap & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+                    let sibClearedOp = sibOpBitmap & ~DrawerFeatureFlags.clearedOnContentWrite
                     _ = try await txn.rowStore.update(
                         table: "drawers",
                         values: Self.withClearedRepresentation([
@@ -1473,11 +1645,11 @@ public actor DrawerStore {
                     )
                     if case .success(let sibEvent) = sibResult {
                         // Gate accepted: update state bitmap, zero content, stamp.
-                        // has_current_representation (bit 19) cleared alongside
-                        // the four distillation columns (cookbook §2.4.1).
+                        // The content-derived bits (19, 27, 28; factsExtracted) clear alongside the
+                        // content-derived columns (cookbook §2.4.1).
                         let sibEventWithReason = sibEvent.withReason(
                             "lineage expunge cascade from \(drawerId)")
-                        let sibClearedOp = sibOperational & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+                        let sibClearedOp = sibOperational & ~DrawerFeatureFlags.clearedOnContentWrite
                         _ = try await txn.rowStore.update(
                             table: "drawers",
                             values: Self.withClearedRepresentation([
@@ -2041,6 +2213,15 @@ public actor DrawerStore {
         try await storage.auditLog.eventsForRow(rowID).count
     }
 
+    /// Estate-wide audit-log page in HLC order, starting strictly after
+    /// `after` (nil = from the beginning), capped at `limit` events. Thin
+    /// pass-through to PersistenceKit's `AuditLog.iterate` — the C3/A6
+    /// timing derivation pages the log through this seam with a persisted
+    /// watermark instead of rescanning an append-only log from zero.
+    public func auditEvents(after: HLC?, limit: Int) async throws -> [AuditEvent] {
+        try await storage.auditLog.iterate(after: after, rowID: nil, limit: limit)
+    }
+
     /// Read a single bitmap column for a drawer inside a transaction,
     /// throwing drawerNotFound when the row is absent. Centralizes
     /// the prior-value read shared by every mutation path.
@@ -2058,6 +2239,184 @@ public actor DrawerStore {
     }
 
     // MARK: - Tunnel CRUD
+
+    /// Re-read a selected contradiction pair and its complete tunnel history,
+    /// validate the retained evidence digests, then insert one proposed edge
+    /// in the same serializable transaction.  The policy callback is pure and
+    /// supplied by GeniusLocusKit so LocusKit does not depend on its decline
+    /// matrix vocabulary.
+    public func fileAtomicConflictProposal(
+        _ request: AtomicConflictProposalRequest
+    ) async throws -> AtomicConflictProposalOutcome {
+        let estateTag = estateUuid.uuidString
+        let outcome: AtomicConflictProposalOutcome = try await storage.transaction(isolation: .serializable) { txn in
+            let drawerRows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .in(Column(table: "drawers", name: "id"), [
+                    .text(request.sourceDrawerID), .text(request.targetDrawerID),
+                ]), orderBy: [], limit: nil, offset: nil, columns: nil)
+            let drawers = try drawerRows.map(Self.drawerFromRow)
+            let byID = Dictionary(uniqueKeysWithValues: drawers.map { ($0.id, $0) })
+            guard let source = byID[request.sourceDrawerID],
+                  let target = byID[request.targetDrawerID],
+                  source.tombstonedAt == nil,
+                  target.tombstonedAt == nil else {
+                return .stale
+            }
+            // The pair key is the hunt's canonical spelling: both ids lowercased,
+            // sorted, joined by a double bar (TieredContradictionCore.pairKey and
+            // its Rust twin). A single-bar guard here read every proposal as
+            // changed and refused it as stale (found by release qualification,
+            // 2026-09-17).
+            let ordered = [source.id.lowercased(), target.id.lowercased()].sorted()
+            guard request.pairKey == "\(ordered[0])||\(ordered[1])",
+                  AtomicConflictProposalRequest.drawerDigest(id: source.id, content: source.content) == request.sourceDigest,
+                  AtomicConflictProposalRequest.drawerDigest(id: target.id, content: target.content) == request.targetDigest,
+                  AtomicConflictProposalRequest.evidenceDigest(
+                    pairKey: request.pairKey, tier: request.tier,
+                    renewalKey: request.renewalKey, evidenceID: request.evidenceID,
+                    sourceDigest: request.sourceDigest, targetDigest: request.targetDigest) == request.evidenceDigest else {
+                return .stale
+            }
+
+            let sourceSensitivityRaw = Int(BitField.extractField(source.adjectiveBitmap, shift: 6, width: 6))
+            let targetSensitivityRaw = Int(BitField.extractField(target.adjectiveBitmap, shift: 6, width: 6))
+            let sourceStateRaw = Int(BitField.extractField(source.adjectiveBitmap, shift: 0, width: 6))
+            let targetStateRaw = Int(BitField.extractField(target.adjectiveBitmap, shift: 0, width: 6))
+            guard let sourceState = State(rawValue: sourceStateRaw), sourceState.isClusterA,
+                  let targetState = State(rawValue: targetStateRaw), targetState.isClusterA,
+                  let sourceSensitivity = AdjectiveSensitivity(rawValue: sourceSensitivityRaw),
+                  let targetSensitivity = AdjectiveSensitivity(rawValue: targetSensitivityRaw),
+                  let sourceEndpoint = try await Self.activeEndpoint(for: source, in: txn),
+                  let targetEndpoint = try await Self.activeEndpoint(for: target, in: txn) else {
+                return .stale
+            }
+
+            let tunnelRows = try await txn.rowStore.query(
+                table: "tunnels",
+                where: .eq(Column(table: "tunnels", name: "kind_id"), .int(Int64(TunnelKind.contradicts.rawValue))),
+                orderBy: [], limit: nil, offset: nil, columns: nil)
+            let history = try tunnelRows.map(Self.tunnelFromRow).filter { tunnel in
+                guard let a = tunnel.sourceDrawerId, let b = tunnel.targetDrawerId else { return false }
+                return [a.lowercased(), b.lowercased()].sorted() == ordered
+            }
+            if let replay = history.first(where: { $0.label.hasPrefix(request.renewalKey) }) {
+                switch replay.lifecycle {
+                case .active, .proposed:
+                    return .existing(replay)
+                case .withdrawn, .superseded:
+                    return .settled
+                }
+            }
+            if let live = history.first(where: { $0.tombstonedAt == nil && ($0.lifecycle == .active || $0.lifecycle == .proposed) }) {
+                return .existing(live)
+            }
+            let withdrawals = history.compactMap { tunnel -> (tier: Int, label: String)? in
+                switch tunnel.lifecycle {
+                case .withdrawn, .superseded:
+                    return (Self.rejectionTier(from: tunnel.label), tunnel.label)
+                case .active, .proposed:
+                    return nil
+                }
+            }
+            if request.declinePolicy(withdrawals) {
+                return .settled
+            }
+
+            var bitmap = BitField.writeField(Int64(TunnelOriginClass.derived.rawValue), into: 0, shift: 6, width: 3)
+            bitmap = BitField.writeField(Int64(TunnelLifecycle.proposed.rawValue), into: bitmap, shift: 3, width: 3)
+            let sensitivity = max(sourceSensitivity.rawValue, targetSensitivity.rawValue)
+            let adjective = BitField.writeField(Int64(sensitivity), into: 0, shift: 6, width: 6)
+            let tunnel = Tunnel(
+                id: UUID().uuidString, sourceWing: sourceEndpoint.wing, sourceRoom: sourceEndpoint.room,
+                sourceDrawerId: source.id, targetWing: targetEndpoint.wing, targetRoom: targetEndpoint.room,
+                targetDrawerId: target.id, label: request.label, kind: .contradicts,
+                adjectiveBitmap: adjective, operationalBitmap: bitmap, addedBy: request.addedBy,
+                filedAt: request.filedAt)
+            _ = try await txn.rowStore.insert(table: "tunnels", values: Self.tunnelValues(tunnel))
+            return .created(tunnel)
+        }
+        if case .created = outcome {
+            emitTunnelAdd(now: request.filedAt.timeIntervalSince1970, estateTag: estateTag)
+        }
+        return outcome
+    }
+
+    private static func rejectionTier(from label: String) -> Int {
+        if label.hasPrefix("dcp: ") { return 1 }
+        if label.hasPrefix("tier2:") { return 2 }
+        if label.hasPrefix("tier3:") { return 3 }
+        return Int.max
+    }
+
+    /// Resolve a drawer's room → wing → estate-root path from the same
+    /// transaction that validates and files a contradiction proposal.  A stale
+    /// or malformed topology must not be converted into caller-supplied edge
+    /// coordinates.
+    private static func activeEndpoint(
+        for drawer: Drawer,
+        in transaction: any StorageTransaction
+    ) async throws -> (wing: String, room: String)? {
+        guard let roomID = UUID(uuidString: drawer.parentNodeId) else { return nil }
+        let roomRows = try await transaction.rowStore.query(
+            table: "nodes",
+            where: .eq(Column(table: "nodes", name: "id"), .uuid(roomID)),
+            orderBy: [], limit: 1, offset: nil, columns: nil)
+        guard let room = roomRows.first,
+              activeNode(room, depth: 2),
+              let wingID = nodeUUID(room["parent_id"]),
+              !Self.string(room["display_name"]).isEmpty else {
+            return nil
+        }
+
+        let wingRows = try await transaction.rowStore.query(
+            table: "nodes",
+            where: .eq(Column(table: "nodes", name: "id"), .uuid(wingID)),
+            orderBy: [], limit: 1, offset: nil, columns: nil)
+        guard let wing = wingRows.first,
+              activeNode(wing, depth: 1),
+              let rootID = nodeUUID(wing["parent_id"]),
+              !Self.string(wing["display_name"]).isEmpty else {
+            return nil
+        }
+
+        let rootRows = try await transaction.rowStore.query(
+            table: "nodes",
+            where: .eq(Column(table: "nodes", name: "id"), .uuid(rootID)),
+            orderBy: [], limit: 1, offset: nil, columns: nil)
+        guard let root = rootRows.first,
+              activeNode(root, depth: 0),
+              nodeValueIsNull(root["parent_id"]) else {
+            return nil
+        }
+        return (wing: Self.string(wing["display_name"]), room: Self.string(room["display_name"]))
+    }
+
+    private static func activeNode(_ row: StorageRow, depth: Int64) -> Bool {
+        guard case .some(.int(let storedDepth)) = row["depth"],
+              case .some(.int(let lifecycle)) = row["lifecycle"],
+              storedDepth == depth, lifecycle == 0,
+              nodeValueIsNull(row["tombstoned_hlc"]),
+              nodeValueIsNull(row["tombstoned_at"]) else {
+            return false
+        }
+        return true
+    }
+
+    private static func nodeUUID(_ value: TypedValue?) -> UUID? {
+        switch value {
+        case .uuid(let id): return id
+        case .text(let id): return UUID(uuidString: id)
+        default: return nil
+        }
+    }
+
+    private static func nodeValueIsNull(_ value: TypedValue?) -> Bool {
+        switch value {
+        case .none, .some(.null): return true
+        default: return false
+        }
+    }
 
     /// Insert a tunnel. Conflicting ids surface as duplicateKey.
     ///
@@ -2228,12 +2587,96 @@ public actor DrawerStore {
     ///
     /// Mirrors Rust `DrawerStore::all_active_tunnels`.
     public func allActiveTunnels() async throws -> [Tunnel] {
-        // Load all non-tombstoned tunnels and filter in-memory: PersistenceKit's
-        // predicate DSL does not expose bit-mask comparisons, so the client-side
-        // filter is the correct approach (consistent with recall_trace bitmap
-        // filtering elsewhere in this file).
-        let all = try await allTunnels()
-        return all.filter { !$0.isRetired && $0.lifecycle == .active }
+        // Push both the lifecycle (bits 3–5 = 0) and the retirement (bit 13 = 0)
+        // filters into SQL. `bitwiseEq` compiles to ("operationalBitmap" & mask) = 0,
+        // which is evaluated inside SQLite — no rows are hydrated that fail either
+        // condition. `tombstonedAt IS NULL` is the hard-delete guard, matching
+        // what `allTunnels` already applies. Together these three predicates
+        // replace the previous full-scan + in-memory retain.
+        //
+        // Bit constants per TunnelOperational.swift layout:
+        //   bits 3–5 = TunnelLifecycle; `.active` rawValue 0 → all three bits clear
+        //   bit   13 = is_retired flag (Tunnel.isRetiredBit)
+        let lifecycleMask: Int64 = 0x38         // bits 3–5
+        let retiredBit: Int64 = Tunnel.isRetiredBit // bit 13
+        let activeMask: Int64 = lifecycleMask | retiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
+    }
+
+    /// Active non-tombstoned tunnels whose `sourceDrawerId` matches `drawerId`.
+    ///
+    /// Pushes three predicates into SQL so that SQLite evaluates them before
+    /// any row is decoded into a Swift `Tunnel`:
+    ///   • `sourceDrawerId = drawerId`  (equality; the primary filter)
+    ///   • `tombstonedAt IS NULL`       (hard-delete guard)
+    ///   • `(operationalBitmap & activeMask) = 0`  (lifecycle active + not retired)
+    ///
+    /// The `idx_tunnels_kind_source_drawer` compound index has `sourceDrawerId`
+    /// as the trailing column; SQLite may use it for the equality filter when
+    /// the result-set fraction is small (MCP connection queries typically match
+    /// far fewer than 1 % of the tunnels table).
+    ///
+    /// Callers that need the full sensitivity gate (`adjectiveSensitivity.isBulkExportable`)
+    /// apply it in memory on the (now small) returned slice.
+    public func activeTunnelsFrom(drawerId: String) async throws -> [Tunnel] {
+        // Bitmap mask covering lifecycle (bits 3–5) and the retired flag (bit 13).
+        // Both fields must be 0 for an active, non-retired tunnel.
+        let activeMask: Int64 = 0x38 | Tunnel.isRetiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "sourceDrawerId"), .text(drawerId)),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
+    }
+
+    /// Active non-tombstoned tunnels whose `targetDrawerId` matches `drawerId`.
+    ///
+    /// Mirror of `activeTunnelsFrom(drawerId:)` for the incoming-edge direction.
+    /// Same three SQL predicates; `idx_tunnels_kind_target_drawer` is the
+    /// candidate index for `targetDrawerId`.
+    public func activeTunnelsTo(drawerId: String) async throws -> [Tunnel] {
+        let activeMask: Int64 = 0x38 | Tunnel.isRetiredBit
+        let rows = try await storage.rowStore.query(
+            table: "tunnels",
+            where: .and([
+                .eq(Column(table: "tunnels", name: "targetDrawerId"), .text(drawerId)),
+                .isNull(Column(table: "tunnels", name: "tombstonedAt")),
+                .bitwiseEq(Column(table: "tunnels", name: "operationalBitmap"),
+                           expected: 0,
+                           mask: activeMask),
+            ]),
+            orderBy: [OrderClause(
+                column: Column(table: "tunnels", name: "filedAt"),
+                direction: .ascending)],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map(Self.tunnelFromRow)
     }
 
     /// Flip bit 13 of `operationalBitmap` to retire a tunnel.
@@ -2537,7 +2980,7 @@ public actor DrawerStore {
         )
     }
 
-    /// Transition a KGFact's state to withdrawn.
+    /// Transition a KGFact's state to withdrawn and write a sealed audit row.
     ///
     /// Sets bits 0–5 of `adjectiveBitmap` to `State.withdrawn.rawValue` (18).
     /// That raw lands in RowState Cluster B (at/above the active upper bound
@@ -2545,17 +2988,121 @@ public actor DrawerStore {
     /// from `allKGFacts` active recall. The row is not deleted — retirement
     /// is a state transition that preserves the audit trail.
     ///
-    /// - Throws: `LocusKitError.invalidContent` if no fact with `id` exists.
-    public func withdrawKGFact(id: String) async throws {
-        guard let fact = try await getKGFact(id: id) else {
-            throw LocusKitError.invalidContent("kgFact not found: \(id)")
+    /// The state change is routed through `AuditGate.admit` (verb `.retract`,
+    /// transition `active → withdrawn`) so the substrate emits a sealed
+    /// `_storagekit_audit` row. The gate uses the source drawer's lattice
+    /// anchor when available; a null anchor is used when `sourceDrawerID` is
+    /// empty or the drawer is not found.
+    ///
+    /// - Parameters:
+    ///   - id: The KGFact row identifier.
+    ///   - changedBy: Actor performing the withdrawal (required, non-empty).
+    ///   - reason: Optional human-readable explanation for the withdrawal.
+    ///   - now: The wall-clock instant for the HLC tick (must be passed deterministically).
+    /// - Throws: `LocusKitError.invalidContent` if no fact with `id` exists or
+    ///   the gate rejects the transition.
+    public func withdrawKGFact(id: String, changedBy: String, reason: String? = nil, now: Date) async throws {
+        try Self.validateNonEmpty(id, label: "id")
+        try Self.validateNonEmpty(changedBy, label: "changedBy")
+
+        // Derive the canonical row key for the audit log (UUID passthrough for
+        // UUID-shaped IDs; SHA-256 truncated name-based UUID for arbitrary strings).
+        let rowKey = RowKeyDerivation.deterministicRowKey(from: id)
+
+        // Stamp the ingest clock once before the transaction closure —
+        // `hlc` is actor-isolated mutable state and cannot be mutated inside
+        // a non-isolated closure.
+        let nowMillis = Int64(now.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        let vocab = vocabulary
+
+        // State slot: bits 0-5 of adjective bitmap (6-bit state field).
+        // legalValues duplicate the State.allCases raws from LocusKit/Adjectives.swift; the actual
+        // gate check uses the basis slot's legalValues so this set is only
+        // needed so FieldSlot.admits() does not reject the query.
+        // @guardian-pair: drawerstore-withdraw-kgfact DrawerStore.withdrawKGFact.stateSlot.legalValues <-> State.allCases (raw set equality)
+        let stateSlot = FieldSlot(column: .adjective, shift: 0, width: 6,
+                                  label: "state",
+                                  legalValues: [0, 1, 2, 3, 16, 17, 18, 19, 32, 33])
+
+        try await storage.transaction(isolation: .serializable) { txn in
+            // Fetch the current kg_facts row to read prior bitmaps.
+            let rows = try await txn.rowStore.query(
+                table: "kg_facts",
+                where: .eq(Column(table: "kg_facts", name: "id"), .text(id))
+            )
+            guard let row = rows.first else {
+                throw LocusKitError.invalidContent("kgFact not found: \(id)")
+            }
+            let priorAdj  = Self.int64(row["adjectiveBitmap"])
+            let priorOp   = Self.int64(row["operationalBitmap"])
+            let priorProv = Self.int64(row["provenanceBitmap"])
+            let prior = BitmapFields(
+                adjective:   UInt64(bitPattern: priorAdj),
+                operational: UInt64(bitPattern: priorOp),
+                provenance:  UInt64(bitPattern: priorProv)
+            )
+
+            // Derive the lattice anchor from the source drawer when available.
+            // KGFact rows do not carry their own UDC/QID; the source drawer is
+            // the canonical anchor source. A null anchor (udcCode 0, qidPointer 0)
+            // is used when sourceDrawerID is empty or the drawer cannot be found;
+            // AuditGate.admit accepts null anchors without rejection.
+            let sourceDrawerID = Self.string(row["sourceDrawerID"])
+            let anchor: SubstrateTypes.LatticeAnchor
+            if sourceDrawerID.isEmpty {
+                anchor = SubstrateTypes.LatticeAnchor(udcCode: 0, qidPointer: 0)
+            } else {
+                let drawerRows = try await txn.rowStore.query(
+                    table: "drawers",
+                    where: .eq(Column(table: "drawers", name: "id"), .text(sourceDrawerID))
+                )
+                if let drawerRow = drawerRows.first {
+                    anchor = SubstrateTypes.LatticeAnchor.udcQid(
+                        Self.string(drawerRow["udcCode"]),
+                        qid: Self.string(drawerRow["wikidataQID"])
+                    )
+                } else {
+                    anchor = SubstrateTypes.LatticeAnchor(udcCode: 0, qidPointer: 0)
+                }
+            }
+
+            // Route through the substrate write gate: validates the active→withdrawn
+            // transition via RowStateAutomaton (verb .retract), enforces I-22 bitmap
+            // invariants, and emits the sealed snapshot event.
+            let result = AuditGate.admit(
+                estateUuid: estate,
+                rowId: rowKey,
+                nounType: .kgFact,
+                verb: .retract,
+                prior: prior,
+                priorLatticeAnchor: anchor,
+                writes: [FieldWrite(slot: stateSlot, value: Int64(State.withdrawn.rawValue))],
+                afterLatticeAnchor: anchor,
+                vocabulary: vocab,
+                hlc: stamp,
+                actor: changedBy
+            )
+            let gateEvent: AuditEvent
+            switch result {
+            case .success(let e): gateEvent = e
+            case .failure(let v):
+                throw LocusKitError.invalidContent("kgFact withdrawal rejected by gate: \(v)")
+            }
+            // Thread the caller-supplied reason into the event before persisting.
+            let event = gateEvent.withReason(reason)
+
+            // Materialized projection: write the merged snapshot to the live kg_facts
+            // row (the O(1) read target). Append the sealed event to the audit log
+            // (the source of truth for this state transition).
+            _ = try await txn.rowStore.update(
+                table: "kg_facts",
+                values: ["adjectiveBitmap": .bitmap(event.afterBitmaps.adjective)],
+                where: .eq(Column(table: "kg_facts", name: "id"), .text(id))
+            )
+            try await txn.auditLog.append(event)
         }
-        // Preserve all bits above the 6-bit state field (g_state_cluster mask = 0x3F).
-        let newBitmap = (fact.adjectiveBitmap & ~Int64(0x3F)) | Int64(State.withdrawn.rawValue)
-        _ = try await storage.rowStore.update(
-            table: "kg_facts",
-            values: ["adjectiveBitmap": .bitmap(newBitmap)],
-            where: .eq(Column(table: "kg_facts", name: "id"), .text(id)))
     }
 
     public func getKGFact(id: String) async throws -> KGFact? {
@@ -2956,6 +3503,48 @@ public actor DrawerStore {
         return result
     }
 
+    /// Active kg-facts with optional subject and/or sourceDrawerID equality filters
+    /// pushed into SQL.
+    ///
+    /// When `subjectEq` or `sourceDrawerIDEq` are non-nil their equality predicates
+    /// are compiled into the SQL WHERE clause alongside the active-cluster guard
+    /// (`g_state_cluster < 16`). This lets the engine use `idx_kg_facts_subject`
+    /// and `idx_kg_facts_sourceDrawer` rather than loading the whole table and
+    /// filtering in Swift. When both are nil the query is equivalent to `allKGFacts`.
+    ///
+    /// Callers that need only the `g_state_cluster` guard should use `allKGFacts`
+    /// directly; this method is for fact-search paths that carry exact-match filters.
+    public func kgFacts(subjectEq: String? = nil, sourceDrawerIDEq: String? = nil) async throws -> [KGFact] {
+        // Build the predicate list. The active-cluster guard is always present;
+        // equality terms are added only when the caller supplies a value.
+        var predicates: [StoragePredicate] = [
+            .lt(Column(table: "kg_facts", name: "g_state_cluster"),
+                .int(Int64(RowState.activeClusterUpperBoundRaw))),
+        ]
+        if let subject = subjectEq {
+            // idx_kg_facts_subject covers this column.
+            predicates.append(.eq(Column(table: "kg_facts", name: "subject"), .text(subject)))
+        }
+        if let sourceID = sourceDrawerIDEq {
+            // idx_kg_facts_sourceDrawer covers this column.
+            predicates.append(.eq(Column(table: "kg_facts", name: "sourceDrawerID"), .text(sourceID)))
+        }
+        let rows = try await storage.rowStore.query(
+            table: "kg_facts",
+            where: .and(predicates),
+            orderBy: [OrderClause(column: Column(table: "kg_facts", name: "filedAt"), direction: .ascending)],
+            limit: nil, offset: nil
+        )
+        let result = try rows.map(Self.kgFactFromRow)
+        emitKGFactQuery(
+            now: Date().timeIntervalSince1970,
+            resultCount: result.count,
+            estateTag: estateUuid.uuidString,
+            queryLabel: "filtered"
+        )
+        return result
+    }
+
     /// All kg-facts estate-wide regardless of state — active AND retired
     /// (withdrawn, expired, decayed, superseded, rejected, tombstoned).
     ///
@@ -3104,6 +3693,75 @@ public actor DrawerStore {
         return try rows.map(Self.recallTraceFromRow)
     }
 
+    /// Make sure the `recall_ratings` ledger exists before it is written.
+    /// Populated estates receive the table from the 1.8 → 1.9 estate-format
+    /// capsule; a fresh estate is stamped at the current format without
+    /// running that capsule, so the store applies the same declaration on
+    /// the first write. `migrate(to:)` is a no-op once the table exists.
+    /// Only `upsertRecallRatings` calls this: a read never creates the
+    /// table (see `recallRatings(ids:)`). Mirrors Rust
+    /// `ensure_recall_ratings_table`.
+    private func ensureRecallRatingsTable() async throws {
+        try await storage.migrate(to: RecallRating.schema)
+    }
+
+    /// Write the end-of-day tournament ratings. One `insert or replace`
+    /// per rating keyed on `recall_ratings.drawer_id`; `updated_at` is
+    /// stored as ISO8601 TEXT. Empty input writes nothing and does not
+    /// touch the table.
+    public func upsertRecallRatings(_ ratings: [RecallRating]) async throws {
+        if ratings.isEmpty { return }
+        try await ensureRecallRatingsTable()
+        for rating in ratings {
+            _ = try await storage.rowStore.upsert(
+                table: "recall_ratings",
+                values: [
+                    "drawer_id": .text(rating.drawerID),
+                    "rating": .float(rating.rating),
+                    "contests": .int(Int64(rating.contests)),
+                    "updated_at": .timestamp(rating.updatedAt),
+                ],
+                conflictColumns: ["drawer_id"]
+            )
+        }
+    }
+
+    /// Tournament ratings for `ids`, keyed by drawer id. Ids with no
+    /// `recall_ratings` row are absent from the result. One point read per
+    /// id (the row store has no set predicate); order of `ids` is irrelevant.
+    /// Empty input reads nothing and does not touch the table.
+    ///
+    /// A read never writes. When the schema ledger carries no row for the
+    /// rating declaration's kit id the table has never been created (neither
+    /// the 1.8 → 1.9 capsule nor an upsert has run), so no drawer holds a
+    /// rating and the read returns empty without creating the table. The
+    /// scorer reads ratings on every matrixAware recall, and a frozen estate
+    /// must stay byte-identical on disk across a pure read.
+    public func recallRatings(ids: [String]) async throws -> [String: RecallRating] {
+        var result: [String: RecallRating] = [:]
+        if ids.isEmpty { return result }
+        guard try await storage.currentSchemaVersion(for: RecallRating.schema.kitID) > 0 else {
+            return result
+        }
+        for id in ids where result[id] == nil {
+            let rows = try await storage.rowStore.query(
+                table: "recall_ratings",
+                where: .eq(Column(table: "recall_ratings", name: "drawer_id"), .text(id)),
+                orderBy: [],
+                limit: 1,
+                offset: nil
+            )
+            guard let row = rows.first else { continue }
+            result[id] = RecallRating(
+                drawerID: Self.string(row["drawer_id"]),
+                rating: Self.optDouble(row["rating"]) ?? 0,
+                contests: Int(Self.int64(row["contests"])),
+                updatedAt: try Self.date(table: "recall_ratings", column: "updated_at", row["updated_at"])
+            )
+        }
+        return result
+    }
+
     /// Delete recall-trace rows whose `recalledAt` is strictly before
     /// `cutoff`. Returns the number of rows deleted.
     ///
@@ -3155,7 +3813,10 @@ public actor DrawerStore {
             target: item.target,
             recalledAt: item.recalledAt,
             score: item.score,
-            operationalBitmap: newBitmap)
+            operationalBitmap: newBitmap,
+            door: item.door,
+            composition: item.composition,
+            laneRanks: item.laneRanks)
         try await storage.rowStore.update(
             table: "recall_trace",
             values: Self.recallTraceValues(updated),
@@ -3213,7 +3874,10 @@ public actor DrawerStore {
                 target: item.target,
                 recalledAt: item.recalledAt,
                 score: item.score,
-                operationalBitmap: item.operationalBitmap | RecallTraceItem.flagUsed
+                operationalBitmap: item.operationalBitmap | RecallTraceItem.flagUsed,
+                door: item.door,
+                composition: item.composition,
+                laneRanks: item.laneRanks
             )
             try await storage.rowStore.update(
                 table: "recall_trace",
@@ -3574,21 +4238,29 @@ public actor DrawerStore {
     /// the node tree. Higher kits call this to obtain display names
     /// after node-tree integrity removed them from the Drawer struct.
     public func resolveNodeNames(
-        parentNodeIds: [String]
+        parentNodeIds: [String],
+        preservePhysicalUUIDSpellings: Bool = false
     ) async throws -> [String: (wing: String, room: String)] {
         guard !parentNodeIds.isEmpty else { return [:] }
         let unique = Array(Set(parentNodeIds))
         // Query with .uuid() values to match the nodes table's id column type.
         // NodeStore stores id as .uuid(UUID); querying with .text() fails in
         // InMemoryStorage because the predicate evaluator does strict type matching.
-        let uuidValues = unique.compactMap { str -> TypedValue? in
+        var nodeValues = unique.compactMap { str -> TypedValue? in
             guard let uuid = UUID(uuidString: str) else { return nil }
             return .uuid(uuid)
         }
-        guard !uuidValues.isEmpty else { return [:] }
+        // Rust SQLite stores UUID nodes as lowercase TEXT while Swift's
+        // `.uuid(UUID)` binding uses UUID.uuidString. The portable v2 read
+        // seam may opt in to the supplied physical spelling as a second,
+        // bounded predicate; legacy callers retain typed UUID lookup only.
+        if preservePhysicalUUIDSpellings {
+            nodeValues += unique.map { .text($0) }
+        }
+        guard !nodeValues.isEmpty else { return [:] }
         let roomRows = try await storage.rowStore.query(
             table: "nodes",
-            where: .in(Column(table: "nodes", name: "id"), uuidValues)
+            where: .in(Column(table: "nodes", name: "id"), nodeValues)
         )
         var roomMap: [String: (displayName: String, parentId: String)] = [:]
         var wingIds = Set<String>()
@@ -3601,10 +4273,13 @@ public actor DrawerStore {
         }
         var wingNames: [String: String] = [:]
         if !wingIds.isEmpty {
-            let wingUuids = wingIds.compactMap { UUID(uuidString: $0) }.map { TypedValue.uuid($0) }
+            var wingValues = wingIds.compactMap { UUID(uuidString: $0) }.map { TypedValue.uuid($0) }
+            if preservePhysicalUUIDSpellings {
+                wingValues += wingIds.map { .text($0) }
+            }
             let wingRows = try await storage.rowStore.query(
                 table: "nodes",
-                where: .in(Column(table: "nodes", name: "id"), wingUuids)
+                where: .in(Column(table: "nodes", name: "id"), wingValues)
             )
             for row in wingRows {
                 wingNames[Self.string(row["id"])] = Self.string(row["display_name"])
@@ -3647,7 +4322,14 @@ public actor DrawerStore {
     /// replaces the old recompute-on-every-read path in
     /// `fingerprintsCaptured`/`fingerprintBitSeries`).
     private static func drawerValues(_ d: Drawer, fingerprint: Fingerprint256) -> [String: TypedValue] {
-        [
+        // Use the drawer struct's operationalBitmap directly. Every bit is
+        // managed by the write path that owns it (gatedCaptureBody, the
+        // content-write clear, setSpanIndexed) before drawerValues runs;
+        // OR-ing anything here would write a different value than the audit
+        // event recorded in afterBitmaps.operational and make AuditLogFold
+        // reconstruction diverge.
+        let opBitmap: Int64 = d.operationalBitmap
+        return [
             "id": .text(d.id),
             "content": .text(d.content),
             "parent_node_id": .text(d.parentNodeId),
@@ -3664,28 +4346,23 @@ public actor DrawerStore {
             "removedByBatch": d.removedByBatch.map { TypedValue.text($0) } ?? .null,
             "provenance": .bitmap(d.provenance),
             "adjectiveBitmap": .bitmap(d.adjectiveBitmap),
-            "operationalBitmap": .bitmap(d.operationalBitmap),
+            "operationalBitmap": .bitmap(opBitmap),
             "lineageID": .text(d.lineageID.uuidString),
             "udcCode": .text(d.udcCode),
             "udcFacets": d.udcFacets.map { TypedValue.text($0) } ?? .null,
             "wikidataQID": d.wikidataQID.map { TypedValue.text($0) } ?? .null,
             "wikidataQidsSecondary": d.wikidataQidsSecondary.map { TypedValue.text($0) } ?? .null,
             "content_fingerprint": .blob(Data(fingerprint.toBytes())),
-            // Distilled representation (SPEC §4): fresh captures carry nil
-            // in all four fields — population happens post-insert via
-            // setDistilledRepresentation (drain-stage or sweep), never on
-            // the capture path.
-            "distilled": d.distilled.map { TypedValue.text($0) } ?? .null,
-            "distilled_pipeline_version": d.distilledPipelineVersion.map { TypedValue.text($0) } ?? .null,
-            "distilled_token_count": d.distilledTokenCount.map { TypedValue.int($0) } ?? .null,
-            "distilled_at": d.distilledAt.map { TypedValue.timestamp($0) } ?? .null,
-            // Subject trio (PR-01): same capture-path contract as the
-            // distilled quad — a fresh capture MAY carry a subject (the
+            // SSC facts: a fresh capture may carry them when the caller
+            // already ran the enrichment stage; otherwise NULL until
+            // setSSCFacts runs after the write.
+            "ssc_facts": d.sscFacts.map { TypedValue.text($0) } ?? .null,
+            // Subject trio (PR-01): a fresh capture MAY carry a subject (the
             // filing AI provides it at file time); backfill and the model
             // rider populate the rest via setSubjectRepresentation.
             "subject": d.subject.map { TypedValue.text($0) } ?? .null,
             "subject_pipeline_version": d.subjectPipelineVersion.map { TypedValue.text($0) } ?? .null,
-            "subject_at": d.subjectAt.map { TypedValue.timestamp($0) } ?? .null
+            "subject_at": d.subjectAt.map { TypedValue.timestamp($0) } ?? .null,
         ]
     }
 
@@ -3766,7 +4443,13 @@ public actor DrawerStore {
             // score is REAL (float) nullable: TypedValue.float for Double,
             // .null when the recall did not produce a score.
             "score": item.score.map { TypedValue.float($0) } ?? .null,
-            "operationalBitmap": .bitmap(item.operationalBitmap)
+            "operationalBitmap": .bitmap(item.operationalBitmap),
+            // Lane-attribution trio (v15, W2.5 Track R(a)). TEXT nullable:
+            // NULL when the writer has no attribution (plain locus-verb
+            // traces); the RecallDirector fills all three.
+            "door": item.door.map { TypedValue.text($0) } ?? .null,
+            "composition": item.composition.map { TypedValue.text($0) } ?? .null,
+            "laneRanks": item.laneRanks.map { TypedValue.text($0) } ?? .null
         ]
     }
 
@@ -3776,7 +4459,10 @@ public actor DrawerStore {
             target: string(row["target"]),
             recalledAt: try date(table: "recall_traces", column: "recalledAt", row["recalledAt"]),
             score: optDouble(row["score"]),
-            operationalBitmap: int64(row["operationalBitmap"])
+            operationalBitmap: int64(row["operationalBitmap"]),
+            door: optString(row["door"]),
+            composition: optString(row["composition"]),
+            laneRanks: optString(row["laneRanks"])
         )
     }
 
@@ -3790,6 +4476,18 @@ public actor DrawerStore {
             "addedBy": .text(f.addedBy),
             "foreignSourceKey": .text(f.foreignSourceKey),
             "foreignRecordID": .text(f.foreignRecordID),
+            "evidenceQuote": .text(f.evidenceQuote),
+            "evidenceStart": .int(Int64(f.evidenceStart)),
+            "evidenceEnd": .int(Int64(f.evidenceEnd)),
+            "evidenceStartUTF8Byte": .int(Int64(f.evidenceStartUTF8Byte)),
+            "evidenceEndUTF8Byte": .int(Int64(f.evidenceEndUTF8Byte)),
+            "sourceDigest": .text(f.sourceDigest),
+            "extractorProviderID": .text(f.extractorProviderID),
+            "extractorModelID": .text(f.extractorModelID),
+            "extractorModelVersion": .text(f.extractorModelVersion),
+            "extractionSchemaVersion": .text(f.extractionSchemaVersion),
+            "searchProjection": .text(f.searchProjection),
+            "searchProjectionVersion": .text(f.searchProjectionVersion),
             "adjectiveBitmap": .bitmap(f.adjectiveBitmap),
             "operationalBitmap": .bitmap(f.operationalBitmap),
             "provenanceBitmap": .bitmap(f.provenanceBitmap),
@@ -3901,13 +4599,9 @@ public actor DrawerStore {
             udcFacets: optString(row["udcFacets"]),
             wikidataQID: optString(row["wikidataQID"]),
             wikidataQidsSecondary: optString(row["wikidataQidsSecondary"]),
-            // Distilled representation (SPEC §4). Absent at `.structured`
-            // hydration (the text column is projected away like `content`);
-            // NULL on any row not yet swept. Both decode to nil.
-            distilled: optString(row["distilled"]),
-            distilledPipelineVersion: optString(row["distilled_pipeline_version"]),
-            distilledTokenCount: optInt64(row["distilled_token_count"]),
-            distilledAt: optDate(row["distilled_at"]),
+            // SSC facts: NULL on any row the enrichment stage has not
+            // written yet (or since the last content write); decodes to nil.
+            sscFacts: optString(row["ssc_facts"]),
             // Subject trio (PR-01). NULL on any row not yet subjected;
             // decodes to nil — the backfill-eligibility signal.
             subject: optString(row["subject"]),
@@ -4095,6 +4789,18 @@ public actor DrawerStore {
             addedBy: string(row["addedBy"]),
             foreignSourceKey: string(row["foreignSourceKey"]),
             foreignRecordID: string(row["foreignRecordID"]),
+            evidenceQuote: string(row["evidenceQuote"]),
+            evidenceStart: Int(int64(row["evidenceStart"])),
+            evidenceEnd: Int(int64(row["evidenceEnd"])),
+            evidenceStartUTF8Byte: Int(int64(row["evidenceStartUTF8Byte"])),
+            evidenceEndUTF8Byte: Int(int64(row["evidenceEndUTF8Byte"])),
+            sourceDigest: string(row["sourceDigest"]),
+            extractorProviderID: string(row["extractorProviderID"]),
+            extractorModelID: string(row["extractorModelID"]),
+            extractorModelVersion: string(row["extractorModelVersion"]),
+            extractionSchemaVersion: string(row["extractionSchemaVersion"]),
+            searchProjection: string(row["searchProjection"]),
+            searchProjectionVersion: string(row["searchProjectionVersion"]),
             adjectiveBitmap: int64(row["adjectiveBitmap"]),
             operationalBitmap: int64(row["operationalBitmap"]),
             provenanceBitmap: int64(row["provenanceBitmap"]),
@@ -4431,13 +5137,14 @@ public actor DrawerStore {
         drawerId: String,
         content: String
     ) async throws -> Int {
-        // Content changed in place → the distilled representation (a view
-        // of the OLD content) is stale. NULL-on-edit in the same statement
-        // is the §7.3 regeneration trigger — no staleness flag, no Bool.
+        // Content changed in place → the content-derived columns
+        // (ssc_facts, subject trio) describe the OLD content. NULL-on-edit
+        // in the same statement is the regeneration trigger — no staleness
+        // flag, no Bool.
         //
         // Wrapped in a serializable transaction to read the current
-        // operationalBitmap before writing, so the has_current_representation
-        // bit (cookbook §2.4.1) can be cleared in the same statement as
+        // operationalBitmap before writing, so the content-derived bits
+        // (19, 27, 28; factsExtracted) can be cleared in the same statement as
         // the four distillation columns (§4 invariant: bit and columns
         // travel together). Pre-read cost is acceptable — dataset-content
         // writes are rare (signature computation only).
@@ -4451,7 +5158,10 @@ public actor DrawerStore {
             // same contract as the un-wrapped call). Compute the cleared
             // bitmap using the prior value, or 0 if the row is not found.
             let currentOp = rows.first.map { Self.int64($0["operationalBitmap"]) } ?? 0
-            let clearedOp = currentOp & ~DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+            // Content changed: clear the content-derived bits (19, 27, 28; factsExtracted) so the
+            // span rows are re-encoded, in the same UPDATE that NULLs the
+            // content-derived columns below.
+            let clearedOp = currentOp & ~DrawerFeatureFlags.clearedOnContentWrite
             return try await txn.rowStore.update(
                 table: "drawers",
                 values: Self.withClearedRepresentation([
@@ -4908,99 +5618,399 @@ public actor DrawerStore {
         }
     }
 
-    // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
+    // MARK: - Content-derived columns (ssc_facts, subject trio) and the span index bit
 
     /// Every content-derived column, all NULL — merged into every UPDATE
-    /// whose values touch `content`, so derived text can never outlive
-    /// the content it renders (the §7.3 NULL-on-edit regeneration trigger
-    /// and the erasure scrub: distilled text and the subject line are both
-    /// content-derived, so zeroing content must scrub them in the same
-    /// statement). Covers the distilled quad and the subject trio (PR-01).
+    /// whose values touch `content`, so derived text can never outlive the
+    /// content it was derived from (the erasure scrub and the content-edit
+    /// regeneration trigger). Covers `ssc_facts` (Encoder Rerank Program
+    /// §6: a NULL after a content write is the enrichment stage's "needs
+    /// facts" predicate) and the subject trio (PR-01). The matching bits
+    /// (19, 27, 28; `factsExtracted` is cleared too — a content write
+    /// revokes the prior extraction result) clear through
+    /// `DrawerFeatureFlags.clearedOnContentWrite` in the same statement.
     private static let clearedRepresentationValues: [String: TypedValue] = [
-        "distilled": .null,
-        "distilled_pipeline_version": .null,
-        "distilled_token_count": .null,
-        "distilled_at": .null,
+        "ssc_facts": .null,
         "subject": .null,
         "subject_pipeline_version": .null,
         "subject_at": .null,
     ]
 
-    /// Merge the representation-clearing NULLs into a content-writing
-    /// UPDATE's value map. Caller values win on key collision by
-    /// construction (no caller writes representation columns and content
-    /// in one statement — `setDistilledRepresentation` never carries
-    /// `content`).
+    /// Merge the content-derived NULLs into a content-writing UPDATE's
+    /// value map. Caller values win on key collision by construction (no
+    /// caller writes derived columns and content in one statement).
     private static func withClearedRepresentation(
         _ values: [String: TypedValue]
     ) -> [String: TypedValue] {
         values.merging(clearedRepresentationValues) { caller, _ in caller }
     }
 
-    /// Write the distilled representation of one drawer — all four columns
-    /// in ONE atomic UPDATE (SPEC §4 invariant: NULL together or populated
-    /// together).
+    /// Write (or clear, with `nil`) one drawer's SSC facts (Encoder Rerank
+    /// Program §6): the grammar-v1 inner text without the `(*[` `]*)`
+    /// delimiters, pairs comma-separated. A direct column write like the
+    /// subject line: no audit event, no supersession cascade, no lifecycle
+    /// or lineage field touched, and no content digest bump (the facts are
+    /// derived from `content`, which has its own trail). The enrichment
+    /// stage calls this after the drawer write; every content write NULLs
+    /// the column again. Mirrors Rust `set_ssc_facts`.
     ///
-    /// A representation is a deterministic, regenerable function of
-    /// (content, pipeline version) — a view, not a belief-state change —
-    /// so, like `updateDatasetContent`, this is a direct column write: no
-    /// audit event, no supersession cascade, no lifecycle or lineage field
-    /// touched, and no content digest/revision bump (search isolation §9:
-    /// a representation-only write emits no index job).
-    ///
-    /// Mirrors Rust `set_distilled_representation` (twin parity).
-    ///
-    /// - Parameters:
-    ///   - drawerId: The drawer row id (`Drawer.id`) of the SOURCE drawer.
-    ///   - distilled: The distilled rendering (SPEC §5 format).
-    ///   - pipelineVersion: Format+pipeline contract identifier ("p1").
-    ///   - tokenCount: Approximate token count of `distilled` (SPEC §6).
-    ///   - at: Generation instant (deterministic clock — passed in, never
-    ///     read here).
     /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
-    public func setDistilledRepresentation(
-        drawerId: String,
-        distilled: String,
-        pipelineVersion: String,
-        tokenCount: Int64,
-        at generatedAt: Date
-    ) async throws -> Int {
+    @discardableResult
+    public func setSSCFacts(_ facts: String?, for drawerId: String) async throws -> Int {
         try Self.validateNonEmpty(drawerId, label: "drawerId")
-        try Self.validateNonEmpty(distilled, label: "distilled")
-        try Self.validateNonEmpty(pipelineVersion, label: "pipelineVersion")
-        // Read-modify-write within a serializable transaction so the
-        // has_current_representation bit (cookbook §2.4.1) is set in the
-        // SAME UPDATE as the four distillation columns (§4 invariant: bit
-        // and columns travel together; skew is structurally impossible).
+        if let facts, facts.isEmpty {
+            throw LocusKitError.invalidContent("ssc_facts must be nil or non-empty")
+        }
+        return try await storage.rowStore.update(
+            table: "drawers",
+            values: ["ssc_facts": facts.map { TypedValue.text($0) } ?? .null],
+            where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+        )
+    }
+
+    /// Set bit 27 (`spanIndexed`) on one drawer after its span rows were
+    /// written under the active encoder model. A DERIVED SIGNAL write (the
+    /// duty owns it): no audit event, no cascade, no digest bump.
+    /// Read-modify-write in one serializable transaction, the same shape as
+    /// `setAnomalousFlag`, so a concurrent content write cannot interleave
+    /// between the read and the write. Mirrors Rust `set_span_indexed`.
+    ///
+    /// - Returns: Count of rows updated (0 = drawer not found or bit already
+    ///   set; 1 = success).
+    @discardableResult
+    public func setSpanIndexed(drawerId: String) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
         return try await storage.transaction(isolation: .serializable) { txn in
             let rows = try await txn.rowStore.query(
                 table: "drawers",
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
                 orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"]
             )
-            // Row not found → zero rows updated (mirrors the prior single-
-            // UPDATE contract; the caller checks for 0 and skips downstream
-            // writes).
             guard let row = rows.first else { return 0 }
             let currentOp = Self.int64(row["operationalBitmap"])
-            let setOp = currentOp | DrawerFeatureFlags.hasCurrentRepresentation.rawValue
+            let updatedOp = currentOp | DrawerFeatureFlags.spanIndexed.rawValue
+            guard updatedOp != currentOp else { return 0 }
             return try await txn.rowStore.update(
                 table: "drawers",
-                values: [
-                    "distilled": .text(distilled),
-                    "distilled_pipeline_version": .text(pipelineVersion),
-                    "distilled_token_count": .int(tokenCount),
-                    "distilled_at": .timestamp(generatedAt),
-                    "operationalBitmap": .bitmap(setOp),
-                ],
+                values: ["operationalBitmap": .bitmap(updatedOp)],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+        }
+    }
+
+    /// The span-encode duty's work items: active drawers with non-empty
+    /// content whose bit 27 is clear, oldest first, at most `limit`, resuming
+    /// after `afterDrawerID` when paging. Empty-content active rows
+    /// (gate-rejected erasure scrubs) carry nothing to encode and are
+    /// excluded. Bit 27 is cleared by every content write and by encoder
+    /// activation, so this predicate is the whole re-encode policy. Full
+    /// rows are returned because the duty needs `content` and
+    /// `content_hash`. Mirrors Rust `span_index_debt_batch`.
+    public func spanIndexDebtBatch(limit: Int, afterDrawerID: String? = nil) async throws -> [Drawer] {
+        var clauses: [StoragePredicate] = [Self.spanIndexDebtPredicate]
+        if let afterDrawerID {
+            clauses.append(.gt(Column(table: "drawers", name: "id"), .text(afterDrawerID)))
+        }
+        let rows = try await storage.rowStore.query(
+            table: "drawers",
+            where: .and(clauses),
+            orderBy: [
+                OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),
+            ],
+            limit: limit, offset: nil, columns: nil
+        )
+        return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "spanIndexDebtBatch")
+    }
+
+    /// Count of active, non-empty drawers whose bit 27 is clear — the
+    /// span-encode drain's `pending`. F10: a single `COUNT(*)` query
+    /// (`RowStore.count(table:where:)`) rather than materializing and
+    /// decoding every matching row just to measure `rows.count` — this duty
+    /// polls on a five-second cadence, so the old form re-paid the full
+    /// matching-row materialization cost on every tick regardless of how
+    /// large the debt was. Mirrors Rust `count_span_index_debt`.
+    public func countSpanIndexDebt() async throws -> Int {
+        try await storage.rowStore.count(
+            table: "drawers", where: Self.spanIndexDebtPredicate)
+    }
+
+    /// Active, non-empty, bit 27 clear.
+    private static var spanIndexDebtPredicate: StoragePredicate {
+        .and([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .neq(Column(table: "drawers", name: "content"), .text("")),
+            .bitmaskNone(Column(table: "drawers", name: "operationalBitmap"),
+                         mask: DrawerFeatureFlags.spanIndexed.rawValue),
+        ])
+    }
+
+    /// Mark distilled fact extraction settled for the current content and
+    /// active recipe. Zero accepted facts is still settled work.
+    @discardableResult
+    public func setFactsExtracted(drawerId: String) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
+                orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"])
+            guard let row = rows.first else { return 0 }
+            let current = Self.int64(row["operationalBitmap"])
+            let updated = current | DrawerFeatureFlags.factsExtracted.rawValue
+            guard current != updated else { return 0 }
+            return try await txn.rowStore.update(
+                table: "drawers", values: ["operationalBitmap": .bitmap(updated)],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+        }
+    }
+
+    /// Compare-and-set form used by the extraction duty. The bit is written
+    /// only while the row is live and its content still exactly matches the
+    /// snapshot sent to inference, closing the final rewrite race.
+    @discardableResult
+    public func setFactsExtracted(
+        drawerId: String, ifContentMatches expectedContent: String
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        let id = Column(table: "drawers", name: "id")
+        let content = Column(table: "drawers", name: "content")
+        let tombstone = Column(table: "drawers", name: "tombstonedAt")
+        let op = Column(table: "drawers", name: "operationalBitmap")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let predicate: StoragePredicate = .and([
+                .eq(id, .text(drawerId)), .eq(content, .text(expectedContent)),
+                .isNull(tombstone),
+            ])
+            let rows = try await txn.rowStore.query(
+                table: "drawers", where: predicate, orderBy: [], limit: 1,
+                offset: nil, columns: ["operationalBitmap"])
+            guard let row = rows.first else { return 0 }
+            let current = Self.int64(row["operationalBitmap"])
+            let updated = current | DrawerFeatureFlags.factsExtracted.rawValue
+            guard current != updated else { return 1 }
+            return try await txn.rowStore.update(
+                table: "drawers", values: ["operationalBitmap": .bitmap(updated)],
+                where: .and([predicate, .bitmaskNone(
+                    op, mask: DrawerFeatureFlags.factsExtracted.rawValue)]))
+        }
+    }
+
+    /// Settle one source as REJECTED by the active recipe: sets bits 28 and 29
+    /// together, only while the drawer is live, its content still equals the
+    /// inference snapshot, and `recipeID` is the active recipe. Returns nil when
+    /// the source or recipe changed, 0 when already settled, 1 when written.
+    /// The rejected row stays in the estate as the analysis corpus; the reason
+    /// lives in the duty's checkpoint row. Mirrors Rust
+    /// `mark_fact_extraction_rejected`.
+    public func markFactExtractionRejected(
+        sourceID: String, expectedContent: String, recipeID: String
+    ) async throws -> Int? {
+        try Self.validateNonEmpty(sourceID, label: "sourceID")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let predicate: StoragePredicate = .and([
+                .eq(Column(table: "drawers", name: "id"), .text(sourceID)),
+                .eq(Column(table: "drawers", name: "content"), .text(expectedContent)),
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .lt(Column(table: "drawers", name: "g_state_cluster"), .int(Int64(RowState.activeClusterUpperBoundRaw))),
+            ])
+            guard let source = try await txn.rowStore.query(table: "drawers",
+                where: predicate, orderBy: [], limit: 1, offset: nil,
+                columns: ["operationalBitmap"]).first else { return nil }
+            let registry = try await txn.rowStore.query(table: "fact_extractor_models", where: .and([
+                .eq(Column(table: "fact_extractor_models", name: "recipe_id"), .text(recipeID)),
+                .eq(Column(table: "fact_extractor_models", name: "is_active"), .int(1)),
+            ]), orderBy: [], limit: 1, offset: nil)
+            guard !registry.isEmpty else { return nil }
+            let current = Self.int64(source["operationalBitmap"])
+            let settled = DrawerFeatureFlags.factsExtracted.rawValue | DrawerFeatureFlags.factsRejected.rawValue
+            if current & DrawerFeatureFlags.factsExtracted.rawValue != 0 { return 0 }
+            return try await txn.rowStore.update(
+                table: "drawers", values: ["operationalBitmap": .bitmap(current | settled)],
+                where: predicate)
+        }
+    }
+
+    /// Live drawers the active recipe rejected (bit 29 set): the rejected corpus.
+    public func countFactExtractionRejected() async throws -> Int {
+        try await storage.rowStore.count(table: "drawers", where: .and([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .lt(Column(table: "drawers", name: "g_state_cluster"), .int(Int64(RowState.activeClusterUpperBoundRaw))),
+            .bitmaskAll(Column(table: "drawers", name: "operationalBitmap"),
+                        mask: DrawerFeatureFlags.factsRejected.rawValue),
+        ]))
+    }
+
+    /// Publish one completely processed source generation atomically. Nil means
+    /// the source/recipe changed. A replay returns zero. Empty success never
+    /// retires facts; absence from new model output is not a retraction.
+    public func publishExtractedFacts(
+        sourceID: String, expectedContent: String, recipeID: String,
+        facts: [KGFact], now: Date
+    ) async throws -> Int? {
+        for fact in facts {
+            try Self.validateNonEmpty(fact.subject, label: "subject")
+            try Self.validateNonEmpty(fact.predicate, label: "predicate")
+            try Self.validateNonEmpty(fact.object, label: "object")
+            guard fact.sourceDrawerID == sourceID, !fact.extractionSchemaVersion.isEmpty else {
+                throw LocusKitError.invalidContent("extraction publication source mismatch")
+            }
+        }
+        let stamp = hlc.send(now: Int64(now.timeIntervalSince1970 * 1000))
+        let estateID = estateUuid
+        let vocab = vocabulary
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let sourcePredicate: StoragePredicate = .and([
+                .eq(Column(table: "drawers", name: "id"), .text(sourceID)),
+                .eq(Column(table: "drawers", name: "content"), .text(expectedContent)),
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .lt(Column(table: "drawers", name: "g_state_cluster"), .int(Int64(RowState.activeClusterUpperBoundRaw))),
+            ])
+            guard let source = try await txn.rowStore.query(table: "drawers",
+                where: sourcePredicate, orderBy: [], limit: 1, offset: nil).first else { return nil }
+            let registry = try await txn.rowStore.query(table: "fact_extractor_models", where: .and([
+                .eq(Column(table: "fact_extractor_models", name: "recipe_id"), .text(recipeID)),
+                .eq(Column(table: "fact_extractor_models", name: "is_active"), .int(1)),
+            ]), orderBy: [], limit: 1, offset: nil)
+            guard !registry.isEmpty else { return nil }
+            let op = Self.int64(source["operationalBitmap"])
+            if op & DrawerFeatureFlags.factsExtracted.rawValue != 0 { return 0 }
+            let history = try await txn.rowStore.query(table: "kg_facts", where:
+                .eq(Column(table: "kg_facts", name: "sourceDrawerID"), .text(sourceID)))
+            var ids = Set(history.map { Self.string($0["id"]) })
+            var filed = 0
+            for fact in facts where ids.insert(fact.id).inserted {
+                var values = Self.kgFactValues(fact)
+                // Inherit current source access policy inside the same transaction.
+                values["adjectiveBitmap"] = .bitmap(Self.int64(source["adjectiveBitmap"]))
+                values["provenanceBitmap"] = .bitmap(Self.int64(source["provenance"]))
+                _ = try await txn.rowStore.insert(table: "kg_facts", values: values)
+                filed += 1
+            }
+            let desiredIDs = Set(facts.map(\.id))
+            let inactiveIDs = Set(history.filter {
+                Self.int64($0["adjectiveBitmap"]) & 63 >= Int64(RowState.activeClusterUpperBoundRaw)
+            }.map { Self.string($0["id"]) })
+            let anchor = SubstrateTypes.LatticeAnchor.udcQid(
+                Self.string(source["udcCode"]), qid: Self.string(source["wikidataQID"]))
+            // Only positively replaced duplicates are retired. An omitted fact,
+            // even after a recipe change, remains an independently grounded claim.
+            for row in history where !facts.isEmpty && !desiredIDs.contains(Self.string(row["id"])) {
+                guard !Self.string(row["extractionSchemaVersion"]).isEmpty,
+                      Self.int64(row["adjectiveBitmap"]) & 63 < Int64(RowState.activeClusterUpperBoundRaw),
+                      facts.contains(where: {
+                          !inactiveIDs.contains($0.id)
+                          && $0.subject == Self.string(row["subject"]) && $0.predicate == Self.string(row["predicate"])
+                          && $0.object == Self.string(row["object"]) && $0.evidenceQuote == Self.string(row["evidenceQuote"])
+                      }) else { continue }
+                let result = AuditGate.admit(estateUuid: estateID,
+                    rowId: RowKeyDerivation.deterministicRowKey(from: Self.string(row["id"])),
+                    nounType: .kgFact, verb: .retract,
+                    prior: BitmapFields(adjective: UInt64(bitPattern: Self.int64(row["adjectiveBitmap"])),
+                        operational: UInt64(bitPattern: Self.int64(row["operationalBitmap"])),
+                        provenance: UInt64(bitPattern: Self.int64(row["provenanceBitmap"]))),
+                    priorLatticeAnchor: anchor,
+                    writes: [FieldWrite(slot: FieldSlot(column: .adjective, shift: 0, width: 6,
+                        label: "state", legalValues: [0, 1, 2, 3, 16, 17, 18, 19, 32, 33]), value: 18)],
+                    afterLatticeAnchor: anchor, vocabulary: vocab, hlc: stamp, actor: "fact-extraction-duty")
+                guard case .success(let event) = result else {
+                    throw LocusKitError.invalidContent("fact replacement rejected by audit gate")
+                }
+                _ = try await txn.rowStore.update(table: "kg_facts",
+                    values: ["adjectiveBitmap": .bitmap(event.afterBitmaps.adjective)], where:
+                    .eq(Column(table: "kg_facts", name: "id"), .text(Self.string(row["id"]))))
+                try await txn.auditLog.append(event.withReason("replaced by grounded extraction generation"))
+            }
+            _ = try await txn.rowStore.update(table: "drawers",
+                values: ["operationalBitmap": .bitmap(op | DrawerFeatureFlags.factsExtracted.rawValue)],
+                where: sourcePredicate)
+            return filed
+        }
+    }
+
+    /// Active, non-empty drawers whose fact-extraction settlement bit is clear.
+    public func factExtractionDebtBatch(
+        limit: Int, afterDrawerID: String? = nil
+    ) async throws -> [Drawer] {
+        var clauses = [Self.factExtractionDebtPredicate]
+        if let afterDrawerID {
+            clauses.append(.gt(Column(table: "drawers", name: "id"), .text(afterDrawerID)))
+        }
+        let rows = try await storage.rowStore.query(
+            table: "drawers", where: .and(clauses),
+            orderBy: [OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending)],
+            limit: limit, offset: nil, columns: nil)
+        return try Self.decodeDrawerRowsSkipCorrupt(rows, scan: "factExtractionDebtBatch")
+    }
+
+    public func countFactExtractionDebt() async throws -> Int {
+        try await storage.rowStore.count(
+            table: "drawers", where: Self.factExtractionDebtPredicate)
+    }
+
+    private static var factExtractionDebtPredicate: StoragePredicate {
+        .and([
+            .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            .lt(Column(table: "drawers", name: "g_state_cluster"), .int(Int64(RowState.activeClusterUpperBoundRaw))),
+            .neq(Column(table: "drawers", name: "content"), .text("")),
+            .bitmaskNone(Column(table: "drawers", name: "operationalBitmap"),
+                         mask: DrawerFeatureFlags.factsExtracted.rawValue),
+        ])
+    }
+
+    // ── Anomalous flag write (§11.18 anomalous-flag recall prefilter) ────────
+
+    /// Set or clear bit 26 (`isAnomalous`) on one drawer's `operationalBitmap`.
+    ///
+    /// This is a DERIVED SIGNAL write — it carries no audit event, no
+    /// supersession cascade, no lifecycle or lineage field touched, and no
+    /// content digest or revision bump. The anomaly flag is computed by
+    /// GeniusLocusKit's room-cohesion sweep, not asserted by a user or
+    /// belief-state change.
+    ///
+    /// Implemented as a read-modify-write within a single serializable
+    /// transaction, the pattern every bitmap-bit write here follows
+    /// (`setSpanIndexed` too): the read and the write are atomic so two
+    /// concurrent sweep iterations on the same drawer cannot interleave.
+    ///
+    /// - Parameters:
+    ///   - drawerId: The `Drawer.id` whose bit should change.
+    ///   - anomalous: `true` sets bit 26; `false` clears it.
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    public func setAnomalousFlag(
+        drawerId: String,
+        anomalous: Bool
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)),
+                orderBy: [], limit: 1, offset: nil, columns: ["operationalBitmap"]
+            )
+            guard let row = rows.first else { return 0 }
+            let currentOp = Self.int64(row["operationalBitmap"])
+            let updatedOp: Int64
+            if anomalous {
+                // Set bit 26 — drawer is a low-cohesion outlier.
+                updatedOp = currentOp | DrawerFeatureFlags.isAnomalous.rawValue
+            } else {
+                // Clear bit 26 — drawer is not anomalous (or room too small).
+                updatedOp = currentOp & ~DrawerFeatureFlags.isAnomalous.rawValue
+            }
+            // Skip the write if the bitmap is unchanged — avoids spurious
+            // UPDATE traffic when the sweep re-runs on a stable estate.
+            guard updatedOp != currentOp else { return 0 }
+            return try await txn.rowStore.update(
+                table: "drawers",
+                values: ["operationalBitmap": .bitmap(updatedOp)],
                 where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
             )
         }
     }
 
     /// Write the subject line of one drawer — all three columns in ONE
-    /// atomic UPDATE (PR-01; same invariant family as the distilled quad:
-    /// NULL together or populated together) PLUS a sealed `"setSubject"`
+    /// atomic UPDATE (PR-01: NULL together or populated together) PLUS a
+    /// sealed `"setSubject"`
     /// custody audit event, committed together in one transaction (Codex
     /// cc90c5dcecb081918c159788e1ffb3d6): the column write and the audit
     /// append succeed or fail together. No supersession cascade, no
@@ -5132,6 +6142,165 @@ public actor DrawerStore {
     /// (Rust `SUBJECT_PIPELINE_AI_V1`).
     public static let subjectPipelineAIV1 = "ai-v1"
 
+    /// Append an encode-completion audit marker: one event per encode drain
+    /// unit, anchored on the unit's first drawer, recording when that unit's
+    /// background encode work finished (A2, benchmark reset 2026-08-13).
+    ///
+    /// This closes the gap named in finding P2: capture supplies a start
+    /// timestamp but nothing supplied an end, so INGEST time (write-ack to
+    /// encode-idle) could not be derived from the audit log. A production
+    /// single write is its own drain unit, so the marker is exact per-row;
+    /// a bulk pass emits ONE marker carrying `rows=N`, giving throughput.
+    ///
+    /// Shape follows the `setSubject` precedent exactly: an informational
+    /// event with `beforeBitmaps == afterBitmaps`, appended directly to the
+    /// audit log WITHOUT `AuditGate.admit` — the gate governs bitmap
+    /// mutations, and this event mutates nothing. The `reason` column
+    /// carries the machine-parseable payload (`session=<id> rows=<n>`),
+    /// which needs no schema change and propagates through observer sync
+    /// like every other audit row (G-Set CRDT).
+    ///
+    /// An absent drawer row is a silent no-op (mirrors setSubject's
+    /// historical contract): the drawer may have been expunged between
+    /// encode completion and the marker write, and a marker must never
+    /// fail the drain worker.
+    ///
+    /// - Parameters:
+    ///   - drawerId: The FIRST drawer id of the drain unit — the event's
+    ///     row anchor. The remaining rows of the unit are represented by
+    ///     the count, not by per-row events.
+    ///   - rowCount: Number of rows the drain unit encoded (`rows=N`).
+    ///   - unitSessionID: The queue session id that tagged the drain unit's
+    ///     batch claim (`session=<id>`), bracketing the unit end-to-end.
+    ///   - completedAt: Wall-clock completion time, passed in by the drain
+    ///     worker (the process boundary where "now" legitimately enters).
+    public func appendEncodeCompleteMarker(
+        drawerId: String,
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
+        let nowMillis = Int64(completedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+            guard let row = rows.first else { return }
+            let bitmaps = (
+                adjective: Self.int64(row["adjectiveBitmap"]),
+                operational: Self.int64(row["operationalBitmap"]),
+                provenance: Self.int64(row["provenance"])
+            )
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let event = AuditEvent(
+                estateUuid: estate,
+                rowId: rowUuid,
+                hlc: stamp,
+                verb: Self.encodeCompleteVerb,
+                beforeBitmaps: bitmaps,
+                afterBitmaps: bitmaps,
+                beforeLatticeAnchor: anchor,
+                afterLatticeAnchor: anchor,
+                actor: Self.encodeWorkerActor,
+                reason: "session=\(unitSessionID) rows=\(rowCount)")
+            try await txn.auditLog.append(event)
+        }
+    }
+
+    /// Audit verb for encode-completion markers (A2). Sits beside the
+    /// mutation verbs (`capture`, `mutate.*`, `withdraw`, `expunge`,
+    /// `setSubject`) but is informational: it never changes a bitmap.
+    /// Shared by both legs (Rust `ENCODE_COMPLETE_VERB`).
+    public static let encodeCompleteVerb = "encodeComplete"
+
+    /// Audit actor for encode-completion markers: the background encode
+    /// drain worker, distinct from `capture`/`mcp_agent`/`dreaming_daemon`.
+    /// Shared by both legs (Rust `ENCODE_WORKER_ACTOR`).
+    public static let encodeWorkerActor = "encode_worker"
+
+    /// Append a reindex-completion marker (C3, benchmark reset 2026-08-13):
+    /// an informational estate-anchored audit event sealing when a
+    /// full-corpus basis retrain FINISHED — the CYCLE tier-3 boundary (a
+    /// row's own novel vocabulary becomes semantically findable only after
+    /// the first retrain that follows it). Verb `reindexComplete`, actor
+    /// `reindex_worker`, reason `session=<id> rows=<n>`. Same no-gate,
+    /// before==after shape as the other markers.
+    /// Mirrors Rust `append_reindex_complete_marker`.
+    public func appendReindexCompleteMarker(
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let nowMillis = Int64(completedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        let zero: (adjective: Int64, operational: Int64, provenance: Int64) = (0, 0, 0)
+        let anchor = SubstrateTypes.LatticeAnchor.udc("000")
+        let event = AuditEvent(
+            estateUuid: estate,
+            rowId: estate,
+            hlc: stamp,
+            verb: "reindexComplete",
+            beforeBitmaps: zero,
+            afterBitmaps: zero,
+            beforeLatticeAnchor: anchor,
+            afterLatticeAnchor: anchor,
+            actor: "reindex_worker",
+            reason: "session=\(unitSessionID) rows=\(rowCount)")
+        try await storage.transaction(isolation: .serializable) { txn in
+            try await txn.auditLog.append(event)
+        }
+    }
+
+    /// Dream-cycle bracket phase (A3, benchmark reset 2026-08-13). A dream
+    /// cycle emits one `dreamStart` marker when it begins and one `dreamEnd`
+    /// when it completes, both carrying the same session id, so CYCLE-dreamt
+    /// time can be attributed from the audit log alone.
+    public enum DreamCyclePhase: String, Sendable {
+        case start = "dreamStart"
+        case end   = "dreamEnd"
+    }
+
+    /// Append a dream-cycle bracket marker (A3): an informational audit
+    /// event anchored on the ESTATE itself (`rowId == estateUuid` — a dream
+    /// cycle belongs to no single drawer), with zero bitmaps, the
+    /// unclassified lattice anchor, actor `dreaming_daemon`, and
+    /// `reason: "session=<id>"`. Same no-gate rationale as
+    /// `appendEncodeCompleteMarker`: nothing mutates, the gate governs
+    /// bitmap writes. Mirrors Rust `append_dream_cycle_marker`.
+    public func appendDreamCycleMarker(
+        phase: DreamCyclePhase,
+        unitSessionID: String,
+        at markedAt: Date
+    ) async throws {
+        try Self.validateNonEmpty(unitSessionID, label: "unitSessionID")
+        let nowMillis = Int64(markedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        let zero: (adjective: Int64, operational: Int64, provenance: Int64) = (0, 0, 0)
+        let anchor = SubstrateTypes.LatticeAnchor.udc("000")
+        let event = AuditEvent(
+            estateUuid: estate,
+            rowId: estate,
+            hlc: stamp,
+            verb: phase.rawValue,
+            beforeBitmaps: zero,
+            afterBitmaps: zero,
+            beforeLatticeAnchor: anchor,
+            afterLatticeAnchor: anchor,
+            actor: "dreaming_daemon",
+            reason: "session=\(unitSessionID)")
+        try await storage.transaction(isolation: .serializable) { txn in
+            try await txn.auditLog.append(event)
+        }
+    }
+
     /// Count of active drawers still awaiting a subject line — the
     /// backfill-eligibility predicate as an aggregate (PR-01): not
     /// tombstoned, non-empty content, and subject absent OR produced
@@ -5199,15 +6368,15 @@ public actor DrawerStore {
     }
 
     /// Tier-aware debt count (PR-10): NULL rows plus rows produced under
-    /// any of `includingPipelines`. Mirrors Rust
-    /// `count_subject_debt_including`.
+    /// any of `includingPipelines`. F10: a single `COUNT(*)` query
+    /// (`RowStore.count(table:where:)`) rather than materializing and
+    /// decoding every matching row just to measure `rows.count` — see
+    /// `countSpanIndexDebt`'s note; the same five-second poll cadence
+    /// applies here. Mirrors Rust `count_subject_debt_including`.
     public func countSubjectDebt(includingPipelines pipelines: [String]) async throws -> Int {
-        let rows = try await storage.rowStore.query(
+        try await storage.rowStore.count(
             table: "drawers",
-            where: Self.subjectDebtPredicate(includingPipelines: pipelines),
-            orderBy: [], limit: nil, offset: nil, columns: ["id"]
-        )
-        return rows.count
+            where: Self.subjectDebtPredicate(includingPipelines: pipelines))
     }
 
     /// The subject-backfill sweep enumerator (PR-09): up to `limit`
@@ -5250,48 +6419,6 @@ public actor DrawerStore {
                 .or([
                     .isNull(Column(table: "drawers", name: "subject")),
                     .neq(Column(table: "drawers", name: "subject_pipeline_version"),
-                         .text(pipelineVersion)),
-                ]),
-            ]),
-            orderBy: [], limit: nil, offset: nil, columns: ["id"]
-        )
-        return rows.count
-    }
-
-    /// Count of active drawers still awaiting distillation — the §7.1
-    /// eligibility predicate as an aggregate: not tombstoned, non-empty
-    /// content, and representation absent (bit 19 clear) OR produced under
-    /// a different pipeline contract. This is the drain-accounting observable
-    /// (SPEC_DISTILLATION_STORAGE §7.1 / FINDING_11X_MAINTENANCE_WALK
-    /// constraint 6): `drainStatuses` reports it as the distillation
-    /// drain's `pending`, so "fully drained" cannot read true while any
-    /// row still owes a representation — measured off the rows themselves,
-    /// not a queue-depth proxy. Empty-content active rows (gate-rejected
-    /// erasure scrubs) are excluded: they carry nothing to distill.
-    /// Projected to `id` only, so no text column is materialized.
-    ///
-    /// The `bitmaskNone` predicate replaces the previous `isNull(distilled)`
-    /// test — both are correct (§4 invariant: bit and columns are always in
-    /// agreement), but the bitmap predicate is index-friendly and eliminates
-    /// the per-row NULL scan on the text column.
-    ///
-    /// Mirrors Rust `count_undistilled`.
-    public func countUndistilled(pipelineVersion: String) async throws -> Int {
-        let rows = try await storage.rowStore.query(
-            table: "drawers",
-            where: .and([
-                .isNull(Column(table: "drawers", name: "tombstonedAt")),
-                .neq(Column(table: "drawers", name: "content"), .text("")),
-                .or([
-                    // Bit 19 (has_current_representation) clear → no
-                    // representation yet. Cookbook §2.4.1: the bit is the
-                    // authoritative presence indicator; faster than IS NULL
-                    // on the text column.
-                    .bitmaskNone(
-                        Column(table: "drawers", name: "operationalBitmap"),
-                        mask: DrawerFeatureFlags.hasCurrentRepresentation.rawValue
-                    ),
-                    .neq(Column(table: "drawers", name: "distilled_pipeline_version"),
                          .text(pipelineVersion)),
                 ]),
             ]),

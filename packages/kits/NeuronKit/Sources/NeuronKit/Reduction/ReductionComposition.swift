@@ -139,8 +139,10 @@ extension NeuronKit {
             ReductionCandidate(
                 id: item.candidate.id, content: item.candidate.content,
                 room: item.candidate.room, score: item.candidate.score,
-                udcCode: item.candidate.udcCode, udcFacets: item.candidate.udcFacets,
+                udcCode: item.candidate.udcCode, qid: item.candidate.qid,
+                udcFacets: item.candidate.udcFacets,
                 coarseRank: item.candidate.coarseRank, eventTime: item.candidate.eventTime,
+                filedAt: item.candidate.filedAt,
                 isCurrentlyBelieved: item.candidate.isCurrentlyBelieved,
                 precisionScore: item.precision)
         }
@@ -319,8 +321,9 @@ extension NeuronKit {
             // and the T3 temporal scorer reads them. (NK-7 planned hardening)
             return ReductionCandidate(
                 id: c.id, content: body, room: c.room, score: c.score,
-                udcCode: c.udcCode, udcFacets: c.udcFacets, coarseRank: c.coarseRank,
-                eventTime: c.eventTime, isCurrentlyBelieved: c.isCurrentlyBelieved,
+                udcCode: c.udcCode, qid: c.qid,
+                udcFacets: c.udcFacets, coarseRank: c.coarseRank,
+                eventTime: c.eventTime, filedAt: c.filedAt, isCurrentlyBelieved: c.isCurrentlyBelieved,
                 precisionScore: c.precisionScore)
         }
     }

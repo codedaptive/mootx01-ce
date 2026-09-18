@@ -135,7 +135,7 @@ struct EncryptionInvariantTests {
 
     /// E-1 (update path): a content update on an encrypting estate runs the
     /// encryption seam (wired in the W1_DISTILL wave, when UPDATE became a
-    /// protected-text write path for the distilled-representation columns),
+    /// protected-text write path for the ssc_facts and subject columns),
     /// so the write is sealed + keyID-stamped rather than refused. The
     /// invariant's INTENT — plaintext protected text never persists on an
     /// encrypting estate — is now satisfied by encryption, and the guard

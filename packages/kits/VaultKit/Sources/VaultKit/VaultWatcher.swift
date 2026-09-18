@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import OSLog
 
 // VaultWatcher.swift
@@ -30,7 +31,7 @@ import OSLog
 /// to do with them (report-not-erase policy).
 public actor VaultWatcher {
 
-    private static let log = Logger(subsystem: "com.mootx01.kit", category: "VaultWatcher")
+    private static let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "VaultKit.Watcher")
 
     /// The vault root directory being watched.
     public let vaultURL: URL

@@ -1,0 +1,16 @@
+{
+  "_comment": "Golden-pin fixture for PeriodicCoach.renderBlock() tiebreak case — shared by Swift and Rust ports. When two modes have equal attribution counts, the sort must be ascending by mode name (Filing < Recall). Both ports must produce identical output. See PeriodicCoachTests.swift and modes_tests.rs.",
+  "snapshot": {
+    "totalCalls": 10,
+    "toolCounts": {
+      "moot_memory_search": 4,
+      "moot_file_memory": 4
+    },
+    "bigramCounts": {},
+    "modeAttributionCounts": {
+      "Recall": 4,
+      "Filing": 4
+    }
+  },
+  "expected_block": "[Moot coaching · call 10]\nGood filing — 4 memories stored this session. I bet moot_confirm_memory on your most important ones marks them user-verified, which puts them on the recall fast path.\nModes available: Filing (50%), Recall (50%), Lenses (unused), Vault (unused)."
+}

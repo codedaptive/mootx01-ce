@@ -1,9 +1,9 @@
 ---
 title: LocusKit Specification
-version: 1.19.0
+version: 3.7.0
 status: active
-date: 2026-08-07
-description: "Behavioral specification for LocusKit: invariants, conformance requirements, and the contract it guarantees."
+date: 2026-09-15
+description: "Behavioral specification for LocusKit. 3.0.0 is schema v19 (Encoder Rerank Program): the encoder registry (encoder_models), the span index bit (operationalBitmap bit 27), the ssc_facts column, and the single v10 → v19 migration hop; the adornment tables and the distilled columns are gone. 3.0.1: removed the stored-distillation dependency from subject invalidation. 3.2.0 is schema v20 (Fact Extraction): twelve kg_facts evidence and projection columns, the fact_extractor_models registry, operationalBitmap bit 28 (factsExtracted), KGFactSearchProjectionBackfill, and a two-hop migration ladder (v10 → v19 → v20). 3.3.0: withdrawKGFact / withdraw_kg_fact now accepts changedBy/changed_by and reason parameters and routes through AuditGate.admit (verb Retract, active → withdrawn), emitting a sealed audit row in the same transaction as the bitmap update. 3.4.0: expungeGated / expunge_gated adds a sensitivityCeiling parameter (AdjectiveSensitivity, default .secret / Secret); the lineage cascade refuses any sibling whose sensitivity tier exceeds the ceiling, leaving it byte-identical and recording its id in ExpungeOutcome.refusedSiblingIDs / refused_sibling_ids. 3.5.0: BitmapEvaluationResult / BitmapEvaluationResult reports rows excluded only by the default-injected sensitivity ceiling without surfacing those rows."
 spec_type: kit
 authors: MOOTx01 maintainers
 package: LocusKit
@@ -91,7 +91,7 @@ This specification does NOT define:
   stores a lattice anchor per drawer; it does not own the classification.
 - Multi-estate coordination, grants, federation, the Brain layer, or
   vector recall — see `GENIUSLOCUSKIT_SPEC.md` and
-  `VECTORKIT_SPEC.md`.
+  `SYNAPSEKIT_SPEC.md`.
 - The ARIA grammar the verbs realise — see `ARIALEXICONLIB_SPEC.md`.
 
 ## § 3 — Position in the kit family
@@ -130,6 +130,7 @@ attribute of `Drawer`, `KGFact`, `DiaryEntry`, `Tunnel`, and
 column (`adjectiveBitmap`, `operationalBitmap`, `provenance`/
 `provenanceBitmap`). Bool surfaces only as a computed property backed by a
 bitmap bit (e.g. `Drawer.isPinned` via feature-flag bit 12,
+`Drawer.isAnomalous` via bit 26 (low-cohesion outlier flag, §11.18),
 `RecallTraceItem.used` via bit 0, `Tunnel.hasInverse` via bit 12).
 
 **I-3 (drawer content immutable at core):** `Drawer.content` is stored
@@ -295,6 +296,18 @@ insert `.sensitivityAtMost(.normal)` instead. The default is the conservative
 no-claims posture. The plumbing for claim-driven default adjustment is reserved
 and is not present at this revision.
 
+**B-4.2 (sensitivity-withheld evaluation result):**
+`BitmapEvaluator.evaluateResult` / `BitmapEvaluator::evaluate_result` returns
+the normally admitted rows with `withheldBySensitivity` /
+`withheld_by_sensitivity`. When the evaluator injected its default sensitivity
+ceiling, it evaluates the same already-loaded candidate set a second time with
+that ceiling omitted while retaining every other caller predicate and default;
+the count is the difference between those admissions. Therefore it counts only
+rows excluded by the default ceiling that every other predicate admits. An
+explicit sensitivity filter suppresses the default and reports zero. The
+additional evaluation never returns the above-ceiling rows across the LocusKit
+boundary.
+
 **B-5 (paged stream contract):** the first page is produced when iteration
 begins; later pages lazily on each `next()`. Page size is
 `RecallFrame.limit` or the default 50, clamped to at least 1. `pageIndex` is
@@ -347,9 +360,9 @@ but the audit event is returned unsealed. The caller is responsible for calling
 one of two sealing methods after determining step-2 success or failure:
 
 - `sealExpungeAudit(_ event: AuditEvent)` (success path): appends the gate-
-  produced event as `verb = "tombstone"` — the success audit is honest.
+  produced event as `verb = "tombstone"` — the success audit records the full success.
 - `sealExpungeOrphanAudit(rowID:successEvent:now:)` (failure path): constructs and
-  appends an `"expungeOrphan"` event — the audit honestly records the partial state
+  appends an `"expungeOrphan"` event — the audit records the partial state
   (storage succeeded, cross-kit delete did not). If this seal call also fails, the
   error is NOT swallowed: it is propagated to the GLK boundary (folded into the
   Rust `CrossKitVectorDeleteFailed.reason` string; logged at OSLog `.fault` in
@@ -372,17 +385,19 @@ string is preserved in the substrate audit trail for forensic inspection.
 
 Direct callers (not via GLK) use the sealing path and are unaffected.
 
-**B-8b (lineage walk on expunge — a refused gate preserves the row):**
+**B-8b (lineage walk on expunge — a refused sibling preserves the row):**
 `DrawerStore.expungeGated` / `expunge_gated` walks the target's full lineage
-chain (all rows sharing its `lineageID`). Members whose `tombstone` transition
-the `AuditGate` admits are scrubbed and tombstoned; already-tombstoned members
-have their content re-zeroed as defense in depth. A member the gate **refuses**
-— `accepted → tombstoned` is forbidden by S-3 (accepted rows are audit-grade
-and survive intact) — is left **byte-identical**: no content write, no state
-write, no representation clear, no audit append, and **no erasure-ledger
-record** (the read-time `ErasureOverlay` nulls content for any ledgered id, so
-a ledger record alone would suppress the row). A refused gate is a refusal,
-not a partial apply. The walk continues over the remaining members, and the
+chain (all rows sharing its `lineageID`). Each sibling is checked in order.
+First, the `sensitivityCeiling` / `sensitivity_ceiling` parameter: a member
+whose sensitivity exceeds the ceiling is refused immediately, before reaching
+`AuditGate.admit`. Second, the gate's transition table: `accepted → tombstoned`
+is refused by S-3 (accepted rows are audit-grade and survive intact). A ceiling
+refusal and a gate refusal produce identical storage outcomes — the member is
+left **byte-identical**: no content write, no state write, no representation
+clear, no audit append, and **no erasure-ledger record** (the read-time
+`ErasureOverlay` nulls content for any ledgered id, so a ledger record alone
+would suppress the row). A refusal is a refusal, not a partial apply. The walk
+continues over the remaining members, and the
 refusal is surfaced, not swallowed: the verb returns an `ExpungeOutcome`
 (Swift: `auditEvent: AuditEvent?` + `refusedSiblingIDs: [String]`; Rust:
 `event` + `refused_sibling_ids: Vec<String>`, walk order) so the caller can
@@ -467,6 +482,21 @@ and an incremental cursor without transferring ownership. Corpus indexing and
 recall results remain keyed by `Drawer.id`; LocusKit never imports CorpusKit or
 writes CorpusKit tables.
 
+**B-17 (federation identity opt-out):** `Estate.open` establishes the
+estate's Ed25519 federation identity on a federating first open. The
+federation posture is declared per open by the caller, never read from the
+environment: the host decides it from the estate catalog record (a
+registered estate federates; a transient estate does not). A
+non-federating open performs the identity step not at all: no keypair is
+generated, the identity key store is never touched in either direction,
+and no public key is written to the manifest. Grant issuance on a
+non-federating instance throws at the signing step; every other estate
+capability is unaffected. The declaration governs only the open it is
+passed to — an estate opened later with a federating posture mints then.
+Both ports implement the identical contract (Swift `federate:` parameter;
+Rust `open` for a non-federating open and `open_with_federation` for the
+explicit posture).
+
 ## § 6 — Error model (conceptual)
 
 | Category | Trigger | Recovery posture |
@@ -537,9 +567,9 @@ no second verbatim-content row. The fixture runs against both ports.
 - Fingerprint / Hamming / SimHash / count-fold math →
   `SUBSTRATELIB_SPEC.md`.
 - The FDC classification encoder → `FDC_ENCODER_CANONICAL.md`.
-- Vector embeddings and ANN recall → `VECTORKIT_SPEC.md`.
+- Vector embeddings and ANN recall → `SYNAPSEKIT_SPEC.md`.
   Relevance-ranked recall is a GLK-level operation delivered through
-  NeuronKit/HybridRecall on top of VectorKit; LocusKit's `Ordering` enum
+  NeuronKit/HybridRecall on top of SynapseKit; LocusKit's `Ordering` enum
   does not include a relevance case because LocusKit has no scoring signal.
   Callers that need relevance ordering must use GLK RecallDirector.
 - N-estate coordination, grants, cross-estate recall, branches, the Brain
@@ -563,9 +593,15 @@ the same contract with different host shapes:
   value-level results. The Rust version also surfaces helper shapes the Swift
   version keeps internal (`BitmapAuditPair`, `RoomBundle`, `RoomLevelEntry`).
   The Rust trait carries `withdraw_kg_fact`
-  (mirroring the Swift `withdrawKGFact` present on the actor); the
-  trait default returns `DatabaseUnavailable` so existing implementations are
-  not broken — only `DrawerStoreCore` carries the live bitmap update logic.
+  (mirroring the Swift `withdrawKGFact` present on the actor); both
+  now accept `changedBy`/`changed_by` (non-empty string) and
+  `reason`/`reason` (optional string). Both route through
+  `AuditGate.admit` / `audit_gate::admit` with verb `Retract`, emitting
+  a sealed audit row in the same transaction as the bitmap update
+  (adjective bits 0-5 set to `State.withdrawn` raw value 18).
+  The trait default returns `DatabaseUnavailable` so existing
+  implementations are not broken — only `DrawerStoreCore` carries the
+  live bitmap update and audit-emission logic.
   Most empty-success reads default fail-loud
   (`DatabaseUnavailable`). Two reads — `all_drawers` and
   `room_level_fingerprints` — instead carry NO default at all: per the SDK
@@ -586,7 +622,7 @@ the same contract with different host shapes:
   is structurally Rust-only; Swift reaches the same durable behaviour by
   implementing every method against its injected `Storage`.
 
-- **KG-fact active filter — single source of truth.** The active KGFact
+- **KG-fact active filter — single authoritative definition.** The active KGFact
   recall paths (`allKGFacts()` / `all_kg_facts`, `kgFacts(forDrawerID:)` /
   `kg_facts_for_drawer`, and the GLK `recallKGFacts` / `recall_kg_facts`
   pass-throughs) return the **RowState Cluster-A** set — the
@@ -946,7 +982,7 @@ sweep. The ordinary `capture(_:CaptureFrame)` verb does not set `contentKind` to
 kind). This seam assembles the correct operational bitmap (`ContentKind.dataset` raw 7
 in bits 6–11), structures the `DatasetHandleContent` JSON payload, and stamps the
 sentinel `embeddingModelID = "dataset-handle"` (satisfying the non-empty invariant
-I-4 while signalling to the VectorKit encode pipeline that no embedding should be
+I-4 while signalling to the SynapseKit encode pipeline that no embedding should be
 generated). Any path other than `captureDatasetHandle` that produces a `.dataset`-kind
 drawer is a conformance defect.
 
@@ -982,11 +1018,12 @@ normal verb surface.
 ## § 14 — Subject representation behavioral contracts
 
 The subject is a one-sentence, AI-facing summary of a drawer's content —
-the assertion field of the progressive-recall dense row (UUID · subject ·
-FDC code · WikiQID · event_time). Schema v12 stores it as three nullable
-`drawers` columns (`subject`, `subject_pipeline_version`, `subject_at`)
-that are written and cleared together, mirroring the distilled quad's
-NULL-together lifecycle.
+the second column of the canonical candidate row (ARIA_MCP_SPEC 2.0.0
+§ 8: UUID · subject · best span · SSC facts · event_time · score). Schema
+v12 stores it as three nullable `drawers` columns (`subject`,
+`subject_pipeline_version`, `subject_at`) that are written and cleared
+together; every content write NULLs them in the same statement, exactly as
+it NULLs `ssc_facts`.
 
 - **B-17 (returned, never searched):** the subject is presentation data.
   No index, no generated column, no bitmap bit, no recall filter, and no
@@ -995,18 +1032,19 @@ NULL-together lifecycle.
   ranking or matching math.
 - **B-18 (length contract):** `setSubjectRepresentation` /
   `set_subject_representation` reject an empty subject or one longer than
-  120 characters (`DrawerStore.subjectLengthContract` ↔
-  `SUBJECT_LENGTH_CONTRACT`; both ports count characters, not bytes). The
-  cap keeps the dense row's per-row cost near-uniform.
+  120 grapheme clusters (`DrawerStore.subjectLengthContract` ↔
+  `SUBJECT_LENGTH_CONTRACT`; the unit is grapheme clusters, counted
+  identically by Swift's `String.count` and by the Rust
+  `locus_kit::drawer_store::subject_length` helper, not bytes or Unicode
+  scalars). The cap keeps the candidate row's per-row cost near-uniform.
 - **B-19 (atomic set):** the trio is populated by ONE UPDATE statement.
   `subject_pipeline_version` records producer provenance (e.g. `ai-v1`,
   `minillm-v1`) and is the regeneration lever; `subject_at` is the
   generation instant, passed in as a parameter (I-6 determinism — never
   read from a clock inside the store).
 - **B-20 (content-write invalidation):** every write that changes or
-  erases `content` NULLs the trio in the same statement it NULLs the
-  distilled quad — a subject must never describe content that no longer
-  exists. Erasure paths (`expungeGated`) scrub it; dataset-content
+  erases `content` NULLs the subject trio in the same statement. A subject
+  must never describe content that no longer exists. Erasure paths (`expungeGated`) scrub it; dataset-content
   updates clear it for regeneration.
 - **B-21 (NULL is the debt marker):** NULL `subject` on a live,
   non-empty-content drawer means "subject debt" — eligible for backfill.
@@ -1027,6 +1065,191 @@ NULL-together lifecycle.
   plus the content trail reconstructs the history. A write that matches
   no row (unknown id) seals nothing. (MXE-SK, Codex
   cc90c5dcecb081918c159788e1ffb3d6.)
+
+## § ENCODER_MODELS: encoder registry, span index bit, ssc_facts (schema v19)
+
+Schema v19 (ENCODER_RERANK_CONTRACT §2, §5, §6, §12) replaces the adornment
+tables and the distilled columns with three things LocusKit owns.
+
+### The encoder registry
+
+```text
+encoder_models
+  model_id        TEXT PRIMARY KEY   -- <model>-w<window_words>, e.g. minilm-l6-v2-w60
+  model_version   TEXT NOT NULL      -- weights revision; a change is a re-index
+  dim             INTEGER NOT NULL
+  query_prefix    TEXT NOT NULL      -- "" when the card has none
+  doc_prefix      TEXT NOT NULL
+  pooling         TEXT NOT NULL      -- "mean" | "cls"
+  tokenizer_hash  TEXT NOT NULL      -- sha256 hex of the vendored vocab file
+  window_words    INTEGER NOT NULL
+  overlap_divisor INTEGER NOT NULL   -- 2 = half overlap (step = window / 2)
+  max_spans       INTEGER NOT NULL   -- 32
+  max_sequence    INTEGER NOT NULL
+  is_active       INTEGER NOT NULL DEFAULT 0
+  ext             TEXT NULL
+```
+
+One row per shipped model per device; exactly one row with `is_active = 1`
+at a time. The span window is part of the identity: a different window is a
+different index and is never compared. `EncoderModelStore` is the only
+writer: `upsert` inserts or replaces a row without touching activation;
+`activate(modelID:)` makes one row active, demotes every other, and clears
+bit 27 on every drawer that carries it, in one transaction, so the
+span-encode duty re-encodes the whole estate under the new model; `active()`
+returns the active row or nil (lexical-only recall).
+
+### The span index bit
+
+`operationalBitmap` bit 27 (`spanIndexed`) means "at least one encoder span
+row exists in `vectors` under the ACTIVE model for this row's current
+`content_hash`". It is set by the span-encode duty after a successful span
+write (`setSpanIndexed`), cleared by every content write in the same
+statement that changes `content` (`DrawerFeatureFlags.clearedOnContentWrite`
+also clears the retained bit 19), and cleared estate-wide by
+`EncoderModelStore.activate`. A clear bit IS the duty's work-item predicate:
+`spanIndexDebtBatch(limit:afterDrawerID:)` returns active, non-empty drawers
+whose bit is clear, ordered by id, and `countSpanIndexDebt()` is the drain's
+`pending`. Bit 19 (`hasCurrentRepresentation`) keeps its assignment with no
+writer; bits 28–30 stay free.
+
+### ssc_facts
+
+`drawers.ssc_facts` (TEXT, nullable, declared beside `content_fingerprint`)
+holds the grammar-v1 fact anchors of `content` as inner text without the
+`(*[` `]*)` delimiters, pairs comma-separated (`kind: hobby, entity:
+painting, place: brazil`). NULL when the content has no fact anchors and NULL
+after every content write, which is the enrichment stage's "needs facts"
+predicate. `setSSCFacts(_:for:)` writes or clears it (a direct column write,
+no audit event, no digest bump); the BM25 document takes its tokens and the
+candidate row renders it. It rides the structured hydration tier and the
+`drawers` sync manifest unchanged.
+
+### The migration hops
+
+The ladder carries TWO entries: v10 → v19 and v19 → v20. A v10 estate
+(CE 1.0.35/1.0.37) traverses both; a v19 estate receives only the second.
+The v10 → v19 hop applies the deltas that survive at 19: `operationalAND` on
+`container_fingerprints` (v11), the subject trio (v12), the kg_facts identity
+trio (v13), `idx_drawers_filedAt` (v14), the recall_trace attribution trio
+(v15), `encoder_models` and `ssc_facts` (v19). It never creates the v16–v18
+adornment or distilled objects. The v19 → v20 hop adds the twelve kg_facts
+evidence and projection columns and creates `fact_extractor_models` (see
+§ FACT_EXTRACTION below). Both hops are idempotent: addColumn skips a present
+column and all DDL is CREATE ... IF NOT EXISTS. CE 1.0.35 and 1.0.37 ship
+schema 10; development estates written at 11–18 are moved by the SQL surgery
+script, never by this ladder.
+`LocusKitSchema.upgradePath(storedVersion:)` / `schema::upgrade_path`
+decides BEFORE the schema opens: 0 fresh, 10 or 19 upgrade, 20 current,
+anything else refused by version. PersistenceKit's runner stamps the declared
+version whenever no ladder entry matches, so an unsupported estate opened
+blind would be marked current with none of the v20 objects in place.
+`mootx01 upgrade` applies that gate first and skips every later step on a
+refusal.
+
+### Conformance pins
+
+- A fresh row has `ssc_facts` NULL and bit 27 clear, and is span-index debt.
+- `setSSCFacts` / `setSpanIndexed` round-trip; a second `setSpanIndexed` is a
+  no-op (returns 0); empty facts are refused.
+- Expunge and the dataset-content patch NULL `ssc_facts` and clear bit 27 in
+  the same statement as the content change.
+- `activate` demotes the previous active row and clears bit 27 on exactly
+  the drawers that carried it; an unregistered id is refused.
+- A schema-10 SQLite file opened with the v20 declaration traverses both hops
+  and lands at 20 with `encoder_models`, `ssc_facts`, `subject`, `addedBy`,
+  `operationalAND`, the recall_trace trio, the twelve kg_facts evidence and
+  projection columns, and `fact_extractor_models` present, and no
+  `distilled*`, `adornment` column or `adornments` / `adornment_minters`
+  table; `upgradePath` refuses 11–18.
+
+## § FACT_EXTRACTION: fact extractor registry, kg_facts evidence and projection columns, factsExtracted bit (schema v20)
+
+Schema v20 (Fact Extraction Program) adds the evidence provenance and search
+projection tier to KGFacts and the fact-extractor model registry to LocusKit.
+
+### The twelve kg_facts columns (v19 to v20)
+
+The v19 to v20 migration adds twelve columns to `kg_facts`. Text columns
+default to the empty string; integer columns default to -1. A row that carries
+the empty string defaults was written before extraction ran and is backfill
+debt until `KGFactSearchProjectionBackfill` runs.
+
+```text
+evidenceQuote             TEXT NOT NULL DEFAULT ''
+evidenceStart             INTEGER NOT NULL DEFAULT -1  -- UTF-16 code-unit start in the source
+evidenceEnd               INTEGER NOT NULL DEFAULT -1  -- UTF-16 code-unit end, exclusive
+evidenceStartUTF8Byte     INTEGER NOT NULL DEFAULT -1  -- UTF-8 byte offset start
+evidenceEndUTF8Byte       INTEGER NOT NULL DEFAULT -1  -- UTF-8 byte offset end, exclusive
+sourceDigest              TEXT NOT NULL DEFAULT ''     -- SHA-256 hex of the source content at extraction time
+extractorProviderID       TEXT NOT NULL DEFAULT ''
+extractorModelID          TEXT NOT NULL DEFAULT ''
+extractorModelVersion     TEXT NOT NULL DEFAULT ''
+extractionSchemaVersion   TEXT NOT NULL DEFAULT ''     -- schema revision of the extraction prompt
+searchProjection          TEXT NOT NULL DEFAULT ''     -- pre-built BM25/vector search projection
+searchProjectionVersion   TEXT NOT NULL DEFAULT ''     -- version token; a row without the target version is projection debt
+```
+
+`KGFact` carries these as stored fields, with defaults matching the migration
+defaults so a manually filed or imported fact writes the shape it always did.
+
+### The fact_extractor_models table
+
+`fact_extractor_models` (created by the v19 to v20 migration) is the
+registry for active and historical fact extractor configurations.
+
+```text
+recipe_id                 TEXT NOT NULL PRIMARY KEY
+provider_id               TEXT NOT NULL
+model_id                  TEXT NOT NULL
+model_version             TEXT NOT NULL
+schema_version            TEXT NOT NULL
+extractor_kind            TEXT NOT NULL
+maximum_input_characters  INTEGER NOT NULL
+maximum_facts_per_source  INTEGER NOT NULL
+is_active                 INTEGER NOT NULL DEFAULT 0
+ext                       BLOB NULL   -- declared .json; SQLite stores JSON columns as BLOB
+```
+
+`FactExtractorModelStore` (Swift actor, Rust struct) manages this table.
+`active()` returns the one active row; `all()` lists every row; `upsert(_:)`
+inserts or replaces by `recipe_id`; `activate(recipeID:)` promotes one entry,
+demotes the previous active entry, and clears bit 28 on every drawer that
+carried it, all inside one transaction. Only one row may be active at a time.
+
+### operationalBitmap bit 28: factsExtracted
+
+Bit 28 of `Drawer.operationalBitmap` (`DrawerFeatureFlags.factsExtracted` in
+Swift, `DrawerFeatureFlags::FACTS_EXTRACTED` in Rust, wire value `1 << 28`)
+records that one extraction attempt has completed for the drawer's current
+content under the active extractor recipe. The bit being set does not imply
+facts were found. It is included in `clearedOnContentWrite` alongside bits 19
+and 27, so any content write resets it together with the other content-derived
+flags. A recipe activation via `activate(recipeID:)` also clears it on every
+carrier drawer.
+
+### KGFactSearchProjectionBackfill
+
+`KGFactSearchProjectionBackfill.run(storage:buildProjection:projectionVersion:)`
+(Swift static method) and `locus_kit::kg_fact_search_projection_backfill::run`
+(Rust free function) fill `searchProjection` and `searchProjectionVersion` on
+every fact row that does not already carry the target version, deriving the
+projection from the row's own subject, predicate, and object. The projection
+function and version string are caller-injected because LocusKit sits below
+FactExtractionKit and must not import it. The operation is idempotent: a
+second call with the same version scans zero rows. It is run by `mootx01
+upgrade` and by nothing else. Both ports.
+
+### Conformance pins
+
+- A row that carries all-empty-string defaults is backfill debt for
+  `searchProjection`; no query or predicate is broken by its presence.
+- `KGFactSearchProjectionBackfill.run` with the current version and an estate
+  already at that version reports scanned: 0, updated: 0.
+- `activate(recipeID:)` clears bit 28 on every carrier in one transaction;
+  drawers that do not carry the bit are not touched.
+- `clearedOnContentWrite` includes bit 28 alongside bits 19 and 27.
+- Both ports.
 
 *End of LocusKit Specification.*
 
@@ -1063,7 +1286,261 @@ unknown id and interprets nothing. `respondToTunnel` (accept →
 records `changedBy` into the ledger's `reviewedBy` — reviewer identity
 is recorded on accept and reject alike.
 
+## Counted endpoint hydration
+
+`Estate.hydrateWithSensitivityCount` and `Estate::hydrate_with_sensitivity_count`
+load only the supplied unique drawer IDs, evaluate the caller frame with the
+existing default-sensitivity-only evaluator, and return admitted rows plus the
+integer. Missing IDs and rows excluded by any other frame predicate do not
+contribute. Rejected rows and loaded-ID sets are not returned. Explicit
+sensitivity predicates disable the default-ceiling count. Hydration preserves
+the existing body-loading rules, including content-predicate evaluation.
+
+## Security repair contract
+
+`Estate.activeCorpusContentIDs(limit:)` / `active_corpus_content_ids_limited(limit)` expose a bounded list of eligible training IDs. Shipping stores apply active/nonempty/nondataset filters and `(filedAt, content, id)` ascending order in storage, project IDs only, and enforce the limit before loading document bodies. Swift `DrawerStore` and each Rust storage adapter implement the same query.
+
+### Counted candidates and extraction identity
+
+Recall and frame-filtered hydration carry the default-sensitivity exclusion
+count produced by their existing candidate evaluation, without a second estate
+scan. Explicit sensitivity filters retain the evaluator's zero withheld-count
+contract. Fact-extraction debt counting materializes no drawer rows. Recipe
+upsert and activation enforce single-active identity and invalidate bit 28 in
+the same transaction when the recipe identity or activation changes. Evidence
+character offsets count Unicode scalars, independently of UTF-8 byte offsets.
+
 ## Changelog
+
+### 3.7.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 3.5.0 -- 2026-09-13
+
+Added the counted endpoint hydration API and admitted-rows-only result contract
+for ranked topK keystones hydration.
+
+Added `BitmapEvaluationResult` / `BitmapEvaluationResult` and
+`BitmapEvaluator.evaluateResult` / `BitmapEvaluator::evaluate_result`.
+They preserve the admitted recall rows and report only the rows withheld by the
+default-injected sensitivity ceiling; explicit sensitivity filters report zero
+and never surface withheld rows.
+
+### 3.4.0 -- 2026-09-13
+
+`expungeGated` / `expunge_gated` adds a `sensitivityCeiling` /
+`sensitivity_ceiling` parameter (`AdjectiveSensitivity`, default `.secret` /
+`Secret`). During the lineage cascade the store reads `bits 6–11` of each
+sibling's `adjective_bitmap` and refuses the sibling if its sensitivity tier
+strictly exceeds the ceiling — leaving it byte-identical (no content write, no
+state write, no audit append, no erasure-ledger entry) and appending its id to
+`ExpungeOutcome.refusedSiblingIDs` / `refused_sibling_ids`. GeniusLocusKit's
+erase verb passes `.elevated` / `Elevated` so the ceiling in GLK calls matches
+the target-level check performed at step 0.5.
+
+### 3.3.0 -- 2026-09-12
+
+`withdrawKGFact` / `withdraw_kg_fact` widened to accept `changedBy` /
+`changed_by` (non-empty string, required) and `reason` / `reason`
+(optional string). Both ports now route through `AuditGate.admit` /
+`audit_gate::admit` with verb `Retract`, writing a sealed audit row
+(verb "retract", actor, reason, after-bitmaps with adjective bits 0-5
+= 18 Withdrawn, lattice anchor derived from the source drawer or null
+if absent) atomically with the bitmap update. The `now` parameter
+(Swift `Date`, Rust `i64` millis) was already present and continues to
+stamp the HLC.
+
+### 3.1.0 -- 2026-09-08
+
+B-17: the federation posture is the caller's declaration only. The
+`MOOTX01_ESTATE_FEDERATE` environment read is gone from both ports; the
+host decides from the estate catalog record (registered federates,
+transient does not). Rust `Estate::open` is a non-federating open;
+`Estate::open_with_federation(store, owner, federate)` carries the
+explicit posture.
+
+### 3.0.0 -- 2026-09-05
+
+Schema v19 (Encoder Rerank Program). Added `encoder_models` and
+`EncoderModelStore` (`active`, `upsert`, `activate`), `operationalBitmap`
+bit 27 `spanIndexed` with `setSpanIndexed` / `spanIndexDebtBatch` /
+`countSpanIndexDebt`, and `drawers.ssc_facts` with `setSSCFacts`. Removed
+the adornment tables, the adornment store API (§ ADORNMENT_STORE), the
+`drawers.adornment` column, the five `distilled*` columns and their API
+(`setDistilledRepresentation`, `countUndistilled`,
+`roomsWithStaleDistilledRepresentations`, `drawersWithRepresentations`);
+LocusKit no longer depends on AdornmentLib (BREAKING; MAJOR). The migration
+ladder is one hop, v10 → v19, with `upgradePath(storedVersion:)` as the
+refusal gate; bit 19 keeps its assignment with no writer. Both ports.
+
+### 2.5.0 -- 2026-09-04
+
+- Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
+
+### 2.4.0 -- 2026-09-03
+
+Schema v18 (both ports): `drawers` gains `distilled_source_digest` TEXT
+nullable — the SHA-256 hex digest of the complete content the stored
+representation was rendered from — as a table column and a v17 → v18
+ladder entry (idempotent addColumn). The representation contract is now
+five columns that are NULL together or populated together with bit 19:
+`setDistilledRepresentation` / `set_distilled_representation` take the
+digest and reject an empty one; every content-touching write NULLs all five.
+`countUndistilled` and `roomsWithStaleDistilledRepresentations` treat a NULL
+digest as stale; `drawersWithRepresentations(pipelineVersion:)` lists only
+rows whose converter ID equals the argument and whose digest is present.
+Rust gains `rooms_with_stale_distilled_representations`. The column reaches
+populated estates through GeniusLocusKit's estate-format 1.3 capsule.
+
+### 2.3.0 -- 2026-08-28
+
+New behavioral contract B-17: federation identity opt-out.
+`MOOTX01_ESTATE_FEDERATE=false` (or an explicit non-federating open)
+skips the Ed25519 identity step entirely; grant issuance throws on such
+an instance. Both ports. Motivated by durable plaintext bulk estates
+minting one login-keychain identity entry each.
+
+### 2.2.0 -- 2026-08-26
+
+Sensitivity gate on `activeAdornments`: Restricted/Secret drawers
+contribute no rows to the composition projection (codex finding
+2026-08-26 — legacy-migrated adornments rendered for redacted rows).
+Storage semantics unchanged; both ports; pinned by AdornmentStoreTests /
+adornment_tests.
+
+### 2.0.3 -- 2026-08-26
+
+Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
+
+### 2.0.2 -- 2026-08-26
+
+Vocabulary (mission SSC-RENAME): the § 14 candidate-row citation now
+defines SSC = Semantic Search Candle. Terminology only; no schema or
+behavior change.
+
+### 2.0.1 -- 2026-08-25
+
+§ 14 wording aligned to ARIA_MCP_SPEC 2.0.0 § 8: the subject is the
+second column of the seven-column canonical candidate row (the retired
+five-field dense-row spelling with FDC/WikiQID columns removed from the
+description). No behavioral change.
+
+### 2.0.0 -- 2026-08-25
+
+Moved adornment text out of Drawer rows into permanent normalized
+`adornment_minters` and `adornments` tables. Added runtime zero/one/many
+minter activation, computed per-Drawer/per-minter debt, composite-key storage,
+and the legacy-column migration. Retired the adornment-required and
+engine-family bits.
+
+### 1.27.0 -- 2026-08-24
+
+ADORN-BACKFILL: `AdornmentRequiredBackfill` — populated-estate bit 27 migration.
+
+New idempotent, re-runnable backfill (`AdornmentRequiredBackfill` Swift /
+`adornment_required_backfill` Rust) that sets `adornmentRequired` (bit 27 of
+`operationalBitmap`) on live, never-adorned drawers written before the adornment
+feature landed (v15 → v16). Estates predating v16 have bit 27 = 0 on every
+existing row; `adornmentDebtBatch` therefore returns nothing and `AdornmentPass`
+never mints adornment for them. This backfill closes that gap.
+
+Predicate: `tombstonedAt IS NULL AND adornment IS NULL AND bitmaskNone(bit 27)`.
+Tombstoned rows are skipped (adornmentRequired is intentionally not set on
+expunge). Rows with existing adornment text are skipped (they were correctly
+processed by AdornmentPass; their bit 27 state reflects the prior mint).
+Rows already flagged are skipped (idempotence). Each qualifying row receives
+one per-row UPDATE that ORs bit 27 into `operationalBitmap`, preserving all
+other bits.
+
+Run ONLY by `mootx01 upgrade` — the sole migration vehicle (Bob's ruling).
+Wired immediately after `KGFactIdentityBackfill` in both the up-to-date
+early-return path and the full convergence path.
+
+### 1.26.0 -- 2026-08-24
+
+SCORE-ORDERING mission: DrawerStore ORDER BY three-column contract.
+
+All `DrawerStore` scan methods that return ordered results now use a
+**three-column ORDER BY**: `(filedAt, content, id)` in the ASC variant and
+`(filedAt DESC, content DESC, id DESC)` in the DESC variant. This replaces
+the prior two-column form `(filedAt, id)`. The `content` column is the
+middle tiebreak, making the scan order deterministic even when multiple
+drawers share the same `filedAt`. Both the Swift (SQLite backend,
+`EstateVerbs.swift`) and Rust (`InMemoryDrawerStore`, `DrawerStore` trait
+default) ports are updated. The stale `P4-secfix` comment on the SQLite
+scan path was corrected to describe the three-column form.
+
+### 1.25.0 -- 2026-08-23
+
+- Schema §: `adornment` nullable TEXT column added to the drawer row
+  (SPEC_ADORNMENT §1). Bit 27 of `operationalBitmap` assigned as
+  `adornmentRequired` — set by body-mutating verbs and cleared by
+  `AdornmentPass` after a successful write. Bits 28–30 assigned as the
+  `adornmentBitmask` 3-bit engine-family × generation code
+  (000 = unadorned; 001/011/111 = apple gen1-3; 100/110/101 = non-apple
+  gen1-3). Migration: `addColumn("adornment", type: .text, nullable: true)`
+  via `mootx01 upgrade` (PersistenceKit idempotent replay). Bit 27 was
+  previously listed as free; bits 28-30 newly assigned.
+- New estate API: `adornmentDebtBatch(limit:afterID:)` fetches active
+  drawers with `adornmentRequired` set. `setAdornment(drawerId:adornment:
+  bitmaskCode:)` writes the adornment field + bits 28–30 atomically and
+  clears bit 27.
+
+### 1.24.0 -- 2026-08-20
+
+- Bit 26 of `operationalBitmap` assigned as `isAnomalous` — the low-cohesion
+  outlier flag (§11.18). `DrawerFeatureFlags.isAnomalous` = `1 << 26`;
+  `Drawer.isAnomalous: Bool` is a computed property reading bit 26 of
+  `operationalBitmap` directly (bit 26 is above the feature-flags region
+  12–23, so `featureFlags.contains(.isAnomalous)` is intentionally false;
+  the accessor reads the raw bitmap). Bit 26 is set/cleared by the
+  GeniusLocusKit room-cohesion anomaly-flag sweep; LocusKit owns the write
+  primitive `Estate.setAnomalousFlag(drawerId:anomalous:now:)` (no audit
+  event, no lifecycle field touched — derived-signal write). Bits 27–63
+  remain reserved.
+
+### 1.23.0 -- 2026-08-20
+
+- Schema v15: `recall_trace` gains the lane-attribution trio — `door`
+  (tool/recipe identity), `composition` (lane composition at trace
+  time), `laneRanks` (the target's 1-based per-lane rank packed as a
+  canonical JSON object, fixed lane order locus/bm25/hamming/dense).
+  All TEXT nullable; NULL means the row was written without attribution
+  (pre-v15 rows, plain locus-verb traces). No query text is stored
+  (privacy ruling 2026-08-20). Migration ships as ladder entry
+  v14 → v15 (addColumn ×3), delivered to populated estates through
+  `mootx01 upgrade`. W2.5 Track R(a): the columns make used-trace rows
+  attributable to lanes so the optimizer can aggregate per-lane reward
+  (Bradley-Terry, cookbook §8.12) without re-deriving lane membership.
+
+### 1.21.0 -- 2026-08-13
+
+- C3 reindex-completion marker: a third informational audit event family —
+  `reindexComplete` (estate-anchored like the dream brackets, actor
+  `reindex_worker`, reason `session=<id> rows=<n>`), sealed when a
+  full-corpus basis retrain finishes. This is the CYCLE tier-3 boundary
+  (a row's own novel terms become recallable at the retrain that follows
+  its capture). Same no-gate, before == after bitmap contract as A2/A3.
+  Alongside it, the audit log gains a public estate-wide page read
+  (`auditEvents(after:limit:)` both ports) so the C3/A6 timing derivation
+  can scan incrementally from a caller-held watermark instead of
+  re-reading an append-only log from zero. See LOCUSKIT_INTERFACE § 17.
+
+### 1.20.0 -- 2026-08-13
+
+- Audit markers (A2/A3): two informational audit event families join the
+  trail — `encodeComplete` (one per encode drain unit, anchored on the
+  unit's first drawer, actor `encode_worker`, reason
+  `session=<id> rows=<n>`) and `dreamStart`/`dreamEnd` (estate-anchored
+  dream-cycle brackets, actor `dreaming_daemon`, reason `session=<id>`).
+  Both write `before == after` bitmaps and bypass `AuditGate` by the
+  `setSubject` precedent (the gate governs bitmap mutations). The reason
+  column carries the payload; no schema change. Closes the P2 gap: the
+  audit log now records when background encode work ENDS, making INGEST
+  time (write-ack to encode-idle) and CYCLE-dreamt derivable from audit
+  rows alone. See LOCUSKIT_INTERFACE § 17.
 
 ### 1.19.0 -- 2026-08-07
 
@@ -1087,6 +1564,8 @@ is recorded on accept and reject alike.
   cc90c5dcecb081918c159788e1ffb3d6 (MXE-SK).
 
 ### 1.17.0 -- 2026-08-04
+
+- **v1.22.0 (2026-08-19)** — Filter gains eventAfter/eventBefore (EventAfter/EventBefore in Rust): structured-tier predicates over the drawer's eventTime (two-clock effective capture instant, ING-01), INCLUSIVE at both edges — a [start, end] window is all([eventAfter(start), eventBefore(end)]). Distinct from the strict createdAfter/createdBefore pair, which reads filedAt. Enables date-indexed grabs (temporal_recall dated arm).
 
 - **Schema v13: the kg_facts identity trio gains a migration ladder entry
   (MXE-MI).** MXE-KH declared `addedBy` / `foreignSourceKey` /
@@ -1269,8 +1748,45 @@ Documented `KGFact` full adjective-axis parity with `Drawer`: `KGFact` now expos
 ### 1.1.1 -- 2026-06-17
 Clarified the store-backend posture: `all_drawers` and `room_level_fingerprints` are now compile-required `DrawerStore` reads (no trait default) on the Rust leg, matching the Swift surface; the rest of the read surface retains the fail-loud `DatabaseUnavailable` default. Updated the newtype-forwarding-contract paragraph accordingly. No behaviour change; no new invariant.
 
+### 1.22.0 -- 2026-08-19
+MACD-3D: `SensitivityFilteredStorage` and `SensitivityCeilingError` added to LocusKit as their permanent cross-platform home. `SensitivityFilteredStorage` wraps `any Storage` with a dynamic `AdjectiveSensitivity` ceiling, gating outbound `TableChange` events and inbound sync writes (Perkins Gate CVK-ICLOUD P5-M1). No new invariant; the Perkins Amendment 1 structural mandate (the wrapper must be the EXACT handle passed to `engine.enable()`) is enforced by `SyncController` and `DaemonSyncService` at their call sites. Swift-only — no Rust port required.
+
 ### 1.1.0 -- 2026-06-17
 Added invariant I-12 (the `ext` forward-compat slot, the forward-compatible ext-slot contract): every persistent entity table carries one nullable `.json` `ext` column, inert in 1.0; `keys` gained it at schema v2. Pre-ship pre-provisioning during the 1.0.0 free-migration window.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 3.0.1 -- 2026-09-06
+
+Removed the stored-distillation dependency from subject invalidation.
+
+### 3.2.0 -- 2026-09-11
+
+Schema v20 (Fact Extraction Program). The v19 to v20 migration hop adds twelve
+columns to `kg_facts` (evidenceQuote, evidenceStart, evidenceEnd,
+evidenceStartUTF8Byte, evidenceEndUTF8Byte, sourceDigest, extractorProviderID,
+extractorModelID, extractorModelVersion, extractionSchemaVersion,
+searchProjection, searchProjectionVersion; text columns default to the empty
+string, integer columns to -1) and creates the `fact_extractor_models`
+registry table. The migration ladder is now two hops: v10 to v19 and v19 to
+v20; a v10 estate traverses both, a v19 estate receives only the second.
+`upgradePath` accepts 10 or 19 as upgrade floors; 20 is current; all other
+values are refused. Added `DrawerFeatureFlags.factsExtracted` (bit 28,
+`1 << 28`), included in `clearedOnContentWrite` alongside bits 19 and 27.
+Added `FactExtractorModelStore` (`active`, `all`, `upsert`, `activate`) and
+`KGFactSearchProjectionBackfill.run` (idempotent projection backfill, caller-injected
+projection function and version, run only by `mootx01 upgrade`). New
+§ FACT_EXTRACTION section documents the full behavioral contract. Both ports.
+No consumer action is required.
+
+### 3.6.0 -- 2026-09-14
+
+B-18 (length contract) restated: the subject cap is 120 grapheme clusters, not
+120 characters (which could be read as Unicode scalars or code units). The unit
+is grapheme clusters, counted identically by Swift's `String.count` and by the
+Rust `locus_kit::drawer_store::subject_length` helper. The Swift port already
+counted grapheme clusters through `String.count`. The Rust port counted Unicode
+scalars at the capture verb, the storage boundary, and the violations reporter;
+this mission brought the Rust port to the Swift unit, changing LocusKit Rust
+behavior and adding four LocusKit Rust tests that verify the new counting rule.

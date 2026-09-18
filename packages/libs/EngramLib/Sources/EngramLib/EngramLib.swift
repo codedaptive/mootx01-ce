@@ -147,6 +147,16 @@ public enum EngramLib {
     ///
     /// Use case: building cohort engrams, computing the union of
     /// a set's structural features.
+    /// Batch Jaccard similarities of `probe` against `candidates`
+    /// (W2.5 Track M1). Delegates the set arithmetic to
+    /// `SubstrateTypes.Jaccard` (zip4 AND/OR + popcount — the same
+    /// conformance-gated primitives Hamming uses; scalar is the oracle).
+    public static func jaccardSimilarities(
+        probe: Engram, candidates: [Engram]
+    ) -> [Double] {
+        candidates.map { Jaccard.similarity(probe, $0) }
+    }
+
     public static func union(_ engrams: [Engram]) -> Engram {
         return kernel().orReduce256(engrams)
     }

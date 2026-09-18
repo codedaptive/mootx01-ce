@@ -10,8 +10,8 @@ pub enum CorpusKitError {
     StoreUnavailable(String),
     /// The selected embedding model cannot be reconstructed from a trained
     /// basis because it does not implement `TrainableEmbeddingBasis` — the
-    /// deterministic provider, the named host-inference model cases, and the
-    /// stateless FDC provider have no trained basis to restore. Returned by
+    /// deterministic provider and the stateless `CandleNL` provider have no
+    /// trained basis to restore. Returned by
     /// `EmbeddingModelConfig::reconstruct` for those cases rather than
     /// panicking or returning a wrong provider.
     NotTrainable(String),
@@ -27,6 +27,7 @@ pub enum CorpusKitError {
     /// canonical record — the job is stale and is rejected WITHOUT
     /// advancing the index checkpoint (GLK shared-content 1.1).
     StaleRevision(String),
+    RetrainingSkipped(crate::RetrainingSkipReason),
 }
 
 impl std::fmt::Display for CorpusKitError {
@@ -46,6 +47,7 @@ impl std::fmt::Display for CorpusKitError {
                 write!(f, "invalid configuration: {}", s)
             }
             CorpusKitError::StaleRevision(s) => write!(f, "stale revision: {}", s),
+            CorpusKitError::RetrainingSkipped(reason) => write!(f, "retraining skipped: {:?}", reason),
         }
     }
 }

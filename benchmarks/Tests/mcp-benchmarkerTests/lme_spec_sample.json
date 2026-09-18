@@ -1,0 +1,50 @@
+[
+  {
+    "question_id": "spec_001",
+    "question_type": "single-session-user",
+    "question": "What color is the car Alice mentioned?",
+    "answer": "Blue",
+    "question_date": "2024/03/01 (Fri) 09:00",
+    "haystack_dates": ["2024/02/28 (Thu) 18:00"],
+    "haystack_session_ids": ["sess_001"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I bought a blue car last week.", "has_answer": true},
+        {"role": "assistant", "content": "Congratulations on the new car!", "has_answer": false}
+      ]
+    ],
+    "answer_session_ids": ["sess_001"]
+  },
+  {
+    "question_id": "spec_002_abs",
+    "question_type": "multi-session",
+    "question": "What is Alice's favorite restaurant in Paris?",
+    "answer": "There is no mention of a Paris restaurant in the conversations.",
+    "question_date": "2024/03/01 (Fri) 09:05",
+    "haystack_dates": ["2024/02/28 (Thu) 18:00"],
+    "haystack_session_ids": ["sess_001"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I had lunch at a local diner today.", "has_answer": false},
+        {"role": "assistant", "content": "How was it?", "has_answer": false}
+      ]
+    ],
+    "answer_session_ids": []
+  },
+  {
+    "question_id": "spec_003",
+    "question_type": "temporal-reasoning_abs",
+    "question": "How many days ago did Alice mention the car?",
+    "answer": "This information is not available.",
+    "question_date": "2024/03/01 (Fri) 09:10",
+    "haystack_dates": ["2024/02/28 (Thu) 18:00"],
+    "haystack_session_ids": ["sess_001"],
+    "haystack_sessions": [
+      [
+        {"role": "user", "content": "I just got home from work.", "has_answer": false},
+        {"role": "assistant", "content": "Hope it was a good day!", "has_answer": false}
+      ]
+    ],
+    "answer_session_ids": []
+  }
+]

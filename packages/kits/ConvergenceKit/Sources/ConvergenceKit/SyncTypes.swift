@@ -113,6 +113,47 @@ public struct SyncedTable: Sendable, Codable {
     }
 }
 
+/// Wire representation used for HLC fields (row-level `moot_sync_hlc`,
+/// tombstone HLC, and `TypedValue.hlc` columns) when encoding or decoding
+/// CKRecord data in a zone managed by `CKRecordMapping`.
+///
+/// This is a **local CloudKit encoding directive** — it lives in the manifest
+/// and is never transmitted on the wire inside a CKRecord. The canonical
+/// HLC wire format for federation and JSON (`PackedHLC` / `SyncValueBox.hlc`)
+/// is always full-width and is unaffected by this declaration.
+///
+/// WHY a dedicated declaration rather than inferring from `schemaVersion`:
+/// Generic schemaVersion 2 and 3 callers already exist in the test suite
+/// (e.g. `FederationTombstoneRetentionTests` uses schemaVersion 2 and
+/// `ProjectionTests` uses schemaVersion 3, both with legacyPacked zones).
+/// Coupling representation to schemaVersion would silently break those
+/// callers; the opt-in must be explicit per the binding decision (A1).
+public enum HLCWireRepresentation: String, Sendable {
+    /// Default. Row-level `moot_sync_hlc`, tombstone HLC, and
+    /// `TypedValue.hlc` columns are encoded as a packed `Int64` via
+    /// `NSNumber`. Layout: 48-bit `physicalTime` | 12-bit `logicalCount`
+    /// | 4-bit `nodeID`. Byte-identical to all existing zones.
+    ///
+    /// Limitation: `logicalCount` values above 4095 (12-bit cap) and
+    /// `physicalTime` bits above 47 are silently truncated. This was
+    /// acceptable for the original zones; Fulcrum's new v2 zone adopts
+    /// `.fullWidthV2` to fix this gap.
+    case legacyPacked
+
+    /// Explicit opt-in for Fulcrum's v2 zone. Row-level `moot_sync_hlc`,
+    /// tombstone HLC, and `TypedValue.hlc` columns are encoded as
+    /// `Data(HLC.wireBytes)` — exactly 16 bytes (8 bytes `physicalTime`
+    /// LE + 4 bytes `logicalCount` LE + 4 bytes `nodeID` LE). Fully
+    /// lossless: no component is truncated regardless of magnitude.
+    ///
+    /// Strict decode: `CKRecordMapping.decode(_:representation:)` fails
+    /// closed (`SyncError.decodingFailure`) on any deviation — packed
+    /// `NSNumber` where `Data` is expected, wrong-length `Data`, malformed
+    /// wire bytes, or a column HLC in one representation while the
+    /// row-level HLC is in the other (mixed-representation record).
+    case fullWidthV2
+}
+
 /// Declarative configuration for a sync session. The consumer
 /// declares which PersistenceKit tables sync to which zone with
 /// which conflict policies.
@@ -143,6 +184,20 @@ public struct SyncManifest: Sendable {
     /// stay plaintext.
     public let encryptedContentColumns: [String: Set<String>]
 
+    /// HLC wire representation for this zone's CKRecord data (CloudKit only).
+    ///
+    /// Controls how `CKRecordMapping` encodes and decodes the row-level
+    /// `moot_sync_hlc` field, tombstone HLC, and `TypedValue.hlc` columns.
+    ///
+    /// Default is `.legacyPacked` — every existing manifest and caller
+    /// keeps byte-identical behavior without any code change. Fulcrum's
+    /// new v2 zone opts in to `.fullWidthV2` for lossless HLC transport.
+    ///
+    /// Not wire-carried: this is a local CloudKit encoding directive that
+    /// stays in the manifest. `SyncRecord` / federation wire format is
+    /// always full-width (`PackedHLC`) and is unaffected by this field.
+    public let hlcWireRepresentation: HLCWireRepresentation
+
     /// Optional callback invoked once per pull batch AFTER all
     /// inbound records have been applied. Use it to restore cross-row or
     /// cross-table structural invariants that row-grain conflict policies
@@ -165,20 +220,53 @@ public struct SyncManifest: Sendable {
     /// Not `Codable` — closures cannot be serialised; set at construction only.
     public var postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)?
 
+    /// Optional must-succeed boundary invoked after inbound rows and the
+    /// non-fatal integrity hook have run, but before the CloudKit change cursor
+    /// and successful-pull state are committed.
+    ///
+    /// Use this when accepting a transport batch requires a second durable,
+    /// semantic operation. A throw aborts the pull cycle before cursor
+    /// advancement, so the same CloudKit changes are offered again on the next
+    /// pull. The callback is not invoked for an empty batch.
+    ///
+    /// The barrier guards both inbound routes. It runs on the pull path over
+    /// the pulled batch, and on the schema-skew replay path in `enable()` over
+    /// the records replayed from `_ck_pending_skew`. On replay a throw retains
+    /// the queue entries and fails `enable()`, so the same held records are
+    /// offered to the barrier again on the next `enable()`.
+    ///
+    /// The row writes have already happened and are not rolled back. Callers
+    /// must therefore make this callback idempotent. This differs deliberately
+    /// from `postApplyIntegrityHook`, whose failures remain non-fatal conflicts.
+    ///
+    /// CloudKit-only execution directive; not wire-carried or `Codable`.
+    public var postApplyCommitBarrier: (@Sendable (AppliedBatch) async throws -> Void)?
+
     public init(
         kitID: String,
         schemaVersion: Int,
         zoneIdentifier: String,
         tables: [SyncedTable],
         encryptedContentColumns: [String: Set<String>] = [:],
-        postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil
+        // Default is legacyPacked so every existing manifest and caller
+        // stays byte/behavior-identical without any code change. Opt in
+        // to fullWidthV2 only for zones explicitly designed for lossless
+        // HLC transport (Fulcrum v2 zone). The parameter must be set at
+        // construction; it is not inferred from schemaVersion because
+        // generic schemaVersion-2/3 callers already exist with legacyPacked
+        // zones (see HLCWireRepresentation doc for details).
+        hlcWireRepresentation: HLCWireRepresentation = .legacyPacked,
+        postApplyIntegrityHook: (@Sendable (AppliedBatch) async throws -> Void)? = nil,
+        postApplyCommitBarrier: (@Sendable (AppliedBatch) async throws -> Void)? = nil
     ) {
         self.kitID = kitID
         self.schemaVersion = schemaVersion
         self.zoneIdentifier = zoneIdentifier
         self.tables = tables
         self.encryptedContentColumns = encryptedContentColumns
+        self.hlcWireRepresentation = hlcWireRepresentation
         self.postApplyIntegrityHook = postApplyIntegrityHook
+        self.postApplyCommitBarrier = postApplyCommitBarrier
     }
 
     /// Validate `encryptedContentColumns` entries before use.

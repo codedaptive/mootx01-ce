@@ -122,14 +122,19 @@ Repository → Settings → Secrets and variables → Actions:
 | `AZURE_SUBSCRIPTION_ID` | Subscription ID |
 | `AZURE_CLIENT_SECRET` | **Option B only** — App Registration client secret |
 
-`AZURE_CLIENT_ID` is the gate: the workflows check for it and skip signing (with
-a warning) when it is absent, so adding these secrets is what activates signing.
+`AZURE_CLIENT_ID` is the gate. The release lane refuses to ship when it is
+absent; the candidate lane warns and ships unsigned.
 
 ---
 
 ## 4. How the workflows use it
 
-Both workflows sign in the same place:
+Scope: this section describes the public repository's workflows, the lane
+that publishes Windows builds. The development repository's `release.yml`
+carries no signing step and none is planned: it is not tagged for public
+release and its internal Windows assets ship unsigned by design.
+
+Both public-lane workflows sign in the same place:
 
 1. Build `mootx01.exe` + `moot-mgr.exe`, copy to the workspace root.
 2. **Sign the two exes** (before zip and before Inno, so the archive and the
@@ -159,10 +164,6 @@ The signing action is pinned by commit SHA:
    `signtool verify /pa /v mootx01-<ver>-windows-x86_64-setup.exe`
    (or right-click → Properties → Digital Signatures → publisher = Codedaptive).
 4. Re-run the blocked winget PR check; the Defender error should clear.
-5. **Tighten `release.yml` to fail closed.** Once a signed release is verified,
-   change each `Azure signing preflight` step so a missing `AZURE_CLIENT_ID`
-   is a hard error instead of a warning — a published stable release must not
-   silently ship unsigned. (macOS already fails closed via `REQUIRE_SIGNING`.)
 
 ---
 

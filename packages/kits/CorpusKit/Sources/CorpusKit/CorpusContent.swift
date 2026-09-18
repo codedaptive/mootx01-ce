@@ -88,6 +88,11 @@ public struct CorpusContentRecord: Sendable, Equatable {
     /// use `text` for both BM25 and dense embedding — the default for all
     /// consumers that do not supply a separate dense representation.
     public let denseCompositionText: String?
+    /// SSC facts from `drawers.ssc_facts` (schema 19). A bare comma-separated
+    /// pair list (e.g. `"entity: louvre, place: paris"`) appended to the BM25
+    /// document via `SSCFacts.lexicalSupplement(_:)`. nil means no facts computed
+    /// yet — the BM25 supplement contributes nothing.
+    public let sscFacts: String?
 
     /// The text the engine uses when composing the dense float lane vector.
     /// Returns `denseCompositionText` when set, falls back to `text`.
@@ -95,13 +100,15 @@ public struct CorpusContentRecord: Sendable, Equatable {
 
     public init(
         id: CorpusContentID, revision: Int64, digest: String, text: String,
-        denseCompositionText: String? = nil
+        denseCompositionText: String? = nil,
+        sscFacts: String? = nil
     ) {
         self.id = id
         self.revision = revision
         self.digest = digest
         self.text = text
         self.denseCompositionText = denseCompositionText
+        self.sscFacts = sscFacts
     }
 }
 
@@ -166,9 +173,16 @@ public protocol CorpusContentSource: Sendable {
     /// Every live content ID, in deterministic ascending ID order — the
     /// streaming order rebuilds use.
     func activeContentIDs() async throws -> [CorpusContentID]
+
+    /// At most `limit` live IDs in the same deterministic order. Storage-backed
+    /// production sources must push the limit into their query.
+    func activeContentIDs(limit: Int) async throws -> [CorpusContentID]
 }
 
 public extension CorpusContentSource {
+    func activeContentIDs(limit: Int) async throws -> [CorpusContentID] {
+        Array(try await activeContentIDs().prefix(max(0, limit)))
+    }
     /// Default N-serial fallback. Implementations backed by a SQL store
     /// should override with a single WHERE…IN query.
     func records(for ids: [CorpusContentID]) async throws -> [CorpusContentID: CorpusContentRecord] {

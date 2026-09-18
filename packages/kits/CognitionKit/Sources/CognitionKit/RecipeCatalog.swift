@@ -171,11 +171,18 @@ public enum RecipeCatalog {
         // over a wing's tunnel graph (cookbook § 19.1). Consumes
         // SubstrateML.RandomWalks.walkWithRestart.
         RecipeDescriptor(ExploratoryRecall()),
-        // Distillation-family recipes (Dc1–Dc3). Registered here in one step
-        // rather than one per mission to avoid three concurrent stream edits
-        // to this file (Dc4 consolidation strategy).
-        RecipeDescriptor(Distill()),
+        // Distilled-recall recipe: exact-search geometry with inline distilled-representation
+        // hydration — the ContextDistillLib converter runs at read time, so every row
+        // renders without a sweep dependency.
         RecipeDescriptor(DistilledRecall()),
+        // Escalation-ladder recall recipe (D10): runs cheap-first stages and
+        // stops at the first confident result. Stage 1 = session_hybrid preset,
+        // Stage 2 = PreciseRecall hamming+text. Federation is PARKED.
+        RecipeDescriptor(
+            name: "walk_recall",
+            version: "1.0.0",
+            description: "Escalation-ladder recall: run a cheap session_hybrid stage first and stop when the top-gap is confident (≥ 0.25); escalate to a precise hamming+text re-rank only when Stage 1 is insufficient. Faster than precise recall for the common case; falls back gracefully when the estate needs the extra precision.",
+            requiredCapabilities: []),
     ]
 
     /// The descriptor for the recipe named `name`, or nil if no shipped

@@ -104,6 +104,7 @@ fn effective_dense_text_fallback_to_lexical_text_when_none() {
         digest: content_digest("lexical text"),
         text: "lexical text".into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     // When dense_composition_text is None, effective_dense_text() returns text.
     assert_eq!(record.effective_dense_text(), "lexical text");
@@ -117,6 +118,7 @@ fn effective_dense_text_returns_dense_when_set() {
         digest: content_digest("lexical text"),
         text: "lexical text".into(),
         dense_composition_text: Some("dense text".into()),
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     assert_eq!(record.effective_dense_text(), "dense text");
     // Lexical text must remain unmodified.
@@ -134,6 +136,7 @@ fn record_with_nil_dense_behaves_identically_to_pre_dual_text() {
         digest: content_digest("only text"),
         text: "only text".into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     assert_eq!(record.effective_dense_text(), record.text.as_str());
 }
@@ -262,6 +265,7 @@ fn source_protocol_dense_text_supplied_via_record() {
             digest: content_digest("lexical about dogs"),
             text: "lexical about dogs".into(),
             dense_composition_text: Some("dense summary of dogs".into()),
+            ssc_facts: None, // supplied by GLK layer (schema 19)
         },
     ]);
 
@@ -305,6 +309,7 @@ fn source_protocol_nil_dense_text_means_lexical_used_for_both() {
             digest: content_digest("only lexical text"),
             text: "only lexical text".into(),
             dense_composition_text: None, // explicit None: lexical text for both lanes
+            ssc_facts: None, // supplied by GLK layer (schema 19)
         },
     ]);
 

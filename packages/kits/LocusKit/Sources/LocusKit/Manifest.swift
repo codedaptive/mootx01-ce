@@ -25,7 +25,7 @@ public enum ManifestKey: String, Sendable, CaseIterable {
     case bitmapLayoutVersion     = "bitmap_layout_version"
     case provenanceBitmapVersion = "provenance_bitmap_version"
 
-    // MARK: Optional keys (7)
+    // MARK: Optional keys (8)
     case federationGroupID           = "federation_group_id"
     case miningPatternsHash          = "mining_patterns_hash"
     case tinyModelID                 = "tiny_model_id"
@@ -65,7 +65,9 @@ public enum ManifestKey: String, Sendable, CaseIterable {
         .bitmapLayoutVersion, .provenanceBitmapVersion
     ]
 
-    /// The 7 optional keys. Absent means "not configured".
+    /// The 7 optional keys. Absent means "not configured". A manifest row
+    /// under the retired key `index_composition_policy` (GeniusLocusKit
+    /// 2.15.0 to 2.22.0) is not a key: it is left in place and ignored.
     public static let optional: [ManifestKey] = [
         .federationGroupID, .miningPatternsHash, .tinyModelID,
         .tinyModelTrainingCorpusSize, .operationalBitmapLayouts,

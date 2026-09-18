@@ -15,8 +15,15 @@
 //! exercise genuine primitive-form read-back (a TIMESTAMP column round-trips as
 //! a parsed `Timestamp(i64)` here), the same discipline as bundle_store_tests.
 
-use corpus_kit::{BasisStore, Corpus, EmbeddingModelConfig, FloatLaneOutcome, PersistedBasis};
-use corpus_kit_providers::{LsaProvider, RandomIndexingProvider};
+// Tests basis persistence for RI and LSA providers.
+
+use corpus_kit::{
+    BasisStore, Corpus, CorpusPathReason, EmbeddingModelConfig, PersistedBasis,
+    TrainableEmbeddingBasis, TrainingPathDecision,
+};
+use corpus_kit::FloatLaneOutcome;
+use corpus_kit_providers::RandomIndexingProvider;
+use corpus_kit_providers::LsaProvider;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, SqliteStorage, Storage};
 use serde::Deserialize;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -116,6 +123,59 @@ fn reindex_persists_basis() {
     assert_eq!(loaded.trained_chunk_count, RI_DOCS.len());
 }
 
+/// G-5a-RI (standalone): RI reindex records FoldOrderProvenanceUnknown — not
+/// DeltaNotFoldSafe.
+///
+/// The standalone path rejects RI from the counts path because the live
+/// accumulator folds counts in ingest-arrival order, while a from-scratch
+/// train uses activeChunks() order. RI is float-order-sensitive so these
+/// fold orders cannot be proven equal. The reason is fold-order PROVENANCE,
+/// not a pending delta (there is no delta in the standalone model).
+///
+/// After any `ingest()` call the in-memory counts accumulator is non-empty
+/// (chunks are folded immediately on ingest). The standalone counts-path probe
+/// sees: capable=true (RI supports finalize_from_counts), fold_safe=false
+/// (RI's counts_delta_fold_safe() always returns false). fold_safe=false →
+/// FoldOrderProvenanceUnknown before any basis-existence check. This fires on
+/// both the FIRST reindex (no prior basis) and subsequent reindexes.
+///
+/// DeltaNotFoldSafe is reserved for the ATTACHED engine path (ContentEngine)
+/// where a real pending delta exists and IS the reason for rejection.
+#[test]
+fn g5a_ri_standalone_reindex_records_fold_order_provenance_unknown() {
+    let _g = global_lock();
+    let path = scratch_path();
+    let corpus = fresh_ri_corpus(storage_at(&path));
+    for (i, doc) in RI_DOCS.iter().enumerate() {
+        corpus
+            .ingest(doc, &format!("doc-{i}"), NOW_MILLIS)
+            .expect("ingest");
+    }
+
+    // First reindex: in-memory counts accumulator is non-empty from ingests.
+    // RI fold_safe=false → FoldOrderProvenanceUnknown. Corpus path trains fresh.
+    corpus.reindex(NOW_MILLIS).expect("first reindex");
+    let decisions = corpus.training_path_decisions();
+    assert_eq!(
+        decisions.get("random-indexing-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::FoldOrderProvenanceUnknown)),
+        "first reindex: standalone RI must record FoldOrderProvenanceUnknown (fold_safe=false \
+         fires before any basis-existence check once counts accumulator is non-empty)"
+    );
+
+    // Second reindex: basis row and healed counts exist from first reindex.
+    // RI fold_safe=false → FoldOrderProvenanceUnknown again. NOT DeltaNotFoldSafe.
+    corpus.reindex(NOW_MILLIS + 1000).expect("second reindex");
+    let decisions = corpus.training_path_decisions();
+    assert_eq!(
+        decisions.get("random-indexing-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::FoldOrderProvenanceUnknown)),
+        "second reindex: standalone RI must record FoldOrderProvenanceUnknown (fold-order \
+         provenance cannot be proven equal to canonical training order — no pending delta, \
+         different from DeltaNotFoldSafe which requires a real delta)"
+    );
+}
+
 // ── §3 first-ingest auto-train + growth retrain ──
 
 /// Mirrors Swift `firstIngestAutoTrainsAndGrowthRetrains`.
@@ -171,11 +231,8 @@ fn first_ingest_auto_trains_and_growth_retrains() {
 }
 
 // ── §8 per-doc ingest non-degeneracy (REGRESSION — Kinsta-verified bug) ──
+// These helpers and tests construct LsaProvider; gated on `lsa` (ruling 2026-09-07).
 
-/// Car-topic and animal-topic docs for LSA non-degeneracy tests.
-/// Two distinct vocabularies: car (engine/fuel/road) vs animal (dog/bark/fetch).
-/// A degenerate 1-car-doc basis would have only car vocabulary,
-/// so animal-topic queries would be all-OOV.
 fn lsa_car_doc(n: usize) -> String {
     format!("car engine fuel road vehicle drive speed combustion power auto document {n}")
 }
@@ -813,3 +870,287 @@ fn ingest_queue_is_durable_for_sqlite_estate() {
     let _ = std::fs::remove_file(&queue_sibling);
     let _ = std::fs::remove_file(&path);
 }
+
+// ── §B  finalize_from_counts / counts_delta_fold_safe digest gates ──────────
+//
+// Shared fixture corpus: 8 short docs that deliberately SHARE terms across
+// documents (so fold order changes f32 accumulation for RI) and include some
+// unique-per-doc terms (river/fish/mountain) to keep the vocab interesting.
+//
+// Docs 0-4 reuse the car/animal vocabulary from the α corpus for cross-test
+// consistency; docs 5-7 introduce a second vocabulary island.
+
+const DIGEST_CORPUS: [&str; 8] = [
+    "car engine drive road vehicle",
+    "vehicle road transport car fuel",
+    "engine fuel combustion power car",
+    "dog bark run fetch animal",
+    "animal run cat dog pet",
+    "river stream water flow fish",
+    "fish swim river current water",
+    "mountain peak climb trail path",
+];
+
+// T1 — RI restore→finalize byte-identity
+//
+// Proves: the RICT counts blob, when restored into a fresh provider and
+// finalize_from_counts is called, yields a serialize_basis output that is
+// byte-identical to a from-scratch train_on_corpus over the same corpus.
+#[test]
+fn t1_ri_restore_finalize_byte_identity() {
+    // Scratch path: train from scratch, capture serialize_basis output.
+    let a = {
+        let mut p = RandomIndexingProvider::new();
+        p.train_on_corpus(&DIGEST_CORPUS);
+        p.serialize_basis()
+    };
+
+    // Counts path: fold each doc via add_to_counts, serialize counts blob.
+    let counts_blob = {
+        let mut p = RandomIndexingProvider::new();
+        for doc in &DIGEST_CORPUS {
+            p.add_to_counts(doc);
+        }
+        p.serialize_counts()
+    };
+
+    // Restore path: fresh provider, restore counts, finalize_from_counts, serialize_basis.
+    let b = {
+        let mut p = RandomIndexingProvider::new();
+        p.restore_counts(&counts_blob).expect("T1: restore_counts must succeed");
+        let ok = p.finalize_from_counts();
+        assert!(ok, "T1: finalize_from_counts must return true for RI");
+        p.serialize_basis()
+    };
+
+    assert_eq!(
+        a, b,
+        "T1: RI restore→finalize basis bytes must be identical to from-scratch train_on_corpus"
+    );
+}
+
+// T2 — RI v4 term-row round-trip (decompose_counts / restore_counts_from_parts)
+//
+// Proves: decomposing the RICT blob into a header + per-term rows and
+// rehydrating via restore_counts_from_parts yields the same basis as T1.
+#[test]
+fn t2_ri_term_row_round_trip() {
+    // Produce the scratch basis (T1's `a`).
+    let a = {
+        let mut p = RandomIndexingProvider::new();
+        p.train_on_corpus(&DIGEST_CORPUS);
+        p.serialize_basis()
+    };
+
+    // Build the counts blob (T1's `counts_blob`).
+    let mut counts_side = RandomIndexingProvider::new();
+    for doc in &DIGEST_CORPUS {
+        counts_side.add_to_counts(doc);
+    }
+
+    // Decompose into header + term rows. The inherent decompose_counts on
+    // RandomIndexingProvider returns (Vec<u8>, Vec<...>) directly (not Option),
+    // because RI always supports term decomposition.
+    let (header, terms) = counts_side.decompose_counts();
+
+    // Rehydrate via restore_counts_from_parts, then finalize_from_counts.
+    let b = {
+        let mut p = RandomIndexingProvider::new();
+        p.restore_counts_from_parts(&header, &terms)
+            .expect("T2: restore_counts_from_parts must succeed");
+        let ok = p.finalize_from_counts();
+        assert!(ok, "T2: finalize_from_counts must return true for RI");
+        p.serialize_basis()
+    };
+
+    assert_eq!(
+        a, b,
+        "T2: RI decompose→restore_from_parts→finalize basis bytes must equal scratch bytes"
+    );
+}
+
+// T3 — RI permuted fold order (OBSERVED outcome: EQUAL for this small corpus)
+//
+// F-3 stated that RI float accumulation is order-sensitive because IEEE 754 f32
+// addition is not associative. That is TRUE in general. HOWEVER, for this specific
+// 8-document corpus, ALL accumulated values happen to be EXACT INTEGERS in f32
+// (each RI index vector contains only ±1.0 at K=10 positions; their sums over 8
+// short docs stay well within f32's exact-integer range of 2^23). Exact-integer
+// f32 arithmetic IS commutative — addition of exact integers gives the same result
+// regardless of order, so the reversed corpus produces IDENTICAL bytes.
+//
+// SIGNIFICANT FINDING: this test pins that a small corpus with only exact-integer
+// accumulation is fold-order-independent for RI. F-3's non-commutativity manifests
+// on large corpora or on corpora with many document-term co-occurrences that push
+// the accumulated sums past the exact-integer threshold. countsDeltaFoldSafe remains
+// false for RI: the general case (production estates) is order-sensitive, and this
+// test cannot serve as proof of safety.
+//
+// The assertion below matches the OBSERVED run outcome; it pins the behaviour of
+// this fixture so a future change that accidentally introduces rounding (e.g. a
+// non-integer seed value) is caught immediately.
+#[test]
+fn t3_ri_permuted_fold_order_observed_outcome() {
+    // Scratch basis over canonical corpus order.
+    let a = {
+        let mut p = RandomIndexingProvider::new();
+        p.train_on_corpus(&DIGEST_CORPUS);
+        p.serialize_basis()
+    };
+
+    // Counts folded in REVERSED corpus order.
+    let reversed_blob = {
+        let mut p = RandomIndexingProvider::new();
+        for doc in DIGEST_CORPUS.iter().rev() {
+            p.add_to_counts(doc);
+        }
+        p.serialize_counts()
+    };
+
+    // Restore reversed counts, finalize (no-op for RI), serialize.
+    let b = {
+        let mut p = RandomIndexingProvider::new();
+        p.restore_counts(&reversed_blob).expect("T3: restore_counts must succeed");
+        p.finalize_from_counts(); // always true for RI, no-op
+        p.serialize_basis()
+    };
+
+    // F-8c precondition: verify the counts-side provider's accumulated values stay
+    // within the exact-integer f32 regime (< 2^24 = 16_777_216.0). Equality below
+    // this bound is arithmetic necessity, not an order-safety property; exceeding it
+    // is the F-3 divergence regime, and a fixture that outgrows the regime must fail
+    // HERE rather than on the equality.
+    //
+    // Method: build a fresh counts-side provider over DIGEST_CORPUS, enumerate all
+    // vocabulary terms via the canonical tokenizer, fetch each term's raw context
+    // vector via the public accessor, and compute the maximum absolute per-dimension
+    // accumulated value.
+    {
+        let mut counts_probe = RandomIndexingProvider::new();
+        for doc in &DIGEST_CORPUS {
+            counts_probe.add_to_counts(doc);
+        }
+        let terms: std::collections::HashSet<String> = DIGEST_CORPUS
+            .iter()
+            .flat_map(|doc| corpus_kit::default_keyword_tokens(doc))
+            .collect();
+        let max_abs = terms
+            .iter()
+            .filter_map(|term| counts_probe.context_vector_for_term(term))
+            .flat_map(|cv| cv.iter().map(|x| x.abs()))
+            .fold(0.0_f32, f32::max);
+        assert!(
+            max_abs < 16_777_216.0,
+            "F-8c: counts-side accumulated value {max_abs} >= 2^24 = 16_777_216.0. \
+             Equality below this bound is arithmetic necessity, not an order-safety \
+             property; exceeding it is the F-3 divergence regime, and a fixture that \
+             outgrows the regime must fail HERE rather than on the equality."
+        );
+    }
+
+    // OBSERVED: equal for this small 8-document corpus (all accumulated values are
+    // exact f32 integers). See the test comment above for the full explanation.
+    // countsDeltaFoldSafe remains false for RI despite this equality — the general
+    // case on production estates IS order-sensitive.
+    assert_eq!(
+        a, b,
+        "T3: OBSERVED — RI reversed-fold basis bytes equal canonical-order bytes for this \
+         small corpus (exact-integer f32 accumulation; see test comment). If this ever \
+         fails, rounding has been introduced and the F-3 non-commutativity is manifesting \
+         at corpus scale."
+    );
+}
+
+// T4 — RI corrupted term row: restore must either throw or produce different bytes
+//
+// Proves: a single-byte corruption in a per-term vector payload is not silently
+// absorbed. Either decode fails (BasisCodecError → DecodingFailure) or the
+// finalized basis bytes differ from the clean basis. At least one must be true.
+#[test]
+fn t4_ri_corrupted_term_row_detected() {
+    // Scratch basis (clean).
+    let a = {
+        let mut p = RandomIndexingProvider::new();
+        p.train_on_corpus(&DIGEST_CORPUS);
+        p.serialize_basis()
+    };
+
+    // Build decomposed rows from the counts side. The inherent decompose_counts
+    // on RandomIndexingProvider returns (Vec<u8>, Vec<...>) directly (not Option).
+    let (header, mut terms) = {
+        let mut p = RandomIndexingProvider::new();
+        for doc in &DIGEST_CORPUS {
+            p.add_to_counts(doc);
+        }
+        p.decompose_counts()
+    };
+
+    // Corrupt one byte in the middle of the FIRST term's vector payload.
+    // The payload begins with a u32 length prefix (4 bytes), so byte 4+ is vector data.
+    assert!(!terms.is_empty(), "T4: decomposed terms must be non-empty");
+    let vector_bytes = &mut terms[0].1;
+    let mid = vector_bytes.len() / 2;
+    assert!(mid > 4, "T4: vector payload must be long enough to corrupt");
+    vector_bytes[mid] ^= 0xFF; // flip all bits of one byte
+
+    // Attempt to restore from the corrupted data.
+    let result = {
+        let mut p = RandomIndexingProvider::new();
+        let restore_result = p.restore_counts_from_parts(&header, &terms);
+        restore_result.map(|()| {
+            p.finalize_from_counts();
+            p.serialize_basis()
+        })
+    };
+
+    match result {
+        Err(_) => {
+            // Restore detected the corruption — exactly what we want.
+        }
+        Ok(b) => {
+            // Restore succeeded (f32 bytes can survive bit flips), but the
+            // basis bytes must differ from the clean basis.
+            assert_ne!(
+                a, b,
+                "T4: corrupted term row produced identical basis bytes — corruption was silently ignored"
+            );
+        }
+    }
+}
+
+// T5 — PPMI restore→finalize byte-identity
+//
+// Same shape as T1 but for PPMI (PPMC blob). Proves the PPMI counts codec
+// round-trip + finalize path yields byte-identical basis output to from-scratch
+// train_on_corpus.
+#[test]
+fn t9_lsa_counts_only_unsupported() {
+    // Build an LSA provider with counts accumulated.
+    let mut p = LsaProvider::default_new();
+    for doc in &DIGEST_CORPUS {
+        p.add_to_counts(doc);
+    }
+    let counts_blob = p.serialize_counts();
+
+    // Restore into a fresh provider.
+    let mut restored = LsaProvider::default_new();
+    restored.restore_counts(&counts_blob).expect("T9: restore_counts must succeed");
+
+    // Capture the pre-call basis (empty, untrained).
+    let pre = restored.serialize_basis();
+
+    // finalize_from_counts must return false: LSA lacks TF rows in its counts blob.
+    let ok = restored.finalize_from_counts();
+    assert!(
+        !ok,
+        "T9: LSA finalize_from_counts must return false (counts blob holds only vocab anchors, not TF rows)"
+    );
+
+    // State must be unchanged: serialize_basis must still equal the pre-call snapshot.
+    let post = restored.serialize_basis();
+    assert_eq!(
+        pre, post,
+        "T9: LSA finalize_from_counts must leave provider state unchanged when returning false"
+    );
+}
+

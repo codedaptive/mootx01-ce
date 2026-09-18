@@ -34,6 +34,7 @@ let package = Package(
         .iOS(.v26),
     ],
     products: [
+        .library(name: "AriaMCPWire", targets: ["AriaMCPWire"]),
         .library(name: "AriaMCP", targets: ["AriaMCP"]),
         // AriaResident: the resident-daemon composition layer (telemetry + Brain
         // pump + monitoring gate + HTTP transport), shared by both the product
@@ -41,12 +42,16 @@ let package = Package(
         // Sits ABOVE the telemetry-free AriaMCP core.
         .library(name: "AriaResident", targets: ["AriaResident"]),
     ],
+    traits: [],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(name: "AriaLexiconLib", path: "../../libs/AriaLexiconLib"),
         .package(
             name: "GeniusLocusKit",
             path: "../GeniusLocusKit",
-            traits: ["MigrationFloor1_0"]
+            traits: [
+                "MigrationFloor1_0",
+            ]
         ),
         .package(name: "NeuronKit", path: "../NeuronKit"),
         // SubstrateML provides ARM (MiningThresholds) and FCA (BoundedConceptMiner,
@@ -55,15 +60,15 @@ let package = Package(
         .package(name: "SubstrateML", path: "../../libs/SubstrateML"),
         .package(name: "CognitionKit", path: "../CognitionKit"),
         .package(name: "LocusKit", path: "../LocusKit"),
-        // CorpusKit + VectorKit: the aria-mcp executable wires semantic recall
-        // for the durable SQLite estate (ARIA_MCP_SQLITE_PATH) by constructing a
+        // CorpusKit + SynapseKit: the aria-mcp executable wires semantic recall
+        // for the estate its catalog record names by constructing a
         // Corpus + VectorStore after `kit.open` and registering both — the same
         // composition EstateLifecycle.provision wires for a .glk estate. Without
         // this, the BM25 + vector recall lanes stay dark on a bare open. App →
         // kit layering (downstream→upstream), no inversion. Permitted per
         // in-repository dependency direction.
         .package(name: "CorpusKit", path: "../CorpusKit"),
-        .package(name: "VectorKit", path: "../VectorKit"),
+        .package(name: "SynapseKit", path: "../SynapseKit"),
         // SubstrateTypes provides RowVerb, consumed by HTTPServer.swift's
         // tombstone-instant resolution (audit-trail fallback) after the
         // topology-analysis relocation to NeuronKit. App → lib layering, no
@@ -113,16 +118,29 @@ let package = Package(
         // targets that import a product directly. Test-only dep; no layering inversion.
         // Per in-repository dependency direction.
         .package(name: "QueueKit", path: "../QueueKit"),
-        // WorkPacketKit: the four moot_*_packet tools (FAB5-I2) store and retrieve
-        // agentic work packets as structuredJSON drawers. App→kit layering,
-        // no inversion. WorkPacketKit depends only on LocusKit, which AriaMcpKit
-        // already carries transitively via GeniusLocusKit.
-        .package(name: "WorkPacketKit", path: "../WorkPacketKit"),
+        // were retired from the AriaMCP library (ENC-W6B). No longer imported
+        // by the AriaMCP library target; test-only dep. No layering inversion.
+        // ContextDistillLib: inline distillation for depth:distilled and moot_recall_distilled.
+        // Replaces reading the stored distilled column (removed in schema 19 by W1).
+        // AriaMCP calls ContextDistiller().distill(DistillationInput(original:), converter:)
+        // at read time. Lib→kit layering (upstream → downstream), no inversion.
+        .package(name: "ContextDistillLib", path: "../../libs/ContextDistillLib"),
+        // FactExtractionKit: AriaResident holds a (any FactExtractor)? in ResidentConfig
+        // and drives activateFactExtractor + runFactExtractionBatch at estate open.
+        // App → kit layering (downstream→upstream), no inversion.
+        .package(name: "FactExtractionKit", path: "../FactExtractionKit"),
     ],
     targets: [
         .target(
+            name: "AriaMCPWire",
+            dependencies: [.product(name: "MootProductIdentity", package: "MootProductIdentity")],
+            path: "Sources/AriaMCPWire"
+        ),
+        .target(
             name: "AriaMCP",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
+                "AriaMCPWire",
                 .product(name: "AriaLexiconLib", package: "AriaLexiconLib"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
@@ -141,8 +159,9 @@ let package = Package(
                 .product(name: "EideticLib", package: "EideticLib"),
                 // LoopbackHTTP backs HTTPServer.swift (the resident HTTP MCP transport).
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
-                // WorkPacketKit backs the four moot_*_packet tools (FAB5-I2).
-                .product(name: "WorkPacketKit", package: "WorkPacketKit"),
+                // ContextDistillLib: inline distillation at read time for depth:distilled
+                // and moot_recall_distilled (replaces stored distilled column, schema 19).
+                .product(name: "ContextDistillLib", package: "ContextDistillLib"),
             ],
             path: "Sources/AriaMCP",
             // Privacy manifest (M-MXA-5): deriveBuildSerial reads the running
@@ -153,6 +172,7 @@ let package = Package(
         .target(
             name: "AriaResident",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "AriaMCP",
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
                 // NeuronKit: AriaResident constructs NeuronKit.AutonomicGovernor
@@ -160,6 +180,12 @@ let package = Package(
                 // layering (downstream→upstream), no inversion. The AriaMCP target
                 // itself still lists NeuronKit for its own direct uses (recall, lens
                 // tools, etc.); this dep is the AriaResident target's own declaration.
+                // SynapseKit: AriaResident owns EstateHNSWGraphMaintenance, the production
+                // adapter behind NeuronKit's pure HNSWGraphMaintenance seam. The adapter
+                // holds a live VectorStore handle and calls three write methods, so it
+                // must sit at the app layer: NeuronKit may not hold storage (B-1). The
+                // seam protocol stays in NeuronKit and carries no SynapseKit type.
+                .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "NeuronKit", package: "NeuronKit"),
                 // CognitionKit: AriaResident injects the graphAnalyticsHandler closure
                 // (Keystones + ConstellationLens) into NeuronKit.AutonomicGovernor.
@@ -178,6 +204,10 @@ let package = Package(
                 // VaultKit is already a package-level dep (AriaMCP target); this
                 // adds the direct product reference for the AriaResident target.
                 .product(name: "VaultKit", package: "VaultKit"),
+                // FactExtractionKit: ResidentConfig carries a (any FactExtractor)?
+                // and runResidentDaemon activates it at estate open when the estate's
+                // fact_extraction setting is on. App → kit layering, no inversion.
+                .product(name: "FactExtractionKit", package: "FactExtractionKit"),
             ],
             path: "Sources/AriaResident"
         ),
@@ -203,11 +233,11 @@ let package = Package(
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 // PostgreSQL backend: needed for the precedence-ladder config tests.
                 .product(name: "PersistenceKitPostgreSQL", package: "PersistenceKit"),
-                // CorpusKit + VectorKit: DurableSemanticRecallTests builds the same
+                // CorpusKit + SynapseKit: DurableSemanticRecallTests builds the same
                 // Corpus + VectorStore the aria-mcp durable branch wires, to assert
                 // the BM25/vector lanes light up and survive a restart.
                 .product(name: "CorpusKit", package: "CorpusKit"),
-                .product(name: "VectorKit", package: "VectorKit"),
+                .product(name: "SynapseKit", package: "SynapseKit"),
                 .product(name: "VaultKit", package: "VaultKit"),
                 // LoopbackHTTP: HTTPServerTests drive the HTTP transport directly.
                 .product(name: "LoopbackHTTP", package: "LoopbackHTTP"),
@@ -226,6 +256,7 @@ let package = Package(
                 // prevention predicate (test 4 — second dreamer must stand down while
                 // first holds a fresh lease).  / recall-driven dreaming dream path.
                 .product(name: "QueueKit", package: "QueueKit"),
+                // directly via the normalized store (ADORN-STORE-02 Part C).
             ],
             path: "Tests/AriaMCPTests"
         ),
@@ -235,6 +266,20 @@ let package = Package(
                 "AriaResident",
                 .product(name: "ObserverSink", package: "ObserverSink"),
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
+                // FactExtractionKitProviders: ClosureFactExtractor drives the
+                // decision function in FactExtractionActivationTests without
+                // a real model.
+                .product(name: "FactExtractionKitProviders", package: "FactExtractionKit"),
+                // GeniusLocusKit + LocusKit + InMemory: FactExtractionActivationTests
+                // spins up an in-memory estate to exercise the live-activation
+                // path of resolveFactExtractionCycle (setting=.on, extractor present).
+                // LocusKit provides OwnerCredentials; PersistenceKit provides
+                // EstateConfiguration; PersistenceKitInMemory provides InMemoryStorage.
+                .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
+                .product(name: "GeniusLocusKitMigrations", package: "GeniusLocusKit"),
+                .product(name: "LocusKit", package: "LocusKit"),
+                .product(name: "PersistenceKit", package: "PersistenceKit"),
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
             ],
             path: "Tests/AriaResidentTests"
         ),

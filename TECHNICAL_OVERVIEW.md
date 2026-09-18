@@ -22,7 +22,7 @@ MOOTx01 is an SDK of composable kits. **GeniusLocusKit** composes them into a wo
 
 ```text
 Observe / Remember -> LocusKit (spatial memory + knowledge graph)
-                      VectorKit (on-device embeddings + ANN / hybrid search)
+                      SynapseKit (on-device embeddings + ANN / hybrid search)
                       CorpusKit (content-plus-vector RAG bundles)
 
 Dream             -> NeuronKit (hybrid recall, dreaming daemon, Bradley-Terry, SolverBandit)
@@ -84,7 +84,7 @@ Composition (this repo):
 
 Standalone substrate (SDK: moot-memory):
     LocusKit        Spatial memory system plus knowledge graph
-    VectorKit       On-device embeddings plus nearest-neighbour search
+    SynapseKit       On-device embeddings plus nearest-neighbour search
     CorpusKit       Content-plus-vector RAG bundles
 
 Grounding (SDK: moot-semantics):
@@ -139,12 +139,12 @@ mootx01/
 ├── packages/
 │   ├── libs/     SubstrateTypes · SubstrateKernel · SubstrateML · SubstrateLib · EngramLib
 │   │             AriaLexiconLib · LatticeLib · EideticLib · IntellectusLib · ObserverSink · LoopbackHTTP
-│   ├── kits/     LocusKit · VectorKit · PersistenceKit · ConvergenceKit · QueueKit
+│   ├── kits/     LocusKit · SynapseKit · PersistenceKit · ConvergenceKit · QueueKit
 │   │             CorpusKit · GeniusLocusKit · NeuronKit · CognitionKit · VaultKit · AriaMcpKit
 │   └── PACKAGES.md
 ├── apps/         aria-mcp-server (MCP server) · mootx01 (CLI) · moot-mgr (console)
 │                 moot-bridge (transport bridge) · Mootx01-App (Apple app)
-│                 Mootx01-Setup (macOS install assistant) · moot-math-benchmark
+│                 Mootx01-Setup (macOS install assistant) · moot-math-speedtest
 │                 moot-agent-skills (client adapters)
 ├── examples/     SDK · SidecarDemo · MootNotepad · MootTodo · MootCalendarIngest
 └── docs/         start-here · concepts · reference · decisions · engineering · validation · archive
@@ -164,7 +164,8 @@ mootx01/
 | [`docs/start-here/AI_INSTALL_MANIFEST.json`](docs/start-here/AI_INSTALL_MANIFEST.json) | Machine-readable install facts for AI agents (commands, ports, verification, adapters) |
 | [`apps/moot-mgr/README.md`](apps/moot-mgr/README.md) | Operator console, dashboard/read API, control plane, and troubleshooting |
 | [`apps/moot-bridge/README.md`](apps/moot-bridge/README.md) | Optional two-backend MCP bridge: routing, configuration, security, and failure behavior |
-| [`apps/moot-math-benchmark/README.md`](apps/moot-math-benchmark/README.md) | Reproducible benchmark program, evidence requirements, and result submission |
+| [`apps/moot-math-speedtest/README.md`](apps/moot-math-speedtest/README.md) | Reproducible substrate and kernel speed test, evidence requirements, and result submission |
+| [`benchmarks/README.md`](benchmarks/README.md) | Reproducible end-to-end memory benchmark suite and public result surface |
 | [`llms.txt`](llms.txt) | Compact repository and standalone-SDK discovery map for AI agents |
 | [`docs/concepts/TOPOLOGY.md`](docs/concepts/TOPOLOGY.md) | Readable front door: products, stack, surfaces, sidecar |
 | [`docs/concepts/MOOTX01_AND_ARIA_CANON.md`](docs/concepts/MOOTX01_AND_ARIA_CANON.md) | Durable definitions of MOOTx01 and ARIA |

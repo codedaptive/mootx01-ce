@@ -16,3 +16,19 @@ path = "src/main.rs"
 [dependencies]
 # The server-logic library lives in AriaMcpKit; this binary just wires it to I/O.
 aria-mcp = { path = "../../../packages/kits/AriaMcpKit/rust" }
+# Resident gold-miner engine install at startup (DEFAULT-MINT-01): the dev
+# binary mirrors the product serve's engine block so the two Rust entry
+# points do not diverge on minting. In-repo kit dependency; layering holds
+# (app -> lib).
+# The estate catalog and open posture the entry point resolves its estate through.
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust" }
+moot-product-identity = { path = "../../../packages/libs/MootProductIdentity/rust" }
+
+[dev-dependencies]
+# test-seams enables EstateCatalog::set_configuration_directory_override,
+# the test seam used by the estate-selection tests below.
+genius-locus-kit = { path = "../../../packages/kits/GeniusLocusKit/rust", features = ["test-seams"] }
+# serde_json needed by tests/estate_selection.rs to parse dispatch_tool results.
+serde_json = "1"
+
+[features]

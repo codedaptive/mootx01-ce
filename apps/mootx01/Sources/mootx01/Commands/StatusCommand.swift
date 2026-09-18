@@ -1,11 +1,14 @@
 // StatusCommand.swift
 //
-// Show current serve state: running PID (if any), active estate name,
-// wired MCP clients, and a brief estate summary (file size as proxy for
-// content since a full estate open requires the macOS MCP stack).
+// Show current serve state with the OBSERVED vocabulary (MACD-2c2, P-c2-10):
+// registration, PID, and port answers are reported as the observations they
+// are — never equated with a running/ready server. Also shows the active
+// estate name, wired MCP clients, and a brief estate summary (file size as
+// proxy for content since a full estate open requires the macOS MCP stack).
 
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 struct StatusCommand: AsyncParsableCommand {
@@ -17,45 +20,89 @@ struct StatusCommand: AsyncParsableCommand {
     func run() async throws {
         let home = FileManager.default.homeDirectoryForCurrentUser
         let env = ProcessInfo.processInfo.environment
-        let dataDir = MootPaths.resolveDataDirectory(environment: env, homeDirectory: home)
+
+        // Catalog load to resolve the active record's PID file path.
+        // `EstateCatalog.load()` is read-only and fast; a catalog that does
+        // not exist yet (first install) returns `.failure`, and `pidURL`
+        // remains nil — the PID observation is skipped, which is correct
+        // (no serve has ever run on this machine).
+        let activeRecord = try? EstateCatalog.load().active
+        // The PID file is `estate.pid` inside the estate's own directory,
+        // not `mootx01.pid` at the catalog root. The path is owned by the
+        // estate record to stay in sync with serve and upgrade.
+        let pidURL: URL? = activeRecord?.pidURL
 
         print("mootx01 status")
         print("─────────────────────────────────")
 
-        // Server liveness. Prefer the PID file, but the launchd resident daemon
-        // serves the HTTP port WITHOUT owning that PID file — so fall back to a
-        // direct TCP connection to the resident endpoint, the transport-level
-        // truth. Without this, `status` reported "not running" while the daemon
-        // was live on 4242, which read as a broken install.
-        let pidURL = dataDir.appendingPathComponent("mootx01.pid", isDirectory: false)
+        // Server state — OBSERVED vocabulary (MACD-2c2, P-c2-10): a PID file, a
+        // launchd registration, or an answering TCP port is NEVER equated
+        // with a running/ready server. Readiness belongs exclusively to the
+        // signed provider's OWN authenticated report; port liveness never
+        // elects (Kong). This command reports OBSERVATIONS, classified:
+        //   - registration: does a daemon LaunchAgent plist exist (legacy
+        //     raw-serve label or the bundle label)?
+        //   - port: does something accept a TCP connection (identity
+        //     unverified — could be any process)?
+        //   - provider report: the descriptor/authenticated readiness surface
+        //     remains authoritative; a registration or open port alone is not.
         let rawPort = Int(env["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
         let residentPort = (1...65535).contains(rawPort) ? rawPort : MootPaths.defaultResidentPort
-        if let pidString = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-           let pid = Int32(pidString),
-           processIsRunning(pid: pid) {
-            print("Server: running (PID \(pid))")
-        } else if portIsListening(port: residentPort) {
-            print("Server: running (HTTP on 127.0.0.1:\(residentPort))")
-        } else {
-            print("Server: not running")
-            // Remove stale PID file if the process is gone.
-            if FileManager.default.fileExists(atPath: pidURL.path) {
+        #if os(macOS)
+        // MACD-3B3 C5: run the authenticated ownership probe so the provider's
+        // verbatim state flows into `observedServerStatus`.  This surface owns no
+        // second copy of the arbiter vocabulary — the format rule lives in
+        // `LaunchAgent.authenticatedBundledOwner` (P-c2-10, rule at line 183).
+        // The probe is fail-closed: subprocess failure, JSON parse error, and
+        // any unrecognised outcome map to `.absent` or `.unauthenticated`, never
+        // to a false `.healthy`.
+        let ownerOutcome = ProviderOwnershipProbe().detect(homeDirectory: home)
+        let providerReportedState = LaunchAgent.authenticatedBundledOwner(outcome: ownerOutcome)
+        let legacyRegistered = FileManager.default.fileExists(
+            atPath: MootPaths.daemonPlistURL(homeDirectory: home).path
+        )
+        let bundleRegistered = FileManager.default.fileExists(
+            atPath: DaemonBundle.launchAgentPlistURL(homeDirectory: home).path
+        )
+        let registration: LaunchAgent.DaemonRegistrationObservation =
+            (legacyRegistered || bundleRegistered) ? .registered : .none
+        let port: LaunchAgent.DaemonPortObservation =
+            portIsListening(port: residentPort) ? .answering : .unbound
+        print("Server: \(LaunchAgent.observedServerStatus(registration: registration, port: port, providerReportedState: providerReportedState))")
+        if bundleRegistered {
+            print("Daemon provider bundle: enabled registration present (launchd: \(DaemonBundle.launchAgentLabel))")
+        }
+        #else
+        print("Server: \(portIsListening(port: residentPort) ? "port answering (unverified — not proof of readiness)" : "not running")")
+        #endif
+        // A PID file whose process is verifiably a live mootx01 binary is an
+        // OBSERVATION worth surfacing (identity-verified, still not
+        // readiness); a stale one is removed.
+        if let pidURL,
+           let pidString = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+           let pid = Int32(pidString) {
+            if processIsRunning(pid: pid) {
+                print("Foreground serve process: PID \(pid) (identity-verified mootx01; not proof of resident readiness)")
+            } else if FileManager.default.fileExists(atPath: pidURL.path) {
                 try? FileManager.default.removeItem(at: pidURL)
             }
         }
 
-        // Active estate.
-        let activeName = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
-        print("Active estate: \(activeName)")
-
-        // Estate file info.
-        let estateURL = DatabaseManager.estateURL(for: activeName, in: dataDir)
-        if FileManager.default.fileExists(atPath: estateURL.path) {
-            let attrs = try? FileManager.default.attributesOfItem(atPath: estateURL.path)
-            let size = attrs?[.size] as? Int ?? 0
-            print("Estate file: \(estateURL.path) (\(formatBytes(size)))")
-        } else {
-            print("Estate file: not yet created (run `mootx01 serve` to initialise)")
+        // Active estate, from the catalog. Status reports; it does not create
+        // the catalog, so a machine that has never run install or serve says so.
+        switch Result(catching: { try EstateCatalog.load().active }) {
+        case .success(let active):
+            print("Active estate: \(active.name)")
+            let estateURL = active.databaseURL
+            if FileManager.default.fileExists(atPath: estateURL.path) {
+                let attrs = try? FileManager.default.attributesOfItem(atPath: estateURL.path)
+                let size = attrs?[.size] as? Int ?? 0
+                print("Estate file: \(estateURL.path) (\(formatBytes(size)))")
+            } else {
+                print("Estate file: not yet created (run `mootx01 serve` to initialise)")
+            }
+        case .failure(let error):
+            print("Active estate: none (\(error))")
         }
 
         // Wired clients.

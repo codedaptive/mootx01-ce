@@ -45,6 +45,7 @@ let package = Package(
     dependencies: [
         .package(path: "../SubstrateTypes"),
         .package(path: "../SubstrateKernel"),
+        .package(path: "../ContextDistillLib"),
         // IntellectusLib is the zero-dep telemetry leaf. Adding it here
         // lets the five VizGraph algorithms emit community.assignment,
         // centrality.score, nmf.factor, anomaly.flag, and edge.decayed_weight
@@ -57,7 +58,7 @@ let package = Package(
     targets: [
         .target(
             name: "SubstrateML",
-            dependencies: ["SubstrateTypes", "SubstrateKernel", "IntellectusLib"],
+            dependencies: ["SubstrateTypes", "SubstrateKernel", "IntellectusLib", "ContextDistillLib"],
             path: "Sources/SubstrateML"
         ),
         .testTarget(

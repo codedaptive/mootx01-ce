@@ -192,6 +192,49 @@ struct EvaluatorTests {
             "restricted drawer must be absent from default recall (Private tier)")
     }
 
+    @Test("Sensitivity-withheld result reports only default-ceiling exclusions")
+    func sensitivityWithheldResult_countsOnlyDefaultCeilingExclusions() async throws {
+        let path = FileManager.default.temporaryDirectory
+            .appendingPathComponent("locuskit-withheld-\(UUID().uuidString).sqlite3")
+        defer { try? FileManager.default.removeItem(at: path) }
+        let store = try await DrawerStore(storage: TestStorage.sqlite(path))
+        let filedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let drawers = [
+            Drawer(id: "normal", content: "normal", parentNodeId: "test-parent",
+                   addedBy: "test-agent", filedAt: filedAt, embeddingModelID: "test-v1",
+                   provenance: 0x40000),
+            Drawer(id: "elevated", content: "elevated", parentNodeId: "test-parent",
+                   addedBy: "test-agent", filedAt: filedAt, embeddingModelID: "test-v1",
+                   provenance: 0x40000,
+                   adjectiveBitmap: Int64(AdjectiveSensitivity.elevated.rawValue) << 6),
+            Drawer(id: "restricted", content: "restricted", parentNodeId: "test-parent",
+                   addedBy: "test-agent", filedAt: filedAt, embeddingModelID: "test-v1",
+                   provenance: 0x40000,
+                   adjectiveBitmap: Int64(AdjectiveSensitivity.restricted.rawValue) << 6),
+        ]
+
+        let normalFrame = try await BitmapEvaluator.evaluateResult(
+            frame: RecallFrame(filterChain: []), drawers: drawers, store: store
+        )
+        #expect(normalFrame.rows.count == 2)
+        #expect(normalFrame.withheldBySensitivity == 1)
+
+        let elevatedFrame = try await BitmapEvaluator.evaluateResult(
+            frame: RecallFrame(filterChain: [.sensitivityAtMost(.secret)]),
+            drawers: drawers,
+            store: store
+        )
+        #expect(elevatedFrame.rows.count == 3)
+        #expect(elevatedFrame.withheldBySensitivity == 0)
+
+        let explicitSensitivityFrame = try await BitmapEvaluator.evaluateResult(
+            frame: RecallFrame(filterChain: [.sensitivity(.restricted)]),
+            drawers: drawers,
+            store: store
+        )
+        #expect(explicitSensitivityFrame.withheldBySensitivity == 0)
+    }
+
     @Test(".sensitivityAtMost(.elevated) includes elevated drawer")
     func sensitivityAtMost_includesElevated() async throws {
         let estate = try await makeEstate()
@@ -333,6 +376,30 @@ struct EvaluatorTests {
         #expect(rows.count == 1)
         #expect(rows.first?.id == d2.id)
         #expect(rows.first?.id != d1.id)
+    }
+
+    @Test(".eventAfter/.eventBefore window on eventTime, inclusive at the edges")
+    func eventWindow_filtersByEventTime() async throws {
+        let estate = try await makeEstate()
+        let iso = ISO8601DateFormatter()
+        let early = iso.date(from: "2023-05-08T13:00:00Z")!
+        let edge = iso.date(from: "2023-07-17T14:31:00Z")!
+        let late = iso.date(from: "2023-11-30T09:00:00Z")!
+        var f1 = frame(content: "early"); f1.eventTime = early
+        var f2 = frame(content: "edge"); f2.eventTime = edge
+        var f3 = frame(content: "late"); f3.eventTime = late
+        _ = try await captureAndConfirm(f1, into: estate)
+        let d2 = try await captureAndConfirm(f2, into: estate)
+        _ = try await captureAndConfirm(f3, into: estate)
+        // [June 1, edge] — the edge drawer sits exactly on the upper bound
+        // and must be INSIDE (inclusive window semantics, unlike created*).
+        let stream = await estate.recall(RecallFrame(filterChain: [
+            .all([.eventAfter(iso.date(from: "2023-06-01T00:00:00Z")!),
+                  .eventBefore(edge)])
+        ]))
+        let rows = await drain(stream)
+        #expect(rows.count == 1)
+        #expect(rows.first?.id == d2.id)
     }
 
     @Test(".createdBefore returns only drawers filed strictly before the timestamp")

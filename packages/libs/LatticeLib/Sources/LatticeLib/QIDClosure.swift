@@ -72,6 +72,38 @@ public enum QIDClosure {
     /// Callers record it as provenance.
     public static var dataVersion: String { graphFile?.version ?? "0.0.0-unavailable" }
 
+    /// The DIRECT neighbors of `qid` over the pinned P31/P279 edge graph, in
+    /// BOTH directions: its direct parents plus every Q-ID that lists `qid`
+    /// as a direct parent (its children). Undirected adjacency is what a
+    /// graph-distance BFS needs — the path between two entities routes
+    /// through a common ancestor, which requires walking up AND down the
+    /// taxonomy (W2.5 Track S: this is the vendored adjacency behind
+    /// SubstrateML's `WikidataAdjacencyProvider` for LatticeDistance §8.3).
+    /// Empty/unknown qid (or unavailable artifact) → `[]`. `qid` itself is
+    /// never a member of its own neighbor set (self-loops are dropped).
+    /// Mirrors the Rust `qid_closure::neighbors` exactly.
+    public static func neighbors(of qid: String) -> Set<String> {
+        guard !qid.isEmpty, let graph = edges else { return [] }
+        var result = Set(graph[qid] ?? [])
+        if let children = childIndex[qid] { result.formUnion(children) }
+        result.remove(qid)
+        return result
+    }
+
+    /// The reverse (parent → direct children) index over the pinned edges,
+    /// built once per process on first use. Pure over the pinned artifact,
+    /// so the lazy build is deterministic.
+    private static let childIndex: [String: [String]] = {
+        guard let graph = edges else { return [:] }
+        var index: [String: [String]] = [:]
+        for (child, parents) in graph {
+            for parent in parents {
+                index[parent, default: []].append(child)
+            }
+        }
+        return index
+    }()
+
     // MARK: - BFS over the pinned edges
 
     /// Compute the transitive closure of `qid` by breadth-first walk over the
@@ -110,8 +142,10 @@ public enum QIDClosure {
     }
 
     /// The integer part of a Q-ID ("Q146" → 146). Returns 0 when the value has
-    /// no parseable trailing integer (defensive; not present in the artifact).
-    static func qidInt(_ qid: String) -> UInt64 {
+    /// no parseable trailing integer (defensive; not present in the artifact)
+    /// or when the string is empty — 0 is the null Q-ID at the SubstrateML
+    /// lattice-anchor boundary.
+    public static func qidInt(_ qid: String) -> UInt64 {
         let digits = qid.drop(while: { !$0.isNumber })
         return UInt64(digits) ?? 0
     }

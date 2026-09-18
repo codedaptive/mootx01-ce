@@ -11,6 +11,7 @@
 // `internal` members of both types without touching those files.
 
 import Foundation
+import MootProductIdentity
 import SQLCipher
 import PersistenceKit
 import OSLog
@@ -42,7 +43,7 @@ extension SQLiteStorage {
 extension SQLiteBackend {
 
     private static let logger = Logger(
-        subsystem: "com.mootx01.kit", category: "PersistenceKitSQLite")
+        subsystem: MootProductIdentity.Logging.subsystem, category: "PersistenceKitSQLite")
 
     /// Detect and repair foreign SQLite geometry (nonzero reserved-bytes-per-page).
     ///

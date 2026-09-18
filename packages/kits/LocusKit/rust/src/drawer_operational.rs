@@ -20,7 +20,11 @@
 //! bits 12–23  feature_flags          (bitset, 11 named bits 12..23)
 //! bit  24     state_extension flag
 //! bit  25     lineage_clustering flag (NEW in v0.6)
-//! bits 26–63  reserved
+//! bit  26     is_anomalous — low-cohesion outlier flag (§11.18, 2026-08-20)
+//! bit  27     span_indexed — encoder span rows exist for the current content
+//!             (Encoder Rerank Program, 2026-09-05)
+//! bits 28–30  FREE (3 bits headroom)
+//! bits 31–63  reserved
 //! ```
 //!
 //! ## Swift-to-Rust shape change
@@ -179,17 +183,15 @@ impl DrawerFeatureFlags {
     /// Privacy-aware bucket; recall gated by zone-policy check.
     pub const IS_LOCKED_ZONE: i64 = 1 << 18;
 
-    /// Bit 19 — drawer carries a current distilled representation per
-    /// SPEC_DISTILLATION_STORAGE §4 (cookbook §2.4.1, 2026-07-28).
+    /// Bit 19 — retained assignment with no writer at schema v19.
     ///
-    /// Set iff all four distillation columns (`distilled`,
-    /// `distilled_pipeline_version`, `distilled_token_count`,
-    /// `distilled_at`) are populated. Clear when those columns are NULL.
-    ///
-    /// The §4 invariant makes this bit skew-impossible: it travels in the
-    /// SAME UPDATE as the four columns — set by `set_distilled_representation`,
-    /// cleared by every `insert_cleared_representation` call site and by
-    /// the dataset-content patch path. Wire value: 1 << 19 = 524288 (0x80000).
+    /// It marked "a distilled representation is stored for this row" while
+    /// the distilled columns existed; schema v19 removed those columns and
+    /// distillation is rendered inline at hydration instead, so nothing
+    /// sets this bit any more and every content-clearing path still clears
+    /// it. The position stays assigned because a bit is never reused (a
+    /// populated estate may carry it set on rows written before v19).
+    /// Wire value: 1 << 19 = 524288 (0x80000).
     ///
     /// Mirrors Swift `DrawerFeatureFlags.hasCurrentRepresentation`.
     pub const HAS_CURRENT_REPRESENTATION: i64 = 1 << 19;
@@ -228,6 +230,63 @@ impl DrawerFeatureFlags {
     /// Mask covering the 12-bit feature region (bits 12–23). Matches
     /// the Swift `featureFlags` accessor's `0xFFF000` mask.
     pub const FIELD_MASK: i64 = 0xFFF000;
+
+    // ── Anomalous flag (§11.18 anomalous-flag recall prefilter, 2026-08-20) ──
+
+    /// Bit 26 — drawer is a low-cohesion outlier in its room, computed by
+    /// the anomaly-flag maintenance sweep in GeniusLocusKit (§11.18).
+    ///
+    /// Set/cleared by `Estate::set_anomalous_flag` during the room-cohesion
+    /// sweep: drawers whose shingle-similarity z-score against room peers
+    /// falls below the anomaly threshold get this flag set; all others are
+    /// cleared. Requires ≥ 3 drawers in the room for z-score stability.
+    ///
+    /// NOTE: bit 26 is above the 12-bit feature-flags region (bits 12–23).
+    /// `has_feature_flag(IS_ANOMALOUS)` works via direct bitwise AND, but
+    /// the `feature_flags()` masked accessor will NOT reflect this bit.
+    /// Use `is_anomalous()` to test this bit.
+    ///
+    /// Wire value: 1 << 26 = 67108864 (0x4000000).
+    /// Mirrors Swift `DrawerFeatureFlags.isAnomalous`.
+    pub const IS_ANOMALOUS: i64 = 1 << 26;
+
+    /// Bit 27 — at least one encoder span row exists in `vectors` under the
+    /// ACTIVE encoder model for this row's current `content_hash`.
+    ///
+    /// Set by the span-encode duty (`Estate::set_span_indexed`) after a
+    /// successful `write_span_vectors`. Cleared by every content write (the
+    /// same statement that bumps `content_hash`, through
+    /// `CLEARED_ON_CONTENT_WRITE`) and by `EncoderModelStore::activate`,
+    /// which clears it estate-wide so the duty re-encodes under the new
+    /// model. A clear bit IS the duty's work-item predicate
+    /// (`span_index_debt_batch`).
+    ///
+    /// NOTE: bit 27 is above the 12-bit feature-flags region (bits 12–23);
+    /// `feature_flags()` will not reflect it. Use `is_span_indexed()`.
+    ///
+    /// Wire value: 1 << 27 = 134217728 (0x8000000).
+    /// Mirrors Swift `DrawerFeatureFlags.spanIndexed`.
+    pub const SPAN_INDEXED: i64 = 1 << 27;
+
+    /// Bit 28 — distilled fact extraction settled for the current content
+    /// under the active recipe. Zero extracted facts is a settled result.
+    pub const FACTS_EXTRACTED: i64 = 1 << 28;
+
+    /// Bit 29 — the active recipe rejected this drawer's current content.
+    /// Always set together with bit 28: a rejection is settled for the recipe,
+    /// and the row is the rejected corpus for analysis (the checkpoint row
+    /// keeps the reason). Cleared with bit 28 by content writes and recipe
+    /// activation. Wire value: 1 << 29. Mirrors Swift `factsRejected`.
+    pub const FACTS_REJECTED: i64 = 1 << 29;
+
+    /// The bits every content write clears in the same UPDATE that changes
+    /// `content`: bit 19 (retained, always cleared), bit 27 (the span rows
+    /// describe the previous content), and bits 28 and 29 (the extraction
+    /// outcome described the previous content, so the drawer owes a fresh
+    /// extraction attempt). Applied as `operational_bitmap & !CLEARED_ON_CONTENT_WRITE`.
+    /// Mirrors Swift `DrawerFeatureFlags.clearedOnContentWrite`.
+    pub const CLEARED_ON_CONTENT_WRITE: i64 = Self::HAS_CURRENT_REPRESENTATION
+        | Self::SPAN_INDEXED | Self::FACTS_EXTRACTED | Self::FACTS_REJECTED;
 }
 
 // MARK: - Drawer accessors
@@ -287,20 +346,32 @@ impl Drawer {
         (self.operational_bitmap & flag) == flag
     }
 
-    /// True when bit 19 of `operational_bitmap` is set, indicating that
-    /// all four distillation columns are populated (cookbook §2.4.1).
-    ///
-    /// Consumers use this instead of `distilled.is_some()` for eligibility
-    /// checks — it is a direct bitmap read, not a column-presence test.
-    /// `distill_items_sweep` uses this accessor as the primary eligibility
-    /// gate; `count_undistilled` uses the corresponding `BitmaskNone`
-    /// predicate on the database side.
-    ///
-    /// Mirrors Swift `Drawer.hasCurrentRepresentation`.
+    /// True when bit 19 of `operational_bitmap` is set. No writer sets the
+    /// bit at schema v19 (see `DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION`);
+    /// rows written before v19 may still carry it. Mirrors Swift
+    /// `Drawer.hasCurrentRepresentation`.
     pub fn has_current_representation(&self) -> bool {
         // Cookbook §2.4.1: has_current_representation at bit 19.
         (self.operational_bitmap & DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION)
             == DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION
+    }
+
+    /// True when bit 27 of `operational_bitmap` is set: encoder span rows
+    /// exist under the active model for this row's current content. Direct
+    /// bitmap read because bit 27 is outside the feature-flags region.
+    /// Mirrors Swift `Drawer.isSpanIndexed`.
+    pub fn is_span_indexed(&self) -> bool {
+        (self.operational_bitmap & DrawerFeatureFlags::SPAN_INDEXED) != 0
+    }
+
+    /// True when bit 28 is set for the current content and active extractor.
+    pub fn are_facts_extracted(&self) -> bool {
+        (self.operational_bitmap & DrawerFeatureFlags::FACTS_EXTRACTED) != 0
+    }
+
+    /// Bit 29: the active recipe rejected the current content (settled).
+    pub fn are_facts_rejected(&self) -> bool {
+        (self.operational_bitmap & DrawerFeatureFlags::FACTS_REJECTED) != 0
     }
 
     // ── Wave-2 vague tier accessors (cookbook §2.4.2) ─────────────────────
@@ -350,6 +421,24 @@ impl Drawer {
         // Cookbook §2.4 bit 25: lineage_clustering flag.
         bit_field::extract_flag(self.operational_bitmap, 25)
     }
+
+    // ── Anomalous flag (bit 26, §11.18 anomalous-flag recall prefilter) ───────
+
+    /// True when bit 26 of `operational_bitmap` is set, indicating this
+    /// drawer is a low-cohesion outlier in its room (cookbook §2.4, §11.18).
+    ///
+    /// Computed and maintained by GeniusLocusKit's anomaly-flag sweep.
+    /// Bit 26 is above the feature-flags region (bits 12–23) so
+    /// `has_feature_flag(DrawerFeatureFlags::IS_ANOMALOUS)` also works,
+    /// but this named accessor is preferred for readability.
+    ///
+    /// Mirrors Swift `Drawer.isAnomalous`.
+    pub fn is_anomalous(&self) -> bool {
+        // Cookbook §2.4 bit 26: anomalous flag (§11.18). Reads the raw
+        // bitmap directly — bit 26 is outside the feature_flags() region.
+        (self.operational_bitmap & DrawerFeatureFlags::IS_ANOMALOUS) != 0
+    }
+
 
     // -------------------------------------------------------------------------
     // Adjective-bitmap axis accessors — mirrors the `Drawer` extension in

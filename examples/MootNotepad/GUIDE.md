@@ -19,31 +19,25 @@ Think of MOOT as a filing cabinet with rooms. This app uses one room called
 
 - **Write a note.** The app hands your text to MOOT and says "file this in the
   notes room." MOOT makes a drawer and gives back an id.
-- **See your notes.** The app asks MOOT "show me what is in the notes room."
-  MOOT answers with text, one line per note. The app reads those lines and
-  turns each one into a row you can tap.
+- **See your notes.** The app asks MOOT "which drawers match?" and gets back
+  a list of ids. Then it asks "give me these drawers in full" and gets each
+  note's text back, one row per note.
 - **Delete a note.** The app tells MOOT "withdraw the drawer with this id." The
   note goes away.
 
 The app never keeps its own copy of the truth. After every change, it asks MOOT
 again. That way the screen always shows what MOOT really holds.
 
-## One tricky bit (worth knowing)
+## One thing worth knowing
 
-When the app asks MOOT for the notes, MOOT replies with **text**, not with neat
-note objects. Each line looks like this:
+MOOT answers every question twice. One answer is words for a person to read.
+The other is a tidy list of rows for the app to use, each with the drawer's
+id, its room, and its text. The app always uses the tidy list. It never has
+to pick apart the words.
 
-```
-<id>  [notes]  the start of your note...
-```
-
-So the app has to read that text and pull out the three parts: the id, the room,
-and a short preview. There is a small piece of code that does this. It is called
-the parser. In a perfect world MOOT would hand back ready-made note objects, but
-for now we read the text. The code points this out where it happens.
-
-Also, the line only shows the **start** of a long note (a preview), not every
-word. For this small app, that preview is the note we show.
+Searching gives back rows with ids but no note text, to keep it fast. So the
+app makes one more call, "give me these drawers in full", and gets every
+note's text in one go. The code points this out where it happens.
 
 ## What to try
 
@@ -54,10 +48,7 @@ word. For this small app, that preview is the note we show.
    as you type.
 4. **Delete.** Swipe a note to the left and tap Delete. It is withdrawn from
    MOOT.
-5. **Use your voice.** Try saying: "Hey Siri, take a note in MootNotepad." The
-   note Siri files shows up in the app's list, because Siri and the app share
-   the same MOOT.
-6. **Watch the count.** The small text at the top of the list comes straight
+5. **Watch the count.** The small text at the top of the list comes straight
    from MOOT. Add and delete notes and watch it change.
 
 ## Where are the notes kept?

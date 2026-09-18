@@ -126,7 +126,9 @@ enum PostgreSQLSchemaEmitter {
     }
 
     static func dropColumnSQL(table: String, columnName: String) -> String {
-        "ALTER TABLE \"\(table)\" DROP COLUMN \"\(columnName)\""
+        // IF EXISTS: the same idempotence as addColumn, in reverse — a capsule
+        // replaying a kit's ladder may find the column already dropped.
+        "ALTER TABLE \"\(table)\" DROP COLUMN IF EXISTS \"\(columnName)\""
     }
 
     static func renameColumnSQL(table: String, from: String, to: String) -> String {

@@ -1,6 +1,6 @@
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 
 /// Async closure type for checking whether a persisted association already
@@ -30,8 +30,9 @@ public typealias AssociationEdgeChecker =
 /// retrieves each row's engram via `getVector(itemID:modelID:)`, and calls
 /// `VectorStore.findNearest(probe:modelID:limit:)` to locate nearby
 /// vectors. Pairs within `proximityThreshold` Hamming distance (default
-/// 64 — 25% of 256 bits) are deduplicated and emitted as
-/// `AssociationFrame` values with weight = 1 − (distance / 256).
+/// 64 — 25% of 256 bits) are deduplicated and emitted as `AssociationFrame`
+/// values. The association row has no weight column; `weight: 0.0` is passed
+/// to the frame and discarded at the `associate` verb.
 ///
 /// The probe window is one-sided: probes are recency-sampled (newest first),
 /// while neighbors are searched across the whole estate. Two dormant old
@@ -51,16 +52,6 @@ public typealias AssociationEdgeChecker =
 /// GLK-02 boundary, which records the provenance bit `vector_similarity`
 /// per architecture spec §2.5 / cookbook §2.5 (provenance bitmap
 /// amendments — bit 3 vector_similarity).
-///
-/// ADMIN — weight is the entrance gate. It is derived FREE from the
-/// already-computed proximity-gate Hamming distance (no extra origin-side
-/// work to obtain it), and carried on the `AssociationFrame`. But it is
-/// VESTIGIAL past the `associate` verb: the association row has no weight
-/// column, so the verb accepts and discards it (see `Verbs.associate`,
-/// the drop site). The value is computed and plumbed on purpose — a
-/// pre-2.0 gauntlet experiment will test whether feeding weight into
-/// recall improves results; until that runs, it is faithfully carried and
-/// dropped, never persisted and never silently fabricated.
 ///
 /// Cadence: every five minutes — matches the cookbook §15.2 bucket-
 /// boundary work that the dreaming daemon's hot-path Rule 4 runs at,
@@ -191,7 +182,7 @@ public enum VectorSimilaritySignal {
 
         // Two-lane kNN scan via shared core (also used by associateSweep verb).
         // ProximityScanCore.candidates applies within-pass symmetric pair dedup
-        // and returns unique (a, b, weight) candidates.
+        // and returns unique (a, b) candidates.
         let candidatePairs = await ProximityScanCore.candidates(
             in: vectorStore,
             itemIDs: itemIDs,
@@ -199,7 +190,7 @@ public enum VectorSimilaritySignal {
             proximityThreshold: proximityThreshold,
             corpus: corpus,
             neighboursPerProbe: ProximityScanCore.neighboursPerProbe
-        )
+        ).pairs
 
         // FINDING-3 optimization: filter out pairs that already have a
         // persisted association. The DB-level INSERT-OR-IGNORE in
@@ -210,7 +201,7 @@ public enum VectorSimilaritySignal {
         // a valid new pair is never permanently suppressed.
         var emittablePairs = candidatePairs
         if let check = edgeChecker {
-            var filtered: [(a: String, b: String, weight: Double)] = []
+            var filtered: [(a: String, b: String)] = []
             for pair in candidatePairs {
                 let alreadyPersisted = await check(pair.a, pair.b)
                 if !alreadyPersisted {
@@ -221,10 +212,12 @@ public enum VectorSimilaritySignal {
         }
 
         for pair in emittablePairs {
+            // weight: 0.0 — the association row has no weight column; the
+            // associate verb accepts and discards the field.
             emissions.append(.associate(AssociationFrame(
                 a: pair.a,
                 b: pair.b,
-                weight: pair.weight)))
+                weight: 0.0)))
         }
 
         emissions.append(.diagnostic(DiagnosticReport(

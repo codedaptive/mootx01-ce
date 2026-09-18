@@ -19,8 +19,8 @@ use crate::content::{
     CorpusContentChange, CorpusContentId, CorpusContentRecord, CorpusContentSource,
 };
 use crate::corpus::{
-    discrimination_signal_from_outcome, Corpus, EmbeddingModelConfig, EncodeSpeed,
-    FloatDiscriminationSignal, FloatLaneOutcome, ProviderSlot,
+    Corpus, CorpusPathReason, EmbeddingModelConfig, EncodeSpeed,
+    ProviderSlot, TrainingPathDecision,
 };
 use crate::corpus_provider_counts_store::{
     CorpusProviderCountsStore, PersistedCounts, PersistedCountsReference,
@@ -38,8 +38,7 @@ use crate::schema_profile::{
     CorpusIndexUnitPolicy, CorpusOperatingMode,
 };
 use crate::tokenizer::default_keyword_tokens;
-use crate::trainable_embedding_basis::TrainableEmbeddingBasis;
-use intellectus_lib::{report, StatSample};
+use crate::trainable_embedding_basis::{RetrainingBudget, RetrainingOutcome, TrainableEmbeddingBasis};
 use persistence_kit::{Column, Storage, StoragePredicate, TypedValue};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -47,13 +46,23 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// GLK's room-rollup coordination callback (fired with Drawer IDs).
-pub type ContentOnEncoded = Box<dyn Fn(&[String]) + Send + Sync>;
+/// Post-encode coordination callback. Second parameter is the queue session
+/// id that tagged the drain unit's batch claim — the A2 encode-completion
+/// marker's `session=<id>` bracket. Twin of Swift `CorpusContentEngine.onEncoded`.
+pub type ContentOnEncoded = Box<dyn Fn(&[String], &str) + Send + Sync>;
 /// Test-only drain failure-injection hook (transient failure when Err).
 pub type ContentIngestFailureHook = Box<dyn Fn(&str) -> Result<(), ()> + Send + Sync>;
-use vectorkit::{
+use synapsekit::{
     EmbeddingProvider, VectorExactKey, VectorPayload, VectorPayloadInput,
     VectorRepresentationClaims, VectorRepresentationKey, VectorStore,
 };
+
+/// The whole-record dense float surface of the engine: per-signal nearest and
+/// farthest recall, the discrimination signal, the float re-embed of one
+/// record and the forced store-error test seams. Compiled only with the
+/// the whole-record float lane. Swift twin:
+/// Sources/CorpusKitWholeRecordDense/CorpusContentEngine+FloatLane.swift.
+mod float_lane;
 
 /// Range evidence for a standalone passage hit. Never changes result
 /// identity.
@@ -218,24 +227,6 @@ fn evidence_from_item_key(key: &str) -> Option<CorpusEvidence> {
     }
 }
 
-/// Emit one CorpusKit-tagged counter (the same shape corpus.rs uses).
-fn emit_engine_metric(name: &str, value: f64) {
-    report!(StatSample::metric(
-        name.to_string(),
-        value,
-        [("kit".to_string(), "CorpusKit".to_string())]
-            .into_iter()
-            .collect(),
-        {
-            use std::time::{SystemTime, UNIX_EPOCH};
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs_f64())
-                .unwrap_or(0.0)
-        },
-    ));
-}
-
 // ── Engine ───────────────────────────────────────────────────────────────
 
 /// The engine/index layout version stamped into `corpus_index_state`.
@@ -260,8 +251,16 @@ pub type ContentBackfillFaultHook = Box<dyn Fn(&str, usize) -> Result<(), String
 /// The consumer name this engine claims representations under.
 pub const CLAIMS_CONSUMER: &str = "corpus";
 
+/// The vector lanes this engine writes, claims and deletes per slot: lane 0
+/// is the 256-bit engram row every build writes; lane 1 is the whole-record
+/// float row (the whole-record float lane). The
+/// default build names lane 0 alone, so a populated estate whose float rows
+/// the 1.6 to 1.7 capsule vacuumed (and whose lane-1 claim it released) is
+/// never re-claimed by `reconcile_configured_providers`.
+pub const CLAIMED_LANES: [u32; 2] = [0, 1];
+
 /// Reserved checkpoint row recording the last APPLIED feed cursor.
-const FEED_CURSOR_ROW_ID: &str = "\u{1F}feed";
+pub(crate) const FEED_CURSOR_ROW_ID: &str = "\u{1F}feed";
 
 #[cfg(target_os = "macos")]
 fn physical_memory_bytes() -> Option<u64> {
@@ -356,6 +355,12 @@ struct PreparedProviderTraining {
     counts_row: PersistedCounts,
     basis_digest: String,
     subsumed_references: Vec<PersistedCountsReference>,
+    /// IDs for which `source.record()` returned `None` during training (F-6).
+    /// The publication loop upserts a non-subsumed sentinel row (revision=0,
+    /// digest="") for each so that future queue reference admission does not
+    /// attempt to fold an ID the source can no longer resolve — the sentinel
+    /// fails the admission digest-equality check and keeps the corpus clean.
+    skipped_references: Vec<PersistedCountsReference>,
 }
 
 /// The canonical-ID indexing/recall engine. One engine serves BOTH
@@ -403,16 +408,44 @@ pub struct CorpusContentEngine {
     /// `corpus_bitmap_generation` at engine open; bumped in-memory after each
     /// `train_trainable_slots` call. All bitmap coverage writes stamp this value.
     current_basis_generation: AtomicI64,
+    /// Training-path decision seam (Part 3). Keyed by model_id. Reset at the
+    /// start of every `train_trainable_slots` call. Tests use this to assert
+    /// that the counts path (not corpus path) was taken, without re-reading
+    /// corpus text. Mirrors the same seam on `Corpus` (standalone mode).
+    training_path_decisions: Mutex<BTreeMap<String, TrainingPathDecision>>,
 }
 
 impl CorpusContentEngine {
     /// Construct the engine over a validated configuration and content
-    /// source. In attached mode NO canonical content table is created.
+    /// source. In attached mode NO canonical content table is created. Twin
+    /// of Swift `CorpusContentEngine.init(storage:configuration:source:models:)`.
     pub fn open(
         storage: Arc<dyn Storage>,
         configuration: CorpusContentConfiguration,
         source: Arc<dyn CorpusContentSource>,
         models: Vec<EmbeddingModelConfig>,
+    ) -> CorpusKitResult<Self> {
+        Self::open_with_policy(storage, configuration, source, models, false)
+    }
+
+    /// Open existing compatible derived stores without migrations or policy writes.
+    /// Query providers and persisted counts are rehydrated normally. Callers must
+    /// also refrain from invoking mutation/reconciliation operations on this engine.
+    pub fn open_readonly(
+        storage: Arc<dyn Storage>,
+        configuration: CorpusContentConfiguration,
+        source: Arc<dyn CorpusContentSource>,
+        models: Vec<EmbeddingModelConfig>,
+    ) -> CorpusKitResult<Self> {
+        Self::open_with_policy(storage, configuration, source, models, true)
+    }
+
+    fn open_with_policy(
+        storage: Arc<dyn Storage>,
+        configuration: CorpusContentConfiguration,
+        source: Arc<dyn CorpusContentSource>,
+        models: Vec<EmbeddingModelConfig>,
+        readonly: bool,
     ) -> CorpusKitResult<Self> {
         if models.is_empty() {
             return Err(CorpusKitError::InvalidConfiguration(
@@ -436,25 +469,67 @@ impl CorpusContentEngine {
             }
             CorpusOperatingMode::Attached => attached_declaration(),
         };
-        storage
-            .migrate(&profile)
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        #[cfg(feature = "standalone-passages")]
-        if configuration.mode() == CorpusOperatingMode::Standalone {
-            crate::index_configuration_store::CorpusIndexConfigurationStore::new(Arc::clone(
-                &storage,
-            ))
-            .bind(configuration.index_unit())?;
-        }
-        storage
-            .migrate(&VectorStore::schema_declaration())
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        storage
-            .migrate(&VectorRepresentationClaims::schema_declaration())
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        if readonly {
+            for declaration in [
+                profile,
+                VectorStore::schema_declaration(),
+                VectorRepresentationClaims::schema_declaration(),
+            ] {
+                let current = storage.current_schema_version_for(&declaration.kit_id)
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+                if current != declaration.version {
+                    return Err(CorpusKitError::StoreUnavailable(format!(
+                        "read-only corpus open requires compatible {} schema {}; found {}. Open writable to upgrade first",
+                        declaration.kit_id, declaration.version, current
+                    )));
+                }
+            }
+            #[cfg(feature = "standalone-passages")]
+            if configuration.mode() == CorpusOperatingMode::Standalone {
+                use crate::index_configuration_store::{CorpusIndexConfigurationStore, policy_fingerprint};
+                let existing = CorpusIndexConfigurationStore::new(Arc::clone(&storage)).fingerprint()?;
+                if existing.as_deref() != Some(policy_fingerprint(configuration.index_unit()).as_str()) {
+                    return Err(CorpusKitError::InvalidConfiguration(
+                        "read-only corpus open requires an existing matching index policy".into(),
+                    ));
+                }
+            }
+        } else {
+            storage
+                .migrate(&profile)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            #[cfg(feature = "standalone-passages")]
+            if configuration.mode() == CorpusOperatingMode::Standalone {
+                crate::index_configuration_store::CorpusIndexConfigurationStore::new(Arc::clone(
+                    &storage,
+                ))
+                .bind(configuration.index_unit())?;
+            }
+            // SECURITY: a populated estate opened before the VectorKit → SynapseKit
+            // rename keys its two vector-tier ledger rows (store and claims) by the
+            // old ids; migrating under the new ids without moving those rows
+            // replays both ladders from version 0 — the vector ladder folds every
+            // row's generation to 0. Both renames run first; a conflicted ledger
+            // (rows under both ids) is left as it is with one warning and the
+            // estate still opens — each migrate below reads its ladder position
+            // from the current-id row, so nothing replays.
+            VectorStore::prepare_schema_ledger(storage.as_ref())
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            storage
+                .migrate(&VectorStore::schema_declaration())
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            VectorRepresentationClaims::prepare_schema_ledger(storage.as_ref())
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            storage
+                .migrate(&VectorRepresentationClaims::schema_declaration())
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
 
-        let inverted_index = InvertedIndexStore::open_for_storage(&storage)
-            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        }
+        let inverted_index = if readonly {
+            InvertedIndexStore::open_readonly_for_storage(&storage)
+        } else {
+            InvertedIndexStore::open_for_storage(&storage)
+        }.map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
         let vector_store = Arc::new(VectorStore::new(
             Arc::clone(&storage),
             VectorStore::default_sidecar_path(&storage),
@@ -505,6 +580,7 @@ impl CorpusContentEngine {
             train_fault_before_commit_model: Mutex::new(None),
             backfill_fault_hook: Mutex::new(None),
             current_basis_generation: AtomicI64::new(initial_basis_generation),
+            training_path_decisions: Mutex::new(BTreeMap::new()),
         };
         // Rehydrate the base snapshot plus crash-durable reference deltas.
         engine.reload_counts_from_storage()?;
@@ -590,17 +666,17 @@ impl CorpusContentEngine {
     /// Install (or clear) the `on_encoded` coordination callback.
     pub fn set_on_encoded<F>(&self, callback: F)
     where
-        F: Fn(&[String]) + Send + Sync + 'static,
+        F: Fn(&[String], &str) + Send + Sync + 'static,
     {
         if let Ok(mut guard) = self.on_encoded.lock() {
             *guard = Some(Box::new(callback));
         }
     }
 
-    pub(crate) fn fire_on_encoded(&self, ids: &[String]) {
+    pub(crate) fn fire_on_encoded(&self, ids: &[String], unit_session_id: &str) {
         if let Ok(guard) = self.on_encoded.lock() {
             if let Some(cb) = guard.as_ref() {
-                cb(ids);
+                cb(ids, unit_session_id);
             }
         }
     }
@@ -621,26 +697,22 @@ impl CorpusContentEngine {
         Ok(())
     }
 
-    /// Test seam: force the next per-signal float call to report a store
-    /// error for the DEFAULT slot (single-use).
-    pub fn test_force_float_store_error(&self, message: impl Into<String>) {
-        if let Ok(mut guard) = self.forced_float_error.lock() {
-            *guard = Some(message.into());
-        }
-    }
-
-    /// Test seam: force the next default float call to report provider opt-out.
-    #[cfg(feature = "canonical-test-seams")]
-    pub fn test_force_float_provider_opt_out(&self) {
-        self.forced_float_provider_opt_out
-            .store(true, Ordering::Release);
-    }
-
     /// The declared encode speed (serial drain today; surface retained).
     pub fn set_encode_speed(&self, speed: EncodeSpeed) {
         if let Ok(mut guard) = self.encode_speed.lock() {
             *guard = speed;
         }
+    }
+
+    /// Returns a snapshot of the training-path decisions recorded by the most
+    /// recent `train_trainable_slots` call. Tests use this to assert the branch
+    /// taken (counts path vs. corpus path with reason) without re-reading corpus
+    /// text. Clones and returns so callers do not hold the mutex.
+    pub fn training_path_decisions(&self) -> BTreeMap<String, TrainingPathDecision> {
+        self.training_path_decisions
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default()
     }
 
     fn embed_concurrency_cap(&self) -> usize {
@@ -748,6 +820,19 @@ impl CorpusContentEngine {
             .collect())
     }
 
+    /// All non-cursor index-state rows for this corpus engine.
+    ///
+    /// GeniusLocusKit calls this to compare each drawer's `distilled_at` instant
+    /// against the corresponding index row's `updated_at_millis`, detecting the
+    /// mid-run crash scenario where the distillation sweep committed but the
+    /// reindex did not. The feed-cursor sentinel row is excluded. Mirrors Swift
+    /// `CorpusContentEngine.allIndexStates`.
+    pub fn all_index_states(
+        &self,
+    ) -> CorpusKitResult<Vec<crate::index_state_store::CorpusIndexState>> {
+        self.index_state_all_states()
+    }
+
     /// Destroy this engine's recall index — OWNERSHIP-SCOPED: exact-key
     /// vector deletes (checkpointed IDs × slots × lanes), wholesale clears
     /// only on corpus-exclusive tables, claim release for the "corpus"
@@ -763,7 +848,7 @@ impl CorpusContentEngine {
         for id in &ids {
             for key in self.unit_keys(id)? {
                 for slot in &self.slots {
-                    for lane in [0u32, 1u32] {
+                    for lane in CLAIMED_LANES {
                         if shared.contains(&format!("{}|{lane}", slot.model_id)) {
                             continue;
                         }
@@ -792,179 +877,6 @@ impl CorpusContentEngine {
         Ok(())
     }
 
-    /// Per-signal dense float NEAREST recall — content-ID keyed.
-    pub fn float_nearest_per_signal(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Vec<(String, FloatLaneOutcome)> {
-        self.float_per_signal(query, limit, true)
-    }
-
-    /// Per-signal dense float FARTHEST (anti-similarity) recall.
-    pub fn float_farthest_per_signal(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Vec<(String, FloatLaneOutcome)> {
-        self.float_per_signal(query, limit, false)
-    }
-
-    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
-    ///
-    /// Mirrors Swift `CorpusContentEngine.floatNearestPerSignalWithDiscrimination`.
-    /// Same semantics and return shape as `float_nearest_per_signal`, but each entry
-    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
-    /// Discrimination is `Some` exactly when the outcome is `Hits` with ≥1 result.
-    ///
-    /// **Measurement only:** no behaviour change inside `CorpusContentEngine`.
-    /// The coordinator (GLK) consumes the signal to discount the dense contribution
-    /// when the lane self-reports degeneracy.
-    ///
-    /// See `FloatDiscriminationSignal` for the statistic definition.
-    pub fn float_nearest_per_signal_with_discrimination(
-        &self,
-        query: &str,
-        limit: usize,
-    ) -> Vec<(String, FloatLaneOutcome, Option<FloatDiscriminationSignal>)> {
-        self.float_nearest_per_signal(query, limit)
-            .into_iter()
-            .map(|(model_id, outcome)| {
-                let disc = discrimination_signal_from_outcome(&outcome);
-                (model_id, outcome, disc)
-            })
-            .collect()
-    }
-
-    /// Single-signal convenience: the DEFAULT slot's nearest outcome.
-    pub fn float_nearest(&self, query: &str, limit: usize) -> FloatLaneOutcome {
-        self.float_nearest_per_signal(query, limit)
-            .into_iter()
-            .next()
-            .map(|(_, o)| o)
-            .unwrap_or(FloatLaneOutcome::EmptyQuery)
-    }
-
-    fn float_per_signal(
-        &self,
-        query: &str,
-        limit: usize,
-        nearest: bool,
-    ) -> Vec<(String, FloatLaneOutcome)> {
-        if limit == 0 || query.is_empty() {
-            return self
-                .slots
-                .iter()
-                .map(|s| (s.model_id.clone(), FloatLaneOutcome::EmptyQuery))
-                .collect();
-        }
-        // Consume the forced-error seam for the DEFAULT slot (nearest only).
-        let mut forced_default: Option<FloatLaneOutcome> = None;
-        if nearest {
-            #[cfg(feature = "canonical-test-seams")]
-            let forced_provider_opt_out = self
-                .forced_float_provider_opt_out
-                .swap(false, Ordering::AcqRel);
-            #[cfg(not(feature = "canonical-test-seams"))]
-            let forced_provider_opt_out = false;
-            if forced_provider_opt_out {
-                emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
-                forced_default = Some(FloatLaneOutcome::UnavailableProviderOptOut);
-            } else if let Ok(mut guard) = self.forced_float_error.lock() {
-                if let Some(message) = guard.take() {
-                    emit_engine_metric("corpus.float_lane.store_error", 1.0);
-                    forced_default = Some(FloatLaneOutcome::StoreError(message));
-                }
-            }
-        }
-        let mut results = Vec::with_capacity(self.slots.len());
-        for (slot_index, slot) in self.slots.iter().enumerate() {
-            let model_id = slot.model_id.clone();
-            if slot_index == 0 {
-                if let Some(forced) = forced_default.take() {
-                    results.push((model_id, forced));
-                    continue;
-                }
-            }
-            let probe = {
-                let handle = slot.handle.lock().unwrap();
-                match handle.provider().embed_float(query) {
-                    Ok(v) if v.is_empty() => {
-                        emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
-                        results.push((model_id, FloatLaneOutcome::UnavailableProviderOptOut));
-                        continue;
-                    }
-                    Ok(v) => v,
-                    Err(vectorkit::VectorKitError::EmbedFloatVocabMiss(_)) => {
-                        emit_engine_metric("corpus.float_lane.dark_vocab_miss", 1.0);
-                        results.push((model_id, FloatLaneOutcome::UnavailableNoVocabHit));
-                        continue;
-                    }
-                    Err(_) => {
-                        emit_engine_metric("corpus.float_lane.dark_provider", 1.0);
-                        results.push((model_id, FloatLaneOutcome::UnavailableProviderOptOut));
-                        continue;
-                    }
-                }
-            };
-            let matches = if nearest {
-                self.vector_store
-                    .find_nearest_float(&probe, &model_id, limit * 4)
-            } else {
-                self.vector_store
-                    .find_farthest_float(&probe, &model_id, limit * 4)
-            };
-            let matches = match matches {
-                Ok(m) => m,
-                Err(e) => {
-                    emit_engine_metric("corpus.float_lane.store_error", 1.0);
-                    results.push((model_id, FloatLaneOutcome::StoreError(format!("{e:?}"))));
-                    continue;
-                }
-            };
-            if matches.is_empty() {
-                emit_engine_metric("corpus.float_lane.dark_no_rows", 1.0);
-                results.push((model_id, FloatLaneOutcome::UnavailableNoFloatRows));
-                continue;
-            }
-            let mut by_content: BTreeMap<String, f32> = BTreeMap::new();
-            for m in &matches {
-                let id = content_id_from_item_key(&m.item_id).to_string();
-                let similarity = 1.0 - (m.distance as f32) / 10_000.0;
-                let entry =
-                    by_content
-                        .entry(id)
-                        .or_insert(if nearest { f32::MIN } else { f32::MAX });
-                if nearest {
-                    if similarity > *entry {
-                        *entry = similarity;
-                    }
-                } else if similarity < *entry {
-                    *entry = similarity;
-                }
-            }
-            if by_content.is_empty() {
-                emit_engine_metric("corpus.float_lane.dark_no_rows", 1.0);
-                results.push((model_id, FloatLaneOutcome::UnavailableNoFloatRows));
-                continue;
-            }
-            let mut ranked: Vec<(String, f32)> = by_content.into_iter().collect();
-            ranked.sort_by(|a, b| {
-                let ord = if nearest {
-                    b.1.partial_cmp(&a.1)
-                } else {
-                    a.1.partial_cmp(&b.1)
-                };
-                ord.unwrap_or(std::cmp::Ordering::Equal)
-                    .then_with(|| a.0.cmp(&b.0))
-            });
-            ranked.truncate(limit);
-            emit_engine_metric("corpus.float_lane.hit", ranked.len() as f64);
-            results.push((model_id, FloatLaneOutcome::Hits(ranked)));
-        }
-        results
-    }
-
     /// Register this engine's representation claims (idempotent).
     pub fn register_claims(&self, now_millis: i64) -> CorpusKitResult<()> {
         for (slot_index, slot) in self.slots.iter().enumerate() {
@@ -973,7 +885,7 @@ impl CorpusContentEngine {
                 let p = handle.provider();
                 (p.model_id().to_string(), p.model_version().to_string())
             };
-            for lane in [0u32, 1u32] {
+            for lane in CLAIMED_LANES {
                 // Attached mode writes binary (lane 0) rows for the DEFAULT
                 // slot only — GLK's Hamming readers all probe the default
                 // model — so non-default binary claims are not registered
@@ -1010,7 +922,7 @@ impl CorpusContentEngine {
         for (slot_index, slot) in self.slots.iter().enumerate() {
             let handle = slot.handle.lock().unwrap();
             let provider = handle.provider();
-            for lane in [0u32, 1u32] {
+            for lane in CLAIMED_LANES {
                 if lane == 0
                     && slot_index != 0
                     && self.configuration.mode() == CorpusOperatingMode::Attached
@@ -1089,6 +1001,34 @@ impl CorpusContentEngine {
                     .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
             }
             retired.insert((key.model_id, key.model_version));
+        }
+
+        // A provider whose persisted basis or counts row names a (model_id,
+        // model_version) no slot carries any more is retired even when it held
+        // no representation claim: a non-default attached slot writes no
+        // vector row in the default build (the engram row is the default
+        // slot's, the whole-record float row is the sidecar's), so the claims
+        // diff alone cannot see it leave.
+        let desired_providers: BTreeSet<(String, String)> = desired
+            .iter()
+            .map(|key| (key.model_id.clone(), key.model_version.clone()))
+            .collect();
+        for table in ["corpus_provider_basis", "corpus_provider_counts"] {
+            let persisted = self
+                .storage
+                .row_store()
+                .query_projected(table, &["model_id", "model_version"], None, &[], None, None)
+                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            for row in &persisted {
+                if let (Some(TypedValue::Text(model_id)), Some(TypedValue::Text(model_version))) =
+                    (row.get("model_id"), row.get("model_version"))
+                {
+                    let key = (model_id.clone(), model_version.clone());
+                    if !desired_providers.contains(&key) {
+                        retired.insert(key);
+                    }
+                }
+            }
         }
 
         let desired_model_ids: BTreeSet<String> =
@@ -1191,82 +1131,6 @@ impl CorpusContentEngine {
                 Ok(false)
             }
         }
-    }
-
-    /// Re-embed ONLY the dense float (Lane D) vector for a single content ID.
-    ///
-    /// Resolves the current record from the source — picking up any newly-written
-    /// `dense_composition_text` (e.g. a distillate written by the GLK drain rider)
-    /// — and writes a fresh float-vector row (vector_index: 1) for each active slot.
-    /// Only the float lane is updated: BM25, binary (Hamming) vectors, coverage,
-    /// and the idempotence checkpoint are NOT touched.
-    ///
-    /// **Why not the full index path?** The idempotence gate keys on the CONTENT
-    /// digest (unchanged by distillation). Calling `index_record(force: true)`
-    /// would bypass the gate but also re-run BM25 indexing, disturbing IDF state.
-    /// This method targets only the float lane, preserving §9 BM25 isolation
-    /// (SPEC_DISTILLATION_STORAGE): BM25 scores are byte-identical before/after.
-    ///
-    /// Routes through the CCE (not direct to `VectorStore`) to maintain
-    /// counts-admission serialization (FINDING_11X_MAINTENANCE_WALK_2026-07-28
-    /// constraint 3). Returns `false` only when the ID no longer resolves.
-    ///
-    /// Swift parity: `CorpusContentEngine.recomposeDenseVector(id:now:)`.
-    pub fn recompose_dense_vector(&self, id: &str, now_millis: i64) -> CorpusKitResult<bool> {
-        Self::validate(id)?;
-        match self.source.record(id)? {
-            Some(record) => {
-                self.recompose_dense_float(&record, now_millis)?;
-                Ok(true)
-            }
-            None => Ok(false),
-        }
-    }
-
-    /// Dense-float-only vector upsert for one content record. Writes the float
-    /// (vector_index: 1) row across all active slots using `effective_dense_text`.
-    /// Does NOT touch BM25, binary vectors, coverage, or the checkpoint.
-    /// Swift parity: `CorpusContentEngine.recomposeDenseFloat(record:now:)`.
-    fn recompose_dense_float(
-        &self,
-        record: &CorpusContentRecord,
-        now_millis: i64,
-    ) -> CorpusKitResult<()> {
-        // The whole-content key is the content ID itself. For passage mode,
-        // passages use lexical text only — no dense-text split — so only the
-        // whole-document float row is updated here, which is correct for all
-        // GLK-attached configurations.
-        let key = &record.id;
-        let embed_text = record
-            .dense_composition_text
-            .as_deref()
-            .unwrap_or(&record.text);
-
-        let mut rows: Vec<VectorPayloadInput> = Vec::with_capacity(self.slots.len());
-        for slot in &self.slots {
-            let handle = slot.handle.lock().unwrap();
-            let provider = handle.provider();
-            let (_engram, floats) = provider
-                .embed_pair(embed_text)
-                .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
-            if floats.is_empty() {
-                continue;
-            }
-            rows.push(VectorPayloadInput {
-                item_id: key.clone(),
-                vector_index: 1,
-                payload: VectorPayload::from_f32(&floats),
-                model_id: provider.model_id().to_string(),
-                model_version: provider.model_version().to_string(),
-                filed_at_unix_secs: now_millis,
-            });
-        }
-        if !rows.is_empty() {
-            self.vector_store
-                .add_payloads(&rows)
-                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
-        }
-        Ok(())
     }
 
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
@@ -1391,7 +1255,7 @@ impl CorpusContentEngine {
                     .map_err(|_| CorpusKitError::StoreUnavailable("provider lock poisoned".into()))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let providers: Vec<&dyn vectorkit::EmbeddingProvider> =
+        let providers: Vec<&dyn synapsekit::EmbeddingProvider> =
             guards.iter().map(|guard| guard.provider()).collect();
         let metadata: Vec<(String, String, String, bool)> = selected
             .iter()
@@ -1431,6 +1295,9 @@ impl CorpusContentEngine {
                                     provider.embed_pair(record.effective_dense_text()).map_err(|error| {
                                         CorpusKitError::EmbeddingFailed(format!("{error:?}"))
                                     })?;
+                                // The default build stores the engram only; the pooled float is
+                                // computed for the projection and dropped (whole-record dense rows
+                                // are a whole-record float lane write).
                                 if meta.3 {
                                     rows.push(VectorPayloadInput {
                                         item_id: record.id.clone(),
@@ -1441,15 +1308,17 @@ impl CorpusContentEngine {
                                         filed_at_unix_secs: now_millis,
                                     });
                                 }
-                                if !floats.is_empty() {
-                                    rows.push(VectorPayloadInput {
-                                        item_id: record.id.clone(),
-                                        vector_index: 1,
-                                        payload: VectorPayload::from_f32(&floats),
-                                        model_id: meta.0.clone(),
-                                        model_version: meta.1.clone(),
-                                        filed_at_unix_secs: now_millis,
-                                    });
+                                {
+                                    if !floats.is_empty() {
+                                        rows.push(VectorPayloadInput {
+                                            item_id: record.id.clone(),
+                                            vector_index: 1,
+                                            payload: VectorPayload::from_f32(&floats),
+                                            model_id: meta.0.clone(),
+                                            model_version: meta.1.clone(),
+                                            filed_at_unix_secs: now_millis,
+                                        });
+                                    }
                                 }
                                 covered.push((record.id.clone(), meta.0.clone(), meta.2.clone()));
                             }
@@ -1473,11 +1342,24 @@ impl CorpusContentEngine {
         })?;
         drop(guards);
 
+        // ONE transaction for the whole batch's BM25 writes (DRAIN-BATCH-TXN,
+        // 2026-08-29): index() upserts one row per TERM, and autocommitted
+        // per-term writes made SQLite's WAL autocheckpoint fsync per ~1000
+        // frames — the drain sat in checkpoint fsync while encode backfills
+        // froze. The ingest paths already bracket (Corpus::ingest_batch);
+        // this is the queue-drain path gaining the same bracket.
+        self.inverted_index
+            .begin_batch()
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
         for (record, tokens, _, _) in &prepared {
-            self.inverted_index
-                .index(&record.id, tokens, "")
-                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            if let Err(error) = self.inverted_index.index(&record.id, tokens, "") {
+                let _ = self.inverted_index.rollback_batch();
+                return Err(CorpusKitError::StoreUnavailable(format!("{error:?}")));
+            }
         }
+        self.inverted_index
+            .commit_batch()
+            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
         let rows: Vec<_> = prepared
             .iter()
             .flat_map(|item| item.2.iter().cloned())
@@ -2048,6 +1930,9 @@ impl CorpusContentEngine {
                 let (engram, floats) = provider
                     .embed_pair(embed_text)
                     .map_err(|e| CorpusKitError::EmbeddingFailed(format!("{e:?}")))?;
+                // The default build stores the engram only; the pooled float is
+                // computed for the projection and dropped (whole-record dense rows
+                // are a whole-record float lane write).
                 if write_binary {
                     rows.push(VectorPayloadInput {
                         item_id: key.clone(),
@@ -2058,15 +1943,17 @@ impl CorpusContentEngine {
                         filed_at_unix_secs: now_millis,
                     });
                 }
-                if !floats.is_empty() {
-                    rows.push(VectorPayloadInput {
-                        item_id: key.clone(),
-                        vector_index: 1,
-                        payload: VectorPayload::from_f32(&floats),
-                        model_id: provider.model_id().to_string(),
-                        model_version: provider.model_version().to_string(),
-                        filed_at_unix_secs: now_millis,
-                    });
+                {
+                    if !floats.is_empty() {
+                        rows.push(VectorPayloadInput {
+                            item_id: key.clone(),
+                            vector_index: 1,
+                            payload: VectorPayload::from_f32(&floats),
+                            model_id: provider.model_id().to_string(),
+                            model_version: provider.model_version().to_string(),
+                            filed_at_unix_secs: now_millis,
+                        });
+                    }
                 }
             }
             covered.push((record.id.clone(), provider.model_id().to_string(), digest));
@@ -2126,7 +2013,17 @@ impl CorpusContentEngine {
             CorpusIndexUnitPolicy::WholeContent => {
                 // Carry dense_composition_text so embed_pair uses
                 // effective_dense_text (dense when supplied, lexical when None).
-                vec![(record.id.clone(), record.text.clone(), record.dense_composition_text.clone())]
+                // Lexical text = verbatim + grammar-v1 trailer tokens scanned
+                // from the dense text (anarrow shape, twin of Swift): the
+                // supplement affects BM25 TOKENISATION only — the canonical
+                // record text is unmodified and remains the payload.
+                // Schema 19: supplement comes from ssc_facts column, not dense text.
+                let lexical = format!(
+                    "{}{}",
+                    record.text,
+                    crate::ssc_facts::lexical_supplement(record.ssc_facts.as_deref())
+                );
+                vec![(record.id.clone(), lexical, record.dense_composition_text.clone())]
             }
             #[cfg(feature = "standalone-passages")]
             CorpusIndexUnitPolicy::TokenWindows {
@@ -2235,7 +2132,7 @@ impl CorpusContentEngine {
                 .remove(key)
                 .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
             for model_id in &model_ids {
-                for lane in [0u32, 1u32] {
+                for lane in CLAIMED_LANES {
                     if shared.contains(&format!("{model_id}|{lane}")) {
                         continue;
                     }
@@ -2260,7 +2157,7 @@ impl CorpusContentEngine {
                 let p = handle.provider();
                 (p.model_id().to_string(), p.model_version().to_string())
             };
-            for lane in [0u32, 1u32] {
+            for lane in CLAIMED_LANES {
                 let claimants = self
                     .claims
                     .claimants(&VectorRepresentationKey::new(
@@ -2563,13 +2460,330 @@ impl CorpusContentEngine {
         provider_count.min(cpu_workers).min(memory_workers).max(1)
     }
 
+    /// Record a training-path decision for the given model_id, overwriting any
+    /// prior entry for this model within this train call.
+    fn record_path_decision(
+        &self,
+        model_id: &str,
+        decision: TrainingPathDecision,
+    ) -> CorpusKitResult<()> {
+        let mut guard = self.training_path_decisions.lock().map_err(|_| {
+            CorpusKitError::StoreUnavailable("training_path_decisions mutex poisoned".into())
+        })?;
+        guard.insert(model_id.to_string(), decision);
+        Ok(())
+    }
+
+    /// Record a training-path decision ONLY if no decision is already recorded
+    /// for the given model_id within this train call. Used by the corpus-path
+    /// publication loop to avoid overwriting a decision already set by the
+    /// retain-loop guard path.
+    fn record_path_decision_if_absent(
+        &self,
+        model_id: &str,
+        decision: TrainingPathDecision,
+    ) -> CorpusKitResult<()> {
+        let mut guard = self.training_path_decisions.lock().map_err(|_| {
+            CorpusKitError::StoreUnavailable("training_path_decisions mutex poisoned".into())
+        })?;
+        guard.entry(model_id.to_string()).or_insert(decision);
+        Ok(())
+    }
+
+    /// Attempt the counts path for one provider job. Returns:
+    ///   `Ok(Some(decision))` — counts path succeeded; caller removes job from
+    ///                          `jobs` and does not pass it to `prepare_provider_training`.
+    ///   `Ok(None)`           — counts path not eligible; guard-rejection reason
+    ///                          already recorded in `training_path_decisions`.
+    ///   `Err(_)`             — unexpected I/O failure; caller falls back to corpus path.
+    ///
+    /// ## Guard order (attached engine)
+    /// 1. Basis row must exist (`basis_store.load` returns `Some`) → else `NoCountsRow`
+    /// 2. Fresh-probe `finalize_from_counts()` must return `true` → else `NotCountsCapable`
+    /// 3. `counts_delta_fold_safe()` must return `true` → else `DeltaNotFoldSafe`
+    /// 4. Population: `basisRow.trainedChunkCount + pendingRefs.len() == allIDs.len()`
+    ///    → else `PopulationMismatch`
+    /// 5. Every pending ref must resolve via `source.record()` → else `PendingUnresolvable`
+    ///
+    /// On all guards passing:
+    ///   - reconstructs TWO fresh instances (serving + accumulator)
+    ///   - restores counts into both from the durable store
+    ///   - folds each pending ref's effective_dense_text into both
+    ///   - finalizes serving
+    ///   - publishes basis + updated counts + deletes ONLY the folded pending refs
+    ///   - installs the finalized serving provider
+    ///   - returns `Ok(Some(CountsRestore))` when `pending` is empty (zero folds),
+    ///     or `Ok(Some(CountsDeltaFold { folded }))` when pending is non-empty
+    fn try_counts_path_for_job(
+        &self,
+        job: &ProviderTrainingJob,
+        all_ids: &[CorpusContentId],
+        _indexed_count: usize,
+    ) -> CorpusKitResult<Option<TrainingPathDecision>> {
+        let slot = &self.slots[job.slot_index];
+
+        // Guard 2: basis row must exist (first-ever train has no row).
+        let basis_row = match self.basis_store.load(&job.model_id, &job.model_version)? {
+            Some(b) => b,
+            None => {
+                let _ = self.record_path_decision(
+                    &job.model_id,
+                    TrainingPathDecision::Corpus(CorpusPathReason::NoCountsRow),
+                );
+                return Ok(None);
+            }
+        };
+
+        // Guard 3: finalize_from_counts() probe on a throwaway fresh instance.
+        let capable = {
+            let counts = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("counts lock poisoned in counts-path probe".into())
+            })?;
+            let state = counts.as_ref().ok_or_else(|| {
+                CorpusKitError::StoreUnavailable(format!(
+                    "counts accumulator absent for {} in counts-path probe",
+                    job.model_id
+                ))
+            })?;
+            let mut probe = state
+                .accumulator
+                .reconstruct_trainable_basis(&job.fresh_basis_blob)?;
+            probe.finalize_from_counts()
+        };
+        if !capable {
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::NotCountsCapable),
+            );
+            return Ok(None);
+        }
+
+        // Guard 4: counts_delta_fold_safe() on the live accumulator (pure property).
+        let fold_safe = {
+            let counts = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable(
+                    "counts lock poisoned in fold-safe probe".into(),
+                )
+            })?;
+            let state = counts.as_ref().ok_or_else(|| {
+                CorpusKitError::StoreUnavailable(format!(
+                    "counts accumulator absent for {} in fold-safe probe",
+                    job.model_id
+                ))
+            })?;
+            state.accumulator.counts_delta_fold_safe()
+        };
+        if !fold_safe {
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::DeltaNotFoldSafe),
+            );
+            return Ok(None);
+        }
+
+        // Collect ALL references; pending = non-subsumed.
+        let all_refs = self
+            .counts_store
+            .references(&job.model_id, &job.model_version)?;
+        let pending: Vec<&PersistedCountsReference> =
+            all_refs.iter().filter(|r| !r.is_subsumed).collect();
+
+        // Guard 5: population check.
+        //   basisRow.trained_chunk_count + pending.len() == all_ids.len()
+        //   LHS: frozen base document count written at last publication.
+        //   RHS: live active-content-id count from the source.
+        //   Every divergence is reject-safe: additions drive RHS > LHS+pending,
+        //   removals drive LHS+pending > RHS. Both mean "corpus has changed since
+        //   the last counts snapshot" → corpus path rebuilds cleanly.
+        let expected = basis_row.trained_chunk_count + pending.len();
+        if expected != all_ids.len() {
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::PopulationMismatch),
+            );
+            return Ok(None);
+        }
+
+        // Guard 6: all pending refs must resolve via source.record().
+        let mut pending_texts: Vec<String> = Vec::with_capacity(pending.len());
+        for pref in &pending {
+            match self.source.record(&pref.content_id)? {
+                Some(record) => {
+                    pending_texts.push(record.effective_dense_text().to_string());
+                }
+                None => {
+                    let _ = self.record_path_decision(
+                        &job.model_id,
+                        TrainingPathDecision::Corpus(CorpusPathReason::PendingUnresolvable),
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+
+        // ── All guards passed — execute the counts path ───────────────────────
+        //
+        // Reconstruct TWO fresh providers: `serving` (will be finalized and
+        // installed) and `new_accumulator` (will replace the slot's counts state
+        // and persist the updated accumulated statistics).
+        let (mut serving, mut new_accumulator) = {
+            let counts = slot.counts.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable(
+                    "counts lock poisoned before counts-path restore".into(),
+                )
+            })?;
+            let state = counts.as_ref().ok_or_else(|| {
+                CorpusKitError::StoreUnavailable(format!(
+                    "counts accumulator absent for {} before restore",
+                    job.model_id
+                ))
+            })?;
+            (
+                state
+                    .accumulator
+                    .reconstruct_trainable_basis(&job.fresh_basis_blob)?,
+                state
+                    .accumulator
+                    .reconstruct_trainable_basis(&job.fresh_basis_blob)?,
+            )
+        };
+
+        // Restore base counts into both fresh instances from the durable store.
+        let restored_serving = self.counts_store.restore_counts_into(
+            serving.as_mut(),
+            &job.model_id,
+            &job.model_version,
+        )?;
+        let restored_acc = self.counts_store.restore_counts_into(
+            new_accumulator.as_mut(),
+            &job.model_id,
+            &job.model_version,
+        )?;
+        if !restored_serving || !restored_acc {
+            // Counts row disappeared between guard check and restore — fall back.
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::NoCountsRow),
+            );
+            return Ok(None);
+        }
+
+        // Fold every pending ref's text into both providers.
+        for text in &pending_texts {
+            serving.add_to_counts(text);
+            new_accumulator.add_to_counts(text);
+        }
+        let folded = pending.len();
+
+        // Finalize the serving provider.
+        if !serving.finalize_from_counts() {
+            // Defensive guard: probe said true, post-restore said false.
+            let _ = self.record_path_decision(
+                &job.model_id,
+                TrainingPathDecision::Corpus(CorpusPathReason::NotCountsCapable),
+            );
+            return Ok(None);
+        }
+
+        // Serialize the serving basis and compute its digest.
+        let basis_blob = serving.serialize_basis();
+        let basis_digest = crate::content::content_digest_bytes(&basis_blob);
+        let now_secs = basis_row.trained_at_secs; // use the stored timestamp for determinism
+        let new_doc_count = basis_row.trained_chunk_count + folded;
+        let vocab_size = new_accumulator.counts_vocabulary_size();
+
+        // Publication: basis + updated counts + delete ONLY the folded pending refs.
+        // Do NOT delete all references (corpus path does delete-all; counts path
+        // deletes only the refs it folded, leaving subsumed refs untouched).
+        let basis_store = &self.basis_store;
+        let counts_store = &self.counts_store;
+        let new_basis_row = PersistedBasis {
+            model_id: job.model_id.clone(),
+            model_version: job.model_version.clone(),
+            basis: basis_blob,
+            trained_at_secs: now_secs,
+            trained_chunk_count: new_doc_count,
+        };
+        let pending_content_ids: Vec<String> = pending
+            .iter()
+            .map(|r| r.content_id.clone())
+            .collect();
+        self.storage
+            .transaction(persistence_kit::IsolationLevel::Serializable, &mut |txn| {
+                let rows = txn.row_store();
+                basis_store
+                    .upsert_into(&new_basis_row, &rows)
+                    .map_err(|e| persistence_kit::StorageError::BackendError {
+                        underlying: format!("{e:?}"),
+                    })?;
+                counts_store
+                    .persist_counts_into(
+                        new_accumulator.as_ref(),
+                        &job.model_id,
+                        &job.model_version,
+                        new_doc_count,
+                        vocab_size,
+                        now_secs,
+                        &rows,
+                        // Counts-path publish: not the full retrain, so the
+                        // invalidation sentinel stands.
+                        false,
+                    )
+                    .map_err(|e| persistence_kit::StorageError::BackendError {
+                        underlying: format!("{e:?}"),
+                    })?;
+                // Delete ONLY the folded pending refs — never delete-all here.
+                for content_id in &pending_content_ids {
+                    counts_store
+                        .delete_reference_into(
+                            &job.model_id,
+                            &job.model_version,
+                            content_id,
+                            &rows,
+                        )
+                        .map_err(|e| persistence_kit::StorageError::BackendError {
+                            underlying: format!("{e:?}"),
+                        })?;
+                }
+                Ok(())
+            })
+            .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+
+        // Install the finalized serving provider and update the in-memory slot.
+        {
+            let mut handle = slot.handle.lock().unwrap();
+            *handle = crate::corpus::ProviderHandle::Trainable(serving);
+        }
+        *slot.basis_digest.lock().unwrap() = basis_digest.clone();
+        {
+            let mut counts = slot.counts.lock().unwrap();
+            *counts = Some(crate::corpus::CountsState {
+                accumulator: new_accumulator,
+                document_count: new_doc_count,
+                vocab_anchor: vocab_size,
+                growth_term_digests: BTreeSet::new(),
+            });
+        }
+
+        // Zero pending → restore only (no folds), CountsRestore.
+        // Non-zero pending → delta fold, CountsDeltaFold.
+        // Both cases run through the identical publication path above; the win of
+        // the counts path is ZERO TEXT PAGING, never skipped publication.
+        if folded == 0 {
+            Ok(Some(TrainingPathDecision::CountsRestore))
+        } else {
+            Ok(Some(TrainingPathDecision::CountsDeltaFold { folded }))
+        }
+    }
+
     fn prepare_provider_training(
         &self,
         job: ProviderTrainingJob,
         all_ids: &[CorpusContentId],
         indexed_states: &BTreeMap<String, CorpusIndexState>,
         now_millis: i64,
-    ) -> CorpusKitResult<PreparedProviderTraining> {
+        budget: Option<&RetrainingBudget>,
+    ) -> CorpusKitResult<(PreparedProviderTraining, RetrainingOutcome)> {
         let slot = &self.slots[job.slot_index];
         let (mut fresh, mut counts_accumulator) = {
             let counts = slot.counts.lock().map_err(|_| {
@@ -2592,51 +2806,92 @@ impl CorpusContentEngine {
         };
 
         let mut subsumed_references = Vec::new();
+        // F-6: IDs for which source.record() returned None. Each gets a durable
+        // sentinel row (revision=0, digest="") after the delete-all so the queue
+        // reference admission path does not try to fold a content ID the source
+        // no longer knows. The sentinel fails the admission digest-equality check
+        // (revision=0 and digest="" never match a live record's digest) and
+        // prevents the id from being re-admitted as pending delta until the source
+        // can resolve it again.
+        let mut skipped_references = Vec::new();
         let mut document_count = 0usize;
+        let mut all_texts: Vec<String> = Vec::new();
+        if budget.is_some() { all_texts.reserve(all_ids.len()); }
         let mut cursor = 0usize;
         while cursor < all_ids.len() {
             let end = (cursor + Self::TRAINING_PAGE_SIZE).min(all_ids.len());
             let mut texts = Vec::with_capacity(end - cursor);
             for id in &all_ids[cursor..end] {
-                if let Some(record) = self.source.record(id)? {
-                    let indexed = indexed_states.get(&record.id);
-                    if indexed.map_or(true, |state| {
-                        state.revision != record.revision
-                            || state.digest != record.digest
-                            || state.index_version != CONTENT_ENGINE_INDEX_VERSION
-                    }) {
-                        subsumed_references.push(PersistedCountsReference {
+                match self.source.record(id)? {
+                    Some(record) => {
+                        let indexed = indexed_states.get(&record.id);
+                        if indexed.map_or(true, |state| {
+                            state.revision != record.revision
+                                || state.digest != record.digest
+                                || state.index_version != CONTENT_ENGINE_INDEX_VERSION
+                        }) {
+                            subsumed_references.push(PersistedCountsReference {
+                                model_id: job.model_id.clone(),
+                                model_version: job.model_version.clone(),
+                                content_id: record.id.clone(),
+                                revision: record.revision,
+                                digest: record.digest.clone(),
+                                updated_at_secs: now_millis / 1000,
+                                is_subsumed: true,
+                                growth_term_digests: Vec::new(),
+                            });
+                        }
+                        // Training coherence: the basis vocabulary must match the text
+                        // that gets projected through it at embed time. Use
+                        // effective_dense_text so the basis is trained on the same
+                        // representation the float-lane will embed later. For records
+                        // with no dense_composition_text this is identical to record.text.
+                        texts.push(record.effective_dense_text().to_string());
+                    }
+                    None => {
+                        // F-6: source cannot resolve this ID. Log at warning level and
+                        // record a sentinel so queue admission does not fold a ghost
+                        // reference. Sentinel uses revision=0 and digest="" — values that
+                        // can never satisfy the digest-equality check used at admission.
+                        eprintln!(
+                            "[corpus-content-engine] WARNING: source.record({}) returned nil \
+                             during training for model '{}' — content ID skipped; sentinel \
+                             reference row will be upserted after publication",
+                            id, job.model_id
+                        );
+                        skipped_references.push(PersistedCountsReference {
                             model_id: job.model_id.clone(),
                             model_version: job.model_version.clone(),
-                            content_id: record.id.clone(),
-                            revision: record.revision,
-                            digest: record.digest.clone(),
+                            content_id: id.clone(),
+                            revision: 0,
+                            digest: String::new(),
                             updated_at_secs: now_millis / 1000,
-                            is_subsumed: true,
+                            is_subsumed: false,
                             growth_term_digests: Vec::new(),
                         });
                     }
-                    // Training coherence: the basis vocabulary must match the text
-                    // that gets projected through it at embed time. Use
-                    // effective_dense_text so the basis is trained on the same
-                    // representation the float-lane will embed later. For records
-                    // with no dense_composition_text this is identical to record.text.
-                    texts.push(record.effective_dense_text().to_string());
                 }
             }
             let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
-            fresh.accumulate_training(&refs);
+            if budget.is_none() { fresh.accumulate_training(&refs); }
+            else { all_texts.extend(texts.iter().cloned()); }
             for text in &texts {
                 counts_accumulator.add_to_counts(text);
             }
             document_count += texts.len();
             cursor = end;
         }
-        fresh.finalize_training();
+        let outcome = if let Some(budget) = budget {
+            let refs: Vec<&str> = all_texts.iter().map(String::as_str).collect();
+            fresh.train_on_corpus_with_budget(&refs, budget)
+        } else {
+            fresh.finalize_training();
+            RetrainingOutcome::Completed
+        };
 
         let basis_blob = fresh.serialize_basis();
         let basis_digest = crate::content::content_digest_bytes(&basis_blob);
-        Ok(PreparedProviderTraining {
+        Ok((PreparedProviderTraining {
             basis_row: PersistedBasis {
                 model_id: job.model_id.clone(),
                 model_version: job.model_version.clone(),
@@ -2657,7 +2912,8 @@ impl CorpusContentEngine {
             counts_accumulator,
             basis_digest,
             subsumed_references,
-        })
+            skipped_references,
+        }, outcome))
     }
 
     /// Stream-train every trainable slot that lacks a CURRENT basis (or
@@ -2679,6 +2935,16 @@ impl CorpusContentEngine {
         now_millis: i64,
         force: bool,
     ) -> CorpusKitResult<std::collections::BTreeMap<String, String>> {
+        self.train_trainable_slots_impl(now_millis, force, None, None)
+    }
+
+    fn train_trainable_slots_impl(
+        &self,
+        now_millis: i64,
+        force: bool,
+        budget: Option<&RetrainingBudget>,
+        bounded_ids: Option<Vec<CorpusContentId>>,
+    ) -> CorpusKitResult<std::collections::BTreeMap<String, String>> {
         // Publication replaces the base snapshot and deletes only reference
         // deltas represented by that snapshot. Exclude admission while the
         // snapshot is accumulated and published so a post-snapshot reference
@@ -2695,23 +2961,45 @@ impl CorpusContentEngine {
             .map(|state| (state.content_id.clone(), state))
             .collect();
         let mut digests = BTreeMap::new();
-        let mut jobs = Vec::new();
+
+        // Reset the training-path decision seam so the previous call's results
+        // do not bleed into the assertions of a fresh train.
+        {
+            let mut decisions = self.training_path_decisions.lock().map_err(|_| {
+                CorpusKitError::StoreUnavailable("training_path_decisions mutex poisoned".into())
+            })?;
+            decisions.clear();
+        }
+
+        let all_ids = match bounded_ids { Some(ids) => ids, None => self.source.active_content_ids()? };
+        if all_ids.is_empty() {
+            return Ok(digests);
+        }
+
+        // Build the candidate list: ALL trainable slots, with their current
+        // digest and fresh-basis blob. The counts path attempt below decides
+        // for each candidate whether it needs corpus training, counts training,
+        // or can be skipped entirely (already current, no pending refs).
+        struct TrainCandidate {
+            slot_index: usize,
+            model_id: String,
+            model_version: String,
+            fresh_basis_blob: Vec<u8>,
+            existing_digest: String, // empty = first-ever train
+        }
+        let mut candidates: Vec<TrainCandidate> = Vec::new();
         for (slot_index, slot) in self.slots.iter().enumerate() {
             let Some(blob) = &slot.fresh_basis_blob else {
                 continue;
             };
             let model_id = slot.model_id.clone();
-            let digest = slot
+            let existing_digest = slot
                 .basis_digest
                 .lock()
                 .map_err(|_| {
                     CorpusKitError::StoreUnavailable("basis digest mutex poisoned".into())
                 })?
                 .clone();
-            if !force && !digest.is_empty() {
-                digests.insert(model_id, digest);
-                continue;
-            }
             let model_version = slot
                 .handle
                 .lock()
@@ -2721,21 +3009,108 @@ impl CorpusContentEngine {
                 .provider()
                 .model_version()
                 .to_string();
-            jobs.push(ProviderTrainingJob {
+            candidates.push(TrainCandidate {
                 slot_index,
                 model_id,
                 model_version,
                 fresh_basis_blob: blob.clone(),
+                existing_digest,
             });
         }
 
-        let all_ids = self.source.active_content_ids()?;
-        if all_ids.is_empty() {
-            return Ok(digests);
+        // ── Routing: non-force skip / first-train / counts-path (Part 3) ────────
+        //
+        // Corrected routing (drift-gate design):
+        //   1. non-force + trained slot (existing basis) → SKIP entirely. The
+        //      drift gate owns WHEN a retrain happens; non-force callers (engine
+        //      open, ingest-path triggers) must NOT opportunistically retrain
+        //      trained slots. The decision seam records nothing for skipped slots
+        //      (absent = skip semantics).
+        //   2. no persisted basis row (empty existing_digest) → first training,
+        //      force or not. Counts path cannot restore what was never written.
+        //      Records Corpus(FirstTrain).
+        //   3. force == true AND basis exists → attempt the counts path. The guard
+        //      chain (NoCountsRow, NotCountsCapable, DeltaNotFoldSafe,
+        //      PopulationMismatch, PendingUnresolvable) decides. An empty pending
+        //      delta folds nothing, publishes, and records CountsRestore.
+        //
+        // Drift-triggered reindex and migration rebuild call with force == true —
+        // they are the mission's target consumers of the counts path. force callers
+        // rely on publication side-effects: the basis-generation bump that
+        // invalidates coverage and triggers the re-embed backfill.
+        let mut jobs = Vec::new();
+        for candidate in &candidates {
+            let job_proto = ProviderTrainingJob {
+                slot_index: candidate.slot_index,
+                model_id: candidate.model_id.clone(),
+                model_version: candidate.model_version.clone(),
+                fresh_basis_blob: candidate.fresh_basis_blob.clone(),
+            };
+
+            if budget.is_some() {
+                let _ = self.record_path_decision(
+                    &candidate.model_id,
+                    TrainingPathDecision::Corpus(CorpusPathReason::NotCountsCapable),
+                );
+                jobs.push(job_proto);
+                continue;
+            }
+
+            // Non-force + already trained (has a persisted basis) → skip.
+            // The drift gate owns when retraining happens; skip without recording
+            // a decision (absent from seam = skip semantics, see seam doc).
+            if !force && !candidate.existing_digest.is_empty() {
+                digests.insert(
+                    candidate.model_id.clone(),
+                    candidate.existing_digest.clone(),
+                );
+                continue;
+            }
+
+            // No persisted basis row → first training, force or not.
+            // Counts path cannot restore what was never written.
+            if candidate.existing_digest.is_empty() {
+                let _ = self.record_path_decision(
+                    &candidate.model_id,
+                    TrainingPathDecision::Corpus(CorpusPathReason::FirstTrain),
+                );
+                jobs.push(job_proto);
+                continue;
+            }
+
+            // force == true AND basis exists → try the counts path. The guard
+            // chain decides; an empty pending delta folds nothing, publishes,
+            // and records CountsRestore.
+            match self.try_counts_path_for_job(&job_proto, &all_ids, indexed_states.len()) {
+                Ok(Some(decision)) => {
+                    // Counts path succeeded. Record decision and collect the
+                    // new basis digest so it can be returned in `digests`.
+                    let new_digest = self.slots[candidate.slot_index]
+                        .basis_digest
+                        .lock()
+                        .map(|g| g.clone())
+                        .unwrap_or_default();
+                    let _ = self.record_path_decision(&candidate.model_id, decision);
+                    digests.insert(candidate.model_id.clone(), new_digest);
+                    // Do NOT push to jobs — counts path handled it.
+                }
+                Ok(None) => {
+                    // Guard chain rejected; decision already recorded by
+                    // try_counts_path_for_job. Fall through to corpus path.
+                    jobs.push(job_proto);
+                }
+                Err(_) => {
+                    // Unexpected I/O failure. Fall back to corpus path so the
+                    // engine does not stall permanently.
+                    jobs.push(job_proto);
+                }
+            }
         }
-        let cap = Self::provider_training_parallelism(all_ids.len(), jobs.len());
+
+        let cap = if budget.is_some() { jobs.len().max(1) }
+            else { Self::provider_training_parallelism(all_ids.len(), jobs.len()) };
         for job_batch in jobs.chunks(cap) {
-            let prepared: Vec<PreparedProviderTraining> = std::thread::scope(|scope| {
+            let attempts: Vec<(PreparedProviderTraining, RetrainingOutcome)> = std::thread::scope(|scope| {
                 let handles: Vec<_> = job_batch
                     .iter()
                     .map(|job| {
@@ -2751,6 +3126,7 @@ impl CorpusContentEngine {
                                 &all_ids,
                                 &indexed_states,
                                 now_millis,
+                                budget,
                             )
                         })
                     })
@@ -2766,6 +3142,16 @@ impl CorpusContentEngine {
                     })
                     .collect::<CorpusKitResult<Vec<_>>>()
             })?;
+
+            let mut prepared = Vec::with_capacity(attempts.len());
+            for (result, outcome) in attempts {
+                match outcome {
+                    RetrainingOutcome::Completed => prepared.push(result),
+                    RetrainingOutcome::Skipped(reason) => {
+                        return Err(CorpusKitError::RetrainingSkipped(reason));
+                    }
+                }
+            }
 
             for result in prepared {
                 let model_id = result.job.model_id.clone();
@@ -2802,6 +3188,10 @@ impl CorpusContentEngine {
                                 result.counts_row.vocab_size,
                                 result.counts_row.updated_at_secs,
                                 &rows,
+                                // The training commit is the full-corpus retrain
+                                // the migration queues — the one write path
+                                // entitled to replace the sentinel.
+                                true,
                             )
                             .map_err(|e| persistence_kit::StorageError::BackendError {
                                 underlying: format!("{e:?}"),
@@ -2816,6 +3206,21 @@ impl CorpusContentEngine {
                                 underlying: format!("{e:?}"),
                             })?;
                         for reference in &result.subsumed_references {
+                            counts_store
+                                .upsert_reference_into(reference, &rows)
+                                .map_err(|e| persistence_kit::StorageError::BackendError {
+                                    underlying: format!("{e:?}"),
+                                })?;
+                        }
+                        // F-6: upsert sentinel rows for IDs that source.record()
+                        // could not resolve during training. These must be written
+                        // AFTER delete_references_into so the delete does not
+                        // immediately erase the sentinels. Sentinel rows have
+                        // revision=0 and digest="" — values that never satisfy the
+                        // admission digest-equality check, preventing ghost refs
+                        // from being admitted as pending deltas until the source
+                        // can resolve them again.
+                        for reference in &result.skipped_references {
                             counts_store
                                 .upsert_reference_into(reference, &rows)
                                 .map_err(|e| persistence_kit::StorageError::BackendError {
@@ -2842,6 +3247,17 @@ impl CorpusContentEngine {
                     });
                 }
                 digests.insert(model_id.clone(), result.basis_digest);
+                // Record corpus-path decision for this model if not already set
+                // by the routing block above (first-train or guard-rejection).
+                // With the corrected routing every corpus-path job either had
+                // FirstTrain already recorded (new slot) or a guard reason set
+                // by try_counts_path_for_job (force path). This is the I/O-
+                // failure fallback: if neither was recorded, note FirstTrain as
+                // a safe default (the slot arrived here without a valid basis).
+                let _ = self.record_path_decision_if_absent(
+                    &model_id,
+                    TrainingPathDecision::Corpus(CorpusPathReason::FirstTrain),
+                );
 
                 {
                     let mut seam = self.train_fault_after_model.lock().unwrap();
@@ -2993,6 +3409,9 @@ impl CorpusContentEngine {
                                                     "{error:?}"
                                                 ))
                                             })?;
+                                        // The default build stores the engram only; the pooled float is
+                                        // computed for the projection and dropped (whole-record dense rows
+                                        // are a whole-record float lane write).
                                         if meta.4 {
                                             rows.push(VectorPayloadInput {
                                                 item_id: record.id.clone(),
@@ -3003,15 +3422,17 @@ impl CorpusContentEngine {
                                                 filed_at_unix_secs: now_millis,
                                             });
                                         }
-                                        if !floats.is_empty() {
-                                            rows.push(VectorPayloadInput {
-                                                item_id: record.id.clone(),
-                                                vector_index: 1,
-                                                payload: VectorPayload::from_f32(&floats),
-                                                model_id: meta.1.clone(),
-                                                model_version: meta.2.clone(),
-                                                filed_at_unix_secs: now_millis,
-                                            });
+                                        {
+                                            if !floats.is_empty() {
+                                                rows.push(VectorPayloadInput {
+                                                    item_id: record.id.clone(),
+                                                    vector_index: 1,
+                                                    payload: VectorPayload::from_f32(&floats),
+                                                    model_id: meta.1.clone(),
+                                                    model_version: meta.2.clone(),
+                                                    filed_at_unix_secs: now_millis,
+                                                });
+                                            }
                                         }
                                         covered.push((
                                             record.id.clone(),
@@ -3115,7 +3536,7 @@ impl CorpusContentEngine {
                 let (model_id, model_version, trainable): (String, String, bool) = match config {
                     EmbeddingModelConfig::Deterministic => {
                         let p = crate::corpus::make_deterministic_provider();
-                        let pref = &p as &dyn vectorkit::EmbeddingProvider;
+                        let pref = &p as &dyn synapsekit::EmbeddingProvider;
                         (
                             pref.model_id().to_string(),
                             pref.model_version().to_string(),
@@ -3127,38 +3548,15 @@ impl CorpusContentEngine {
                         provider.model_version().to_string(),
                         true,
                     ),
-                    EmbeddingModelConfig::Ppmi { provider } => (
-                        provider.model_id().to_string(),
-                        provider.model_version().to_string(),
-                        true,
-                    ),
                     EmbeddingModelConfig::Lsa { provider } => (
                         provider.model_id().to_string(),
                         provider.model_version().to_string(),
                         true,
                     ),
-                    EmbeddingModelConfig::Nmf { provider } => (
+                    // CandleNL: the provider carries its own model identity.
+                    EmbeddingModelConfig::CandleNL { provider } => (
                         provider.model_id().to_string(),
                         provider.model_version().to_string(),
-                        true,
-                    ),
-                    EmbeddingModelConfig::Fdc { provider } => (
-                        provider.model_id().to_string(),
-                        provider.model_version().to_string(),
-                        false,
-                    ),
-                    // The named text models are constructed with these fixed
-                    // identities in `Corpus::build_slot`; mirrored here so the
-                    // fingerprint never needs the inference seam.
-                    EmbeddingModelConfig::MiniLM { .. } => {
-                        ("minilm-v6".to_string(), "1.0.0".to_string(), false)
-                    }
-                    EmbeddingModelConfig::MPNet { .. } => {
-                        ("mpnet-base-v2".to_string(), "1.0.0".to_string(), false)
-                    }
-                    EmbeddingModelConfig::EmbeddingGemma { .. } => (
-                        "embedding-gemma-300m".to_string(),
-                        "1.0.0".to_string(),
                         false,
                     ),
                 };
@@ -3216,56 +3614,213 @@ impl CorpusContentEngine {
     }
 
     /// Retrain every trainable slot from scratch and re-index every active
-    /// content row (forced — a retrain changes the basis). Training is
-    /// streamed (bounded); each provider's basis+counts commit is atomic.
+    /// content row without a serving gap.
+    ///
+    /// The operation is a shadow swap: trainable slots (RandomIndexing and
+    /// LSA — identified by having a `fresh_basis_blob`) write new vectors
+    /// into a shadow generation that is invisible to queries until the atomic
+    /// publish at the end. The serving generation remains readable throughout
+    /// the build. On publish, VectorStore flips the serving generation in one
+    /// transaction and rebuilds the HNSW graph from the new serving rows.
+    /// Non-trainable slots (stateless / Deterministic / CandleNL) write
+    /// directly to the serving generation; the deferred-index bracket batches
+    /// their resident-index updates.
+    ///
+    /// On failure mid-way (any error after `begin_shadow_generation` and before
+    /// `publish_shadow_generation` commits), `abandon_shadow_generation` is called
+    /// to remove shadow vectors and clear the registry entry (`shadow_state` → NULL,
+    /// `shadow_generation` → NULL). The original error is always returned — returning
+    /// the abandon error in its place would hide the real cause. The old serving
+    /// generation remains intact and keeps serving.
     pub fn reindex(&self, now_millis: i64) -> CorpusKitResult<()> {
-        self.train_trainable_slots(now_millis, true)?;
-        // Bulk-write bracket (same idiom as reconcile_configured_providers
-        // and the drain worker): defer the resident dense index for the
-        // whole O(corpus) rewrite and publish ONCE. Without it every
-        // per-record vector write rebuilt the resident MIH index — an
-        // estate-scale retrain span measured in hours instead of minutes.
-        self.vector_store
-            .begin_deferred_index()
-            .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
-        let ids = self.source.active_content_ids()?;
-        if matches!(
-            self.configuration.index_unit(),
-            CorpusIndexUnitPolicy::WholeContent
-        ) {
-            // Bound both worker admission and prepared-result memory. Worker
-            // joins preserve slice/input order; all durable writes remain on
-            // this caller thread in BM25 -> vectors -> coverage -> checkpoint
-            // order.
-            for batch in ids.chunks(500) {
-                self.index_whole_content_batch(batch, now_millis, SlotScope::All, true)?;
+        self.reindex_impl(now_millis, None, None).map(|_| ())
+    }
+
+    pub fn reindex_with_budget(
+        &self,
+        now_millis: i64,
+        budget: &RetrainingBudget,
+    ) -> CorpusKitResult<crate::CorpusRetrainingReport> {
+        let ids = self.source.active_content_ids_limited(budget.max_documents.saturating_add(1))?;
+        let trainable_ids: Vec<String> = self.slots.iter()
+            .filter(|slot| slot.fresh_basis_blob.is_some())
+            .map(|slot| slot.model_id.clone()).collect();
+        if ids.len() > budget.max_documents {
+            let reason = crate::RetrainingSkipReason::DocumentLimit {
+                actual: ids.len(), limit: budget.max_documents,
+            };
+            if trainable_ids.is_empty() {
+                return Err(CorpusKitError::RetrainingSkipped(reason));
             }
-        } else {
-            // Standalone passage policies also replace durable range rows;
-            // keep that mutation path serialized and policy-bound.
-            for id in ids {
-                match self.source.record(&id)? {
-                    Some(record) => {
-                        if let Some(checkpoint) = self.prepare_index_record(
-                            &record,
-                            None,
-                            true,
-                            now_millis,
-                            SlotScope::All,
-                        )? {
-                            self.index_state.advance(&checkpoint)?;
+            return Ok(crate::CorpusRetrainingReport {
+                completed_model_ids: Vec::new(),
+                skipped_model_ids: trainable_ids.into_iter().map(|id| (id, reason.clone())).collect(),
+            });
+        }
+        if let Some(reason) = budget.cancellation_reason() {
+            if trainable_ids.is_empty() {
+                return Err(CorpusKitError::RetrainingSkipped(reason));
+            }
+            return Ok(crate::CorpusRetrainingReport {
+                completed_model_ids: Vec::new(),
+                skipped_model_ids: trainable_ids.into_iter().map(|id| (id, reason.clone())).collect(),
+            });
+        }
+        self.reindex_impl(now_millis, Some(budget), Some(ids))
+    }
+
+    fn reindex_impl(
+        &self,
+        now_millis: i64,
+        budget: Option<&RetrainingBudget>,
+        bounded_ids: Option<Vec<CorpusContentId>>,
+    ) -> CorpusKitResult<crate::CorpusRetrainingReport> {
+        // Identify trainable model IDs: slots whose fresh_basis_blob is Some
+        // (RandomIndexing, LSA). Their new vectors will be written
+        // into a shadow generation and published atomically. Non-trainable
+        // (Deterministic/stateless) slots are not swapped.
+        let trainable_model_ids: Vec<String> = self
+            .slots
+            .iter()
+            .filter(|slot| slot.fresh_basis_blob.is_some())
+            .map(|slot| slot.model_id.clone())
+            .collect();
+
+        // Open a shadow generation for each trainable model BEFORE training begins.
+        // The VectorStore routes all subsequent add_payloads calls for these models
+        // to the shadow generation automatically — index_whole_content_batch does
+        // not need to know which models are shadow-active. Non-trainable model
+        // writes land on the serving generation unchanged (their resident structures
+        // continue serving throughout the build).
+        if !trainable_model_ids.is_empty() {
+            let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
+            self.vector_store
+                .begin_shadow_generation(&refs)
+                .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+        }
+
+        // Guard: capture the result of the entire span between begin_shadow_generation
+        // and the commit point (publish_shadow_generation). Rust has no async defer;
+        // the immediately-invoked closure captures the result without `?` propagating
+        // past the boundary. On Err, abandon_shadow_generation is called before
+        // returning the original error — NOT the abandon call's error. This ensures
+        // no vectors are left at a shadow generation that will never become visible
+        // (the third state the governing invariant forbids).
+        //
+        // Abort / publish are structurally mutual-exclusive: publish is the last
+        // statement in the Ok branch; if it succeeds the closure returns Ok and the
+        // Err branch (with abandon) never executes.
+        //
+        // Deferred-index bracket: begin_deferred_index / publish_resident_index track
+        // in-memory resident index updates only; storage writes for non-trainable
+        // models are committed as they occur. A mid-reindex failure leaves the
+        // in-memory binary lane stale but storage consistent — the next successful
+        // reindex's publish_resident_index corrects it. No "cancel_deferred_index"
+        // call exists or is needed; the stale state is transient and self-correcting.
+        let span_result: CorpusKitResult<()> = (|| {
+            // Retrain all trainable slots from scratch — produces the new basis blobs
+            // that the subsequent re-embed pass will use. No vector rows are written here.
+            if let Err(error) = self.train_trainable_slots_impl(
+                now_millis, true, budget, bounded_ids.clone())
+            {
+                return Err(error);
+            }
+
+            // Bulk-write bracket for non-trainable model writes (stateless slots):
+            // defers resident dense-index updates for the O(corpus) pass and publishes
+            // once at the end. Trainable-model writes bypass resident structures by
+            // VectorStore shadow-write contract (shadow rows never enter the binary
+            // lane, float indices, or HNSW structures during the build phase).
+            self.vector_store
+                .begin_deferred_index()
+                .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+            let ids = match &bounded_ids {
+                Some(ids) => ids.clone(),
+                None => self.source.active_content_ids()?,
+            };
+            if matches!(
+                self.configuration.index_unit(),
+                CorpusIndexUnitPolicy::WholeContent
+            ) {
+                // Bound both worker admission and prepared-result memory. Worker
+                // joins preserve slice/input order; all durable writes remain on
+                // this caller thread in BM25 -> vectors -> coverage -> checkpoint
+                // order.
+                for batch in ids.chunks(500) {
+                    self.index_whole_content_batch(batch, now_millis, SlotScope::All, true)?;
+                }
+            } else {
+                // Standalone passage policies also replace durable range rows;
+                // keep that mutation path serialized and policy-bound.
+                for id in ids {
+                    match self.source.record(&id)? {
+                        Some(record) => {
+                            if let Some(checkpoint) = self.prepare_index_record(
+                                &record,
+                                None,
+                                true,
+                                now_millis,
+                                SlotScope::All,
+                            )? {
+                                self.index_state.advance(&checkpoint)?;
+                            }
                         }
+                        None => self.clear_derived_state(&id, now_millis)?,
                     }
-                    None => self.clear_derived_state(&id, now_millis)?,
                 }
             }
+
+            // Atomic publish for trainable models: one storage transaction flips
+            // serving_generation to shadow_generation, sets shadow_state
+            // 'pending-reclaim' on the old generation's rows, and rebuilds the
+            // HNSW graph from the new serving rows before returning. A reader sees
+            // the old set or the new set, never a mixture. Old-generation rows are
+            // left 'pending-reclaim'; deletion is REM-BETA's duty (idempotent,
+            // resumable, not called here).
+            if !trainable_model_ids.is_empty() {
+                let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
+                self.vector_store
+                    .publish_shadow_generation(&refs)
+                    .map_err(|e| CorpusKitError::StoreUnavailable(format!("{e:?}")))?;
+            }
+            Ok(())
+        })();
+
+        if let Err(original_error) = span_result {
+            // Abort the shadow generation before returning: delete shadow vectors
+            // and clear shadow_generation / shadow_state in the registry.
+            // abandon_shadow_generation is idempotent — calling it when no shadow
+            // is open is a safe no-op. The abandon result is discarded; the caller
+            // must receive the ORIGINAL error, not an error from cleanup.
+            if !trainable_model_ids.is_empty() {
+                let refs: Vec<&str> = trainable_model_ids.iter().map(|s| s.as_str()).collect();
+                let _ = self.vector_store.abandon_shadow_generation(&refs);
+            }
+            if let CorpusKitError::RetrainingSkipped(reason) = original_error {
+                return Ok(crate::CorpusRetrainingReport {
+                    completed_model_ids: Vec::new(),
+                    skipped_model_ids: trainable_model_ids.iter().cloned()
+                        .map(|id| (id, reason.clone())).collect(),
+                });
+            }
+            return Err(original_error);
         }
+
+        // Publish deferred resident index for non-trainable model writes — the
+        // binary lane (MIH + brute-force) gets its one bulk rebuild here,
+        // same as before.
         self.vector_store
             .publish_resident_index()
             .map_err(|error| CorpusKitError::StoreUnavailable(format!("{error:?}")))?;
+
         self.provider_configuration_store
             .mark_current(&self.provider_generation_token(), now_millis)?;
-        Ok(())
+        let mut completed_model_ids = trainable_model_ids;
+        completed_model_ids.sort();
+        Ok(crate::CorpusRetrainingReport {
+            completed_model_ids,
+            skipped_model_ids: BTreeMap::new(),
+        })
     }
 
     /// Persist the maintained counts snapshot — the BATCH-boundary write.
@@ -3460,6 +4015,8 @@ impl CorpusContentEngine {
                 // Unix seconds per the store's field contract.
                 now_millis / 1000,
                 &self.storage.row_store(),
+                // Incremental maintenance persist: never clears the sentinel.
+                false,
             )?;
         }
         Ok(())
@@ -3621,27 +4178,27 @@ impl CorpusContentEngine {
         Ok(ranked)
     }
 
-    /// Compute sub-span max-cosine scores for a bounded candidate set.
+    /// Compute sub-span max-cosine scores for a candidate set under a budget.
     ///
-    /// Rust twin of Swift `CorpusContentEngine.scoreSubSpans(query:candidateIDs:)`.
+    /// Rust twin of Swift `CorpusContentEngine.scoreSubSpans(query:candidateIDs:budget:)`.
     /// Delegates entirely to `sub_span_scoring::score`, wiring `self.source`
     /// and `self.slots[0]`'s provider. See `sub_span_scoring` module doc for
-    /// the full algorithm description and cross-port contract.
+    /// the full algorithm description, the budget and the cross-port contract.
     ///
-    /// Candidates absent from the source, candidates where the default provider
-    /// returns Err on `embed_float`, and candidates whose text has no
-    /// alphanumeric tokens are not included in the returned map.
-    ///
-    /// # Returns
-    /// `HashMap<CorpusContentId, f32>` — max-cosine ∈ [0,1] per candidate.
-    /// Missing keys implicitly score 0.0.
+    /// `candidate_ids` is a priority order: the budget serves the front of
+    /// the slice first. Candidates absent from the source, candidates where
+    /// the default provider returns Err on `embed_float`, and candidates
+    /// whose text has no alphanumeric tokens are not included in the returned
+    /// scores; candidates the aggregate window budget did not reach are
+    /// listed in `unscored_ids`.
     ///
     /// Mission: MISSION_11X_RECALL_GAP_01 Item 1 — transient sub-span scoring.
     pub fn score_sub_spans(
         &self,
         query: &str,
         candidate_ids: &[&str],
-    ) -> HashMap<String, f32> {
+        budget: crate::sub_span_scoring::SubSpanBudget,
+    ) -> crate::sub_span_scoring::SubSpanScoringOutcome {
         let handle = self.slots[0].handle.lock().unwrap();
         let provider = handle.provider();
         crate::sub_span_scoring::score(
@@ -3651,6 +4208,7 @@ impl CorpusContentEngine {
             provider,
             crate::sub_span_scoring::DEFAULT_WINDOW_TOKENS,
             crate::sub_span_scoring::DEFAULT_OVERLAP_TOKENS,
+            budget,
         )
     }
 

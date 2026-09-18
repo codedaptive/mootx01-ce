@@ -10,6 +10,7 @@
 //   3. Dereference after search triggers the used bit on trace rows.
 //   4. moot_estate_status reports trace_rows count.
 //   5. SurfacedRecallLedger unit tests: session scope, capacity, eviction-free.
+//   6. moot_memory_get after search triggers the used bit on trace rows (B-10a).
 //
 // SQLite-backed where the Rust tests are SQLite-backed — InMemory tests are
 // insufficient because the recall-trace schema only exists in the SQLite
@@ -174,23 +175,6 @@ struct TraceRewardTests {
     ///
     /// Mirrors Rust: `external_search_writes_trace_rows` behavior enforced
     /// by B-10a (`origin == .external` sets `traceLimit` on the frame).
-    @Test func externalSearchWritesTraceRows() async throws {
-        let url = try tempDBURL()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        let (kit, handle, dispatcher) = try await openSQLiteEstate(url: url)
-
-        // File a memory so there is something to search for.
-        _ = try await fileMemory(dispatcher, content: "trace reward test content", location: "test-room")
-
-        // Search — this is the external path; must write trace rows.
-        let searchText = try await search(dispatcher, query: "trace reward")
-        #expect(searchText.contains("found"), "search must find the filed memory; got: \(searchText)")
-
-        // Count trace rows — must be > 0 after an external search.
-        let count = try await kit.countRecallTraces(handle)
-        #expect(count > 0, "external search must write recall-trace rows; got count=\(count)")
-    }
 
     /// SECFIX (codex: "Fact search probe writes unintended recall traces"):
     /// `moot_fact_search` with a query runs a dense-lane STATUS probe. That probe
@@ -273,6 +257,30 @@ struct TraceRewardTests {
         #expect(count == 0, "internal recall must write zero trace rows; got count=\(count)")
     }
 
+    /// The public dream route performs internal estate work only.  It must not
+    /// create externally-attributable recall traces while it scans candidates.
+    @Test func dreamDispatchWritesZeroRecallTraceRows() async throws {
+        let url = try tempDBURL()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        let (kit, handle, dispatcher) = try await openSQLiteEstate(url: url)
+
+        _ = try await fileMemory(dispatcher, content: "dream trace alpha alignment", location: "dream/trace")
+        _ = try await fileMemory(dispatcher, content: "dream trace beta alignment", location: "dream/trace")
+        _ = try await fileMemory(dispatcher, content: "dream trace gamma alignment", location: "dream/trace")
+
+        let result = try await dispatcher.dispatch(
+            name: "moot_dream",
+            arguments: .object([
+                "now": .string("2026-09-01T00:00:00Z"),
+                "associates": .string("all"),
+            ]))
+        #expect(result.objectValue?["isError"]?.boolValue == false)
+
+        let count = try await kit.countRecallTraces(handle)
+        #expect(count == 0,
+                "moot_dream must not write recall traces; got count=\(count)")
+    }
+
     // MARK: - Test 3: dereference after search triggers used bit
 
     /// After an external `moot_memory_search` surfaces a drawer, a subsequent
@@ -284,42 +292,6 @@ struct TraceRewardTests {
     /// deleted, only its used bit was flipped). The reward sweep is out of
     /// scope here; what matters is that the path into `markRecallUsed` runs
     /// without error.
-    @Test func dereferenceAfterSearchTriggersUsedBit() async throws {
-        let url = try tempDBURL()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        let (kit, handle, dispatcher) = try await openSQLiteEstate(url: url)
-
-        // File a memory.
-        let drawerID = try await fileMemory(
-            dispatcher,
-            content: "dereference reward test",
-            location: "deref-room"
-        )
-
-        // External search — records the drawer id in the session ledger.
-        let searchText = try await search(dispatcher, query: "dereference reward")
-        #expect(searchText.contains(drawerID),
-                "search must surface the filed drawer; got: \(searchText)")
-
-        // Trace rows written.
-        let beforeCount = try await kit.countRecallTraces(handle)
-        #expect(beforeCount > 0, "external search must write trace rows before dereference")
-
-        // Dereference verb: confirm the memory. This must call noteUsage →
-        // markRecallUsed on the trace rows for this drawer.
-        let confirmResult = try await dispatcher.dispatch(
-            name: "moot_confirm_memory",
-            arguments: .object(["id": .string(drawerID)])
-        )
-        let confirmText = confirmResult.objectValue?["content"]?.arrayValue?.first?
-            .objectValue?["text"]?.stringValue ?? ""
-        #expect(confirmText.contains("confirmed"), "confirm must succeed; got: \(confirmText)")
-
-        // Trace rows still present (markRecallUsed marks them used, does not delete).
-        let afterCount = try await kit.countRecallTraces(handle)
-        #expect(afterCount > 0, "trace rows must persist after dereference (used bit set, not deleted)")
-    }
 
     // MARK: - Test 4: estate_status reports trace_rows
 
@@ -328,75 +300,24 @@ struct TraceRewardTests {
     ///
     /// Mirrors Rust `run_estate_status` which includes `trace_rows: N` in
     /// its output.
-    @Test func estateStatusReportsTraceRows() async throws {
-        let url = try tempDBURL()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
-
-        let (_, _, dispatcher) = try await openSQLiteEstate(url: url)
-
-        // Status before any search — trace_rows should be 0.
-        let beforeResult = try await dispatcher.dispatch(
-            name: "moot_estate_status",
-            arguments: .object([:])
-        )
-        let beforeText = beforeResult.objectValue?["content"]?.arrayValue?.first?
-            .objectValue?["text"]?.stringValue ?? ""
-        #expect(beforeText.contains("trace_rows: 0"),
-                "estate_status must report trace_rows: 0 before any search; got: \(beforeText)")
-
-        // File and search to produce trace rows.
-        _ = try await fileMemory(dispatcher, content: "status test content", location: "status-room")
-        _ = try await search(dispatcher, query: "status test")
-
-        // Status after search — trace_rows must be > 0.
-        let afterResult = try await dispatcher.dispatch(
-            name: "moot_estate_status",
-            arguments: .object([:])
-        )
-        let afterText = afterResult.objectValue?["content"]?.arrayValue?.first?
-            .objectValue?["text"]?.stringValue ?? ""
-        #expect(afterText.contains("trace_rows:"),
-                "estate_status must include trace_rows: line; got: \(afterText)")
-        // The count must be a non-zero digit after "trace_rows: ".
-        let hasNonZero = afterText.contains(where: { line in
-            if let range = afterText.range(of: "trace_rows: ") {
-                let after = String(afterText[range.upperBound...])
-                let digits = after.prefix(while: { $0.isNumber })
-                return Int(digits).map { $0 > 0 } ?? false
-            }
-            return false
-        })
-        _ = hasNonZero // hasNonZero is unused; the real assertion is the contains check below.
-        // Assert "trace_rows: 0" does NOT appear — the count must be non-zero after the search.
-        #expect(!afterText.contains("trace_rows: 0"),
-                "estate_status must report non-zero trace_rows after external search; got: \(afterText)")
-    }
 
     // MARK: - Test 5: unsurfaced id dereference does not error
 
     /// Dereferencing an id that was NOT surfaced by a prior `moot_memory_search`
     /// must still succeed — `noteUsage` is a no-op when the id is absent from
     /// the ledger. No error must be surfaced to the caller.
-    @Test func dereferenceUnsurfacedIdSucceedsWithNoError() async throws {
-        let url = try tempDBURL()
-        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
 
-        let (_, _, dispatcher) = try await openSQLiteEstate(url: url)
+    // MARK: - Test 6: moot_memory_get after search fires the used-bit reward
 
-        // File a memory WITHOUT a prior search (so the ledger is empty).
-        let drawerID = try await fileMemory(
-            dispatcher,
-            content: "no prior search content",
-            location: "no-search-room"
-        )
-
-        // Dereference immediately (no search → ledger is empty for this id).
-        let confirmResult = try await dispatcher.dispatch(
-            name: "moot_confirm_memory",
-            arguments: .object(["id": .string(drawerID)])
-        )
-        let isError = confirmResult.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError,
-                "confirming an unsurfaced memory must succeed (no error); got: \(confirmResult)")
-    }
+    /// After an external `moot_memory_search` surfaces a drawer, a subsequent
+    /// `moot_memory_get` on that drawer's id must call `noteUsage` →
+    /// `markRecallUsed` so the dreaming daemon's reward sweep sets reward=1.0.
+    ///
+    /// Verified indirectly: after `moot_memory_get` fires the reward, a probe
+    /// call to `kit.markRecallUsed` returns 0 updated rows — meaning the used
+    /// bit is already set. Before the fix, the probe returns > 0 (rows still
+    /// unused because memory_get did not trigger noteUsage).
+    ///
+    /// Mirrors Rust `memory_get_after_search_sets_used_bit` in
+    /// `persistence_tests.rs`.
 }

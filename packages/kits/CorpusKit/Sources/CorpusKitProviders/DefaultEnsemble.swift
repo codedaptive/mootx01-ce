@@ -1,10 +1,12 @@
 // DefaultEnsemble.swift — the ONE definition of the default recall ensemble.
 //
-// Mission 6a-iii-wire: flip the production default from a single deterministic
-// provider to the canonical five honest signals. This factory is the single
-// source of truth for the default recall ensemble — every production
-// provision/open site threads THIS list, so the five honest signals
-// (RI / PPMI / LSA / NMF / FDC) are the live default everywhere.
+// The default ensemble is two signals: Random Indexing (RI) and LSA. Both are
+// always-on; neither requires a trait or feature flag.
+//
+// RI stays because its binary fingerprint feeds dreaming, contradiction, and
+// consolidation. LSA earned its place: paired with RI it improves recall
+// fidelity over RI alone, and its cost is acceptable at the signal count we
+// ship (two providers).
 //
 // ## Why this lives in CorpusKitProviders, not CorpusKit core
 //
@@ -33,40 +35,28 @@ import CorpusKit
 
 /// Factory namespace for CorpusKit's canonical default embedding ensemble.
 ///
-/// `CorpusEnsemble.defaultEnsemble()` is the single definition of the
-/// default recall ensemble — the five honest distributional / co-classification
-/// signals every production estate is provisioned with.
+/// `CorpusEnsemble.defaultEnsemble()` is the single definition of the default
+/// recall ensemble: two signals, RI and LSA, always on.
+///
+/// - RI (Random Indexing): binary fingerprint, feeds dreaming/contradiction/
+///   consolidation. Required; cannot be removed.
+/// - LSA (Latent Semantic Analysis): improves recall fidelity paired with RI.
+///   Always active alongside RI in the default ensemble.
 public enum CorpusEnsemble {
 
-    /// The canonical FIVE-signal default recall ensemble (untrained).
+    /// The default recall ensemble (untrained): RI and LSA, always active.
     ///
-    /// Returns, in this fixed order:
-    ///   1. `.randomIndexing` — Random Indexing distributional semantics.
-    ///   2. `.ppmi`           — PPMI-weighted distributional semantics.
-    ///   3. `.lsa`            — Latent Semantic Analysis (truncated SVD).
-    ///   4. `.nmf`            — Non-negative matrix factorization latent factors.
-    ///   5. `.fdc`            — Frame Decimal Classification co-classification.
-    ///
-    /// The four distributional / matrix providers (RI/PPMI/LSA/NMF) are
-    /// trainable: the Corpus lifecycle trains and persists them on first
-    /// ingest / reindex under their own modelIDs. FDC is stateless — ready
-    /// immediately, no training required. The providers are returned UNTRAINED;
-    /// the Corpus owns the train+persist lifecycle.
-    ///
-    /// `models[0]` (`.randomIndexing`) is the DEFAULT signal that the Corpus's
-    /// single-signal entry points delegate to, so it leads the order.
+    /// `models[0]` (`.randomIndexing`) leads — it is the DEFAULT signal that the
+    /// Corpus's single-signal entry points delegate to.
     ///
     /// Constructed FRESH each call — see the file header for why a function and
     /// not a shared constant.
     ///
-    /// - Returns: the five untrained `EmbeddingModel` cases in canonical order.
+    /// - Returns: the untrained `EmbeddingModel` cases for the default ensemble.
     public static func defaultEnsemble() -> [EmbeddingModel] {
         [
             .randomIndexing(provider: RandomIndexingProvider()),
-            .ppmi(provider: PpmiProvider()),
             .lsa(provider: LsaProvider()),
-            .nmf(provider: NmfProvider()),
-            .fdc(provider: FDCProvider())
         ]
     }
 }

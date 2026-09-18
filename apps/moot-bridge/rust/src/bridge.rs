@@ -309,6 +309,13 @@ impl BridgeServer {
             Some(translated_line) => {
                 let mirror_start = Instant::now();
                 match self.backends[si].transport.send_and_receive(&translated_line) {
+                    // A backend that answered with a JSON-RPC error or an
+                    // `isError` tool result did NOT store the write. Count it as
+                    // a secondary failure, not as a completed mirror, so the
+                    // stats never report a data gap as success.
+                    Ok(response) if Self::is_failed_tool_response(&response) => {
+                        self.stats.record_secondary_failure()
+                    }
                     Ok(_) => {
                         let mlabel = format!("{}.tools/call.mirror", self.backends[si].name);
                         self.stats
@@ -319,6 +326,36 @@ impl BridgeServer {
             }
         }
         response
+    }
+
+    /// True when a backend's response line is a JSON-RPC `error` or a tool
+    /// result flagged `isError: true`. Unparseable text counts as failed.
+    pub fn is_failed_tool_response(response: &str) -> bool {
+        let Ok(parsed) = serde_json::from_str::<Value>(response) else {
+            return true;
+        };
+        if parsed.get("error").is_some() {
+            return true;
+        }
+        parsed
+            .get("result")
+            .and_then(|r| r.get("isError"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    /// The subject the bridge derives for a write tool that requires one: the
+    /// content's first non-empty line, whitespace-trimmed, cut to the
+    /// `DERIVED_SUBJECT_LIMIT` characters mootx01 accepts; empty content
+    /// yields "memory".
+    pub const DERIVED_SUBJECT_LIMIT: usize = 120;
+    pub fn derived_subject(content: &str) -> String {
+        let first_line = content
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .unwrap_or("memory");
+        first_line.chars().take(Self::DERIVED_SUBJECT_LIMIT).collect()
     }
 
     /// Forwards an arbitrary id-bearing method (e.g. initialize) to the primary.
@@ -447,6 +484,25 @@ impl BridgeServer {
             BridgeCallType::Write => {
                 let value = client_args.get(&primary_verb_map.content_arg)?;
                 secondary_args.insert(secondary_verb_map.content_arg.clone(), value.clone());
+                // A write tool that requires a subject gets one derived from the
+                // content when the client's call carries none under that key.
+                if let Some(subject_arg) = &secondary_verb_map.subject_arg {
+                    if !secondary_args.contains_key(subject_arg) {
+                        match client_args.get(subject_arg) {
+                            Some(given) if given.is_string() => {
+                                secondary_args.insert(subject_arg.clone(), given.clone());
+                            }
+                            _ => {
+                                if let Some(text) = value.as_str() {
+                                    secondary_args.insert(
+                                        subject_arg.clone(),
+                                        Value::String(Self::derived_subject(text)),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 &secondary_verb_map.write
             }
             BridgeCallType::Query => {

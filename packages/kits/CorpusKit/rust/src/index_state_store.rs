@@ -5,6 +5,13 @@
 //! and the `corpus_bitmap_generation` singleton table for the global
 //! basis-generation counter. See `index_state_operational.rs` for the
 //! full bit layout and registry.
+//!
+//! v3 added `composition_policy TEXT NOT NULL DEFAULT ''`: the index
+//! composition policy id, a knob that retired when every id came to compose
+//! the same document. v4 drops the column. Populated estates reach v4 only
+//! through the GLK 1.5 → 1.6 migration capsule, which `mootx01 upgrade` runs
+//! (the composite estate declarations carry no migrations); a fresh estate is
+//! created without the column.
 
 use crate::content::CorpusContentId;
 use crate::error::CorpusKitError;
@@ -58,18 +65,21 @@ pub struct CorpusIndexStateStore {
 }
 
 impl CorpusIndexStateStore {
-    /// Checkpoint schema — v2 adds `operational_bitmap` and the
-    /// `corpus_bitmap_generation` singleton.
+    /// Checkpoint schema — v4 drops `composition_policy`, v3 added it, v2
+    /// added `operational_bitmap`.
     ///
     /// Version history:
     ///   v1 — Initial layout (content_id, revision, digest, index_version,
     ///        applied_cursor, updated_at) + PK on content_id.
     ///   v2 — Bitmap adoption: adds `operational_bitmap BITMAP NOT NULL DEFAULT 0`
     ///        to corpus_index_state; creates corpus_bitmap_generation singleton.
+    ///   v3 — added `composition_policy TEXT NOT NULL DEFAULT ''` (see the
+    ///        module doc).
+    ///   v4 — drops `composition_policy`.
     pub fn schema_declaration() -> SchemaDeclaration {
         SchemaDeclaration::new(
             "CorpusKitIndexState",
-            2,
+            4,
             vec![
                 TableDeclaration::new(
                     "corpus_index_state",
@@ -97,7 +107,8 @@ impl CorpusIndexStateStore {
                 ),
             ],
         )
-        .with_migrations(vec![Migration {
+        .with_migrations(vec![
+        Migration {
             from_version: 1,
             to_version: 2,
             operations: vec![
@@ -115,7 +126,31 @@ impl CorpusIndexStateStore {
                     vec!["singleton_id".to_string()],
                 )),
             ],
-        }])
+        },
+        Migration {
+            from_version: 2,
+            to_version: 3,
+            operations: vec![SchemaOperation::AddColumn {
+                table: "corpus_index_state".to_string(),
+                // The composition_policy column (see the module doc); the
+                // ladder step stays so a v2 estate walks the same ladder a v3
+                // estate did. PersistenceKit AddColumn is idempotent.
+                column: ColumnDeclaration::text("composition_policy")
+                    .with_default(TypedValue::Text(String::new())),
+            }],
+        },
+        Migration {
+            from_version: 3,
+            to_version: 4,
+            // Drop it again. PersistenceKit DropColumn is idempotent, so a
+            // fresh estate (created at v4, ladder replayed from 0) and a
+            // capsule re-run both pass through this step without error.
+            operations: vec![SchemaOperation::DropColumn {
+                table: "corpus_index_state".to_string(),
+                column_name: "composition_policy".to_string(),
+            }],
+        },
+        ])
     }
 
     pub fn new(storage: Arc<dyn Storage>) -> Self {

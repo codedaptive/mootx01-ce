@@ -408,6 +408,44 @@ struct ObserverSinkConformanceTests {
         #expect(!names.contains("c"), "Row 'c' must not appear in the result")
     }
 
+    @Test("queryMetricsByNames clamps an oversized limit to maxMetricRowsPerNamedQuery")
+    func queryMetricsByNamesClampsOversizedLimit() async throws {
+        let store = try await makeStore()
+        defer { Task { await store.close() } }
+
+        // Seed more rows than the cap so the clamp is observable.
+        let cap = StatsStore.maxMetricRowsPerNamedQuery
+        let total = cap + 8
+        for i in 0..<total {
+            try await store.insertMetric(
+                name: "clamp-metric", value: Double(i), tags: [:],
+                ts: Double(i), dropboxID: "clamp-box"
+            )
+        }
+
+        // Store-level bound (PH-01): an oversized limit is clamped — the
+        // bound holds even when the handler edge check is bypassed.
+        let rows = try await store.queryMetricsByNames(["clamp-metric"], limit: Int.max)
+        #expect(rows.count == cap,
+                "Oversized limit must be clamped to the cap; got \(rows.count)")
+        // DESC ordering: the newest row (highest ts) comes first, so the cap
+        // drops the OLDEST rows, not the newest.
+        #expect(rows.first?.ts == Date(timeIntervalSince1970: Double(total - 1)),
+                "Clamped result must keep the newest rows (DESC)")
+
+        // A normal small limit is unaffected by the clamp.
+        let ten = try await store.queryMetricsByNames(["clamp-metric"], limit: 10)
+        #expect(ten.count == 10, "A limit below the cap must be honoured exactly")
+        #expect(ten.first?.ts == Date(timeIntervalSince1970: Double(total - 1)))
+
+        // A NEGATIVE limit must not bypass the cap: SQLite treats `LIMIT -1`
+        // as unbounded, so the store floors negatives to 0 rows (Perkins
+        // advisory, PH-01). Rust is immune (usize) — Swift-only guard.
+        let negative = try await store.queryMetricsByNames(["clamp-metric"], limit: -1)
+        #expect(negative.isEmpty,
+                "A negative limit must clamp to zero rows, not unbounded; got \(negative.count)")
+    }
+
     @Test("queryMetricsByNames with empty set returns [] without querying")
     func queryMetricsByNamesEmptySetReturnsEmpty() async throws {
         let store = try await makeStore()

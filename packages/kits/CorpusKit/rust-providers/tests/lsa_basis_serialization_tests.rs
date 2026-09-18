@@ -1,3 +1,5 @@
+// LSA-feature test — compiled only when --features lsa (ruling 2026-09-07).
+// LSA basis serialization tests.
 //! Cross-port basis-serialization conformance gate for `LsaProvider`
 //! (mission 6a-i). Asserts byte-identical serialize, embed reproduction, AND
 //! training-document-embedding reproduction (which exercises the U factor that

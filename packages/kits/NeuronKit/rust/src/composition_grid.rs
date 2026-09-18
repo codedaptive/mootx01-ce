@@ -27,7 +27,8 @@ pub const DEFAULT_NAME: &str = "text";
 /// signal's contribution; combined and weighted-all compositions test
 /// interactions.
 pub fn all() -> Vec<ReductionComposition> {
-    vec![
+    #[allow(unused_mut)]
+    let mut grid = vec![
         // --- single-signal isolations ---
         ReductionComposition::new("text", vec![WeightedSignal::new(Text)]),
         ReductionComposition::new("hamming", vec![WeightedSignal::new(Hamming)]),
@@ -104,13 +105,6 @@ pub fn all() -> Vec<ReductionComposition> {
         ),
         // --- T2 / T5 semantic: the TRUE dense float lane (Lane D) ---
         // dense leads at full weight; text is a light tie-breaker only.
-        ReductionComposition::new(
-            "dense-fused",
-            vec![
-                WeightedSignal::weighted(Dense, 1.0),
-                WeightedSignal::weighted(Text, 0.3),
-            ],
-        ),
         // --- weighted-all: every PER-CANDIDATE signal, weighted ---
         ReductionComposition::new(
             "weighted-all",
@@ -127,7 +121,45 @@ pub fn all() -> Vec<ReductionComposition> {
                 WeightedSignal::weighted(Bm25, 0.2),
             ],
         ),
-    ]
+        // --- composite: cookbook §8.4, activated by W2.5 Track M3 (twin
+        // of the Swift entry — see its comment for the distance→similarity
+        // affine-flip argument; weights are the §8.4 alphas from the
+        // designed constants).
+        ReductionComposition::new(
+            "composite",
+            vec![
+                WeightedSignal::weighted(
+                    Lattice,
+                    substrate_ml::composite_distance::CompositeDistance::DEFAULT_ALPHA_LATTICE,
+                ),
+                WeightedSignal::weighted(
+                    Hamming,
+                    substrate_ml::composite_distance::CompositeDistance::DEFAULT_ALPHA_FINGERPRINT,
+                ),
+            ],
+        ),
+    ];
+    // The whole-record float lane composition: the `dense` signal carries the
+    // cosine over the pooled float embedding; text breaks near-ties.
+    // Mirrors Swift `CompositionGrid.all`. Declared before weighted-all so the
+    // benchmarker fixture order and the grid order agree.
+    {
+        let slot = grid
+            .iter()
+            .position(|c| c.name == "weighted-all")
+            .unwrap_or(grid.len());
+        grid.insert(
+            slot,
+            ReductionComposition::new(
+                "dense-fused",
+                vec![
+                    WeightedSignal::weighted(Dense, 1.0),
+                    WeightedSignal::weighted(Text, 0.3),
+                ],
+            ),
+        );
+    }
+    grid
 }
 
 /// All composition names in grid order (the gauntlet column ids).
@@ -142,6 +174,35 @@ pub fn named(name: Option<&str>) -> ReductionComposition {
     match name {
         None => by_name(DEFAULT_NAME),
         Some(n) => by_name(n),
+    }
+}
+
+/// Look up a composition by name and apply the optimizer-owned recall tuning to
+/// override `mmr_lambda` for compositions that include an `mmr` term. Non-MMR
+/// compositions are returned unchanged. Spec-default tuning (all fields at their
+/// defaults) returns the same composition as `named(name)` exactly.
+///
+/// Mirrors Swift `CompositionGrid.named(_:applyingTuning:)` (W4).
+///
+/// # Parameters
+/// - `name`: composition name; falls back to `text` when unknown or `None`.
+/// - `tuning`: optimizer-owned recall-tuning envelope from the estate manifest
+///   (e.g. from `EstateCoordinator::provisioned_recall_tuning`). Pass
+///   `RecallTuningManifest::default()` to preserve spec-constant behavior.
+pub fn named_with_tuning(
+    name: Option<&str>,
+    tuning: &genius_locus_kit::RecallTuningManifest,
+) -> ReductionComposition {
+    let base = named(name);
+    // Only override mmr_lambda when the composition has an MMR term and the
+    // manifest carries a non-default value. Default tuning returns the
+    // same value as `named(name)` exactly (no float drift).
+    if !base.has_mmr() || *tuning == genius_locus_kit::RecallTuningManifest::default() {
+        return base;
+    }
+    ReductionComposition {
+        mmr_lambda: f64::from(tuning.mmr_lambda),
+        ..base
     }
 }
 

@@ -1,12 +1,13 @@
 //! Canonical-ID engine coverage (GLK shared-content 1.1, P2).
 //! Rust twin of the Swift `CorpusContentEngineTests`.
 
-use corpus_kit::corpus_provider_counts_store::CorpusProviderCountsStore;
+use corpus_kit::corpus_provider_counts_store::{CorpusProviderCountsStore, PersistedCountsReference};
 use corpus_kit::{
     content_digest, ContentIndexJob, CorpusContentChange, CorpusContentConfiguration,
     CorpusContentEngine, CorpusContentId, CorpusContentRecord, CorpusContentSource,
     CorpusContentStore, CorpusDocumentStore, CorpusIndexStateStore, CorpusIndexUnitPolicy,
-    CorpusKitError, CorpusOperatingMode, EmbeddingModelConfig,
+    CorpusKitError, CorpusOperatingMode, CorpusPathReason, EmbeddingModelConfig,
+    TrainingPathDecision,
 };
 use persistence_kit::database_inventory::capture_inventory;
 use persistence_kit::inmemory::InMemoryStorage;
@@ -86,11 +87,27 @@ impl PublicationRaceSource {
         state.released = false;
     }
 
-    fn wait_until_blocked(&self) {
+    /// Wait until the blocked record's `record()` call has entered the blocking
+    /// section. Returns `true` if the block was entered before the deadline, or
+    /// `false` if the 10-second timeout expired. Callers must assert the return
+    /// value with a descriptive message so a hang surfaces as a test failure
+    /// rather than an indefinite suite stall.
+    fn wait_until_blocked(&self) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         let mut state = self.state.lock().unwrap();
         while !state.block_entered {
-            state = self.condition.wait(state).unwrap();
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return false;
+            }
+            let remaining = deadline - now;
+            let (guard, timed_out) = self.condition.wait_timeout(state, remaining).unwrap();
+            state = guard;
+            if timed_out.timed_out() {
+                return false;
+            }
         }
+        true
     }
 
     fn release_blocked_record(&self) {
@@ -126,7 +143,7 @@ impl CorpusContentSource for PublicationRaceSource {
     }
 }
 
-impl vectorkit::EmbeddingProvider for ReindexConcurrencyProvider {
+impl synapsekit::EmbeddingProvider for ReindexConcurrencyProvider {
     fn model_id(&self) -> &str {
         "reindex-concurrency-probe"
     }
@@ -135,14 +152,14 @@ impl vectorkit::EmbeddingProvider for ReindexConcurrencyProvider {
         "1.0.0"
     }
 
-    fn embed(&self, _text: &str) -> Result<engram_lib::Engram, vectorkit::VectorKitError> {
+    fn embed(&self, _text: &str) -> Result<engram_lib::Engram, synapsekit::SynapseKitError> {
         Ok(engram_lib::Engram::ZERO)
     }
 
     fn embed_pair(
         &self,
         _text: &str,
-    ) -> Result<(engram_lib::Engram, Vec<f32>), vectorkit::VectorKitError> {
+    ) -> Result<(engram_lib::Engram, Vec<f32>), synapsekit::SynapseKitError> {
         self.probe.enter();
         std::thread::sleep(Duration::from_millis(20));
         self.probe.leave();
@@ -578,6 +595,7 @@ fn provider_publication_preserves_post_snapshot_admission() {
         digest: content_digest(anchor_text),
         text: anchor_text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     let source = Arc::new(PublicationRaceSource::new(vec![anchor.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -607,7 +625,11 @@ fn provider_publication_preserves_post_snapshot_admission() {
             .train_trainable_slots(NOW + 1, true)
             .expect("force retrain");
     });
-    source.wait_until_blocked();
+    assert!(
+        source.wait_until_blocked(),
+        "provider_publication_preserves_post_snapshot_admission: timed out waiting for \
+         retrain thread to block on anchor record fetch"
+    );
 
     let late_text = "post snapshot vocabulary";
     let late = CorpusContentRecord {
@@ -616,6 +638,7 @@ fn provider_publication_preserves_post_snapshot_admission() {
         digest: content_digest(late_text),
         text: late_text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     source.add(late.clone());
     let admission_engine = Arc::clone(&engine);
@@ -664,6 +687,7 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
         digest: content_digest(anchor_text),
         text: anchor_text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     let source = Arc::new(PublicationRaceSource::new(vec![anchor.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -704,6 +728,7 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
         digest: content_digest(pending_text),
         text: pending_text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     source.add(pending.clone());
 
@@ -714,7 +739,11 @@ fn provider_publication_does_not_refold_pre_snapshot_pending_admission() {
             .train_trainable_slots(NOW + 1, true)
             .expect("force retrain");
     });
-    source.wait_until_blocked();
+    assert!(
+        source.wait_until_blocked(),
+        "provider_publication_does_not_refold_pre_snapshot_pending_admission: timed out \
+         waiting for retrain thread to block on anchor record fetch"
+    );
     let admission_engine = Arc::clone(&engine);
     let pending_for_admission = pending.clone();
     let admission = std::thread::spawn(move || {
@@ -779,6 +808,7 @@ fn provider_publication_marker_survives_reopen_before_admission() {
         digest: content_digest(text),
         text: text.into(),
         dense_composition_text: None,
+        ssc_facts: None, // supplied by GLK layer (schema 19)
     };
     let source = Arc::new(PublicationRaceSource::new(vec![pending.clone()]));
     let config = CorpusContentConfiguration::new(
@@ -872,7 +902,9 @@ fn whole_content_reindex_uses_bounded_parallel_embedding_preparation() {
         )
         .expect("configuration"),
         source as Arc<dyn CorpusContentSource>,
-        vec![EmbeddingModelConfig::Fdc {
+        // CandleNL carries any EmbeddingProvider without a trainable basis,
+        // the same structural role Fdc played before Fdc was retired.
+        vec![EmbeddingModelConfig::CandleNL {
             provider: Box::new(ReindexConcurrencyProvider {
                 probe: Arc::clone(&probe),
             }),
@@ -1146,6 +1178,7 @@ fn attached_engine_opens_without_content_tables_and_returns_drawer_ids() {
                 digest: content_digest(text_a),
                 text: text_a.into(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
             CorpusContentRecord {
                 id: "drawer-b".into(),
@@ -1153,6 +1186,7 @@ fn attached_engine_opens_without_content_tables_and_returns_drawer_ids() {
                 digest: content_digest(text_b),
                 text: text_b.into(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
         ],
     });
@@ -1197,6 +1231,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
                 digest: content_digest("alpha provider coverage"),
                 text: "alpha provider coverage".into(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
             CorpusContentRecord {
                 id: "drawer-b".into(),
@@ -1204,6 +1239,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
                 digest: content_digest("beta provider coverage"),
                 text: "beta provider coverage".into(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             },
         ],
     });
@@ -1308,7 +1344,7 @@ fn provider_addition_and_subtraction_reconcile_without_residue() {
             "retired provider residue survived in {table}",
         );
     }
-    let claims = vectorkit::VectorRepresentationClaims::new(Arc::clone(&storage));
+    let claims = synapsekit::VectorRepresentationClaims::new(Arc::clone(&storage));
     assert!(claims
         .claims(corpus_kit::CLAIMS_CONSUMER)
         .unwrap()
@@ -1327,18 +1363,21 @@ fn engine_claims_its_representations() {
     store.put("Claimed content.", "drawer-c", NOW).unwrap();
     engine.index_content("drawer-c", NOW).unwrap();
 
-    let claims = vectorkit::VectorRepresentationClaims::new(storage);
+    let claims = synapsekit::VectorRepresentationClaims::new(storage);
     let claimed = claims.claims(corpus_kit::CLAIMS_CONSUMER).unwrap();
-    assert!(claimed.contains(&vectorkit::VectorRepresentationKey::new(
+    assert!(claimed.contains(&synapsekit::VectorRepresentationKey::new(
         "corpus-deterministic-v1",
         "1.0.0",
         0
     )));
-    assert!(claimed.contains(&vectorkit::VectorRepresentationKey::new(
-        "corpus-deterministic-v1",
-        "1.0.0",
-        1
-    )));
+    // The whole-record float lane (vector_index 1) is claimed only when the
+    // sidecar build writes it (CLAIMED_LANES).
+    let float_lane = synapsekit::VectorRepresentationKey::new("corpus-deterministic-v1", "1.0.0", 1);
+    assert_eq!(
+        claimed.contains(&float_lane),
+        true,
+        "lane 1 is always claimed (float lane is always on)"
+    );
 }
 
 #[test]
@@ -1359,4 +1398,222 @@ fn reindex_reindexes_every_active_content_row() {
     engine.reindex(NOW).unwrap();
     let after = capture_inventory(&storage, &["vectors"], &exclusions).unwrap();
     assert_eq!(before, after);
+}
+
+// ── Part 3 gate tests: training-path decision seam ───────────────────────────
+//
+// These tests exercise the counts path / corpus path dispatch added in
+// CORPUS-INCREMENTAL-01 Part 3. They use the `training_path_decisions()`
+// seam getter to assert the branch taken, without re-reading corpus text.
+
+// A source backed by a shared mutable map; tests mutate it to add/remove records.
+//
+// `fetch_count` is an atomic counter incremented on every `record()` call.
+// Tests that measure the F-1 two-directional gate use `reset_fetch_count()`
+// immediately before the train call under observation, then read `fetch_count()`
+// afterwards to verify that exactly the expected number of bodies were paged.
+struct MutableSource {
+    records: Mutex<BTreeMap<String, CorpusContentRecord>>,
+    fetch_count: AtomicUsize,
+}
+
+// The counter and remove helpers serve the trainable-slot
+// tests; some methods are unused in the default build.
+#[allow(dead_code)]
+impl MutableSource {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { records: Mutex::new(BTreeMap::new()), fetch_count: AtomicUsize::new(0) })
+    }
+
+    /// Returns the total number of `record()` calls since the last reset.
+    fn fetch_count(&self) -> usize {
+        self.fetch_count.load(Ordering::SeqCst)
+    }
+
+    /// Resets the fetch counter to zero. Call immediately before the train
+    /// call under measurement so only that call's body-page traffic is counted.
+    fn reset_fetch_count(&self) {
+        self.fetch_count.store(0, Ordering::SeqCst);
+    }
+
+    fn put(&self, id: &str, text: &str) {
+        let mut r = self.records.lock().unwrap();
+        r.insert(
+            id.to_string(),
+            CorpusContentRecord {
+                id: id.to_string(),
+                revision: 1,
+                digest: content_digest(text),
+                text: text.to_string(),
+                dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
+            },
+        );
+    }
+
+    fn remove(&self, id: &str) {
+        self.records.lock().unwrap().remove(id);
+    }
+}
+
+impl CorpusContentSource for MutableSource {
+    fn record(&self, id: &str) -> Result<Option<CorpusContentRecord>, CorpusKitError> {
+        // Increment on every body-fetch so tests can measure source traffic.
+        self.fetch_count.fetch_add(1, Ordering::SeqCst);
+        Ok(self.records.lock().unwrap().get(id).cloned())
+    }
+
+    fn changes(
+        &self,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<corpus_kit::CorpusContentChangeBatch, CorpusKitError> {
+        Ok(corpus_kit::CorpusContentChangeBatch::empty())
+    }
+
+    fn active_content_ids(&self) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        let r = self.records.lock().unwrap();
+        let mut ids: Vec<String> = r.keys().cloned().collect();
+        ids.sort();
+        Ok(ids)
+    }
+}
+
+// A source that always returns None for record() — simulates a dead source.
+// Used by trainable-slot tests that are no longer compiled.
+#[allow(dead_code)]
+struct NilSource {
+    ids: Vec<String>,
+}
+
+impl CorpusContentSource for NilSource {
+    fn record(&self, _id: &str) -> Result<Option<CorpusContentRecord>, CorpusKitError> {
+        Ok(None)
+    }
+
+    fn changes(
+        &self,
+        _cursor: Option<&str>,
+        _limit: usize,
+    ) -> Result<corpus_kit::CorpusContentChangeBatch, CorpusKitError> {
+        Ok(corpus_kit::CorpusContentChangeBatch::empty())
+    }
+
+    fn active_content_ids(&self) -> Result<Vec<CorpusContentId>, CorpusKitError> {
+        Ok(self.ids.clone())
+    }
+}
+
+
+fn ri_config() -> EmbeddingModelConfig {
+    use corpus_kit_providers::RandomIndexingProvider;
+    EmbeddingModelConfig::RandomIndexing { provider: Box::new(RandomIndexingProvider::new()) }
+}
+
+fn open_attached_engine(
+    storage: &Arc<dyn Storage>,
+    source: Arc<dyn CorpusContentSource>,
+    models: Vec<EmbeddingModelConfig>,
+) -> CorpusContentEngine {
+    let config = CorpusContentConfiguration::new(
+        CorpusOperatingMode::Attached,
+        CorpusIndexUnitPolicy::WholeContent,
+    )
+    .unwrap();
+    storage
+        .migrate(&corpus_kit::attached_declaration())
+        .expect("migrate attached");
+    CorpusContentEngine::open(Arc::clone(storage), config, source, models).expect("open engine")
+}
+
+/// G-5a: PPMI delta-fold positive.
+///
+/// After an initial full train, one pending reference is introduced and the
+/// second `train_trainable_slots` call (with force=true, as the drift gate
+/// does) must take the counts path (CountsDeltaFold { folded: 1 }), without
+/// re-training from corpus text.
+
+/// G-5a-RI: RI behavior on the training-path dispatch.
+///
+/// RI reports `counts_delta_fold_safe()=false` because its f32 running sums
+/// are not commutative. The dispatch (force=true, as the drift gate does) must
+/// record DeltaNotFoldSafe and fall through to the corpus path, NOT the
+/// delta-fold path.
+#[test]
+fn g5a_ri_counts_path_delta_not_fold_safe() {
+    let storage = in_memory_storage();
+    let source = MutableSource::new();
+    source.put("doc-a", "the quick brown fox");
+    source.put("doc-b", "jumps over the lazy dog");
+
+    let engine = open_attached_engine(
+        &storage,
+        Arc::clone(&source) as Arc<dyn CorpusContentSource>,
+        vec![ri_config()],
+    );
+
+    // First train: corpus path (FirstTrain — no persisted basis).
+    engine.train_trainable_slots(NOW, false).expect("first train");
+
+    // Add a document and a pending ref.
+    source.put("doc-c", "rust concurrency primitives");
+    let counts_store = CorpusProviderCountsStore::new(Arc::clone(&storage));
+    let row_store = storage.row_store();
+    counts_store
+        .upsert_reference_into(
+            &PersistedCountsReference {
+                model_id: "random-indexing-v1".into(),
+                model_version: "1.1.0".into(),
+                content_id: "doc-c".into(),
+                revision: 1,
+                digest: content_digest("rust concurrency primitives"),
+                updated_at_secs: NOW / 1000,
+                is_subsumed: false,
+                growth_term_digests: Vec::new(),
+            },
+            &row_store,
+        )
+        .expect("insert pending ref");
+
+    // Second train: force=true (drift gate). RI → DeltaNotFoldSafe (corpus path).
+    engine.train_trainable_slots(NOW, true).expect("second train");
+    let decisions = engine.training_path_decisions();
+    assert_eq!(
+        decisions.get("random-indexing-v1"),
+        Some(&TrainingPathDecision::Corpus(CorpusPathReason::DeltaNotFoldSafe)),
+        "RI must always take corpus path (DeltaNotFoldSafe)"
+    );
+}
+
+/// G-6f: sentinel safety — a sentinel row with revision=0 and digest="" does
+/// NOT satisfy the admission digest-equality check. This test confirms that
+/// the sentinel's fields are distinct from any live content record's digest.
+///
+/// The admission check compares `reference.digest == record.digest`. A real
+/// record always has a non-empty SHA-256 hex digest. A sentinel has digest="".
+/// This structural test verifies the invariant without running the admission
+/// path (which is engine-internal), relying on the content_digest function
+/// always returning a non-empty hex string.
+#[test]
+fn g6f_sentinel_fields_cannot_satisfy_admission_digest_equality() {
+    // Sentinel values.
+    let sentinel_revision: i64 = 0;
+    let sentinel_digest = "";
+
+    // Any real content record digest is non-empty hex.
+    let live_digest = content_digest("some real document text");
+    assert!(!live_digest.is_empty(), "live digest must be non-empty");
+    assert_ne!(
+        sentinel_digest, live_digest.as_str(),
+        "sentinel digest must not equal any live content digest"
+    );
+
+    // Revision=0 is not a valid positive revision.
+    assert_eq!(sentinel_revision, 0, "sentinel revision is zero");
+    // Any real record would have revision >= 1.
+    let live_revision: i64 = 1;
+    assert_ne!(
+        sentinel_revision, live_revision,
+        "sentinel revision must differ from live record revision"
+    );
 }

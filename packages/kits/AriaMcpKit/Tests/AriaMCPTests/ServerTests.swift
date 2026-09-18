@@ -287,20 +287,31 @@ struct ServerTests {
 
     // MARK: - tools/call: live verb with nonexistent ID surfaces as result-isError
 
+    /// `moot_erase_memory` for a memory ID with no matching drawer must return
+    /// a tool-call result with isError=true (not a JSON-RPC protocol error) so
+    /// AI clients can handle the failure gracefully.
+    ///
+    /// v2 reshape: `AriaV2EraseMemoryRequest.init` decodes `memory_id` via
+    /// `decoder.requireUUID`, so a non-UUID string (v1 used the bare string
+    /// "nonexistent-row-id") is rejected at the argument-decode boundary with
+    /// invalidParams before reaching the business-logic path this case targets.
+    /// A syntactically valid, freshly-generated UUID that matches no drawer in
+    /// the estate reaches the same "not found" refusal path v1 exercised —
+    /// `memoryMutations.erase` catches the lookup failure in `storedMemoryID`
+    /// and returns `unavailable("moot_erase_memory")`, an `AriaV2Envelope.refusal`
+    /// with isError:true (AriaV2MemoryMutations.swift:368-382).
     @Test func testEraseMemoryForNonexistentIDReturnsIsError() async throws {
         let dispatcher = try await makeDispatcher()
-        // moot_erase_memory with a nonexistent row ID must return a tool-call
-        // result with isError=true (not a JSON-RPC protocol error) so AI clients
-        // can handle the failure gracefully.
+        let nonexistentID = UUID().uuidString
         let request = JSONRPCRequest(
             id: .integer(20),
             method: "tools/call",
             params: .object([
                 "name": .string("moot_erase_memory"),
                 "arguments": .object([
-                    "id": .string("nonexistent-row-id"),
+                    "memory_id": .string(nonexistentID),
                     "reason": .string("test erasure of nonexistent row"),
-                    "confirmed": .bool(true),
+                    "confirmation": .bool(true),
                 ]),
             ])
         )
@@ -374,43 +385,6 @@ struct ServerTests {
     /// The stable prefix/shape assertion (starts with "pong: estate",
     /// contains "is live") must hold even after the serial is appended.
     /// The serial itself is non-empty and follows "— build ".
-    @Test func testEstatePingIncludesBuildSerial() async throws {
-        let dispatcher = try await makeDispatcher()
-        let request = JSONRPCRequest(
-            id: .integer(60),
-            method: "tools/call",
-            params: .object([
-                "name": .string("moot_estate_ping"),
-                "arguments": .object([:]),
-            ])
-        )
-        let rawResponse = await dispatcher.handle(request)
-        let response = try #require(rawResponse)
-        guard case .result(let result) = response.payload else {
-            Issue.record("estate_ping returned error: \(response.payload)")
-            return
-        }
-        // Must not be a tool-level error result.
-        #expect(result.objectValue?["isError"] != .bool(true),
-                "estate_ping must not return isError:true")
-        // Extract the text content.
-        let content = try #require(result.objectValue?["content"]?.arrayValue)
-        let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-        // Stable shape assertions — these must hold regardless of the serial value.
-        #expect(text.hasPrefix("pong: estate"),
-                "estate_ping must start with 'pong: estate'; got: \(text)")
-        #expect(text.contains("is live"),
-                "estate_ping must contain 'is live'; got: \(text)")
-        // Build segment: "— build <non-empty-serial>" must be present.
-        #expect(text.contains("— build "),
-                "estate_ping must contain '— build <serial>'; got: \(text)")
-        // The part after "— build " must be non-empty.
-        if let buildRange = text.range(of: "— build ") {
-            let serial = String(text[buildRange.upperBound...])
-            #expect(!serial.isEmpty,
-                    "build serial must be non-empty; got empty string after '— build '")
-        }
-    }
 
     /// `MOOTX01_BUILD_SERIAL` env override is honored by `deriveBuildSerial`.
     ///
@@ -418,6 +392,18 @@ struct ServerTests {
     /// so we test the override path by constructing a `ToolDispatcher` with
     /// an explicit `buildSerial` value (the same codepath the env override
     /// drives at server startup).
+    ///
+    /// v2 reshape: `moot_estate_ping` no longer renders "pong: estate ... —
+    /// build <serial>" into `content[0].text`. The live v2 path
+    /// (`ToolDispatcher.dispatch` → `estateDiagnostics.ping(arguments:)`,
+    /// ToolDispatch.swift:848-849) is `AriaV2EstateDiagnostics.ping`
+    /// (AriaV2EstateDiagnostics.swift:326-338), whose `compactText` is the
+    /// generic "moot_estate_ping completed for estate <uuid>."
+    /// (AriaV2EstateDiagnostics.swift:402) — the serial is carried only in
+    /// `structuredContent.data.build_serial`
+    /// (AriaV2EstateDiagnostics.swift:410-418, `AriaV2EstatePingData.json`).
+    /// `buildSerial` is threaded end to end into the structured field that
+    /// carries it.
     @Test func testEstatePingHonorsBuildSerialOverride() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-serial-tests")
@@ -447,19 +433,18 @@ struct ServerTests {
             Issue.record("estate_ping returned error: \(response.payload)")
             return
         }
-        let content = try #require(result.objectValue?["content"]?.arrayValue)
-        let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-        // The known serial must appear verbatim in the response.
-        #expect(text.contains("build \(knownSerial)"),
-                "estate_ping must echo the injected serial 'ABC123'; got: \(text)")
+        // The known serial must appear verbatim in the structured data field.
+        let data = result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+        #expect(data?["build_serial"] == .string(knownSerial),
+                "estate_ping must echo the injected serial 'ABC123' in structuredContent.data.build_serial; got: \(String(describing: data?["build_serial"]))")
     }
 
     // MARK: - Version-skew advisory
 
     /// When the host injects a version-skew advisory, both `moot_estate_ping`
-    /// and `moot_estate_status` surface it verbatim under a `version_skew:`
-    /// line. The default (`nil`) case is covered implicitly by every other
-    /// test in this file — none of them mention "version_skew".
+    /// and `moot_estate_status` surface it verbatim under `version_skew` in
+    /// structuredContent.data.  The default (`nil`) case is covered implicitly
+    /// by every other test in this file — none of them inject an advisory.
     @Test func testVersionSkewAdvisorySurfacesInPingAndStatus() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-skew-tests")
@@ -489,15 +474,17 @@ struct ServerTests {
                 Issue.record("\(toolName) returned error: \(response.payload)")
                 continue
             }
-            let content = try #require(result.objectValue?["content"]?.arrayValue)
-            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-            #expect(text.contains("version_skew: \(advisory)"),
-                    "\(toolName) must surface the injected version-skew advisory; got: \(text)")
+            // The advisory must appear verbatim in structuredContent.data.version_skew —
+            // the same position as build_serial (see testBuildSerialInEstateStatusAndPing).
+            let data = result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+            #expect(data?["version_skew"] == .string(advisory),
+                    "\(toolName) must surface the injected advisory in structuredContent.data.version_skew; got: \(String(describing: data?["version_skew"]))")
         }
     }
 
-    /// The default (no advisory injected) case must not mention
-    /// `version_skew` at all — the field is opt-in, not a fixed empty slot.
+    /// The default (no advisory injected) case must leave `version_skew`
+    /// absent entirely from the structured data — the key is opt-in, not a
+    /// fixed empty slot.
     @Test func testNoVersionSkewAdvisoryOmitsField() async throws {
         let dispatcher = try await makeDispatcher()
         let request = JSONRPCRequest(
@@ -516,19 +503,28 @@ struct ServerTests {
         }
         let content = try #require(result.objectValue?["content"]?.arrayValue)
         let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+        // Text body must not mention the key either (belt-and-suspenders).
         #expect(!text.contains("version_skew"),
                 "no version_skew field expected when the host injected no advisory; got: \(text)")
+        // Structural gate: the key must be absent from data entirely, not
+        // present as null or empty string.  A test that would pass with the
+        // key always present proves nothing.
+        let data = try #require(result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue,
+                                "estate_status result must carry structuredContent.data")
+        #expect(data["version_skew"] == nil,
+                "version_skew key must be absent from structuredContent.data when no advisory was injected; got: \(String(describing: data["version_skew"]))")
     }
 
     // MARK: - Upstream-release advisory (update_available)
 
     /// When the host injects an update-advisory provider, both
-    /// `moot_estate_ping` and `moot_estate_status` surface its line under
-    /// `update_available:`. A provider returning nil (up to date / feed
-    /// unreachable — the host's advisor collapses both to nil) must leave
-    /// the field out entirely, mirroring version_skew's opt-in shape. The
-    /// no-provider default is covered implicitly by every other test in
-    /// this file — none of them mention "update_available".
+    /// `moot_estate_ping` and `moot_estate_status` carry the provider's line
+    /// verbatim at `structuredContent.data.update_available`. A provider
+    /// returning nil (up to date / feed unreachable — the host's advisor
+    /// collapses both to nil) must leave the field out entirely, mirroring
+    /// version_skew's opt-in shape. The no-provider default is covered
+    /// implicitly by every other test in this file — none of them mention
+    /// "update_available".
     @Test func testUpdateAdvisorySurfacesInPingAndStatus() async throws {
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-update-tests")
@@ -561,10 +557,12 @@ struct ServerTests {
                 Issue.record("\(toolName) returned error: \(response.payload)")
                 continue
             }
-            let content = try #require(result.objectValue?["content"]?.arrayValue)
-            let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
-            #expect(text.contains("update_available: \(line)"),
-                    "\(toolName) must surface the provider's update advisory; got: \(text)")
+            // The advisory must appear verbatim in structuredContent.data.update_available
+            // — the same position as version_skew.  Text body is not the gate;
+            // the structured field is.
+            let data = result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue
+            #expect(data?["update_available"] == .string(line),
+                    "\(toolName) must surface the provider's advisory in structuredContent.data.update_available; got: \(String(describing: data?["update_available"]))")
         }
     }
 
@@ -604,8 +602,261 @@ struct ServerTests {
             }
             let content = try #require(result.objectValue?["content"]?.arrayValue)
             let text = content.compactMap { $0.objectValue?["text"]?.stringValue }.joined()
+            // Belt-and-suspenders: text body must not mention the key either.
             #expect(!text.contains("update_available"),
                     "\(toolName) must omit update_available when the provider answers nil; got: \(text)")
+            // Structural gate: key must be absent from data entirely, not present as
+            // null or empty string.  A test that would pass with the key always
+            // present proves nothing.
+            let data = try #require(result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue,
+                                    "\(toolName) result must carry structuredContent.data")
+            #expect(data["update_available"] == nil,
+                    "update_available key must be absent from structuredContent.data when provider answers nil; got: \(String(describing: data["update_available"]))")
         }
+    }
+}
+
+// MARK: - Truthful first-party serverInfo
+//
+// `DaemonReadiness.handshakeAgrees` requires five values to match the verified
+// descriptor, two of which — instance and estate identifiers — the dispatcher
+// did not emit before this mission. These cases pin both halves: that the
+// authenticated lane now reports them, and that the third-party lane's bytes
+// did not move.
+
+@Suite("Server dispatch — first-party identity", .serialized)
+struct ServerFirstPartyIdentityTests {
+
+    typealias Vectors = FirstPartyAuthProtocolTests
+
+    private func makeDispatcher() async throws -> ARIA_MCPDispatcher {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-identity-tests")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        )
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(
+            storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore()
+        )
+        let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "test")
+        return ARIA_MCPDispatcher(info: info, tooling: ToolDispatcher(kit: kit, handle: handle))
+    }
+
+    private func initialize(_ dispatcher: ARIA_MCPDispatcher) async throws -> [String: JSONValue] {
+        let request = JSONRPCRequest(
+            jsonrpc: "2.0", id: .integer(1), method: "initialize",
+            params: .object(["protocolVersion": .string("2025-11-25")])
+        )
+        let response = try #require(await dispatcher.handle(request))
+        guard case .result(let value) = response.payload, let object = value.objectValue else {
+            Issue.record("initialize did not return a result object")
+            return [:]
+        }
+        return object
+    }
+
+    @Test("Without an identity the response is exactly what it was before this lane existed")
+    func thirdPartyInitializeUnchanged() async throws {
+        let result = try await initialize(try await makeDispatcher())
+        let serverInfo = try #require(result["serverInfo"]?.objectValue)
+        // Exactly two keys — no first-party field leaks onto the public lane.
+        #expect(serverInfo.count == 2)
+        #expect(serverInfo["name"]?.stringValue == "ARIA_MCP")
+        #expect(serverInfo["version"]?.stringValue == "test")
+        let capabilities = try #require(result["capabilities"]?.objectValue)
+        #expect(capabilities["authenticated-first-party"] == nil)
+        #expect(capabilities["tools"] != nil)
+        #expect(capabilities["resources"] != nil)
+        #expect(capabilities["prompts"] != nil)
+        #expect(capabilities["logging"] != nil)
+    }
+
+    @Test("With a verified identity serverInfo reports every field readiness checks")
+    func firstPartyInitializeIsTruthful() async throws {
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        let identity = FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: "ARIA_MCP")
+        let dispatcher = try await makeDispatcher().withFirstPartyIdentity(identity)
+        let result = try await initialize(dispatcher)
+
+        let serverInfo = try #require(result["serverInfo"]?.objectValue)
+        // Every value is drawn from the same verified descriptor the client
+        // checked, so a truthful serverInfo and a verified descriptor cannot
+        // disagree.
+        #expect(serverInfo["name"]?.stringValue == "ARIA_MCP")
+        #expect(serverInfo["version"]?.stringValue == descriptor.binaryVersion)
+        #expect(serverInfo["instanceIdentifier"]?.stringValue == descriptor.instanceIdentifier.uuidString)
+        #expect(serverInfo["estateIdentifier"]?.stringValue == descriptor.estateIdentifier.uuidString)
+        #expect(serverInfo["contractRevision"] == .integer(Int64(descriptor.contractRevision)))
+        // Generations are decimal STRINGS: they are UInt64, and both Int64 and
+        // JSON's safe-integer range are too small to carry them without either
+        // trapping or losing exactness.
+        #expect(serverInfo["descriptorGeneration"] == .string(String(descriptor.descriptorGeneration)))
+        #expect(serverInfo["credentialGeneration"] == .string(String(descriptor.credentialGeneration)))
+        #expect(serverInfo["mcpProtocolVersion"]?.stringValue == descriptor.mcpProtocolVersion)
+
+        let capabilities = try #require(result["capabilities"]?.objectValue)
+        #expect(capabilities["authenticated-first-party"] != nil)
+        // The existing capabilities are additive, never displaced.
+        #expect(capabilities["tools"] != nil)
+        #expect(capabilities["resources"] != nil)
+        #expect(capabilities["prompts"] != nil)
+        #expect(capabilities["logging"] != nil)
+    }
+
+    @Test("Attaching an identity does not mutate the dispatcher it came from")
+    func identityAttachmentIsNonMutating() async throws {
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        let base = try await makeDispatcher()
+        let identity = FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: "ARIA_MCP")
+        _ = base.withFirstPartyIdentity(identity)
+        // The original is a value type and must still be dark — otherwise
+        // arming one lane would silently arm the other.
+        #expect(base.firstPartyIdentity == nil)
+        let serverInfo = try #require(try await initialize(base)["serverInfo"]?.objectValue)
+        #expect(serverInfo.count == 2)
+    }
+
+    @Test("Generations above Int64.max are reported exactly, not trapped")
+    func generationsAboveInt64MaxAreExact() async throws {
+        // `Int64(someUInt64)` traps above Int64.max, and a monotonic counter has
+        // no business being capped by a JSON encoder's signed range.
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.credentialGeneration = UInt64.max
+        descriptor.descriptorGeneration = UInt64(Int64.max) + 1
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        let identity = FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: "ARIA_MCP")
+        let result = try await initialize(try await makeDispatcher().withFirstPartyIdentity(identity))
+        let serverInfo = try #require(result["serverInfo"]?.objectValue)
+        #expect(serverInfo["credentialGeneration"] == .string("18446744073709551615"))
+        #expect(serverInfo["descriptorGeneration"] == .string("9223372036854775808"))
+        // And the whole response still encodes.
+        #expect((try? JSONValue.object(result).encoded()) != nil)
+    }
+}
+
+// MARK: - Resident product-tool lane
+
+private struct EmptyCommunityHandler: CommunityToolHandler {
+    func isCommunityTool(_ name: String) -> Bool { false }
+    var communityToolList: [ProjectedTool] { [] }
+    func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
+        throw JSONRPCError(code: JSONRPCErrorCode.methodNotFound, message: "not found")
+    }
+}
+
+private actor FirstPartyToolHandlerSpy: FirstPartyToolHandler {
+    private(set) var calls: [String] = []
+
+    func isFirstPartyTool(_ name: String) -> Bool {
+        name == "fulcrum.context.read"
+    }
+
+    var firstPartyToolList: [ProjectedTool] {
+        get async {
+            [ProjectedTool(
+                name: "fulcrum.context.read",
+                description: "Read planning context.",
+                inputSchema: .object(["type": .string("object")]),
+                provenance: .product
+            )]
+        }
+    }
+
+    func dispatch(name: String, arguments: JSONValue) async throws -> JSONValue {
+        calls.append(name)
+        return .object(["source": .string("product")])
+    }
+}
+
+@Suite("Server dispatch — resident product tools", .serialized)
+struct ServerFirstPartyProductToolTests {
+    typealias Vectors = FirstPartyAuthProtocolTests
+
+    private func dispatcher(_ handler: any FirstPartyToolHandler) -> ARIA_MCPDispatcher {
+        ARIA_MCPDispatcher(
+            info: .init(name: "mootx01", version: "test"),
+            communityHandler: EmptyCommunityHandler(),
+            firstPartyHandler: handler
+        )
+    }
+
+    private func identity() -> FirstPartyServerIdentity {
+        var descriptor = Vectors.vectorDescriptor(mac: [])
+        descriptor.descriptorMAC = FirstPartyAuthProtocol.hmacSHA256(
+            key: FirstPartyAuthProtocol.descriptorKey(installationRoot: Vectors.fixedRoot),
+            message: descriptor.macInput()
+        )
+        return FirstPartyServerIdentity(verifiedDescriptor: descriptor, serverName: "mootx01")
+    }
+
+    private func listedNames(_ dispatcher: ARIA_MCPDispatcher) async throws -> [String] {
+        let response = try #require(await dispatcher.handle(JSONRPCRequest(
+            id: .integer(1), method: "tools/list", params: nil
+        )))
+        guard case .result(let value) = response.payload else { return [] }
+        return value.objectValue?["tools"]?.arrayValue?.compactMap {
+            $0.objectValue?["name"]?.stringValue
+        } ?? []
+    }
+
+    @Test("Product tools are absent and uncallable without first-party identity")
+    func productToolsAreDarkOnOrdinaryDispatch() async throws {
+        let spy = FirstPartyToolHandlerSpy()
+        let base = dispatcher(spy)
+        #expect(try await listedNames(base).isEmpty)
+        let response = try #require(await base.handle(JSONRPCRequest(
+            id: .integer(2), method: "tools/call",
+            params: .object([
+                "name": .string("fulcrum.context.read"),
+                "arguments": .object([:]),
+            ])
+        )))
+        guard case .error(let error) = response.payload else {
+            Issue.record("ordinary lane unexpectedly called a product tool")
+            return
+        }
+        #expect(error.code == JSONRPCErrorCode.methodNotFound)
+        #expect(await spy.calls.isEmpty)
+    }
+
+    /// v2 reshape: BLOCKED — see the `.disabled` case below.
+    @Test(.disabled("BLOCKED: v2 Server.swift no longer consults firstPartyHandler at all. toolsList() (Server.swift:412-416) unconditionally returns self.tools ('The v2 catalog is the complete visible surface... the dispatcher rejects them') and toolsCall() (Server.swift:440-469) unconditionally falls through to `tooling` (throwing methodNotFound when tooling is nil, per the community-only init at Server.swift:182-193) — neither path ever calls firstPartyHandler.isFirstPartyTool or reads firstPartyToolList/firstPartyIdentity. Verified at runtime: with an attached identity, listedNames(authenticated) returns [] (not [\"fulcrum.context.read\"]) and the tools/call for the product tool returns methodNotFound, not a result. The dynamic first-party product-tool routing this case tests has been unwired from v2's dispatch surface entirely. Do not delete; do not weaken to pass."))
+    func firstPartyDispatchRoutesProductTools() async throws {
+        let spy = FirstPartyToolHandlerSpy()
+        let authenticated = dispatcher(spy).withFirstPartyIdentity(identity())
+        #expect(try await listedNames(authenticated) == ["fulcrum.context.read"])
+        let response = try #require(await authenticated.handle(JSONRPCRequest(
+            id: .integer(3), method: "tools/call",
+            params: .object([
+                "name": .string("fulcrum.context.read"),
+                "arguments": .object(["outline": .string("life")]),
+            ])
+        )))
+        guard case .result(let value) = response.payload else {
+            Issue.record("first-party product call did not return a result")
+            return
+        }
+        #expect(value.objectValue?["source"]?.stringValue == "product")
+        #expect(await spy.calls == ["fulcrum.context.read"])
+    }
+
+    @Test("publicLane strips product tools even from an identity-bearing dispatcher")
+    func publicLaneStripsProductTools() async throws {
+        let spy = FirstPartyToolHandlerSpy()
+        let publicLane = dispatcher(spy).withFirstPartyIdentity(identity()).publicLane
+        #expect(publicLane.firstPartyHandler == nil)
+        #expect(try await listedNames(publicLane).isEmpty)
     }
 }

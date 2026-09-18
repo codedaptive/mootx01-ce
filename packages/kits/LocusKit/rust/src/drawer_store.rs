@@ -98,6 +98,83 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use substrate_lib::row_state::RowVerb;
 use substrate_types::fingerprint256::Fingerprint256;
+use unicode_segmentation::UnicodeSegmentation;
+
+/// Policy-neutral request for one selected contradiction proposal. The caller
+/// supplies the existing decline-matrix function; this lower layer owns the
+/// transactional fresh reads, evidence comparison, sensitivity inheritance,
+/// and tunnel insertion.
+pub struct AtomicConflictProposalRequest {
+    pub source_drawer_id: String,
+    pub target_drawer_id: String,
+    /// The hunt's canonical pair spelling: both ids lowercased, sorted, joined
+    /// by a double bar (GeniusLocusKit `conflict_projection_sweep` and the
+    /// Swift `TieredContradictionCore.pairKey`). The filer recomputes it from
+    /// the fresh rows and answers `Stale` when the request's pair no longer
+    /// names these two drawers.
+    pub pair_key: String,
+    pub tier: u8,
+    pub renewal_identity: String,
+    pub label: String,
+    pub replay_identity: String,
+    pub source_digest: String,
+    pub evidence_digest: String,
+    pub decline_suppresses: fn(u8, &str, &[(u8, String)]) -> bool,
+}
+
+/// A serializable contradiction filing has a distinct creation, replay,
+/// settlement and stale result. A settled decision deliberately carries no
+/// tunnel id. Swift twin: `AtomicConflictProposalOutcome`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AtomicConflictProposalOutcome {
+    Created { tunnel_id: String, lifecycle: String },
+    Existing { tunnel_id: String, lifecycle: String },
+    Settled,
+    /// The selected evidence no longer matches the fresh rows: a drawer is
+    /// missing or tombstoned, the pair key or a digest differs, a lifecycle
+    /// state left cluster A, a sensitivity field is unrecognised, or an
+    /// endpoint room is not active. Nothing is written; the caller answers
+    /// `proposal_stale` and the hunt must run again. Swift twin: `.stale`.
+    Stale,
+}
+
+/// Compute the two digests binding a temporary ARIA candidate to fresh lower
+/// rows. Length prefixes preserve every field boundary.
+pub fn conflict_proposal_digests(
+    source: &Drawer,
+    target: &Drawer,
+    tier: u8,
+    renewal_identity: &str,
+) -> (String, String) {
+    fn append(out: &mut Vec<u8>, value: &str) {
+        out.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        out.extend_from_slice(value.as_bytes());
+    }
+    fn hex(bytes: [u8; 32]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+    fn drawer_material(drawer: &Drawer) -> Vec<u8> {
+        let mut out = Vec::new();
+        for value in [drawer.id.as_str(), drawer.parent_node_id.as_str(), drawer.content.as_str(), drawer.subject.as_deref().unwrap_or(""), drawer.added_by.as_str()] {
+            append(&mut out, value);
+        }
+        out.extend_from_slice(&drawer.event_time.to_be_bytes());
+        out.extend_from_slice(&drawer.filed_at.to_be_bytes());
+        out.extend_from_slice(&drawer.adjective_bitmap.to_be_bytes());
+        out.extend_from_slice(&drawer.operational_bitmap.to_be_bytes());
+        out.extend_from_slice(&drawer.tombstoned_at.unwrap_or(i64::MIN).to_be_bytes());
+        out
+    }
+    let source_material = drawer_material(source);
+    let target_material = drawer_material(target);
+    let source_digest = hex(substrate_kernel::sha256::hash(&source_material));
+    let mut evidence = Vec::new();
+    append(&mut evidence, &source_digest);
+    append(&mut evidence, &hex(substrate_kernel::sha256::hash(&target_material)));
+    evidence.push(tier);
+    append(&mut evidence, renewal_identity);
+    (source_digest, hex(substrate_kernel::sha256::hash(&evidence)))
+}
 
 /// Contract every LocusKit storage backend conforms to.
 ///
@@ -113,11 +190,23 @@ use substrate_types::fingerprint256::Fingerprint256;
 /// store, including minimal fakes, must implement them. Production backends —
 /// the LP-1E `InMemoryDrawerStore` and `SqliteDrawerStore` (both wrapping
 /// `DrawerStoreCore`) — override every method.
-/// The subject length contract (characters). One capped sentence in the
-/// AI-facing register — the bound that keeps every contact-sheet row's
-/// context cost near-uniform. Twin of Swift
-/// `DrawerStore.subjectLengthContract`.
+/// The subject length contract (grapheme clusters). One capped sentence in
+/// the AI-facing register — the bound that keeps every contact-sheet row's
+/// context cost near-uniform. Twin of Swift `DrawerStore.subjectLengthContract`.
+/// The unit is grapheme clusters, the same unit Swift's `String.count` returns.
 pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
+
+/// Returns the grapheme-cluster count of `subject`.
+///
+/// The unit is the grapheme cluster, the same unit Swift's `String.count`
+/// returns. Both ports must agree on the same count for the same input
+/// (contract B-18). Use this function at every site that enforces or
+/// reports the `SUBJECT_LENGTH_CONTRACT` — never call `.chars().count()`
+/// directly, which counts Unicode scalars and disagrees with Swift on
+/// subjects that contain combining characters.
+pub fn subject_length(subject: &str) -> usize {
+    UnicodeSegmentation::graphemes(subject, true).count()
+}
 
 /// Pipeline-version tag for subjects authored by a calling AI at the
 /// capture/mutate boundary (as opposed to the future miniLLM producer,
@@ -125,6 +214,16 @@ pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
 /// as the regeneration lever (SPEC B-19). Twin of Swift
 /// `DrawerStore.subjectPipelineAIV1`.
 pub const SUBJECT_PIPELINE_AI_V1: &str = "ai-v1";
+
+/// Audit verb for encode-completion markers (A2, benchmark reset
+/// 2026-08-13). Sits beside the mutation verbs but is informational —
+/// it never changes a bitmap. Twin of Swift `DrawerStore.encodeCompleteVerb`.
+pub const ENCODE_COMPLETE_VERB: &str = "encodeComplete";
+
+/// Audit actor for encode-completion markers: the background encode drain
+/// worker, distinct from `capture`/`mcp_agent`/`dreaming_daemon`. Twin of
+/// Swift `DrawerStore.encodeWorkerActor`.
+pub const ENCODE_WORKER_ACTOR: &str = "encode_worker";
 
 /// Pipeline-version tag for subjects produced by the on-device miniLLM
 /// rider (PR-10's producer; the Rust lane stays DARK until a model
@@ -147,20 +246,23 @@ pub const SUBJECT_PIPELINE_IMPORT_V1: &str = "import-v1";
 /// Result of a lineage-wide gated expunge (`expunge_gated`). Twin of
 /// Swift `DrawerStore.ExpungeOutcome`.
 ///
-/// `refused_sibling_ids` lists the lineage members whose
-/// `accepted → tombstoned` transition the audit gate refused (S-3:
-/// audit-grade rows survive intact), in walk order. A refused sibling
-/// was left byte-identical — content, state, audit trail, and
-/// erasure-ledger absence — so a non-empty list means the expunge was
-/// partial and the caller must not assume the whole lineage was erased.
+/// `refused_sibling_ids` lists lineage members that were not tombstoned,
+/// in walk order. A sibling is refused for one of two reasons: its
+/// sensitivity exceeds the `sensitivity_ceiling` (the ceiling check runs
+/// before gate admission — a ceiling-refused sibling never reaches the
+/// audit gate), or the audit gate refused `accepted → tombstoned` (S-3:
+/// audit-grade rows survive intact). A refused sibling was left
+/// byte-identical — content, state, audit trail, and erasure-ledger
+/// absence — so a non-empty list means the expunge was partial and the
+/// caller must not assume the whole lineage was erased.
 #[derive(Debug, Clone)]
 pub struct ExpungeOutcome {
     /// The target drawer's gate-produced audit event. When
     /// `seal_audit` was true it has already been appended; when false
     /// it is carried here for deferred sealing (§B-2a).
     pub event: substrate_lib::verbs::AuditEvent,
-    /// IDs of lineage siblings the gate refused to tombstone, in walk
-    /// order. Empty means the expunge covered the full lineage.
+    /// IDs of lineage siblings not tombstoned (ceiling- or gate-refused),
+    /// in walk order. Empty means the expunge covered the full lineage.
     pub refused_sibling_ids: Vec<String>,
 }
 
@@ -175,6 +277,18 @@ pub trait DrawerStore: Send + Sync {
     /// default; concrete production stores override.
     fn storage(&self) -> Option<Arc<dyn Storage>> {
         None
+    }
+
+    /// Atomically revalidate and file one selected contradiction proposal.
+    /// Backends without the storage transaction seam fail closed.
+    fn atomic_file_conflict_proposal(
+        &self,
+        _request: &AtomicConflictProposalRequest,
+        _now: i64,
+    ) -> Result<AtomicConflictProposalOutcome, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "atomic conflict proposal filing is unavailable for this drawer store".to_owned(),
+        ))
     }
 
     // -----------------------------------------------------------------
@@ -433,6 +547,33 @@ pub trait DrawerStore: Send + Sync {
         Ok(all)
     }
 
+    /// Active non-dataset IDs in `(filed_at, content, id)` order, capped at
+    /// storage when the backend overrides this method. The default preserves
+    /// correctness for test stores; production stores forward to the projected
+    /// storage query in `DrawerStoreCore`.
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RowID>, LocusKitError> {
+        let mut rows: Vec<Drawer> = self
+            .all_drawers()?
+            .into_iter()
+            .filter(|d| d.tombstoned_at.is_none())
+            .filter(|d| !d.content.is_empty())
+            .filter(|d| d.content_kind() != crate::drawer_operational::ContentKind::Dataset)
+            .filter(|d| {
+                d.embedding_model_id
+                    != crate::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID
+            })
+            .collect();
+        rows.sort_by(|a, b| {
+            a.filed_at.cmp(&b.filed_at)
+                .then(a.content.cmp(&b.content))
+                .then(a.id.cmp(&b.id))
+        });
+        Ok(rows.into_iter().take(limit).map(|d| d.id).collect())
+    }
+
     /// Bounded full-corpus scan ordered by `filed_at` ascending, projected to
     /// the structured (no-blob) column set — the `content` column is omitted
     /// so decoded drawers carry `content == ""`.
@@ -488,14 +629,14 @@ pub trait DrawerStore: Send + Sync {
     /// true DESC SQL query for O(cap) I/O.
     fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
         // Load the full (unbounded) set and reverse to get DESC order.
-        // `all_drawers()` uses (filed_at ASC, id ASC) compound ordering
-        // (c-recall-portable fix; id is the declared TEXT primary key,
-        // portable to PostgreSQL where rowid is undefined), so `.reverse()`
-        // yields exactly (filed_at DESC, id DESC) — a deterministic total
-        // order that is the byte-for-byte reverse of the ASC result for any
-        // fixed dataset. This is correct but O(estate) — backends
-        // (DrawerStoreCore) override with an efficient SQL ORDER BY DESC,
-        // LIMIT query for O(cap) I/O.
+        // `all_drawers()` uses (filedAt ASC, content ASC, id ASC) compound
+        // ordering (SCORE-ORDERING 2026-08-24; id is the declared TEXT primary
+        // key, portable to PostgreSQL where rowid is undefined), so `.reverse()`
+        // yields exactly (filedAt DESC, content DESC, id DESC) — the deterministic
+        // total order that is the byte-for-byte reverse of the ASC result for
+        // any fixed dataset. This is correct but O(estate) — the DrawerStoreCore
+        // backend overrides with an efficient SQL ORDER BY DESC, LIMIT query for
+        // O(cap) I/O.
         let mut all = self.all_drawers()?;
         all.reverse();
         Ok(match limit {
@@ -647,9 +788,12 @@ pub trait DrawerStore: Send + Sync {
     /// §10.5 storage-layer postconditions. Aggregates untouched per §9.5.1.
     /// The cross-kit RAG vector delete is GLK's orchestration responsibility.
     ///
-    /// A sibling the gate refuses (S-3: `accepted → tombstoned` is
-    /// forbidden — audit-grade rows survive intact) is left byte-identical:
-    /// no content write, no state write, no audit append, no erasure-ledger
+    /// Lineage siblings are filtered by two checks in order. First,
+    /// `sensitivity_ceiling`: a sibling whose sensitivity exceeds the ceiling
+    /// is refused without reaching the audit gate. Second, the gate's
+    /// transition table: `accepted → tombstoned` is refused (S-3 — audit-grade
+    /// rows survive intact). A refused sibling is left byte-identical: no
+    /// content write, no state write, no audit append, no erasure-ledger
     /// record. Refused ids are carried in the returned
     /// `ExpungeOutcome::refused_sibling_ids` so the caller can detect a
     /// partial expunge; the walk continues over the remaining members.
@@ -671,55 +815,147 @@ pub trait DrawerStore: Send + Sync {
         _reason: Option<&str>,
         _now: i64,
         _seal_audit: bool,
+        _sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<ExpungeOutcome, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "expunge_gated not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
-    /// Write the distilled representation of one drawer — all four columns
-    /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
-    /// together or populated together).
+    /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
     ///
-    /// A representation is a deterministic, regenerable function of
-    /// (content, pipeline version) — a view, not a belief-state change —
-    /// so this is a direct column write: no audit event, no supersession
-    /// cascade, no lifecycle or lineage field touched, and no content
-    /// digest/revision bump (search isolation §9: a representation-only
-    /// write emits no index job). `generated_at` is epoch millis
-    /// (deterministic clock — passed in, never read here).
+    /// A DERIVED SIGNAL write: no audit event, no supersession cascade, no
+    /// lifecycle or lineage field touched, and no content digest or revision
+    /// bump. The anomaly flag is computed by GeniusLocusKit's room-cohesion
+    /// sweep (`anomaly_flag_sweep`), not asserted by a user or belief-state
+    /// change. Implemented as a read-modify-write: read the current bitmap,
+    /// set or clear bit 26, write if changed. Returns 0 when the drawer is
+    /// not found; 1 on success; 0 if the bit was already in the requested
+    /// state (idempotent skip-write). Mirrors Swift
+    /// `DrawerStore.setAnomalousFlag(drawerId:anomalous:)`.
     ///
-    /// Returns the count of rows updated (0 = drawer not found;
-    /// 1 = success). Mirrors Swift `DrawerStore.setDistilledRepresentation`.
-    fn set_distilled_representation(
+    /// - `drawer_id`: target drawer identifier.
+    /// - `anomalous`: `true` sets bit 26; `false` clears it.
+    fn set_anomalous_flag(
         &self,
         _drawer_id: &str,
-        _distilled: &str,
-        _pipeline_version: &str,
-        _token_count: i64,
-        _generated_at: i64,
+        _anomalous: bool,
     ) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
-            "set_distilled_representation not implemented for this DrawerStore impl".to_string(),
+            "set_anomalous_flag not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
-    /// Count of active drawers still awaiting distillation — the §7.1
-    /// eligibility predicate as an aggregate (not tombstoned, non-empty
-    /// content, `distilled` NULL or stale pipeline version). The
-    /// distillation drain-accounting observable reported by the GLK
-    /// coordinator's `drain_statuses`. Mirrors Swift `countUndistilled`.
-    fn count_undistilled(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
+    // ── Content-derived columns and the span index bit (Encoder Rerank Program) ──
+
+    /// Write (or clear, with `None`) one drawer's SSC facts (Encoder Rerank
+    /// Program §6): the grammar-v1 inner text without the `(*[` `]*)`
+    /// delimiters, pairs comma-separated. A direct column write like the
+    /// subject line: no audit event, no supersession cascade, no lifecycle
+    /// or lineage field touched, no content digest bump. The enrichment
+    /// stage calls this after the drawer write; every content write NULLs
+    /// the column again. Returns the count of rows updated (0 = drawer not
+    /// found; 1 = success). Mirrors Swift `DrawerStore.setSSCFacts(_:for:)`.
+    fn set_ssc_facts(&self, _drawer_id: &str, _facts: Option<&str>) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
-            "count_undistilled not implemented for this DrawerStore impl".to_string(),
+            "set_ssc_facts not implemented for this DrawerStore impl".to_string(),
         ))
+    }
+
+    /// Set bit 27 (`SPAN_INDEXED`) on one drawer after its span rows were
+    /// written under the active encoder model. A DERIVED SIGNAL write (the
+    /// duty owns it): no audit event, no cascade, no digest bump.
+    /// Read-modify-write like `set_anomalous_flag`. Returns 0 when the
+    /// drawer is not found or the bit is already set; 1 on a write. Mirrors
+    /// Swift `DrawerStore.setSpanIndexed(drawerId:)`.
+    fn set_span_indexed(&self, _drawer_id: &str) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_span_indexed not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// The span-encode duty's work items: active drawers with non-empty
+    /// content whose bit 27 is clear, ordered by id, at most `limit`,
+    /// resuming after `after_drawer_id` when paging. Bit 27 is cleared by
+    /// every content write and by encoder activation, so this predicate is
+    /// the whole re-encode policy. Mirrors Swift
+    /// `DrawerStore.spanIndexDebtBatch(limit:afterDrawerID:)`.
+    fn span_index_debt_batch(
+        &self,
+        _limit: usize,
+        _after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "span_index_debt_batch not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Count of active, non-empty drawers whose bit 27 is clear — the
+    /// span-encode drain's `pending`. Mirrors Swift
+    /// `DrawerStore.countSpanIndexDebt()`.
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_span_index_debt not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Mark one drawer settled for the active distilled-fact recipe.
+    fn set_facts_extracted(&self, _drawer_id: &str) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_facts_extracted not implemented for this DrawerStore impl".to_string()))
+    }
+
+    /// Compare-and-set settlement: writes bit 28 only if the drawer remains
+    /// live and its content equals the inference snapshot.
+    fn set_facts_extracted_if_content_matches(
+        &self, _drawer_id: &str, _expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "set_facts_extracted_if_content_matches not implemented for this DrawerStore impl".to_string()))
+    }
+
+    /// Atomically publish a fully processed source generation and its completion
+    /// bit. None refuses a changed source/recipe; zero is an idempotent replay.
+    fn publish_extracted_facts(&self, _source_id: &str, _expected_content: &str,
+        _recipe_id: &str, _facts: &[KGFact], _now: i64) -> Result<Option<usize>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable("atomic fact publication unavailable".into()))
+    }
+
+    /// Active, non-empty drawers whose bit 28 is clear.
+    fn fact_extraction_debt_batch(
+        &self, _limit: usize, _after_drawer_id: Option<&str>
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "fact_extraction_debt_batch not implemented for this DrawerStore impl".to_string()))
+    }
+
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_fact_extraction_debt not implemented for this DrawerStore impl".to_string()))
+    }
+
+    /// Settle one source as REJECTED by the active recipe: bits 28 and 29
+    /// together, only while the drawer is live, its content equals the
+    /// inference snapshot, and `recipe_id` is active. `None` refuses a changed
+    /// source/recipe; `Some(0)` is already settled. Twin of Swift
+    /// `markFactExtractionRejected`.
+    fn mark_fact_extraction_rejected(&self, _source_id: &str, _expected_content: &str,
+        _recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "mark_fact_extraction_rejected not implemented for this DrawerStore impl".to_string()))
+    }
+
+    /// Live drawers the active recipe rejected (bit 29 set).
+    fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_fact_extraction_rejected not implemented for this DrawerStore impl".to_string()))
     }
 
     // (SUBJECT_LENGTH_CONTRACT is a module-level const below the trait.)
 
     /// Write the subject line of one drawer — all three subject columns
-    /// in ONE atomic UPDATE (PR-01; same invariant family as the
-    /// distilled quad: NULL together or populated together) PLUS a sealed
+    /// in ONE atomic UPDATE (PR-01: NULL together or populated together)
+    /// PLUS a sealed
     /// `"setSubject"` custody audit event, committed together in one
     /// transaction (Codex cc90c5dcecb081918c159788e1ffb3d6): the column
     /// write and the audit append succeed or fail together. `changed_by`
@@ -742,6 +978,50 @@ pub trait DrawerStore: Send + Sync {
     ) -> Result<usize, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "set_subject_representation not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Append an encode-completion audit marker: one informational event per
+    /// encode drain unit, anchored on the unit's first drawer, carrying
+    /// `session=<id> rows=<n>` in the reason column (A2). Mirrors Swift
+    /// `DrawerStore.appendEncodeCompleteMarker`. Absent row = silent no-op.
+    fn append_encode_complete_marker(
+        &self,
+        _drawer_id: &str,
+        _row_count: usize,
+        _unit_session_id: &str,
+        _completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "append_encode_complete_marker not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Append a reindex-completion marker (C3): estate-anchored, verb
+    /// `reindexComplete`, the CYCLE tier-3 boundary. Mirrors Swift
+    /// `DrawerStore.appendReindexCompleteMarker`.
+    fn append_reindex_complete_marker(
+        &self,
+        _row_count: usize,
+        _unit_session_id: &str,
+        _completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "append_reindex_complete_marker not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Append a dream-cycle bracket marker (A3): estate-anchored
+    /// informational event, verb `dreamStart`/`dreamEnd`, reason
+    /// `session=<id>`. Mirrors Swift `DrawerStore.appendDreamCycleMarker`.
+    fn append_dream_cycle_marker(
+        &self,
+        _verb: &str,
+        _unit_session_id: &str,
+        _marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "append_dream_cycle_marker not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -1215,12 +1495,21 @@ pub trait DrawerStore: Send + Sync {
     }
 
     /// Retire a kg-fact by transitioning its adjective_bitmap state to
-    /// `State::Withdrawn` (raw 18). The row is preserved for audit
-    /// purposes; `g_state_cluster` rises to 18 (RowState Cluster B) which
-    /// excludes the fact from the active-recall filter
-    /// (`g_state_cluster < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW`, the
-    /// cluster-B floor of 16). Mirrors Swift `DrawerStore.withdrawKGFact(id:)`.
-    fn withdraw_kg_fact(&self, _id: &str, _now: i64) -> Result<(), LocusKitError> {
+    /// `State::Withdrawn` (raw 18) and writing a sealed audit row.
+    /// Routes through `AuditGate::admit` (verb `retract`, transition
+    /// `active → withdrawn`). `changed_by` names the actor; `reason`
+    /// is optional human-readable context. The row is preserved for
+    /// audit purposes; `g_state_cluster` rises to 18 (RowState Cluster B)
+    /// which excludes the fact from the active-recall filter
+    /// (`g_state_cluster < RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW`).
+    /// Mirrors Swift `DrawerStore.withdrawKGFact(id:changedBy:reason:now:)`.
+    fn withdraw_kg_fact(
+        &self,
+        _id: &str,
+        _changed_by: &str,
+        _reason: Option<&str>,
+        _now: i64,
+    ) -> Result<(), LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "withdraw_kg_fact not implemented for this DrawerStore impl".to_string(),
         ))
@@ -1596,6 +1885,36 @@ pub trait DrawerStore: Send + Sync {
         ))
     }
 
+    /// Write one `recall_ratings` row per rating, keyed on `drawer_id`
+    /// (insert when absent, replace when present). Mirrors Swift
+    /// `DrawerStore.upsertRecallRatings`.
+    ///
+    /// ## Default impl — fail-loud
+    ///
+    /// A backend that does not override this returns `DatabaseUnavailable`
+    /// rather than silently dropping the tournament's ratings.
+    fn upsert_recall_ratings(
+        &self,
+        _ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "upsert_recall_ratings not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Read the `recall_ratings` rows for `ids`; ids without a row are
+    /// absent from the result. Mirrors Swift `DrawerStore.recallRatings(ids:)`.
+    ///
+    /// ## Default impl — fail-loud
+    fn recall_ratings(
+        &self,
+        _ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "recall_ratings not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
     /// Count raw rows in the `drawers` table via SQL `COUNT(*)`, bypassing
     /// all row-decode logic. Corrupt rows (e.g. a poison timestamp) are still
     /// counted because `COUNT(*)` never reads column values. Used by the
@@ -1669,6 +1988,20 @@ pub trait DrawerStore: Send + Sync {
     ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "audit_events_for_row not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Estate-wide audit page in HLC order, strictly after `after` (None =
+    /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
+    /// watermark-paging seam. Same fail-loud default rationale as
+    /// `audit_events_for_row`. Mirrors Swift `DrawerStore.auditEvents`.
+    fn audit_events(
+        &self,
+        _after: Option<substrate_types::hlc::HLC>,
+        _limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "audit_events not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -2104,6 +2437,13 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     fn storage(&self) -> Option<Arc<dyn Storage>> {
         self.as_ref().storage()
     }
+    fn atomic_file_conflict_proposal(
+        &self,
+        request: &AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<AtomicConflictProposalOutcome, LocusKitError> {
+        self.as_ref().atomic_file_conflict_proposal(request, now)
+    }
     fn resolve_node_names(
         &self,
         parent_node_ids: &[String],
@@ -2152,6 +2492,12 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         limit: usize,
     ) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().active_drawers_after(after_id, limit)
+    }
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<RowID>, LocusKitError> {
+        self.as_ref().active_corpus_content_ids_limited(limit)
     }
     fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().all_drawers_bounded_desc(limit)
@@ -2216,27 +2562,45 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<ExpungeOutcome, LocusKitError> {
-        self.as_ref().expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+        self.as_ref().expunge_gated(drawer_id, changed_by, reason, now, seal_audit, sensitivity_ceiling)
     }
-    fn set_distilled_representation(
+    fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
+        self.as_ref().set_ssc_facts(drawer_id, facts)
+    }
+    fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().set_span_indexed(drawer_id)
+    }
+    fn span_index_debt_batch(
         &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
-        self.as_ref().set_distilled_representation(
-            drawer_id,
-            distilled,
-            pipeline_version,
-            token_count,
-            generated_at,
-        )
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().span_index_debt_batch(limit, after_drawer_id)
     }
-    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        self.as_ref().count_undistilled(pipeline_version)
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.as_ref().count_span_index_debt()
+    }
+    fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().set_facts_extracted(drawer_id)
+    }
+    fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        self.as_ref().set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+    fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[crate::kg_fact::KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        self.as_ref().publish_extracted_facts(source_id, expected_content, recipe_id, facts, now)
+    }
+    fn fact_extraction_debt_batch(
+        &self, limit: usize, after_drawer_id: Option<&str>
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().fact_extraction_debt_batch(limit, after_drawer_id)
+    }
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.as_ref().count_fact_extraction_debt()
     }
     fn set_subject_representation(
         &self,
@@ -2255,6 +2619,34 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
             changed_by,
             reason,
         )
+    }
+
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().append_encode_complete_marker(drawer_id, row_count, unit_session_id, completed_at)
+    }
+
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().append_dream_cycle_marker(verb, unit_session_id, marked_at)
+    }
+
+    fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().append_reindex_complete_marker(row_count, unit_session_id, completed_at)
     }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.as_ref().count_missing_subject(pipeline_version)
@@ -2332,8 +2724,14 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     fn add_kg_fact(&self, fact: &KGFact) -> Result<(), LocusKitError> {
         self.as_ref().add_kg_fact(fact)
     }
-    fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
-        self.as_ref().withdraw_kg_fact(id, now)
+    fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().withdraw_kg_fact(id, changed_by, reason, now)
     }
     fn get_kg_fact(&self, id: &str) -> Result<Option<KGFact>, LocusKitError> {
         self.as_ref().get_kg_fact(id)
@@ -2449,11 +2847,30 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
     fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
         self.as_ref().count_recall_traces()
     }
+    fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        self.as_ref().upsert_recall_ratings(ratings)
+    }
+    fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        self.as_ref().recall_ratings(ids)
+    }
     fn audit_events_for_row(
         &self,
         row_id: &str,
     ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
         self.as_ref().audit_events_for_row(row_id)
+    }
+    fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.as_ref().audit_events(after, limit)
     }
     fn tombstoned_rows_without_expunge_audit(&self) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.as_ref().tombstoned_rows_without_expunge_audit()

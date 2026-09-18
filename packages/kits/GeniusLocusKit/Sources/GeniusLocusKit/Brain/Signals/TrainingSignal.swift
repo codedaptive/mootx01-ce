@@ -3,7 +3,7 @@ import Foundation
 /// Training-daemon standing signal — architecture spec §11.2, signal 9.
 ///
 /// Fires the training-daemon `runOnce` pass on each hourly tick and surfaces
-/// the result as a diagnostic. Mirrors DistillationSignal in structure:
+/// the result as a diagnostic. Mirrors TemporalCausalitySignal in structure:
 /// hourly cadence, .single concurrency, injected closure for the live pass,
 /// diagnostic-only emission.
 ///
@@ -15,9 +15,9 @@ import Foundation
 /// short-circuits below the threshold so the emit always returns exactly one
 /// diagnostic.
 ///
-/// Cadence: hourly (3 600 seconds), matching the distillation-sweep and
-/// temporal-causality-fold signals at §11.2 to keep the daemon in sync with
-/// the matrix-population rhythm.
+/// Cadence: hourly (3 600 seconds), matching the temporal-causality-fold
+/// signal at §11.2 to keep the daemon in sync with the matrix-population
+/// rhythm.
 ///
 /// Usage pattern:
 ///
@@ -34,15 +34,14 @@ import Foundation
 /// An error thrown from the closure is caught and surfaced as a
 /// `.diagnostic` emission — the scheduler's drain loop continues unaffected.
 ///
-/// For registration without a live daemon (e.g., test scaffolds), use
-/// `defaultSpec()`, which fires a diagnostic-only no-op. The
-/// `registerDefaultStandingSignals` helper uses the injected-closure variant
-/// so callers that provide a `trainingCycle` closure get a live daemon pass
-/// on each hourly tick.
+/// There is no no-op variant: `registerDefaultStandingSignals` registers
+/// this signal only when handed a live `trainingCycle`, which the host
+/// passes only while the estate's `.adaptiveRecall` preference is not
+/// `.off`.
 public enum TrainingSignal {
 
-    /// Hourly cadence in seconds — matches DistillationSignal and
-    /// TemporalCausalitySignal at §11.2 for matrix-population rhythm.
+    /// Hourly cadence in seconds — matches TemporalCausalitySignal at §11.2
+    /// for matrix-population rhythm.
     public static let defaultCadenceSeconds: TimeInterval = 3_600
 
     /// Stable name surfaced in `SignalReport.name` and in
@@ -96,29 +95,6 @@ public enum TrainingSignal {
                         detail: "\(error)",
                         observedAt: context.now))]
                 }
-            })
-    }
-
-    /// Build a diagnostic-only spec for test and registration contexts
-    /// where no live training daemon is available.
-    ///
-    /// The registered signal fires at the hourly cadence and emits a
-    /// single diagnostic confirming the fire. No enrichment or matrix work
-    /// is performed. This spec is appropriate for test scaffolds; production
-    /// callers should use `spec(trainingCycle:)` to wire a live daemon.
-    public static func defaultSpec() -> SignalSpec {
-        SignalSpec(
-            name: signalName,
-            trigger: .interval(seconds: defaultCadenceSeconds),
-            freshnessTarget: defaultCadenceSeconds * 2,
-            concurrencyPolicy: .single,
-            emit: { context in
-                // No-op pass: fires the scheduled signal and surfaces a
-                // diagnostic so the scheduler's cadence is observable.
-                return [.diagnostic(DiagnosticReport(
-                    title: "training-daemon.fired",
-                    detail: "training signal fired (no-op) at \(context.now.ISO8601Format())",
-                    observedAt: context.now))]
             })
     }
 }

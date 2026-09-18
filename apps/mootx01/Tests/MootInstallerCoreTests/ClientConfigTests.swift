@@ -20,6 +20,9 @@ struct ClientConfigTests {
         #expect(ids.contains("cursor"))
         #expect(ids.contains("cline"))
         #expect(ids.contains("continue"))
+        #expect(ids.contains("grok"))
+        #expect(ids.count == 12)
+        #expect(ids.contains("codex"))
     }
 
     @Test func allClientsShareTheSameServerName() {
@@ -63,6 +66,20 @@ struct ClientConfigTests {
                 "\(client.displayName) (\(client.id)) should have nil localConfigPath — only Claude Code supports project-local scoping"
             )
         }
+    }
+
+    @Test func grokCLIIsCodexTwinTOMLHTTP() throws {
+        let client = try #require(
+            MCPClients.supported.first(where: { $0.id == "grok" }),
+            "grok not found in MCPClients.supported"
+        )
+        #expect(client.displayName == "Grok CLI")
+        #expect(client.configPath == ".grok/config.toml")
+        #expect(client.detectPath == ".grok")
+        #expect(client.supportsLocalHTTP)
+        #expect(client.httpEntryIncludesType == false)
+        #expect(client.useProxyBridge == false)
+        #expect(client.localConfigPath == nil)
     }
 
     @Test func claudeCodeLocalConfigPathIsDotMCPJson() throws {

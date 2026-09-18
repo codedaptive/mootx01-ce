@@ -1,0 +1,96 @@
+{
+  "family": "obsidian",
+  "cases": [
+    {
+      "id": "obsidian-authorization-missing",
+      "covers": ["refusal"],
+      "method": "moot_community_obsidian_authorization",
+      "arguments": {},
+      "result": {"state": "missing"}
+    },
+    {
+      "id": "obsidian-vault-selected",
+      "covers": ["success"],
+      "method": "moot_community_obsidian_select_vault",
+      "arguments": {"bookmark": "Ym9va21hcms=", "displayName": "MOOT Vault"},
+      "result": {
+        "outcome": "selected",
+        "vaultURL": "file:///Users/example/Documents/MOOT%20Vault",
+        "displayName": "MOOT Vault"
+      }
+    },
+    {
+      "id": "obsidian-enabled",
+      "covers": ["success"],
+      "method": "moot_community_obsidian_enable",
+      "arguments": {},
+      "result": {"outcome": "enabled"}
+    },
+    {
+      "id": "obsidian-synchronizing-checkpoint-and-pending",
+      "covers": ["success"],
+      "method": "moot_community_obsidian_status",
+      "arguments": {},
+      "result": {
+        "state": "synchronizing",
+        "pendingCount": 2,
+        "totalCount": 10,
+        "checkpointAt": "2026-08-21T14:00:00Z",
+        "recordCount": 8
+      }
+    },
+    {
+      "id": "obsidian-revoked-access-interrupted",
+      "covers": ["interruption", "refusal"],
+      "method": "moot_community_obsidian_status",
+      "arguments": {},
+      "result": {
+        "state": "interrupted",
+        "reason": "vault-access-revoked",
+        "retryable": true,
+        "checkpointAt": "2026-08-21T14:00:00Z",
+        "recordCount": 8
+      }
+    },
+    {
+      "id": "obsidian-retry-restarted",
+      "covers": ["retry", "success"],
+      "method": "moot_community_obsidian_retry",
+      "arguments": {},
+      "result": {"outcome": "restarted"}
+    },
+    {
+      "id": "obsidian-retry-refused-when-terminal",
+      "covers": ["retry", "refusal"],
+      "method": "moot_community_obsidian_retry",
+      "arguments": {},
+      "result": {"outcome": "refused", "reason": "sync-not-retryable"}
+    },
+    {
+      "id": "obsidian-policy-exclusion-blocked",
+      "covers": ["privacy-exclusion", "refusal"],
+      "method": "moot_community_obsidian_status",
+      "arguments": {},
+      "result": {"state": "blocked", "reason": "policy-refused"}
+    },
+    {
+      "id": "obsidian-disable-preserves-content",
+      "covers": ["success"],
+      "method": "moot_community_obsidian_disable",
+      "arguments": {},
+      "result": {"outcome": "disabledOnly"}
+    },
+    {
+      "id": "obsidian-authorization-needs-renewal",
+      "covers": ["refusal"],
+      "method": "moot_community_obsidian_authorization",
+      "arguments": {},
+      "result": {
+        "state": "needsRenewal",
+        "vaultURL": "file:///Users/example/Documents/MOOT%20Vault",
+        "displayName": "MOOT Vault",
+        "reason": "vault-access-revoked"
+      }
+    }
+  ]
+}

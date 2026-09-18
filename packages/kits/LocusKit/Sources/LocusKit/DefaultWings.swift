@@ -1,4 +1,6 @@
 // DefaultWings.swift — Seven seeded default wings and their hint content.
+
+import Foundation
 //
 // Wings are the provenance/role axis. A fresh estate seeds these
 // seven wings, each with a hint memory in the normal `AI_Charter_Hint` room
@@ -34,6 +36,28 @@ public let hintUDCCode: String = "001"
 /// Actor identifier written into hint drawer `addedBy` fields.
 /// This is an HONEST PROVENANCE VALUE only — no code may branch on it.
 public let hintAddedBy: String = "estate-provision"
+
+/// Fixed filing instant for charter hint drawers (2000-01-01T00:00:00Z).
+///
+/// Charters are reference documentation, not recent memories: stamping them
+/// with the provision wall-clock made them the NEWEST rows in every fresh
+/// estate, so they won recency contests against real user memories and —
+/// because the stamp varied with the provision instant — made two estates
+/// built from the same recipe rank differently (the 2026-08-24 benchmark
+/// replay-drift root cause). A fixed past date removes both effects: charters
+/// never outrank genuinely recent content, and the stamp is a constant.
+/// Mirrors Rust `default_wings::CHARTER_SEED_UNIX_MS`.
+public let charterSeedDate: Date = Date(timeIntervalSince1970: 946_684_800) // 2000-01-01T00:00:00Z
+
+/// Fixed drawer IDs for the seven default-wing charter hints, by position in
+/// `defaultWings` (index 0 → …0001). Seed data carries well-known IDs so
+/// charters are directly addressable and never participate in the random-UUID
+/// tie-break noise that a fresh mint per estate produced. A wing OUTSIDE the
+/// default roster (custom seeding) gets a normal random UUID — only the seven
+/// canonical charters are pinned. Mirrors Rust `default_wings::charter_drawer_id`.
+public func charterDrawerID(forWingIndex index: Int) -> String {
+    String(format: "00000000-0000-0000-0000-%012X", index + 1)
+}
 
 // MARK: - WingDefinition
 

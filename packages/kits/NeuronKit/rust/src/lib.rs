@@ -34,6 +34,7 @@ pub mod anticipation;
 pub mod autonomic_governor;
 pub mod diffusion;
 pub mod composition_grid;
+pub mod query_date_window;
 pub mod benchmark_live;
 pub mod benchmark_scoring;
 pub mod bias;
@@ -43,6 +44,7 @@ pub mod constellation;
 pub mod context_synthesizer;
 pub mod dreaming_cycle;
 pub mod dreaming_decision;
+pub mod hnsw_graph_maintenance;
 pub mod rem_cycle_table;
 pub mod estate_dreaming_reader;
 pub mod estate_dreaming_sink;
@@ -75,6 +77,7 @@ pub mod solver_bandit;
 pub mod spreading_activation;
 pub mod structure_graph;
 pub mod theme_weather;
+pub mod timing_derivation;
 pub mod topology_analysis;
 mod topology_projection;
 pub mod tournament;
@@ -97,6 +100,7 @@ pub use dreaming_cycle::{
     InMemoryDreamingPolicyStore, ProposeFrameOut, RecallTraceItem, RecallTraceRewardSource,
     RewardSource, RewardSourceKind, TunnelLink,
 };
+pub use hnsw_graph_maintenance::{HNSWGraphMaintenance, InMemoryHNSWGraphMaintenance};
 pub use dreaming_decision::{
     candidate_key, contrastive_confidence, decide as dreaming_decide, EmittedCandidate,
     Observation, Outcome as DreamingOutcome,

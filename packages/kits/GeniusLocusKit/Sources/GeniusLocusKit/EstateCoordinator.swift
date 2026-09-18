@@ -1,8 +1,10 @@
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import LocusKit
 import PersistenceKit
+import PersistenceKitInMemory
 
 /// The multi-estate coordinator surface on `GeniusLocusKit`.
 ///
@@ -30,7 +32,7 @@ public extension GeniusLocusKit {
     /// kit's static logger so the subsystem and category stay
     /// fleet-standard ("com.mootx01.kit" / "GeniusLocusKit").
     private static var log: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - open
@@ -75,17 +77,27 @@ public extension GeniusLocusKit {
     ///     window).
     ///   - `.duplicateEstate` if an estate with this UUID is already
     ///     in the registry.
+    /// - Parameter federate: whether this open establishes the estate's Ed25519
+    ///   federation identity. Only a registered estate, one this machine owns,
+    ///   federates; a transient estate never touches an identity key store.
+    ///   The caller decides from its `EstateRecord.kind`. Off by default:
+    ///   minting is additive cost and a Keychain write.
     func open(
         storage: any Storage,
         owner: OwnerCredentials,
-        identityKeyStore: (any EstateIdentityKeyStore)? = nil
+        identityKeyStore: (any EstateIdentityKeyStore)? = nil,
+        federate: Bool = false,
+        frozen: Bool = false
     ) async throws -> EstateHandle {
         let estate: LocusKit.Estate
         do {
             estate = try await LocusKit.Estate.open(
                 storage: storage,
                 owner: owner,
-                identityKeyStore: identityKeyStore
+                identityKeyStore: identityKeyStore,
+                federate: federate,
+                frozen: frozen,
+                fingerprintStorage: frozen ? InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory)) : nil
             )
         } catch {
             throw GeniusLocusKitError.underlyingEstateFailure(reason: "\(error)")
@@ -100,6 +112,7 @@ public extension GeniusLocusKit {
         // back a GrantStore with the estate's own database. The grant
         // store and scope vault are built lazily on first use.
         storages[handle] = storage
+        if frozen { matrixFrozenHandles.insert(handle) }
         // Mark the estate mounted (GLK_PROVISION_001) so the admin plane
         // can observe mount state without polling the registry directly.
         mountStates[handle] = .mounted
@@ -189,6 +202,12 @@ public extension GeniusLocusKit {
         // after all registry cleanup. Closing AFTER cleanup ensures no concurrent
         // actor-isolated path can read through the storage once close() is in flight.
         let storage = storages[handle]
+        // Fence and join matrix work before either underlying estate or storage
+        // can close. A reopened equal handle must never inherit its worker.
+        mountStates[handle] = .draining
+        let matrixWorker = matrixRefreshWorkers[handle]
+        await matrixWorker?.close()
+        matrixRecordStores[handle] = nil
         do {
             try await estate.close()
         } catch {
@@ -202,8 +221,9 @@ public extension GeniusLocusKit {
             kgStores[handle] = nil
             fingerprintStores[handle] = nil
             matrixTiers[handle] = nil
-            calibrationRegistries[handle] = nil
-            matrixPersistenceBackends[handle] = nil
+            matrixRefreshWorkers[handle] = nil
+            matrixFrozenHandles.remove(handle)
+            matrixRecordStores[handle] = nil
             nodeTopologyProviders[handle] = nil
             // Drop the recall accelerators. Both are caller-registered pure
             // score lookups with no lazy re-mint, so a reopened estate scores
@@ -237,7 +257,25 @@ public extension GeniusLocusKit {
             await corpusKits[handle]?.dropIngestQueue()
             corpusKits[handle] = nil
             vectorStores[handle] = nil
-            distillFunctions[handle] = nil
+            spanEncoders[handle] = nil
+            factExtractorRecipeIDs[handle] = nil
+            factExtractors[handle] = nil
+            spanRerankSources[handle] = nil
+            pairScorers[handle] = nil
+            // Derived-rebuild span depth (moot_rebuild_status): plain
+            // counter — remove so a reopened same-estate handle never
+            // inherits a stale span.
+            derivedRebuildDepth[handle] = nil
+            // F1/F9: the duty-queue single-occupancy set and the host-supplied
+            // batch limits are per-estate registries like any other — handles
+            // are equal across reopens, so leaving either behind lets a
+            // reopened estate inherit a stale in-process "already queued"
+            // marker (silently dropping a duty enqueue that should have gone
+            // through) or a batch-limit override the caller never re-supplied
+            // for this open.
+            dutyQueued[handle] = nil
+            dutyLimitsByHandle[handle] = nil
+            lastReindexCompleted[handle] = nil
             mountStates[handle] = nil
             // Drop the sync engine so no engine reference outlives the estate.
             syncEngines[handle] = nil
@@ -253,8 +291,9 @@ public extension GeniusLocusKit {
         kgStores[handle] = nil
         fingerprintStores[handle] = nil
         matrixTiers[handle] = nil
-        calibrationRegistries[handle] = nil
-        matrixPersistenceBackends[handle] = nil
+        matrixRefreshWorkers[handle] = nil
+        matrixFrozenHandles.remove(handle)
+        matrixRecordStores[handle] = nil
         nodeTopologyProviders[handle] = nil
         // Drop the recall accelerators. Both are caller-registered pure
         // score lookups with no lazy re-mint, so a reopened estate scores
@@ -292,7 +331,16 @@ public extension GeniusLocusKit {
         await corpusKits[handle]?.dropIngestQueue()
         corpusKits[handle] = nil
         vectorStores[handle] = nil
-        distillFunctions[handle] = nil
+        spanEncoders[handle] = nil
+        factExtractorRecipeIDs[handle] = nil
+        factExtractors[handle] = nil
+        spanRerankSources[handle] = nil
+        pairScorers[handle] = nil
+        derivedRebuildDepth[handle] = nil
+        // F1/F9: see the matching comment in the error path above.
+        dutyQueued[handle] = nil
+        dutyLimitsByHandle[handle] = nil
+        lastReindexCompleted[handle] = nil
         mountStates[handle] = nil
         // Drop the sync engine so no engine reference outlives the estate.
         syncEngines[handle] = nil
@@ -317,15 +365,14 @@ public extension GeniusLocusKit {
 
     // MARK: - estate(for:)
 
-    /// Reach the live `LocusKit.Estate` actor for a handle.
+    /// Resolve the live `LocusKit.Estate` actor inside the composition layer.
     ///
-    /// This is the per-handle access point. Callers use the returned
-    /// estate to invoke LocusKit verbs (`capture`, `recall`, etc.)
-    /// directly against the addressed estate. The coordinator does
-    /// not mediate verb calls; it only routes by handle.
+    /// GLK's implementation uses this routing helper behind its public verbs.
+    /// Consumers outside the module address an estate through those verbs and
+    /// handle-scoped reads; they cannot obtain the underlying estate actor.
     ///
     /// - Throws: `.estateNotOpen` if the handle is not in the registry.
-    func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
+    internal func estate(for handle: EstateHandle) throws -> LocusKit.Estate {
         guard let estate = registry[handle] else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }

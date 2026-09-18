@@ -146,7 +146,7 @@ struct StorageMaintenanceTests {
         defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
         try await storage.open(schema: schema)
 
-        try await storage.transaction(isolation: .serializable) { _ in
+        _ = try await storage.transaction(isolation: .serializable) { _ in
             // The estate connection holds an open transaction here; the
             // maintenance pass must refuse rather than deadlock or corrupt.
             await #expect(throws: StorageMaintenanceError.notQuiescent(
@@ -157,6 +157,89 @@ struct StorageMaintenanceTests {
         // After the transaction commits, maintenance proceeds normally.
         let report = try await storage.performMaintenance()
         #expect(report.performed)
+        await storage.close()
+    }
+
+    // MARK: - SQ-01: VACUUM destination permissions
+
+    /// POSIX mode bits of the file at `path`, or nil when it does not exist.
+    private func posixMode(_ path: String) -> Int? {
+        (try? FileManager.default.attributesOfItem(atPath: path))?[.posixPermissions] as? Int
+    }
+
+    /// SQ-01 mechanism pin: the VACUUM INTO destination is pre-created as an
+    /// EMPTY owner-only (0600) file, SQLite ACCEPTS that pre-created empty
+    /// destination (sqlite3RunVacuum rejects only a non-empty file), and the
+    /// 0600 mode survives SQLite's own open + write — POSIX open(2) applies
+    /// its mode argument only at file creation. Asserted on the real file at
+    /// creation and after the real VACUUM INTO has written through it, so the
+    /// copy is owner-only at every observable point of its lifetime.
+    @Test func vacuumDestinationIsOwnerOnlyForItsWholeLifetime() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("pk-vacuum-perms-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let srcURL = dir.appendingPathComponent("src.sqlite")
+        let destURL = dir.appendingPathComponent(".vacuum-test.sqlite")
+
+        // Source database with real content to compact.
+        var handle: OpaquePointer?
+        let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE
+        try #require(sqlite3_open_v2(srcURL.path, &handle, flags, nil) == SQLITE_OK)
+        defer { sqlite3_close(handle) }
+        try #require(sqlite3_exec(
+            handle,
+            "CREATE TABLE t (x TEXT); INSERT INTO t VALUES ('payload');",
+            nil, nil, nil) == SQLITE_OK)
+
+        // Pre-created destination: exists, empty, owner-only from creation.
+        try SQLiteBackend.createOwnerOnlyVacuumDestination(at: destURL)
+        #expect(posixMode(destURL.path) == 0o600)
+        let sizeBefore = (try? FileManager.default
+            .attributesOfItem(atPath: destURL.path))?[.size] as? Int64
+        #expect(sizeBefore == 0)
+
+        // The real VACUUM INTO accepts the pre-created empty file and writes
+        // through it without resetting the mode.
+        let escaped = destURL.path.replacingOccurrences(of: "'", with: "''")
+        #expect(sqlite3_exec(handle, "VACUUM INTO '\(escaped)'", nil, nil, nil) == SQLITE_OK)
+        #expect(posixMode(destURL.path) == 0o600,
+                "0600 must survive SQLite's open+write of the destination")
+        let sizeAfter = (try? FileManager.default
+            .attributesOfItem(atPath: destURL.path))?[.size] as? Int64
+        #expect((sizeAfter ?? 0) > 0, "SQLite must have genuinely written the copy")
+    }
+
+    /// SQ-01 end-to-end: a full maintenance cycle still compacts (guard
+    /// against fixing permissions by breaking compaction), leaves the estate
+    /// file family owner-only after the atomic swap, and leaves no temp
+    /// `.vacuum-*` files behind. The swap (`.usingNewMetadataOnly`) carries
+    /// the destination's pre-created 0600 mode onto the estate path and
+    /// `reopen()` re-asserts it.
+    @Test func maintenanceLeavesEstateFilesOwnerOnlyAndCompactionStillWorks() async throws {
+        let (storage, url) = try makeStorage()
+        defer { try? FileManager.default.removeItem(at: url.deletingLastPathComponent()) }
+        try await storage.open(schema: schema)
+        try await churn(storage)
+
+        let report = try await storage.performMaintenance()
+        #expect(report.performed)
+        #expect(report.reclaimedBytes > 0)
+
+        // Post-swap: estate file and any live sidecars are owner-only.
+        for suffix in ["", "-wal", "-shm"] {
+            let path = url.path + suffix
+            guard FileManager.default.fileExists(atPath: path) else { continue }
+            #expect(posixMode(path) == 0o600,
+                    "estate file\(suffix.isEmpty ? "" : " sibling \(suffix)") must be 0600 after the swap")
+        }
+        // No temp destination (or its journal siblings) left behind.
+        let leftovers = try FileManager.default
+            .contentsOfDirectory(atPath: url.deletingLastPathComponent().path)
+            .filter { $0.hasPrefix(".vacuum-") }
+        #expect(leftovers.isEmpty, "no .vacuum-* temp files may survive maintenance")
+        // Data intact exactly as churn left it.
+        #expect(try await storage.rowStore.count(table: "bulk", where: nil) == 0)
         await storage.close()
     }
 
@@ -242,6 +325,37 @@ struct StorageMaintenanceTests {
         // same session, immediately after normalization.
         let report = try await storage.performMaintenance()
         #expect(report.performed, "VACUUM must run on the connection normalization reopened")
+        await storage.close()
+    }
+
+    // MARK: - Production-sized estate regression gate
+
+    /// Regression gate for the VACUUM SQLITE_CANTOPEN failure on large estates.
+    /// Opens a .gitignored copy of the production estate (4.3 GB) and asserts
+    /// performMaintenance() does not throw.
+    /// Skips gracefully when the fixture is absent (CI, other machines).
+    @Test func vacuumSucceedsOnProductionSizedEstate() async throws {
+        let testFileURL = URL(fileURLWithPath: #filePath)
+        let fixturesDir = testFileURL
+            .deletingLastPathComponent()            // PersistenceKitSQLiteTests/
+            .deletingLastPathComponent()            // Tests/
+            .appendingPathComponent("fixtures/production-estate")
+        let masterURL = fixturesDir.appendingPathComponent("master/estate.sqlite")
+        let cloneURL  = fixturesDir.appendingPathComponent("clone/estate.sqlite")
+        guard FileManager.default.fileExists(atPath: masterURL.path) else { return }
+        try? FileManager.default.removeItem(at: cloneURL)
+        try FileManager.default.createDirectory(
+            at: cloneURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true)
+        try FileManager.default.copyItem(at: masterURL, to: cloneURL)
+        defer { try? FileManager.default.removeItem(at: cloneURL) }
+        let storage = try SQLiteStorage(configuration: EstateConfiguration(
+            estateID: UUID(),
+            backend: .sqlite(url: cloneURL, busyTimeout: 30.0)))
+        // Regression gate: must not throw.
+        let report = try await storage.performMaintenance()
+        #expect(report.performed)
+        #expect(report.reclaimedBytes >= 0)
         await storage.close()
     }
 

@@ -1,36 +1,21 @@
 // DreamCommand.swift
 //
-// On-demand REM-ALPHA dreaming cycle.
+// `mootx01 dream` — the one-shot dreaming COORDINATOR (GENIUSLOCUSKIT_SPEC
+// § DUTY_LIFECYCLE). Launched by an operator, a script, or the `drain`
+// finisher; a stdio `serve` spawns nothing.
 //
-// `mootx01 dream` is the sibling of `mootx01 drain`. It is the detached
-// dreaming finisher an stdio `serve` spawns in three situations:
+// Lifecycle:
+//   - `setsid` so a process-group kill aimed at a script does not reach it.
+//   - Takes the per-stream "dreaming" DrainLease and HEARTBEATS it for the
+//     whole run: a pass that pays a model-bound batch outlives the 15 s TTL,
+//     and a stale lease would let a second dreamer start on the same estate.
+//     If another dreamer holds a fresh lease it exits at once.
+//   - Pays ONE bounded fact-extraction batch (the resident's Signal 14 batch),
+//     runs the REM-ALPHA cycle if the dreaming queue holds jobs, then one
+//     bounded subject-backfill batch and one span-encode batch.
+//   - Never loops until settled. `mootx01 drain` is the settle loop.
 //
-//   1. Post-recall fork: after a recall that co-recalled ≥ 2 drawers and
-//      enqueued a dreaming job, so dream sessions trigger promptly after
-//      activity without waiting for the next autonomic governor tick.
-//   2. On-exit: when a direct-open stdio `serve` exits and the dreaming
-//      queue has pending items (mirrors the T5 drain on-exit pattern).
-//   3. On-startup/first-query: when `serve` opens an estate and finds pending
-//      dreaming items from a prior session (jobs in `queue.sqlite` that were
-//      not processed before the previous serve exited).
-//
-// When run by hand it behaves identically: one REM-ALPHA cycle per invocation.
-//
-// Detached lifecycle:
-//   - Calls `setsid()` to escape the parent's process group, surviving a
-//     SIGKILL aimed at the spawning serve.
-//   - Acquires the per-stream `"dreaming"` DrainLease (beside `queue.sqlite`).
-//     If another dreamer holds a fresh lease it exits immediately (stampede
-//     prevention — at most one dreamer per estate per stream at a time).
-//   - Probes `dreamingQueuePendingCount`: if nil or 0, no work to do, exits.
-//   - Runs ONE REM-ALPHA dreaming cycle via `DreamingDaemon.triggerDreamingCycle`.
-//   - Releases the lease and exits.
-//
-// THETA/BETA/OMEGA cycles (recall-driven dreaming, /) are NOT built here.
-// The seam comments below mark where they would plug in. Do not implement them
-// here — those missions have their own scope and PRs.
-//
-// macOS-only: same constraint as `ServeCommand` and `DrainCommand`.
+// macOS-only for the same reason as ServeCommand.
 
 #if os(macOS)
 import Foundation
@@ -44,6 +29,10 @@ import PersistenceKit
 import PersistenceKitSQLite
 import QueueKit
 import MootInstallerCore
+import MootEstateOpen
+import FactExtractionKit
+import MootFactExtractorActivation
+import MootProductIdentity
 import Darwin
 
 struct DreamCommand: AsyncParsableCommand {
@@ -52,7 +41,7 @@ struct DreamCommand: AsyncParsableCommand {
         abstract: "Run one REM-ALPHA dreaming cycle for an estate, then exit (detached background finisher)."
     )
 
-    @Option(name: .long, help: "Named estate to dream on. Default: active estate.")
+    @Option(name: .long, help: "Estate to dream on: a registered name, or <dir>/<name> for a transient estate. Default: the active estate.")
     var db: String?
 
     func run() async throws {
@@ -61,34 +50,28 @@ struct DreamCommand: AsyncParsableCommand {
         // so a SIGKILL aimed at the spawning stdio serve does not reach us.
         setsid()
 
-        let environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
-
-        // Estate resolution (mirrors DrainCommand and ServeCommand).
-        let estateName: String
-        if let dbFlag = db {
-            estateName = dbFlag
-        } else {
-            estateName = (try? DatabaseManager.activeEstateName(in: dataDir)) ?? "default"
+        // The catalog resolves `--db` exactly as serve did when it launched us:
+        // a registered name, or a transient estate by its directory.
+        let estate: EstateRecord
+        do {
+            estate = try EstateOpen.catalog(selecting: db).active
+        } catch {
+            Logging.stderr.log("mootx01 dream fatal: \(error)")
+            throw ExitCode.failure
         }
-        let estateURL: URL
-        if let envPath = environment["ARIA_MCP_SQLITE_PATH"], !envPath.isEmpty {
-            estateURL = URL(fileURLWithPath: envPath)
-        } else {
-            estateURL = DatabaseManager.estateURL(for: estateName, in: dataDir)
-        }
+        let estateName = estate.name
+        let estateURL = estate.databaseURL
         // No estate file → nothing to dream on.
         guard FileManager.default.fileExists(atPath: estateURL.path) else {
             Logging.stderr.log("mootx01 dream: estate file does not exist — exiting")
             return
         }
 
-        // The dreaming lease file lives beside queue.sqlite (parent of the estate
-        // SQLite file), keyed by stream name "dreaming". This is independent of
-        // the encode ("encode.drain.lease") lease — both can be held simultaneously
-        // (recall-driven dreaming: per-(estate, stream) leases).
-        let leaseDir = estateURL.deletingLastPathComponent()
+        // The dreaming lease file lives in the estate directory, keyed by stream
+        // name "dreaming". This is independent of the encode ("encode.drain.lease")
+        // lease — both can be held simultaneously (recall-driven dreaming:
+        // per-(estate, stream) leases).
+        let leaseDir = estate.directory
         let instanceToken = UUID().uuidString
         let lease = DrainLease(
             directory: leaseDir,
@@ -107,6 +90,17 @@ struct DreamCommand: AsyncParsableCommand {
         // Registered cleanup: release the lease on any exit path so the next
         // dreamer can take over immediately rather than waiting out the TTL.
         defer { lease.release() }
+        // The coordinator holds the lease for its whole life and heartbeats it
+        // (§ DUTY_LIFECYCLE): a model-bound batch outlives the 15 s TTL, and a
+        // stale lease would let a second dreamer start on this estate.
+        let heartbeat = Task.detached {
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(DrainLease.heartbeatInterval))
+                if Task.isCancelled { return }
+                lease.heartbeat(now: Date())
+            }
+        }
+        defer { heartbeat.cancel() }
 
         // Open the estate and wire the GLK semantic layer (corpus + vector store
         // + encode queue), exactly as DrainCommand does. wireGLKSubstores is
@@ -115,7 +109,7 @@ struct DreamCommand: AsyncParsableCommand {
         // three commands cannot drift.
         let encryption: EstateEncryptionConfig
         do {
-            let resolved = try EstateKeyProvider.resolveOpenPosture(for: estateURL)
+            let resolved = try EstateOpenPosture.resolve(for: estate)
             encryption = resolved.encryption
         } catch {
             Logging.stderr.log("mootx01 dream fatal: estate encryption key unavailable: \(error)")
@@ -139,13 +133,75 @@ struct DreamCommand: AsyncParsableCommand {
         let kit = GeniusLocusKit()
         let handle: EstateHandle
         do {
-            handle = try await kit.open(storage: storage, owner: owner)
-            _ = try await GLKMigrationCatalog.prepare(
+            // A transient estate never touches the Keychain: identity in memory,
+            // no federation. A registered one resolves its store per backend.
+            handle = try await kit.open(
+                storage: storage, owner: owner,
+                identityKeyStore: estate.kind == .registered ? nil : InMemoryEstateIdentityKeyStore(),
+                federate: estate.kind == .registered)
+            let preparation = try await GLKMigrationCatalog.prepare(
                 kit: kit, handle: handle, now: Date())
+            // The manifest must say what is on disk: after a migration, or for an
+            // estate that predates manifests, rewrite estate.json.
+            if try EstateManifestRefresh.afterPrepare(
+                preparation, estate: estate, encryption: encryption, now: Date()) {
+                Logging.stderr.log("mootx01 dream: estate manifest refreshed (format \(preparation.format), schema \(GeniusLocusKitSchema.version))")
+            }
             try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
         } catch {
             Logging.stderr.log("mootx01 dream fatal: estate open/wiring failed: \(error)")
             throw ExitCode.failure
+        }
+
+        // The coordinator pays ONE bounded Signal 14 batch while the estate is
+        // open, before the REM queue gate, so fact debt progresses even when no
+        // recall-driven dreaming job is pending. It never loops until settled.
+        // `provisionedPreference` returns the key's default for an absent
+        // value, so the only error it can raise is a storage error; that
+        // error is fatal here and never substituted with a default, because
+        // a pass running on defaults the estate never asked for would
+        // silently extract (or skip extracting) against its configuration.
+        let factSettingsDirectory = estate.kind == .registered
+            ? EstateCatalog.configurationDirectory : estate.directory
+        let factExtractor: (any FactExtractor)?
+        do {
+            let factExtractionSetting = try await kit.provisionedPreference(
+                .factExtraction, for: handle)
+            let factExtractorSetting = try await kit.provisionedPreference(
+                .factExtractor, for: handle)
+            guard let workerExecutableURL = ServeCommand.resolvedCurrentExecutableURL() else {
+                Logging.stderr.log("mootx01 dream fatal: could not resolve current executable path for fact extraction")
+                throw ExitCode.failure
+            }
+            factExtractor = FactExtractorBuilder.build(
+                masterSetting: factExtractionSetting,
+                extractorSetting: factExtractorSetting,
+                settingsDirectory: factSettingsDirectory,
+                workerExecutableURL: workerExecutableURL)
+        } catch {
+            Logging.stderr.log("mootx01 dream fatal: fact-extraction preference read failed: \(error)")
+            throw ExitCode.failure
+        }
+        // Batch limits come from the same settings directory (§ DUTY_LIFECYCLE).
+        await kit.configureDutyLimits(
+            DutyLimits(settings: MootProductIdentity.Settings.load(configurationDirectory: factSettingsDirectory)),
+            for: handle)
+        if let extractor = factExtractor {
+            let spec = extractor.spec
+            let recipeID = "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)"
+            do {
+                _ = try await kit.activateFactExtractor(
+                    extractor, recipeID: recipeID, for: handle)
+                _ = try await kit.enqueueDuty(.factExtraction, in: handle, now: Date())
+                let settled = try await kit.drainDuty(.factExtraction, in: handle, now: Date()).unitsPaid
+                let state = try await kit.factExtractionWorkStatus(handle, now: Date())
+                Logging.stderr.log(
+                    "mootx01 dream: fact extraction batch complete — " +
+                    "\(settled) source(s) settled; \(state.detail)")
+            } catch {
+                Logging.stderr.log(
+                    "mootx01 dream warning: fact extraction cycle failed: \(error)")
+            }
         }
 
         // Force-mount the dreaming queue so that `dreamingQueuePendingCount`
@@ -200,11 +256,8 @@ struct DreamCommand: AsyncParsableCommand {
             Logging.stderr.log("mootx01 dream warning: policy restore failed: \(error) — using spec defaults")
         }
 
-        // Run one REM-ALPHA cycle against the pending dreaming queue.
-        // No heartbeat task: one dreaming cycle is fast (subsecond for normal
-        // estates) and well within the 15-second lease TTL. The resident
-        // AutonomicGovernor heartbeats its lease because it holds it for minutes;
-        // the one-shot dream command does not need to.
+        // Run one REM-ALPHA cycle against the pending dreaming queue. The
+        // dreaming lease is heartbeated by the task above for the whole run.
         // `triggerDreamingCycle(now:)` bypasses the timer-interval gate so this
         // on-demand invocation runs unconditionally — unlike `pump(now:)` which
         // would return nil if the interval has not elapsed.
@@ -230,17 +283,33 @@ struct DreamCommand: AsyncParsableCommand {
             // cycle error above.
             if await kit.subjectProducerPipeline(for: handle) != nil {
                 do {
-                    let debt = try await kit.estate(for: handle).countSubjectDebt()
-                    if debt > 0 {
-                        let sweep = try await kit.subjectBackfillSweep(
-                            handle, batchLimit: 32, now: cycleNow)
+                    // One bounded batch per pass (DutyLimits.subjectBackfillBatch),
+                    // run as a claimed QueueKit job (DutyQueue); the settle loop
+                    // is `mootx01 drain`.
+                    _ = try await kit.enqueueDuty(.subjectBackfill, in: handle, now: cycleNow)
+                    let sweep = try await kit.drainDuty(.subjectBackfill, in: handle, now: cycleNow)
+                    if sweep.jobsRun > 0 {
                         Logging.stderr.log(
-                            "mootx01 dream: subject backfill — \(sweep.written) written, "
-                            + "\(sweep.skippedInadmissible) skipped, \(sweep.remainingDebt) remaining")
+                            "mootx01 dream: subject backfill — \(sweep.unitsPaid) written, "
+                            + "\(sweep.remainingDebt) remaining")
                     }
                 } catch {
                     Logging.stderr.log("mootx01 dream warning: subject backfill error: \(error) — continuing")
                 }
+            }
+            // One anomaly-sweep batch per pass: rooms touched since their last
+            // scoring, `DutyLimits.anomalySweepRooms` of them; the settle loop
+            // is `mootx01 drain`.
+            do {
+                _ = try await kit.enqueueDuty(.anomalySweep, in: handle, now: cycleNow)
+                let sweep = try await kit.drainDuty(.anomalySweep, in: handle, now: cycleNow)
+                if sweep.jobsRun > 0 {
+                    Logging.stderr.log(
+                        "mootx01 dream: anomaly sweep — \(sweep.unitsPaid) room(s) scored, "
+                        + "\(sweep.remainingDebt) remaining")
+                }
+            } catch {
+                Logging.stderr.log("mootx01 dream warning: anomaly sweep error: \(error) — continuing")
             }
         } catch {
             // A cycle error is non-fatal at the command level: the dreaming queue
@@ -248,6 +317,21 @@ struct DreamCommand: AsyncParsableCommand {
             // the cycle threw. Log and exit cleanly so the spawning serve is not
             // blocked on this process's exit code.
             Logging.stderr.log("mootx01 dream warning: dreaming cycle error: \(error) — continuing")
+        }
+
+        // Span debt: one bounded batch per dreaming pass, the same call the
+        // resident's dreaming duty makes, so `dream` plus drain status settles
+        // an estate whose drawers still owe spans. The duty attempts encoder
+        // activation itself when none is registered; with no model it is a
+        // clean 0. An error is non-fatal like the cycle error above.
+        do {
+            _ = try await kit.enqueueDuty(.spanEncode, in: handle, now: cycleNow)
+            let encoded = try await kit.drainDuty(.spanEncode, in: handle, now: cycleNow).unitsPaid
+            if encoded > 0 {
+                Logging.stderr.log("mootx01 dream: span encode — \(encoded) drawer(s) encoded")
+            }
+        } catch {
+            Logging.stderr.log("mootx01 dream warning: span encode error: \(error) — continuing")
         }
 
         // Release the lease explicitly (the defer also does this, but being

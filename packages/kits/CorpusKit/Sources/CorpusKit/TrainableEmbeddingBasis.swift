@@ -4,15 +4,15 @@
 // corpus and serialized to (and reconstructed from) a basis blob — without
 // the layering inversion that would otherwise be required.
 //
-// ## Why this protocol lives in CorpusKit core (not VectorKit)
+// ## Why this protocol lives in CorpusKit core (not SynapseKit)
 //
 // Training-on-corpus is a CorpusKit concern, not a generic embedding
-// concern. VectorKit's `EmbeddingProvider` is the universal embed surface;
+// concern. SynapseKit's `EmbeddingProvider` is the universal embed surface;
 // it must stay narrow so a future pre-trained CoreML encoder can conform to
 // it WITHOUT being forced to declare a training method it cannot honour.
 // `TrainableEmbeddingBasis` is the opt-in capability for the distributional
-// providers (RI/PPMI/LSA/NMF) that genuinely train on the estate's own
-// content. FDC (stateless taxonomic) and the deterministic/named-model
+// providers (RI/LSA) that genuinely train on the estate's own
+// content. The deterministic and Apple NL
 // providers do NOT conform — their opt-out is a clean "does not implement
 // this protocol", surfaced to callers as `CorpusKitError.notTrainable`.
 //
@@ -34,13 +34,46 @@
 // (the `TrainableEmbeddingBasis` trait).
 
 import Foundation
-import VectorKit
+import SynapseKit
+
+/// Work limits applied to one full-corpus provider retraining attempt.
+public struct RetrainingBudget: Sendable {
+    public let maxDocuments: Int
+    public let maxSweeps: Int
+    public let deadline: ContinuousClock.Instant?
+
+    public init(maxDocuments: Int, maxSweeps: Int, deadline: ContinuousClock.Instant? = nil) {
+        self.maxDocuments = max(1, maxDocuments)
+        self.maxSweeps = max(1, maxSweeps)
+        self.deadline = deadline
+    }
+
+    public static let unbounded = RetrainingBudget(
+        maxDocuments: .max, maxSweeps: .max, deadline: nil)
+
+    public var cancellationReason: RetrainingSkipReason? {
+        if Task<Never, Never>.isCancelled { return .cancelled }
+        if let deadline, ContinuousClock.now >= deadline { return .deadlineExceeded }
+        return nil
+    }
+}
+
+public enum RetrainingSkipReason: Sendable, Equatable {
+    case documentLimit(actual: Int, limit: Int)
+    case cancelled
+    case deadlineExceeded
+}
+
+public enum RetrainingOutcome: Sendable, Equatable {
+    case completed
+    case skipped(RetrainingSkipReason)
+}
 
 /// A provider whose embedding basis is trained from a corpus and can be
 /// serialized to / reconstructed from a versioned basis blob.
 ///
-/// Conformers are the CorpusKit distributional providers (RI, PPMI, LSA,
-/// NMF) in `CorpusKitProviders`. The protocol is the type-erasure seam that
+/// Conformers are the CorpusKit distributional providers (RI, LSA)
+/// in `CorpusKitProviders`. The protocol is the type-erasure seam that
 /// lets `Corpus` (which holds an `any EmbeddingProvider`) drive training and
 /// serialization without CorpusKit core importing CorpusKitProviders.
 ///
@@ -54,9 +87,9 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// The conformer is responsible for the FULL train+finalize sequence
     /// specific to its method:
     ///   - it tokenizes each text with the canonical `defaultKeywordTokens`
-    ///     where its training API consumes term sequences (RI, PPMI), or
-    ///     passes raw text where its API consumes documents (LSA, NMF);
-    ///   - it runs any required finalization pass (PPMI/LSA/NMF; RI has none).
+    ///     where its training API consumes term sequences (RI), or
+    ///     passes raw text where its API consumes documents (LSA);
+    ///   - it runs any required finalization pass (LSA; RI has none).
     ///
     /// Deterministic: this method MUST NOT call `Date()`/`now` — training is a
     /// pure function of `texts` and the provider's fixed seeds, so the same
@@ -68,6 +101,11 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     ///
     /// - Parameter texts: raw document texts (NOT pre-tokenized term arrays).
     func trainOnCorpus(texts: [String])
+
+    /// Bounded, cooperatively cancellable retraining. A skipped attempt must
+    /// leave the receiver unpublished; Corpus trains a fresh instance and only
+    /// swaps it into service after this method returns `.completed`.
+    func trainOnCorpus(texts: [String], budget: RetrainingBudget) -> RetrainingOutcome
 
     // MARK: - Streamed training (GLK shared-content 1.1 corrective pass)
     //
@@ -88,7 +126,7 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     func accumulateTraining(texts: [String])
 
     /// Run the method-specific finalization pass over the accumulated
-    /// state (PPMI/LSA/NMF; RI has none — no-op). Call exactly once,
+    /// state (LSA; RI has none — no-op). Call exactly once,
     /// after the last `accumulateTraining` page.
     func finalizeTraining()
 
@@ -126,7 +164,7 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// `embed` call will need to reload from BasisStore. Called after
     /// reindex/reembed completes to free the ~2GB of `[Float]` arrays
     /// that the vocab dictionary holds. Providers that have no in-memory
-    /// state (FDC, stateless providers) are no-ops.
+    /// state (stateless providers) are no-ops.
     func releaseBasis()
 
     // MARK: - Maintained counts (incremental-counts change set, P3)
@@ -136,7 +174,7 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     // instead of rebuilding them from scratch by re-reading the whole corpus on
     // every reindex. `Corpus` holds the provider type-erased, so these uniform
     // methods are the bridge: each conformer routes them to its own
-    // method-specific accumulation (RI/PPMI fold term sequences; LSA/NMF fold
+    // method-specific accumulation (RI folds term sequences; LSA folds
     // documents). The accumulated state is the SAME state `finalize()` consumes;
     // maintaining it incrementally is what makes a future refactor cheap.
     //
@@ -145,15 +183,23 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     // O(N·vocab) over an import — the very wall this change set removes. The
     // provider accumulates in memory; `Corpus` snapshots via `serializeCounts()`
     // when a batch closes and on shutdown points, and `restoreCounts(from:)`
-    // resumes that snapshot on open. NOTE: the maintained-counts path is
-    // infrastructure only; Corpus.reindex currently still trains from active
-    // chunk text via trainOnCorpus(texts:), not from these maintained counts.
+    // resumes that snapshot on open. The maintained counts are consumed by:
+    //   - Corpus.reindex (standalone): a counts-capable slot, when the population
+    //     guard passes (countsDocumentCount == activeChunks count), finalizes its
+    //     restored counts into the serving basis (countsRestore decision). RI
+    //     stays on the corpus path (countsDeltaFoldSafe == false; float
+    //     accumulation is order-sensitive). LSA keeps the corpus path because
+    //     finalizeFromCounts() == false.
+    //   - CorpusContentEngine.trainTrainableSlots (attached): a counts-capable
+    //     slot may delta-fold pending reference rows into the restored counts
+    //     (countsDeltaFold decision). RI is restore-only with an empty pending
+    //     delta. LSA always uses the full corpus re-tokenize path.
 
     /// Fold one chunk's raw text into the maintained accumulated counts.
     ///
     /// The conformer tokenizes with the canonical `defaultKeywordTokens` where
-    /// its accumulation consumes term sequences (RI, PPMI), or folds the raw
-    /// document where it consumes documents (LSA, NMF). This is the per-chunk
+    /// its accumulation consumes term sequences (RI), or folds the raw
+    /// document where it consumes documents (LSA). This is the per-chunk
     /// half of the same additive logic `trainOnCorpus` runs over a whole corpus,
     /// surfaced so `Corpus` can drive it once per chunk at write time.
     ///
@@ -188,8 +234,8 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// every provider whose counts are small keeps that behavior with no code.
     /// Only providers whose counts scale with vocabulary need to override it:
     /// RandomIndexing's map reached 1,009,861,855 bytes on a real estate and
-    /// exceeded SQLite's bind ceiling (ee#49), while Nmf and Lsa sit at ~2 MB
-    /// and gain nothing from the split.
+    /// exceeded SQLite's bind ceiling (ee#49), while Lsa sits at ~2 MB
+    /// and gains nothing from the split.
     ///
     /// `header` MUST remain a valid counts blob on its own — same magic and
     /// format version, with an empty term map — so a reader that knows nothing
@@ -210,6 +256,67 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
     /// this, and the pair is exercised together by the round-trip tests.
     func restoreCounts(header: Data, terms: [(term: String, vector: Data)]) throws
 
+    /// Derive the finalized serving basis from accumulated maintained counts,
+    /// reading NO corpus text.
+    ///
+    /// **Contract.** The caller has already restored maintained counts via
+    /// `restoreCounts(from:)` or the term-decomposed `restoreCounts(header:terms:)`
+    /// and MAY have folded additional delta texts via `addToCounts(text:)`.
+    /// `finalizeFromCounts()` drives whatever method-specific finalization pass
+    /// is needed and leaves this provider in the same state as a
+    /// `trainOnCorpus` run over the same accumulated corpus:
+    ///
+    /// - **Returns `true`** when the provider's maintained counts fully determine
+    ///   its basis without corpus text:
+    ///   - *RandomIndexing* ("RICT"): the restored vocabulary of term-to-context
+    ///     vectors IS the basis — restoration alone reproduces it; finalization is
+    ///     a no-op, so `true` is returned immediately.
+    ///   - a provider whose counts blob holds the full raw accumulation state
+    ///     its `finalize()` consumes: one finalize pass over the restored state
+    ///     yields a basis byte-identical to a from-scratch `trainOnCorpus` over
+    ///     the same accumulated corpus. That byte-identity through the digest
+    ///     gate is the acceptance contract. No default provider takes this
+    ///     route today.
+    ///
+    /// - **Returns `false`** when the maintained counts are insufficient:
+    ///   - *LSA*: the counts blob holds only vocab + documentCount
+    ///     trigger anchors; the per-document TF rows and per-term DF needed by
+    ///     the factorization are deliberately NOT persisted (per the design-doc
+    ///     open decision: re-tokenize at refactor time). No counts-only basis
+    ///     can be derived. On `false` the provider's state is unchanged and the
+    ///     caller MUST keep the corpus re-tokenization path.
+    ///
+    /// **Deterministic:** never reads wall-clock time.
+    ///
+    /// **Default:** returns `false` — counts-only refactoring is an explicit
+    /// per-provider opt-in. A conformer that has not audited its counts payload
+    /// MUST NOT be silently eligible.
+    func finalizeFromCounts() -> Bool
+
+    /// Whether folding ADDITIONAL texts into RESTORED maintained counts produces
+    /// bytes identical to a from-scratch fold over the same corpus in canonical
+    /// order.
+    ///
+    /// `true` only for providers whose accumulation is commutative (integer
+    /// count maps whose fold order is irrelevant to the derived basis, with a
+    /// finalize pass that is a pure function of those counts, so restore +
+    /// delta + finalize == from-scratch). No default provider qualifies.
+    ///
+    /// `false` for float in-place accumulation (RandomIndexing): float addition
+    /// is not associative, so folding additional texts after restore can produce
+    /// context vectors that differ by a floating-point rounding step from a
+    /// from-scratch fold in canonical order (reviewer finding F-3). For RI the
+    /// counts path is restore-only with an EMPTY delta — no further accumulation.
+    ///
+    /// `false` is also correct for providers whose counts blob is insufficient to
+    /// derive the basis at all (LSA), though that property is governed by
+    /// `finalizeFromCounts()` returning `false`. The retrain wiring (Part 3)
+    /// reads `countsDeltaFoldSafe` only after `finalizeFromCounts() == true`.
+    ///
+    /// **Default `false`:** delta-fold eligibility is an explicit, audited opt-in.
+    /// A conformer that has not proved commutativity MUST keep the default.
+    var countsDeltaFoldSafe: Bool { get }
+
     /// The maintained vocabulary size — the cheap anchor the vocab-growth retrain
     /// trigger reads to decide when a basis has drifted enough to warrant a
     /// refactor. Reflects the current accumulated state, not the derived basis.
@@ -226,6 +333,16 @@ public protocol TrainableEmbeddingBasis: AnyObject, Sendable {
 }
 
 public extension TrainableEmbeddingBasis {
+
+    func trainOnCorpus(texts: [String], budget: RetrainingBudget) -> RetrainingOutcome {
+        guard texts.count <= budget.maxDocuments else {
+            return .skipped(.documentLimit(actual: texts.count, limit: budget.maxDocuments))
+        }
+        if let reason = budget.cancellationReason { return .skipped(reason) }
+        trainOnCorpus(texts: texts)
+        if let reason = budget.cancellationReason { return .skipped(reason) }
+        return .completed
+    }
 
     /// Default: no term decomposition. The provider is persisted as one blob,
     /// which is correct for every provider whose counts do not scale with
@@ -244,4 +361,19 @@ public extension TrainableEmbeddingBasis {
     /// treat every term as novel. Production distributional providers override
     /// this with their exact maintained-vocabulary lookup.
     func countsContainsTerm(_ term: String) -> Bool { false }
+
+    /// Default: counts-only finalization is not supported. A conformer that
+    /// has not explicitly audited its counts payload and confirmed it is
+    /// sufficient to derive a byte-identical basis (the digest-gate acceptance
+    /// contract) must not be silently eligible. Providers that CAN derive their
+    /// basis from counts alone (RandomIndexing) override this with `true`
+    /// after the finalize pass completes; LSA keeps the default because
+    /// its per-document TF input is not persisted in the counts blob.
+    func finalizeFromCounts() -> Bool { false }
+
+    /// Default: delta-fold after restore is not safe. Providers whose accumulation
+    /// is order-sensitive (float in-place, e.g. RandomIndexing) or whose counts
+    /// blob does not fully determine the basis (LSA) keep this default.
+    /// A provider whose accumulation is integer count maps may override to `true`.
+    var countsDeltaFoldSafe: Bool { false }
 }

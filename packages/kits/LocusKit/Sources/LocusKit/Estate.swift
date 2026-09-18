@@ -156,7 +156,8 @@ public actor Estate {
     /// written by a future schema whose bitmap bit positions may have
     /// shifted.
     ///
-    /// On first open (when `ed25519_public_key` is absent from the manifest)
+    /// On a federating first open (when `ed25519_public_key` is absent from
+    /// the manifest and `federate` resolves true)
     /// a fresh Curve25519 Ed25519 keypair is minted. The public key is
     /// written to the manifest; the private key is stored in `identityKeyStore`
     /// (Keychain in production) and cached in memory for the lifetime of this
@@ -188,6 +189,13 @@ public actor Estate {
     ///     `open(inMemory:owner:hydrateFrom:)`. Tests may still inject
     ///     `InMemoryEstateIdentityKeyStore` explicitly (required when the
     ///     test estate lives on temp-dir SQLite storage).
+    ///   - federate: whether this open establishes the estate's Ed25519
+    ///     federation identity. Off by default: minting is additive cost and
+    ///     a key-store write. When false the identity step is skipped
+    ///     entirely: no keypair, no key-store write, no manifest public key,
+    ///     no key-store read on reopen; grant issuance throws for the
+    ///     lifetime of this instance. The product passes true for a
+    ///     registered estate, the one this machine owns.
     /// - Throws:
     ///   - `EstateError.emptyOwnerIdentifier` if the owner identifier
     ///     is empty (raised before any storage call).
@@ -200,7 +208,10 @@ public actor Estate {
     public static func open(
         storage: any Storage,
         owner: OwnerCredentials,
-        identityKeyStore: (any EstateIdentityKeyStore)? = nil
+        identityKeyStore: (any EstateIdentityKeyStore)? = nil,
+        federate: Bool = false,
+        frozen: Bool = false,
+        fingerprintStorage: (any Storage)? = nil
     ) async throws -> Estate {
         guard !owner.ownerIdentifier.isEmpty else {
             throw EstateError.emptyOwnerIdentifier
@@ -208,7 +219,7 @@ public actor Estate {
         let identityKeyStore = identityKeyStore ?? Self.defaultIdentityKeyStore(for: storage)
         let store: DrawerStore
         do {
-            store = try await DrawerStore(storage: storage)
+            store = try await DrawerStore(storage: storage, frozen: frozen)
         } catch {
             throw EstateError.substrateUnavailable("\(error)")
         }
@@ -250,8 +261,22 @@ public actor Estate {
         //     ordinary metadata, unencrypted, visible to database and backup readers.
         //   - Only the public key is written to the manifest; it is safe to store
         //     there — a public key has no confidentiality requirement.
+        // Federation is the caller's explicit choice, per open. Grant issuance
+        // is the ONLY consumer of the identity key, so an estate that will never
+        // issue federation grants (a transient estate: benchmark artifacts,
+        // scratch) skips the whole identity step — no keypair, no Keychain
+        // write, no manifest public key, no key-store read on reopen. Off by
+        // default because minting is additive cost and a Keychain write; the
+        // product passes true for a registered estate, which this machine owns.
+        // Never a persistent estate property: a non-federating open followed by
+        // a federating one mints then.
         var privateSigningKeyData: Data?
-        if manifest.ed25519PublicKey == nil {
+        if frozen || !federate {
+            // Declared non-federating open: zero identity-key-store contact
+            // either direction. issueGrant throws invalidManifest when the
+            // signing key is absent — the documented non-federating posture.
+            privateSigningKeyData = nil
+        } else if manifest.ed25519PublicKey == nil {
             // First open: mint a fresh Curve25519 keypair for this estate.
             let privateKey = Curve25519.Signing.PrivateKey()
             // Store the private key in the identity key store (Keychain) first.
@@ -278,15 +303,31 @@ public actor Estate {
         }
         let containerFP: ContainerFingerprintStore
         do {
-            containerFP = try await ContainerFingerprintStore(storage: storage)
+            let aggregateStorage: any Storage
+            if frozen {
+                guard let fingerprintStorage, case .inMemory = fingerprintStorage.configuration.backend else {
+                    throw EstateError.substrateUnavailable("frozen open requires private in-memory fingerprint storage")
+                }
+                aggregateStorage = fingerprintStorage
+            } else { aggregateStorage = storage }
+            containerFP = try await ContainerFingerprintStore(storage: aggregateStorage)
         } catch {
             throw EstateError.substrateUnavailable("\(error)")
         }
         // NodeStore shares the same storage — schema already opened.
         let nodeStore = NodeStore(storage: storage)
         // ensure root node exists. createRoot is idempotent —
-        // returns existing root if already seeded.
-        _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
+        // returns existing root if already seeded. A frozen open never seeds:
+        // the snapshot must already carry its root. `now` is the manifest's
+        // own lastModified so the open reads no clock (the engine
+        // determinism rule); the Rust twin passes `manifest.last_modified`.
+        if frozen {
+            guard try await nodeStore.rootNode() != nil else {
+                throw EstateError.substrateUnavailable("frozen estate has no root node")
+            }
+        } else {
+            _ = try await nodeStore.createRoot(displayName: "Estate", now: manifest.lastModified)
+        }
         // Backfill so the aggregate covers every active row and is
         // therefore sound to prune against. One full scan at open.
         let active = (try await store.allDrawers()).filter { $0.tombstonedAt == nil }
@@ -387,9 +428,11 @@ public actor Estate {
             throw EstateError.substrateUnavailable("\(error)")
         }
         let nodeStore = NodeStore(storage: storage)
-        // seed root node on create. createRoot is idempotent.
-        _ = try await nodeStore.createRoot(displayName: "Estate", now: Date())
         let manifest = try await store.readManifest()
+        // seed root node on create. createRoot is idempotent. `now` is the
+        // manifest's lastModified, which DrawerStore stamped at schema
+        // creation, so create reads no clock; the Rust twin does the same.
+        _ = try await nodeStore.createRoot(displayName: "Estate", now: manifest.lastModified)
         // Estate.create does not mint the Ed25519 keypair — that happens in
         // Estate.open (the first open after create). The created estate carries
         // no identity key store and no cached private key; callers that need
@@ -438,59 +481,86 @@ public actor Estate {
         // storage reference owns teardown.
     }
 
-    // MARK: - Distilled representation (SPEC_DISTILLATION_STORAGE §4)
+    // MARK: - Content-derived columns and the span index bit (Encoder Rerank Program)
 
-    /// Write the distilled representation of one drawer — all four
-    /// representation columns in one atomic UPDATE. Delegates to
-    /// `DrawerStore.setDistilledRepresentation`; see that method for the
-    /// full contract (direct column write, no audit event, no index-feed
-    /// involvement). This is the seam GLK's distillation paths (drain-stage
-    /// and `moot_distill` sweep) write through.
-    ///
-    /// After a successful write, OR bit 19 (`hasCurrentRepresentation`)
-    /// into the room/wing container-fingerprint aggregate so that any
-    /// subsequent recall filter on `.hasFeatureFlag(.hasCurrentRepresentation)`
-    /// does not falsely exclude this container mid-session without requiring
-    /// an estate reopen. The OR aggregate is monotone — ORing a set bit is
-    /// always safe. Clear paths need no rollup change: stale set bits are a
-    /// harmless over-approximation (spec § 11.5); `rebuildAll` at estate open
-    /// tightens. Mirrors the `addDrawerCovered` pattern.
+    /// Write (or clear) one drawer's SSC facts. Estate-level pass-through
+    /// over `DrawerStore.setSSCFacts(_:for:)` — the seam the enrichment
+    /// stage writes through after the drawer write. No container-fingerprint
+    /// rollup: nothing filters on fact presence. Mirrors Rust
+    /// `Estate::set_ssc_facts`.
     ///
     /// - Returns: Count of rows updated (0 = drawer not found).
     @discardableResult
-    public func setDistilledRepresentation(
-        drawerId: String,
-        distilled: String,
-        pipelineVersion: String,
-        tokenCount: Int64,
-        at generatedAt: Date
-    ) async throws -> Int {
-        let count = try await store.setDistilledRepresentation(
-            drawerId: drawerId,
-            distilled: distilled,
-            pipelineVersion: pipelineVersion,
-            tokenCount: tokenCount,
-            at: generatedAt)
-        if count == 1, let drawer = try await store.getDrawer(id: drawerId) {
-            let names = try await store.resolveNodeNames(
-                parentNodeIds: [drawer.parentNodeId])
-            let resolved = names[drawer.parentNodeId] ?? (wing: "", room: "")
-            try await containerFP.orIn(
-                wing: resolved.wing, room: resolved.room,
-                adjective: drawer.adjectiveBitmap,
-                operational: drawer.operationalBitmap,
-                provenance: drawer.provenance,
-                now: generatedAt)
-        }
-        return count
+    public func setSSCFacts(_ facts: String?, for drawerId: String) async throws -> Int {
+        try await store.setSSCFacts(facts, for: drawerId)
     }
 
-    /// Count of active drawers still awaiting distillation (the §7.1
-    /// eligibility predicate as an aggregate). Estate-level pass-through
-    /// over `DrawerStore.countUndistilled` — the distillation
-    /// drain-accounting observable GLK's `drainStatuses` reports.
-    public func countUndistilled(pipelineVersion: String) async throws -> Int {
-        try await store.countUndistilled(pipelineVersion: pipelineVersion)
+    /// Set bit 27 (`spanIndexed`) on one drawer after the span-encode duty
+    /// wrote its span rows. Estate-level pass-through over
+    /// `DrawerStore.setSpanIndexed(drawerId:)`. No container-fingerprint
+    /// rollup: recall does not filter on the bit; the duty reads it per row.
+    /// Mirrors Rust `Estate::set_span_indexed`.
+    ///
+    /// - Returns: Count of rows updated (0 = not found or already set).
+    @discardableResult
+    public func setSpanIndexed(drawerId: String) async throws -> Int {
+        try await store.setSpanIndexed(drawerId: drawerId)
+    }
+
+    /// The span-encode duty's work items (active, non-empty, bit 27 clear),
+    /// oldest id first, paged by `afterDrawerID`. Pass-through over
+    /// `DrawerStore.spanIndexDebtBatch`. Mirrors Rust
+    /// `Estate::span_index_debt_batch`.
+    public func spanIndexDebtBatch(limit: Int, afterDrawerID: String? = nil) async throws -> [Drawer] {
+        try await store.spanIndexDebtBatch(limit: limit, afterDrawerID: afterDrawerID)
+    }
+
+    /// Count of drawers still awaiting span encoding — the span-encode
+    /// drain's `pending`. Pass-through over `DrawerStore.countSpanIndexDebt`.
+    /// Mirrors Rust `Estate::count_span_index_debt`.
+    public func countSpanIndexDebt() async throws -> Int {
+        try await store.countSpanIndexDebt()
+    }
+
+    /// Mark one drawer settled for the active distilled-fact recipe.
+    @discardableResult
+    public func setFactsExtracted(drawerId: String) async throws -> Int {
+        try await store.setFactsExtracted(drawerId: drawerId)
+    }
+
+    /// Compare-and-set settlement used after inference and fact filing.
+    @discardableResult
+    public func setFactsExtracted(
+        drawerId: String, ifContentMatches expectedContent: String
+    ) async throws -> Int {
+        try await store.setFactsExtracted(
+            drawerId: drawerId, ifContentMatches: expectedContent)
+    }
+
+    /// Bounded deterministic fact-extraction debt batch.
+    public func factExtractionDebtBatch(
+        limit: Int, afterDrawerID: String? = nil
+    ) async throws -> [Drawer] {
+        try await store.factExtractionDebtBatch(limit: limit, afterDrawerID: afterDrawerID)
+    }
+
+    /// Estate-wide count of drawers awaiting distilled fact extraction.
+    public func countFactExtractionDebt() async throws -> Int {
+        try await store.countFactExtractionDebt()
+    }
+
+    /// Settle one source as rejected by the active recipe (bits 28 and 29).
+    /// Pass-through over `DrawerStore.markFactExtractionRejected`.
+    public func markFactExtractionRejected(
+        sourceID: String, expectedContent: String, recipeID: String
+    ) async throws -> Int? {
+        try await store.markFactExtractionRejected(
+            sourceID: sourceID, expectedContent: expectedContent, recipeID: recipeID)
+    }
+
+    /// Live drawers the active recipe rejected (bit 29 set).
+    public func countFactExtractionRejected() async throws -> Int {
+        try await store.countFactExtractionRejected()
     }
 
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
@@ -521,6 +591,40 @@ public actor Estate {
     /// `DrawerStore.countMissingSubject`.
     public func countMissingSubject(pipelineVersion: String) async throws -> Int {
         try await store.countMissingSubject(pipelineVersion: pipelineVersion)
+    }
+
+    // ── Anomalous flag (bit 26, §11.18 anomalous-flag recall prefilter) ───────
+
+    /// Set or clear the `isAnomalous` flag (bit 26) on one drawer.
+    ///
+    /// Pass-through over `DrawerStore.setAnomalousFlag`. This is the
+    /// seam GeniusLocusKit's anomaly-flag sweep (§11.18) writes through
+    /// after computing per-room cohesion z-scores via SubstrateML.
+    ///
+    /// A derived-signal write: no audit event, no supersession cascade,
+    /// no lifecycle or lineage field touched, and no content digest bump.
+    /// The `now` parameter is accepted for deterministic call-site
+    /// discipline but is not used by the write itself (bit 26 carries no
+    /// timestamp). `rebuildAll` at estate reopen recomputes
+    /// `operationalAND` from scratch; the anomaly sweep owns bit 26 and
+    /// no fingerprint-store pre-computation is required for the recall
+    /// filter to work (filter is applied per-hit after hydration).
+    ///
+    /// - Parameters:
+    ///   - drawerId: The `Drawer.id` whose flag should change.
+    ///   - anomalous: `true` sets bit 26; `false` clears it.
+    ///   - now: Caller-supplied instant (deterministic clock discipline).
+    /// - Returns: Count of rows updated (0 = drawer not found; 1 = success).
+    @discardableResult
+    public func setAnomalousFlag(
+        drawerId: String,
+        anomalous: Bool,
+        now: Date
+    ) async throws -> Int {
+        // `now` is accepted for call-site determinism but not used by
+        // the write itself — the anomalous bit carries no timestamp.
+        _ = now
+        return try await store.setAnomalousFlag(drawerId: drawerId, anomalous: anomalous)
     }
 
     /// Presence debt, NULL-only (PR-09) — the subject-backfill drain
@@ -595,6 +699,12 @@ public actor Estate {
         try await store.allDrawers(hydrationLevel: hydrationLevel, limit: limit)
     }
 
+    /// Active, non-dataset IDs in deterministic `(filedAt, content, id)` order.
+    /// The store applies `limit` before any content body is materialized.
+    public func activeCorpusContentIDs(limit: Int) async throws -> [String] {
+        try await store.activeCorpusContentIDs(limit: limit)
+    }
+
     /// Bounded page of active (non-tombstoned) drawers ordered by `id`
     /// ascending, optionally starting strictly after `afterID`. Exposes
     /// `DrawerStore.activeDrawersAfter(id:limit:)` through the `Estate`
@@ -649,6 +759,18 @@ public actor Estate {
         try await store.drawersIn(wing: wing, room: room)
     }
 
+    /// Enumerate rooms, optionally restricted to one wing.
+    ///
+    /// When `wing` is nil, returns every non-tombstoned room across all wings,
+    /// sorted by `"wing\0room"`. When `wing` is non-nil, returns only rooms in
+    /// that wing. Delegates to `store.listRooms(in:)`.
+    ///
+    /// Used by the community-daemon capture endpoint to derive the set of valid
+    /// `CaptureDestination` values from the current canonical estate state.
+    public func listRooms(in wing: String? = nil) async throws -> [RoomSummary] {
+        try await store.listRooms(in: wing)
+    }
+
     /// Batch by-id drawer load. Returns the drawers matching `ids` in
     /// unspecified order, omitting ids with no row, via a single indexed
     /// `IN` query per chunk rather than a full-estate scan. The O(candidates)
@@ -700,7 +822,8 @@ public actor Estate {
     public func getDrawers(
         ids: [String],
         matchingFrame frame: RecallFrame,
-        hydrationLevel: HydrationLevel
+        hydrationLevel: HydrationLevel,
+        preservePhysicalUUIDSpellings: Bool = false
     ) async throws -> FrameFilteredDrawers {
         // Content-tier predicates need the body for the substring match; force
         // .full in that case so the frame is evaluated faithfully. Otherwise the
@@ -715,7 +838,9 @@ public actor Estate {
         let nodeNames: [String: (wing: String, room: String)]
         if BitmapEvaluator.chainHasStructuredNameFilter(frame.filterChain) {
             let parentIds = Set(loaded.map(\.parentNodeId))
-            nodeNames = try await store.resolveNodeNames(parentNodeIds: Array(parentIds))
+            nodeNames = try await store.resolveNodeNames(
+                parentNodeIds: Array(parentIds),
+                preservePhysicalUUIDSpellings: preservePhysicalUUIDSpellings)
         } else {
             nodeNames = [:]
         }
@@ -723,9 +848,24 @@ public actor Estate {
         // historical reconstruction is honored too (BitmapEvaluator reads the
         // audit log via `store`), so a frame's `asOf` projects the same state
         // it would on the full recall path.
-        let admissible = try await BitmapEvaluator.evaluate(
+        let evaluation = try await BitmapEvaluator.evaluateResult(
             frame: frame, drawers: loaded, store: store, nodeNames: nodeNames)
-        return FrameFilteredDrawers(admissible: admissible, loadedIDs: loadedIDs)
+        return FrameFilteredDrawers(admissible: evaluation.rows, loadedIDs: loadedIDs,
+                                    withheldBySensitivity: evaluation.withheldBySensitivity)
+    }
+
+    /// Hydrate exactly these IDs and count only default-sensitivity exclusions.
+    /// Rejected rows and loaded-ID information remain inside LocusKit.
+    public func hydrateWithSensitivityCount(
+        ids: [String], matchingFrame frame: RecallFrame, hydrationLevel: HydrationLevel
+    ) async throws -> BitmapEvaluationResult {
+        let loadLevel: HydrationLevel = BitmapEvaluator.chainHasContentPredicate(frame.filterChain)
+            ? .full : hydrationLevel
+        let loaded = try await store.getDrawers(ids: ids, hydrationLevel: loadLevel)
+        let nodeNames = try await store.resolveNodeNames(
+            parentNodeIds: Array(Set(loaded.map(\.parentNodeId))))
+        return try await BitmapEvaluator.evaluateResult(
+            frame: frame, drawers: loaded, store: store, nodeNames: nodeNames)
     }
 
     /// LATE BODY HYDRATION — read the full content blob for a specific id set.
@@ -800,6 +940,18 @@ public actor Estate {
         try await store.insertRecallTraces(items)
     }
 
+    /// Write end-of-day tournament ratings (one `insert or replace` per
+    /// row keyed on `drawer_id`). Delegates to `DrawerStore.upsertRecallRatings`.
+    public func upsertRecallRatings(_ ratings: [RecallRating]) async throws {
+        try await store.upsertRecallRatings(ratings)
+    }
+
+    /// Tournament ratings for `ids`, keyed by drawer id; ids without a
+    /// `recall_ratings` row are absent. Delegates to `DrawerStore.recallRatings`.
+    public func recallRatings(ids: [String]) async throws -> [String: RecallRating] {
+        try await store.recallRatings(ids: ids)
+    }
+
     /// Wave-2 §3.2: atomically capture a vague drawer, write its
     /// `_consolidated_from` tunnels, and mark every constituent
     /// `representedByVague` — one serializable commit. Delegates to
@@ -861,6 +1013,23 @@ public actor Estate {
         try await store.allActiveTunnels()
     }
 
+    /// Active non-tombstoned tunnels whose `sourceDrawerId` equals `drawerId`.
+    ///
+    /// Pushes source-drawer equality, tombstone guard, and lifecycle/retirement
+    /// bitmap predicates into SQL so that SQLite evaluates them before any row
+    /// is allocated in Swift. Delegates to `DrawerStore.activeTunnelsFrom`.
+    public func activeTunnelsFrom(drawerId: String) async throws -> [Tunnel] {
+        try await store.activeTunnelsFrom(drawerId: drawerId)
+    }
+
+    /// Active non-tombstoned tunnels whose `targetDrawerId` equals `drawerId`.
+    ///
+    /// Mirror of `activeTunnelsFrom(drawerId:)` for the incoming direction.
+    /// Delegates to `DrawerStore.activeTunnelsTo`.
+    public func activeTunnelsTo(drawerId: String) async throws -> [Tunnel] {
+        try await store.activeTunnelsTo(drawerId: drawerId)
+    }
+
     /// Insert a tunnel directly into the estate store.
     ///
     /// Delegates to `DrawerStore.addTunnel`. Conflicting IDs surface as
@@ -870,6 +1039,16 @@ public actor Estate {
     /// proposed → active review cycle that `moot_link_memories` enforces.
     internal func addTunnel(_ t: Tunnel) async throws {
         try await store.addTunnel(t)
+    }
+
+    /// File one selected contradiction proposal through the store's
+    /// serializable fresh-read/write boundary.  The request carries retained
+    /// digests rather than copied bodies; the store verifies them before it
+    /// can create a proposed edge.
+    public func fileAtomicConflictProposal(
+        _ request: AtomicConflictProposalRequest
+    ) async throws -> AtomicConflictProposalOutcome {
+        try await store.fileAtomicConflictProposal(request)
     }
 
     /// Fetch one tunnel by id (nil when absent). Read-only estate-level
@@ -1007,6 +1186,13 @@ public actor Estate {
         try await store.allKGFacts()
     }
 
+    /// Active kg-facts with optional subject and/or sourceDrawerID equality predicates
+    /// pushed into SQL. When both parameters are nil this is equivalent to
+    /// `allKGFacts()`. Delegates to `DrawerStore.kgFacts(subjectEq:sourceDrawerIDEq:)`.
+    public func kgFacts(subjectEq: String? = nil, sourceDrawerIDEq: String? = nil) async throws -> [KGFact] {
+        try await store.kgFacts(subjectEq: subjectEq, sourceDrawerIDEq: sourceDrawerIDEq)
+    }
+
     /// All kg-facts estate-wide regardless of lifecycle state — active AND
     /// retired — ordered by `filedAt` ascending. Estate-level pass-through
     /// over `DrawerStore.allKGFactsIncludingRetired`.
@@ -1028,9 +1214,12 @@ public actor Estate {
     /// Higher kits call this to obtain display names after node-tree integrity
     /// removed them from the Drawer struct.
     public func resolveNodeNames(
-        parentNodeIds: [String]
+        parentNodeIds: [String],
+        preservePhysicalUUIDSpellings: Bool = false
     ) async throws -> [String: (wing: String, room: String)] {
-        try await store.resolveNodeNames(parentNodeIds: parentNodeIds)
+        try await store.resolveNodeNames(
+            parentNodeIds: parentNodeIds,
+            preservePhysicalUUIDSpellings: preservePhysicalUUIDSpellings)
     }
 
     // MARK: - Manifest and identity

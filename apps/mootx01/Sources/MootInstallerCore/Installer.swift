@@ -17,10 +17,10 @@
 //   The YAML is a simple two-key object; we write it directly rather than
 //   round-tripping a full YAML parser.
 //
-// Codex (Desktop & CLI) (TOML):
-//   ~/.codex/config.toml is shared by Codex CLI and Codex Desktop, so a
-//   single "codex" entry covers both. The installer merges the
-//   `[mcp_servers.mootx01]` table with a line-based pass that preserves all
+// TOML clients (Codex Desktop & CLI, Grok CLI):
+//   Codex uses ~/.codex/config.toml (shared by CLI and Desktop). Grok CLI uses
+//   ~/.grok/config.toml with the same `[mcp_servers.mootx01]` + `url` shape.
+//   The installer merges that table with a line-based pass that preserves all
 //   unrelated content (other tables, top-level keys), rather than writing JSON
 //   into a TOML file — which silently corrupted the file in earlier builds.
 //   Install dispatches on the config file extension so a .toml never reaches
@@ -188,6 +188,21 @@ public enum Installer {
             try fm.removeItem(at: proxySymlinkURL)
         }
         try fm.createSymbolicLink(atPath: proxySymlinkURL.path, withDestinationPath: "mootx01")
+
+        // 5. Create the sibling botLink symlink `mootx01-botLink → mootx01`
+        //    (BL-1) — same relative-symlink and same-directory rationale as
+        //    the proxy symlink above. Cloud agents exec `mootx01-botLink
+        //    <subcommand>` over a permissioned one-shot shell; ArgvDispatch
+        //    prepends the `botlink` subcommand automatically. Uninstall
+        //    symmetry matches the proxy sibling: both live inside the
+        //    install root that `removePlacedBinary` removes wholesale, so
+        //    neither needs an individual unlink there.
+        let botLinkSymlinkURL = MootPaths.botLinkSymlinkURL(homeDirectory: homeDirectory)
+        if fm.fileExists(atPath: botLinkSymlinkURL.path)
+            || (try? fm.destinationOfSymbolicLink(atPath: botLinkSymlinkURL.path)) != nil {
+            try fm.removeItem(at: botLinkSymlinkURL)
+        }
+        try fm.createSymbolicLink(atPath: botLinkSymlinkURL.path, withDestinationPath: "mootx01")
 
         return destURL.path
     }
@@ -843,10 +858,10 @@ public enum Installer {
 
     // MARK: - TOML client helpers
 
-    /// Merge the mootx01 MCP entry into a TOML config file (Codex CLI / Desktop).
+    /// Merge the mootx01 MCP entry into a TOML config file (Codex, Grok CLI).
     ///
-    /// Codex stores MCP servers as `[mcp_servers.<name>]` tables in
-    /// `~/.codex/config.toml`. There is no Foundation TOML codec and the kit
+    /// Codex and Grok CLI store MCP servers as `[mcp_servers.<name>]` tables
+    /// (`~/.codex/config.toml`, `~/.grok/config.toml`). There is no Foundation TOML codec and the kit
     /// ships zero external dependencies, so this is a deliberate line-based
     /// merge rather than a parse/re-emit round-trip: it replaces only the
     /// `[mcp_servers.<serverName>]` table (and any of its child subtables) and
@@ -995,6 +1010,347 @@ public enum Installer {
         var result = output.joined(separator: "\n")
         if !result.isEmpty { result += "\n" }
         try result.write(to: configURL, atomically: true, encoding: .utf8)
+    }
+
+    // MARK: - Upgrade-time Codex direct-entry cleanup (ownership-gated)
+
+    /// Outcome of `cleanupRedundantCodexDirectEntry`. Every leave-alone path
+    /// is distinguished so the upgrade CLI can print an accurate line per case.
+    public enum CodexDirectEntryCleanupOutcome: Equatable, Sendable {
+        /// The Codex plugin does not own the MCP connection (not installed,
+        /// or not enabled) — nothing to reconcile; any direct entry is the
+        /// client's working wiring and is left untouched.
+        case pluginNotOwner
+        /// No config file, or no `[mcp_servers.mootx01]` table in it.
+        case notPresent
+        /// The entry is present but NOT confirmed to be the installer's own
+        /// default-database wiring: `MCPEntryClassifier` returned `.foreign`,
+        /// or the table could not be parsed for classification. Left
+        /// untouched; `reason` names why, for the printed report.
+        case retainedForeign(reason: String)
+        /// Backup or removal failed. Fail-closed: no removal ever happens
+        /// without a completed backup, so the config still carries the entry.
+        case failed(message: String)
+        /// The entry was confirmed `.oursDefault`, backed up, and removed.
+        case removed
+    }
+
+    /// Remove the redundant direct `[mcp_servers.mootx01]` entry from
+    /// `~/.codex/config.toml` when the MOOT Codex plugin owns the MCP
+    /// connection — but ONLY when the entry is confirmed to be the
+    /// installer's own default-database wiring.
+    ///
+    /// Ownership gate: the entry is extracted from the TOML table and run
+    /// through `MCPEntryClassifier.classify(entry:)` — the same shared
+    /// classification the install-time dedupe (`dedupeDirectEntry`) and the
+    /// JSON uninstall path use. An entry that classifies `.foreign` (an
+    /// `args` `--db` estate selection, a non-default-port URL, or a shape
+    /// that does not resolve to the mootx01 binary or the loopback daemon
+    /// endpoint) is reported and left untouched: a stale redundant entry is
+    /// a far smaller harm than silently deleting a user's scoped working
+    /// configuration. A table that cannot be parsed confidently is treated
+    /// exactly the same way — classification failure NEVER enables removal.
+    ///
+    /// Backup discipline: fail-closed. The file is copied to
+    /// `config.toml.mootx01-backup` before modification; a backup failure
+    /// aborts the cleanup with the config untouched.
+    ///
+    /// Lives in MootInstallerCore (rather than as UpgradeCommand private
+    /// logic) so the ownership gate is directly unit-testable from
+    /// `MootInstallerCoreTests` with an injected sandbox home — the same
+    /// extraction rationale as `DepthInstaller.hostsWithExistingPluginDirectory`.
+    public static func cleanupRedundantCodexDirectEntry(
+        pluginID: String = "mootx01@mootx01",
+        homeDirectory: URL
+    ) -> CodexDirectEntryCleanupOutcome {
+        guard PluginDetector.ownsCodexConnection(
+            pluginID: pluginID, homeDirectory: homeDirectory
+        ) else {
+            return .pluginNotOwner
+        }
+        let configURL = homeDirectory.appendingPathComponent(".codex/config.toml")
+        guard FileManager.default.fileExists(atPath: configURL.path),
+              let text = try? String(contentsOf: configURL, encoding: .utf8) else {
+            return .notPresent
+        }
+        let header = "[mcp_servers.\(MCPClients.serverName)]"
+        guard text.components(separatedBy: "\n").contains(where: {
+            $0.trimmingCharacters(in: .whitespaces) == header
+        }) else { return .notPresent }
+
+        // Ownership classification BEFORE any write. nil means the table
+        // exists but could not be parsed with confidence — retain, never
+        // remove what we cannot positively identify as ours.
+        guard let entry = tomlServerEntry(in: text, serverName: MCPClients.serverName) else {
+            return .retainedForeign(
+                reason: "entry could not be parsed for ownership classification")
+        }
+        if case let .foreign(reason) = MCPEntryClassifier.classify(entry: entry) {
+            return .retainedForeign(reason: reason)
+        }
+
+        // Backup before modification, fail-closed on error.
+        let backupURL = configURL.deletingLastPathComponent()
+            .appendingPathComponent("config.toml.mootx01-backup")
+        do {
+            if FileManager.default.fileExists(atPath: backupURL.path) {
+                try FileManager.default.removeItem(at: backupURL)
+            }
+            try FileManager.default.copyItem(at: configURL, to: backupURL)
+        } catch {
+            return .failed(message: "could not back up Codex config: \(error)")
+        }
+        do {
+            try removeFromTOMLConfig(at: configURL, serverName: MCPClients.serverName)
+        } catch {
+            return .failed(message: "could not clean up Codex config: \(error)")
+        }
+        return .removed
+    }
+
+    // MARK: - TOML server-entry extraction (for ownership classification)
+
+    /// Which table of the server entry a scanned line belongs to.
+    private enum TOMLEntrySection { case outside, main, env }
+
+    /// Extract the `[mcp_servers.<serverName>]` table (plus a
+    /// `[mcp_servers.<serverName>.env]` child table, if present) from TOML
+    /// text into the `[String: Any]` shape `MCPEntryClassifier.classify(entry:)`
+    /// consumes: `url`/`command` as String, `args` as [String], `env` as
+    /// [String: Any].
+    ///
+    /// Line-based, matching this file's other TOML handling (the
+    /// dependency-free installer carries no TOML parser). Deliberately
+    /// CONSERVATIVE: returns nil when the table is absent — and, crucially,
+    /// when ANY of its lines cannot be parsed with confidence (an
+    /// unrecognised child subtable, a malformed value, a multi-line
+    /// construct, a non-string args element). Callers treat nil as "not
+    /// classifiable" and retain the entry, so a parse failure can never
+    /// cause a removal — the fail-safe direction (Smythe MO-01 W-2).
+    static func tomlServerEntry(in text: String, serverName: String) -> [String: Any]? {
+        let header = "[mcp_servers.\(serverName)]"
+        let envHeader = "[mcp_servers.\(serverName).env]"
+        let childPrefix = "[mcp_servers.\(serverName)."
+        var entry: [String: Any] = [:]
+        var env: [String: Any]?
+        var found = false
+        var section: TOMLEntrySection = .outside
+
+        for rawLine in text.components(separatedBy: "\n") {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") {
+                if line == header {
+                    section = .main
+                    found = true
+                } else if line == envHeader {
+                    section = .env
+                    if env == nil { env = [:] }
+                } else if line.hasPrefix(childPrefix) {
+                    // A child subtable this extractor does not model — the
+                    // entry has structure we cannot classify. Bail to nil.
+                    return nil
+                } else {
+                    section = .outside
+                }
+                continue
+            }
+            guard section != .outside else { continue }
+            if line.isEmpty || line.hasPrefix("#") { continue }
+            guard let eq = line.firstIndex(of: "=") else { return nil }
+            let key = line[..<eq].trimmingCharacters(in: .whitespaces)
+            let rawValue = String(line[line.index(after: eq)...])
+                .trimmingCharacters(in: .whitespaces)
+            guard !key.isEmpty else { return nil }
+
+            switch section {
+            case .env:
+                guard let value = parseTOMLString(rawValue) else { return nil }
+                env?[key] = value
+            case .main:
+                switch key {
+                case "url", "command":
+                    guard let value = parseTOMLString(rawValue) else { return nil }
+                    entry[key] = value
+                case "args":
+                    // Strict [String]: a non-string element would make the
+                    // classifier's `args as? [String]` cast fail and silently
+                    // skip the `--db` override check — so it fails here instead.
+                    guard let value = parseTOMLStringArray(rawValue) else { return nil }
+                    entry[key] = value
+                case "env":
+                    guard let value = parseTOMLInlineStringTable(rawValue) else { return nil }
+                    env = (env ?? [:]).merging(value) { _, new in new }
+                default:
+                    // A key the classifier does not consult (e.g.
+                    // startup_timeout). Kept raw so the entry is complete;
+                    // classification only reads url/command/args/env.
+                    entry[key] = rawValue
+                }
+            case .outside:
+                break
+            }
+        }
+        guard found else { return nil }
+        if let env { entry["env"] = env }
+        return entry
+    }
+
+    /// Parse a TOML basic (`"…"`) or literal (`'…'`) string value,
+    /// tolerating a trailing `# comment`. Returns nil for anything else
+    /// (multi-line strings, bare values, malformed quoting). Basic-string
+    /// escapes are decoded via JSONSerialization — TOML basic-string escape
+    /// syntax is JSON-compatible for the single-line shapes written here.
+    private static func parseTOMLString(_ raw: String) -> String? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard let first = s.first else { return nil }
+        if first == "\"" {
+            var index = s.index(after: s.startIndex)
+            var escaped = false
+            while index < s.endIndex {
+                let c = s[index]
+                if escaped {
+                    escaped = false
+                } else if c == "\\" {
+                    escaped = true
+                } else if c == "\"" {
+                    guard trailingIsCommentOrEmpty(String(s[s.index(after: index)...]))
+                    else { return nil }
+                    let slice = String(s[...index])
+                    guard let data = "[\(slice)]".data(using: .utf8),
+                          let arr = try? JSONSerialization.jsonObject(with: data) as? [String],
+                          arr.count == 1
+                    else { return nil }
+                    return arr[0]
+                }
+                index = s.index(after: index)
+            }
+            return nil
+        }
+        if first == "'" {
+            // Literal string: no escapes, verbatim to the next single quote.
+            let afterOpen = s.index(after: s.startIndex)
+            guard let close = s[afterOpen...].firstIndex(of: "'") else { return nil }
+            guard trailingIsCommentOrEmpty(String(s[s.index(after: close)...]))
+            else { return nil }
+            return String(s[afterOpen..<close])
+        }
+        return nil
+    }
+
+    /// True when what follows a parsed value is nothing, whitespace, or a
+    /// `# comment` — the only things TOML allows after a value on one line.
+    private static func trailingIsCommentOrEmpty(_ rest: String) -> Bool {
+        let t = rest.trimmingCharacters(in: .whitespaces)
+        return t.isEmpty || t.hasPrefix("#")
+    }
+
+    /// Parse a TOML single-line array of strings (`["serve", "--db", "x"]`)
+    /// via JSONSerialization — TOML inline string-array syntax is
+    /// JSON-array-compatible (Smythe MO-01 W-2). Any non-string element or
+    /// parse failure returns nil (callers retain the entry).
+    private static func parseTOMLStringArray(_ raw: String) -> [String]? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard s.hasPrefix("[") else { return nil }
+        guard let close = indexOfClosingBracket(in: s, open: "[", close: "]") else { return nil }
+        guard trailingIsCommentOrEmpty(String(s[s.index(after: close)...])) else { return nil }
+        let body = String(s[...close])
+        guard let data = body.data(using: .utf8),
+              let arr = try? JSONSerialization.jsonObject(with: data) as? [Any]
+        else { return nil }
+        var strings: [String] = []
+        for element in arr {
+            guard let str = element as? String else { return nil }
+            strings.append(str)
+        }
+        return strings
+    }
+
+    /// Parse a TOML inline table of string values
+    /// (`{ MOOTX01_HTTP_PORT = "", MOOTX01_VAULT = "off" }`) into a map.
+    /// Bare keys and string values only — anything else returns nil
+    /// (callers retain the entry).
+    private static func parseTOMLInlineStringTable(_ raw: String) -> [String: Any]? {
+        let s = raw.trimmingCharacters(in: .whitespaces)
+        guard s.hasPrefix("{") else { return nil }
+        guard let close = indexOfClosingBracket(in: s, open: "{", close: "}") else { return nil }
+        guard trailingIsCommentOrEmpty(String(s[s.index(after: close)...])) else { return nil }
+        let body = String(s[s.index(after: s.startIndex)..<close])
+        guard let pairs = splitTopLevel(body, on: ",") else { return nil }
+        var table: [String: Any] = [:]
+        for pair in pairs {
+            let trimmed = pair.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }  // empty table, or trailing separator
+            guard let eq = trimmed.firstIndex(of: "=") else { return nil }
+            let key = trimmed[..<eq].trimmingCharacters(in: .whitespaces)
+            let value = String(trimmed[trimmed.index(after: eq)...])
+            guard !key.isEmpty, !key.hasPrefix("\""), !key.hasPrefix("'"),
+                  let parsed = parseTOMLString(value)
+            else { return nil }
+            table[key] = parsed
+        }
+        return table
+    }
+
+    /// Index of the bracket closing the one `open` begins at, respecting
+    /// TOML basic/literal string quoting so brackets inside values do not
+    /// miscount. Returns nil when unbalanced.
+    private static func indexOfClosingBracket(
+        in s: String, open: Character, close: Character
+    ) -> String.Index? {
+        var depth = 0
+        var inBasic = false, inLiteral = false, escaped = false
+        var index = s.startIndex
+        while index < s.endIndex {
+            let c = s[index]
+            if inBasic {
+                if escaped { escaped = false }
+                else if c == "\\" { escaped = true }
+                else if c == "\"" { inBasic = false }
+            } else if inLiteral {
+                if c == "'" { inLiteral = false }
+            } else {
+                switch c {
+                case "\"": inBasic = true
+                case "'": inLiteral = true
+                case open: depth += 1
+                case close:
+                    depth -= 1
+                    if depth == 0 { return index }
+                default: break
+                }
+            }
+            index = s.index(after: index)
+        }
+        return nil
+    }
+
+    /// Split on `separator` occurrences outside TOML string quoting.
+    /// Returns nil when quoting is unbalanced.
+    private static func splitTopLevel(_ s: String, on separator: Character) -> [String]? {
+        var parts: [String] = []
+        var current = ""
+        var inBasic = false, inLiteral = false, escaped = false
+        for c in s {
+            if inBasic {
+                if escaped { escaped = false }
+                else if c == "\\" { escaped = true }
+                else if c == "\"" { inBasic = false }
+                current.append(c)
+            } else if inLiteral {
+                if c == "'" { inLiteral = false }
+                current.append(c)
+            } else if c == separator {
+                parts.append(current)
+                current = ""
+            } else {
+                if c == "\"" { inBasic = true }
+                else if c == "'" { inLiteral = true }
+                current.append(c)
+            }
+        }
+        guard !inBasic, !inLiteral else { return nil }
+        parts.append(current)
+        return parts
     }
 
     // MARK: - Backups (§4.2)

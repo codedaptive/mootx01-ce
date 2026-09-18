@@ -28,13 +28,14 @@
 import CorpusKit
 import CorpusKitProviders
 import Foundation
+import MootProductIdentity
 import GeniusLocusKit
 import LocusKit
 import OSLog
 import PersistenceKit
-import VectorKit
+import SynapseKit
 
-private let migrationLog = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+private let migrationLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
 // MARK: - State machine
 
@@ -461,8 +462,7 @@ public extension GeniusLocusKit {
             throw SharedContentMigrationError.storageFailure(
                 state: .discovered, reason: "no storage registered for estate")
         }
-        let estateObj = try estate(for: handle)
-        let source = LocusDrawerCorpusContentSource(estate: estateObj)
+        let source = try await LocusDrawerCorpusContentSource(kit: self, handle: handle)
         let wiredFingerprint = CorpusContentEngine.configurationFingerprint(
             mode: .attached, models: embeddingModels)
         try await storage.migrate(to: SharedContentMigrationStore.schemaDeclaration)
@@ -500,7 +500,7 @@ public extension GeniusLocusKit {
                 // Fresh estate: stamp the current format without creating any
                 // historical migration bookkeeping. A fresh SDK consumer that
                 // does not compile this target uses the same core format row.
-                try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+                try await EstateFormatStore(storage: storage).stamp(.v1_1, now: now)
                 var complete = fresh
                 complete.state = .complete
                 complete.ensembleFingerprint = wiredFingerprint
@@ -530,7 +530,7 @@ public extension GeniusLocusKit {
 
         if record.state == .complete {
             if record.ensembleFingerprint == wiredFingerprint {
-                try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+                try await EstateFormatStore(storage: storage).stamp(.v1_1, now: now)
                 return report(for: record)
             }
             // Follow-on ENSEMBLE UPGRADE: the completed record's recorded
@@ -766,7 +766,7 @@ public extension GeniusLocusKit {
         // The current runtime may open semantic substores as soon as the
         // rebuilt lane is verified. Physical page reclamation remains a
         // retryable maintenance step and does not hold the format gate dark.
-        try await EstateFormatStore(storage: storage).stamp(.current, now: now)
+        try await EstateFormatStore(storage: storage).stamp(.v1_1, now: now)
 
         // 11. complete — after physical reclamation (P5's maintenance API).
         //    `completeSharedContentReclaim` flips the final state; until
@@ -1026,7 +1026,7 @@ public extension GeniusLocusKit {
     private func protectedVectorsFold(
         storage: any Storage, legacyVectorKeys: Set<String>
     ) async throws -> String {
-        // Pin the DECLARED VectorKit schema before reading (P6 scale
+        // Pin the DECLARED SynapseKit schema before reading (P6 scale
         // finding): row decode forms depend on the connection's accumulated
         // schema view, and the baseline capture runs BEFORE any engine has
         // declared the vectors schema while verification runs AFTER — same

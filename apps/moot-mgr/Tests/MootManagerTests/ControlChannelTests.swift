@@ -91,26 +91,43 @@ private func udsRoundTrip(socketPath: String, request: String) async -> String {
 
 struct ResidentHostConfigTests {
 
+    // Helper: create a scratch config directory and write `daemon.stats_store`
+    // into its config.json so the test controls the resolved store path without
+    // touching the developer's real configuration file (no env override exists
+    // for the store path per R6/W-6 ruling 2026-09-09).
+    private func scratchConfigDir(storePath: String) throws -> URL {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("moot-mgr-cht-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        // Write a valid config.json with daemon.stats_store set to storePath.
+        // Using JSONSerialization avoids manual escaping of the path string.
+        let dict: [String: Any] = ["daemon": ["stats_store": storePath]]
+        let data = try JSONSerialization.data(withJSONObject: dict, options: [.sortedKeys])
+        try data.write(to: dir.appendingPathComponent("config.json"))
+        return dir
+    }
+
     @Test("fromEnvironment resolves port, token, and a default socket beside the store")
-    func envResolution() {
+    func envResolution() throws {
+        let customStore = "/tmp/x/stats.sqlite"
+        let configDir = try scratchConfigDir(storePath: customStore)
         let env = [
-            ManagerConfig.storePathEnvKey: "/tmp/x/stats.sqlite",
             ResidentHostConfig.httpPortEnvKey: "9099",
             ResidentHostConfig.controlTokenEnvKey: testToken,
         ]
-        let cfg = ResidentHostConfig.fromEnvironment(env)
+        let cfg = ResidentHostConfig.fromEnvironment(env, configurationDirectory: configDir)
         #expect(cfg.httpPort == 9099)
         #expect(cfg.controlToken == testToken)
         // Default control socket sits beside the store file.
         #expect(cfg.controlSocketPath == "/tmp/x/control.sock")
-        #expect(cfg.manager.storeURL.path == "/tmp/x/stats.sqlite")
+        #expect(cfg.manager.storeURL.path == customStore)
     }
 
     @Test("fromEnvironment defaults the HTTP port and empty token when absent")
-    func envDefaults() {
-        let cfg = ResidentHostConfig.fromEnvironment([
-            ManagerConfig.storePathEnvKey: "/tmp/y/stats.sqlite"
-        ])
+    func envDefaults() throws {
+        let customStore = "/tmp/y/stats.sqlite"
+        let configDir = try scratchConfigDir(storePath: customStore)
+        let cfg = ResidentHostConfig.fromEnvironment([:], configurationDirectory: configDir)
         #expect(cfg.httpPort == ResidentHostConfig.defaultHTTPPort)
         #expect(cfg.controlToken == "")   // no default token → HTTP control disabled
     }

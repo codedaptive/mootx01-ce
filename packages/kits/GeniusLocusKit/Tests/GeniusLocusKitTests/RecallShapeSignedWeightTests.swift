@@ -20,7 +20,7 @@ import Testing
 import Foundation
 import LocusKit
 import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 @testable import GeniusLocusKit
@@ -92,6 +92,7 @@ struct RecallShapeSignedWeightTests {
             limit: 10,
             fallback: .failClosed,
             queryText: query,
+            origin: .internal,
             recallShape: shape
         )
     }

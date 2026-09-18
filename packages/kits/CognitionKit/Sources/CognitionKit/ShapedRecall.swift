@@ -58,17 +58,29 @@ public struct ShapedRecall: Recipe {
         public let filter: LocusKit.Filter
         /// How many ranked matches to return.
         public let limit: Int
+        /// Optional per-call candidate-pool depth override, clamped to
+        /// `[RecallShape.frontierKFloor, RecallShape.frontierKCeiling]` (`[64, 256]`)
+        /// by the GLK recall engine. Takes precedence over the shape's own
+        /// `frontierK` setting and the engine formula `min(max(limit × 4, 64), 256)`.
+        /// Nil (the default) defers to the shape or the engine formula — byte-identical
+        /// to requests without this parameter. Mirrors `GLKRecallRequest.frontierK`.
+        ///
+        /// Not applied to the session_hybrid path, which constructs its own
+        /// recall request through NeuronKit.hybridRecall.
+        public let frontierK: Int?
 
         public init(
             query: String,
             preset: String,
             filter: LocusKit.Filter,
-            limit: Int
+            limit: Int,
+            frontierK: Int? = nil
         ) {
             self.query = query
             self.preset = preset
             self.filter = filter
             self.limit = limit
+            self.frontierK = frontierK
         }
     }
 
@@ -142,19 +154,10 @@ public struct ShapedRecall: Recipe {
         // preference) the preset roster steers. `.full` hydration so each hit
         // carries its body for the result projection. The shape is passed through
         // unchanged; when `nil`, the engine fuses uniformly.
-        let frame = LocusKit.RecallFrame(
-            filterChain: [input.filter],
-            hydrationLevel: .full,
-            limit: input.limit,
-            ordering: .byCaptureTimeDesc)
-        let request = GLKRecallRequest(
-            frame: frame,
-            mode: .unionBest,
-            scoring: .matrixAware,
-            limit: input.limit,
-            fallback: .allowDegraded,
-            queryText: input.query,
-            recallShape: shape)
+        let request = Self.balancedRequest(
+            query: input.query, filter: input.filter, limit: input.limit,
+            shape: shape, frontierK: input.frontierK,
+            fallback: .allowDegraded)
         let result = try await kit.recall(estate, request)
 
         // Project each hit into a PreciseMatch. The hits arrive in the shaped
@@ -171,6 +174,44 @@ public struct ShapedRecall: Recipe {
         }
 
         return Output(matches: matches, appliedPreset: appliedPreset)
+    }
+
+    /// The common balanced unionBest composition. Transcript recall uses this
+    /// lower-level builder to add its strict directive without invoking a
+    /// public tool or duplicating the first-stage policy.
+    static func balancedRequest(
+        query: String,
+        filter: LocusKit.Filter,
+        limit: Int,
+        shape: RecallShape? = nil,
+        frontierK: Int? = nil,
+        fallback: RecallFallbackPolicy
+    ) -> GLKRecallRequest {
+        let frame = LocusKit.RecallFrame(
+            filterChain: [filter], hydrationLevel: .full, limit: limit,
+            ordering: .byCaptureTimeDesc)
+        return GLKRecallRequest(
+            frame: frame, mode: .unionBest, scoring: .matrixAware, limit: limit,
+            fallback: fallback, queryText: query, origin: .internal,
+            recallShape: shape, frontierK: frontierK, subSpanScoring: .off,
+            rerankDirective: nil)
+    }
+
+    /// The transcript-only balanced composition. Keeping construction here lets
+    /// CognitionKit select the strict lower-layer policy without importing the
+    /// CorpusKit implementation type directly.
+    static func balancedTranscriptRequest(
+        query: String,
+        filter: LocusKit.Filter
+    ) -> GLKRecallRequest {
+        let frame = LocusKit.RecallFrame(
+            filterChain: [filter], hydrationLevel: .full, limit: 50,
+            ordering: .byCaptureTimeDesc)
+        return GLKRecallRequest(
+            frame: frame, mode: .unionBest, scoring: .matrixAware, limit: 50,
+            fallback: .allowDegraded, queryText: query, origin: .internal,
+            recallShape: nil, frontierK: nil, subSpanScoring: .off,
+            rerankDirective: .strictTranscript())
     }
 
     /// Session-hybrid recall path: hybridRecall scoredLane + temporal window

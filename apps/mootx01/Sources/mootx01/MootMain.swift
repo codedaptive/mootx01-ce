@@ -15,18 +15,26 @@
 // an MCP client whose config schema can only express a bare `command`
 // string (no `args` array) reach ProxyCommand without an args array —
 // see ArgvDispatch.swift (MootInstallerCore) for the full rationale.
-// Proxy symlink placement (wave 7.6): `Installer.placeBinary()` writes a
-// relative symlink `mootx01-proxy → mootx01` in the same directory as the
-// installed binary. MCP client configs that specify `"command": "mootx01-proxy"`
-// invoke the proxy subcommand via argv0 dispatch above. Uninstall removes
-// the symlink. No separate PATH entry is needed — same-dir placement means
-// both names are equally reachable via the single PATH-visible directory.
+// BL-1 adds the `mootx01-botLink` argv0 route: it PREPENDS `botlink`, so
+// `mootx01-botLink ping` reaches `botlink ping` — the cloud agent's
+// one-shot data path (see BotLinkCommand.swift).
+// Symlink placement (wave 7.6, BL-1): `Installer.placeBinary()` writes
+// relative symlinks `mootx01-proxy → mootx01` and `mootx01-botLink →
+// mootx01` in the same directory as the installed binary. MCP client
+// configs that specify `"command": "mootx01-proxy"` invoke the proxy
+// subcommand via argv0 dispatch above; cloud agents exec `mootx01-botLink`.
+// Uninstall removes both when it removes the install root. No separate
+// PATH entry is needed — same-dir placement means all names are equally
+// reachable via the single PATH-visible directory.
 //
 // On macOS: full subcommand surface including `serve`/`proxy`.
-// On Linux: install, uninstall, db, status, query (serve/proxy require macOS).
+// On Linux: install, uninstall, db, preference, status, query (serve/proxy require macOS).
 
 import ArgumentParser
+import AriaMCP
 import Foundation
+import GeniusLocusKit
+import MootCoreAIWorker
 import MootInstallerCore
 
 @main
@@ -54,14 +62,26 @@ struct Mootx01: AsyncParsableCommand {
     /// SemVer for the installed binary. Development builds carry the beta
     /// pre-release component; stable builds use a bare numeric version.
     /// The human-facing --version string adds the date via `versionDisplay`.
-    static let currentVersion = "1.1.0-beta-19"
+    static let currentVersion = "1.1.0-rc1"
 
     /// Release date stamp shown alongside the version by --version.
-    static let releaseDate = "2026-08-10"
+    static let releaseDate = "2026-09-15"
 
-    /// The exact string --version prints. The Rust port must print an identical
-    /// string (see apps/mootx01/rust: CURRENT_VERSION + RELEASE_DATE).
+    /// The unchanged first line printed by --version. The Rust port must print
+    /// this identical line before its converter identity lines.
     static let versionDisplay = "\(currentVersion) (\(releaseDate))"
+
+    /// The complete --version text. Converter identities come from the product
+    /// paths that use them, rather than duplicating ContextDistillLib literals.
+    static var versionOutput: String {
+        let hydration = GeniusLocusKit.distillationConverter
+        let recall = RecallDistillation.converter
+        return """
+        \(versionDisplay)
+        converter hydration \(hydration.id) \(hydration.converterVersion)
+        converter recall \(recall.id) \(recall.converterVersion)
+        """
+    }
 
     static var configuration: CommandConfiguration {
         #if os(macOS)
@@ -74,8 +94,9 @@ struct Mootx01: AsyncParsableCommand {
             Use `mootx01 upgrade` to replace the binary from a local build and
             restart background services.
             """,
-            version: versionDisplay,
+            version: versionOutput,
             subcommands: [
+                CoreAINuExtractWorkerCommand.self,
                 ServeCommand.self,
                 ProxyCommand.self,
                 DrainCommand.self,
@@ -84,14 +105,20 @@ struct Mootx01: AsyncParsableCommand {
                 UpgradeCommand.self,
                 UninstallCommand.self,
                 DbCommand.self,
+                PreferenceCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
+                // BL-1: one-shot MCP transport for cloud agents (also the
+                // mootx01-botLink argv0 symlink target).
+                BotLinkCommand.self,
                 // — out-of-band sensitivity unlock / lock.
                 UnlockCommand.self,
                 LockCommand.self,
                 // Feature toggles (M-MEMTOOL-1).
                 EnableCommand.self,
                 DisableCommand.self,
+                CodexMemoryCommand.self,
+                CodexHookCommand.self,
                 // Harness Memory Mode hook handler (MXE-HM). Not shown in --help;
                 // invoked by ~/.mootx01/hooks/capture-harness-memory.sh.
                 HookCaptureCommand.self,
@@ -101,15 +128,23 @@ struct Mootx01: AsyncParsableCommand {
         return CommandConfiguration(
             commandName: "mootx01",
             abstract: "ARIA MCP estate management tool (Linux: serve requires macOS).",
-            version: versionDisplay,
+            version: versionOutput,
             subcommands: [
                 InstallCommand.self,
                 UninstallCommand.self,
                 DbCommand.self,
+                PreferenceCommand.self,
                 StatusCommand.self,
                 QueryCommand.self,
+                // BL-1: one-shot MCP transport for cloud agents. Registered
+                // like QueryCommand on both platforms — the HTTP path is
+                // Foundation-only, and the subprocess path shares query's
+                // serve-availability caveat on Linux.
+                BotLinkCommand.self,
                 EnableCommand.self,
                 DisableCommand.self,
+                CodexMemoryCommand.self,
+                CodexHookCommand.self,
                 // Harness Memory Mode hook handler (MXE-HM). Not shown in --help;
                 // invoked by ~/.mootx01/hooks/capture-harness-memory.sh.
                 HookCaptureCommand.self,

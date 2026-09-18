@@ -5,8 +5,13 @@
 // (2) trigger a full basis retrain via `reindex(now:)` when vocabulary
 // growth crosses the configured fraction/floor threshold.
 //
+// ── Which providers are retrained ─────────────────────────────────────────
+// This probe triggers `GeniusLocusKit.reindexCorpus`, which retrains whatever
+// providers are registered in the estate's Corpus. `CorpusEnsemble.defaultEnsemble()`
+// returns RI and LSA — so this probe retrains both providers on every retrain cycle.
+//
 // ── Design rationale ─────────────────────────────────────────────────────
-// Distributional embedding bases (RI / PPMI / LSA / NMF) train on the
+// Distributional embedding bases (RI / LSA) train on the
 // vocabulary present at first ingest and never grow incrementally — their
 // basis is frozen until an explicit `reindex`. Terms ingested AFTER the
 // last retrain are OOV (out-of-vocabulary) and produce only zero-vectors
@@ -29,6 +34,7 @@
 // The daemon never touches CorpusKit directly.
 
 import Foundation
+import MootProductIdentity
 import GeniusLocusKit
 import OSLog
 
@@ -37,7 +43,7 @@ import OSLog
 /// Fractional vocabulary growth required to trigger an auto-reindex.
 ///
 /// The retrain trigger fires on VOCABULARY drift, not raw chunk count:
-/// distributional embeddings (RI / PPMI / LSA / NMF) freeze their vocabulary at
+/// distributional embeddings (RI / LSA) freeze their vocabulary at
 /// training time, so what degrades dense recall is novel TERMS going OOV, not
 /// chunks per se. The maintained counts table (P3) makes the live vocabulary
 /// size a cheap, always-current read, so the gate measures the fraction by which
@@ -81,7 +87,14 @@ public protocol CorpusGrowthProbe: Sendable {
     ///
     /// - Parameter now: Deterministic timestamp from the caller (never
     ///   `Date()` inside the engine; CLAUDE.md determinism rule).
-    func reindex(now: Date) async throws
+    /// - Returns: `true` for a full retrain, `false` when a backstop was
+    ///   reached and the serving basis was kept (F11: DEGRADED). The caller
+    ///   (`DreamingDaemon.check_corpus_growth`-equivalent gate) must not
+    ///   advance its vocabulary baseline on `false`, so a degraded retrain
+    ///   re-fires on the next cycle instead of the drift it hit the backstop
+    ///   under being silently accepted as caught up.
+    @discardableResult
+    func reindex(now: Date) async throws -> Bool
 }
 
 // MARK: - Production adapter
@@ -96,7 +109,7 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
     private let kit: GeniusLocusKit
 
     private static let log = Logger(
-        subsystem: "com.mootx01.kit",
+        subsystem: MootProductIdentity.Logging.subsystem,
         category: "NeuronKit"
     )
 
@@ -116,10 +129,13 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
     }
 
     /// Full basis retrain via `GeniusLocusKit.reindexCorpus(handle:now:)`.
-    public func reindex(now: Date) async throws {
-        try await kit.reindexCorpus(handle: handle, now: now)
+    /// Returns GLK's own completed/degraded outcome unchanged (F11).
+    @discardableResult
+    public func reindex(now: Date) async throws -> Bool {
+        let completed = try await kit.reindexCorpus(handle: handle, now: now)
         Self.log.info(
-            "auto-reindex: corpus retrained for estate \(handle.estateUUID, privacy: .public)"
+            "auto-reindex: corpus retrained for estate \(handle.estateUUID, privacy: .public) (completed: \(completed, privacy: .public))"
         )
+        return completed
     }
 }

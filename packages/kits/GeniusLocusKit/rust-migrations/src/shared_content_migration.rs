@@ -29,7 +29,7 @@ use persistence_kit::{
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
-use vectorkit::{VectorExactKey, VectorRepresentationClaims, VectorStore};
+use synapsekit::{VectorExactKey, VectorRepresentationClaims, VectorStore};
 
 // MARK: - State machine
 
@@ -804,7 +804,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
                     // Fresh estate: stamp current without creating historical
                     // migration bookkeeping.
                     EstateFormatStore::new(Arc::clone(&storage))
-                        .stamp(EstateFormatVersion::CURRENT, now_millis)
+                        .stamp(EstateFormatVersion::V1_1, now_millis)
                         .map_err(|error| SharedContentMigrationError::StorageFailure {
                             state: SharedContentMigrationState::Discovered,
                             reason: format!("estate-format stamp: {error:?}"),
@@ -848,7 +848,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
         if record.state == SharedContentMigrationState::Complete {
             if record.ensemble_fingerprint.as_deref() == Some(wired_fingerprint.as_str()) {
                 EstateFormatStore::new(Arc::clone(&storage))
-                    .stamp(EstateFormatVersion::CURRENT, now_millis)
+                    .stamp(EstateFormatVersion::V1_1, now_millis)
                     .map_err(|error| SharedContentMigrationError::StorageFailure {
                         state: SharedContentMigrationState::Complete,
                         reason: format!("estate-format stamp: {error:?}"),
@@ -872,16 +872,9 @@ impl SharedContentMigrationExt for EstateCoordinator {
         // Option for the circuit-breaker closure.  The flag is a bool (Copy)
         // and can be captured without conflicting with the subsequent move of
         // `models_opt` into CorpusContentEngine::open inside the closure.
-        let has_trainable_provider = models.iter().any(|model| {
-            !matches!(
-                model,
-                EmbeddingModelConfig::Deterministic
-                    | EmbeddingModelConfig::Fdc { .. }
-                    | EmbeddingModelConfig::MiniLM { .. }
-                    | EmbeddingModelConfig::MPNet { .. }
-                    | EmbeddingModelConfig::EmbeddingGemma { .. }
-            )
-        });
+        // Use the canonical trainable check rather than enumerating non-trainable
+        // variants: avoids breakage when new fixed-weight providers are added.
+        let has_trainable_provider = models.iter().any(|model| model.is_trainable());
         // Circuit-breaker wrapper: the immediately-invoked closure captures all
         // shared state by reference / mutable borrow; `?` inside returns from
         // the closure, not the outer function.  After the call the match handles
@@ -1227,7 +1220,7 @@ impl SharedContentMigrationExt for EstateCoordinator {
         }
 
         EstateFormatStore::new(Arc::clone(&storage))
-            .stamp(EstateFormatVersion::CURRENT, now_millis)
+            .stamp(EstateFormatVersion::V1_1, now_millis)
             .map_err(|error| SharedContentMigrationError::StorageFailure {
                 state: record.state,
                 reason: format!("estate-format stamp: {error:?}"),
@@ -1445,7 +1438,7 @@ fn protected_vectors_fold(
     storage: &Arc<dyn Storage>,
     excluded_keys: &BTreeSet<String>,
 ) -> Result<String, SharedContentMigrationError> {
-    // Pin the DECLARED VectorKit schema before reading (P6 scale finding):
+    // Pin the DECLARED SynapseKit schema before reading (P6 scale finding):
     // row decode forms depend on the connection's accumulated schema view,
     // and the baseline capture runs BEFORE any engine has declared the
     // vectors schema while verification runs AFTER — same bytes decoded

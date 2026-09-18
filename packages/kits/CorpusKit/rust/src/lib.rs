@@ -1,14 +1,14 @@
 //! corpus-kit -- the RAG layer of the GeniusLocus substrate.
 //!
 //! Rust version of the Swift `CorpusKit` Swift Package. Depends on
-//! vectorkit (vector primitives), persistence-kit (content and bundle
+//! synapsekit (vector primitives), persistence-kit (content and bundle
 //! persistence), convergence-kit (replication), engram-lib (the Engram
 //! type), and substrate-lib (HLC, fingerprints).
 //!
 //! Concrete tokenizer implementations -- including the
 //! `DeterministicTokenizer` test stub -- live in the sibling
 //! `corpus-kit-providers` crate. Concrete embedding providers
-//! conform to `vectorkit::EmbeddingProvider` directly (Swift/Rust
+//! conform to `synapsekit::EmbeddingProvider` directly (Swift/Rust
 //! consolidation 2026-05-27). This split mirrors
 //! Swift's `CorpusKit` / `CorpusKitProviders` target layout: core kit
 //! ships the traits, primitives, and persistence-kit-backed engines;
@@ -29,6 +29,10 @@
 //! - engine: Lane F, Lane D, and Lane E engine types
 //!   (inverted index, WAND/BMW, BM25 weighting, generalized RRF fusion)
 
+// The five-byte basis/counts blob frame (magic + format version) core compares
+// at open to recognise a blob written by another codec generation. Swift
+// twin: Sources/CorpusKit/BasisBlobFrame.swift.
+pub mod basis_blob_frame;
 pub mod basis_store;
 pub mod bm25_index;
 pub mod bundle_store;
@@ -37,11 +41,13 @@ pub mod chunker;
 // Canonical content boundary + operating profiles (GLK shared-content 1.1, P1).
 pub mod content;
 pub mod content_engine;
+pub mod ssc_facts;
 pub mod content_engine_queue;
 pub mod corpus;
 pub mod corpus_ingest_queue;
 pub mod corpus_provider_counts_store;
 pub mod document_store;
+pub mod encoder;
 pub mod engine;
 pub mod error;
 pub mod hybrid_recall;
@@ -51,12 +57,13 @@ pub mod index_state_store;
 pub mod index_configuration_store;
 pub mod provider_configuration_store;
 pub mod provider_coverage_store;
+pub mod reindex_latch;
 pub mod removed_source_store;
 pub mod schema_profile;
 pub mod sub_span_scoring;
 pub mod sync_manifest;
 pub mod tokenizer;
-// Mission 6a-ii-α: the trainable-basis type-erasure seam. Declared here in
+// The trainable-basis type-erasure seam. Declared here in
 // core so the providers crate (corpus-kit-providers) can implement it without
 // core depending on it (layering: providers → core). Swift port:
 // Sources/CorpusKit/TrainableEmbeddingBasis.swift.
@@ -80,11 +87,17 @@ pub use content_engine::passage_ranges;
 #[cfg(feature = "standalone-passages")]
 pub use index_configuration_store::CorpusIndexConfigurationStore;
 pub use corpus::Corpus;
+pub use corpus::CorpusRetrainingReport;
+pub use corpus::CorpusPathReason;
 pub use corpus::EmbeddingModelConfig;
 pub use corpus::FloatDiscriminationSignal;
 pub use corpus::FloatLaneOutcome;
-pub use corpus::NamedInferenceFn;
+pub use corpus::TrainingPathDecision;
 pub use document_store::CorpusDocumentStore;
+pub use encoder::{
+    CrossEncoderProfile, EncoderError, EncoderModelSpec, PairScorer, RerankAction, RerankDirective,
+    SpanEncoder,
+};
 pub use index_state_store::{CorpusIndexState, CorpusIndexStateStore};
 pub use schema_profile::{
     attached_declaration, attached_excluded_tables, standalone_declaration,
@@ -105,9 +118,10 @@ pub use hybrid_recall::*;
 // Re-export the scoring primitives so SDK consumers can call them directly
 // without reaching into the module path.
 pub use sub_span_scoring::{
-    cosine_similarity, score as score_sub_spans_raw, sub_span_ranges, DEFAULT_OVERLAP_TOKENS,
-    DEFAULT_WINDOW_TOKENS,
+    capped_text, cosine_similarity, score as score_sub_spans_raw, sub_span_ranges, SubSpanBudget,
+    SubSpanScoringOutcome, DEFAULT_OVERLAP_TOKENS, DEFAULT_WINDOW_TOKENS,
 };
 pub use sync_manifest::*;
 pub use tokenizer::*;
 pub use trainable_embedding_basis::TrainableEmbeddingBasis;
+pub use trainable_embedding_basis::{RetrainingBudget, RetrainingOutcome, RetrainingSkipReason};

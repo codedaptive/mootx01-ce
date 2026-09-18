@@ -18,7 +18,7 @@ import CorpusKitProviders
 import LocusKit
 import PersistenceKit
 import PersistenceKitSQLite
-import VectorKit
+import SynapseKit
 import EngramLib
 import SubstrateTypes
 import GeniusLocusKitMigrations
@@ -118,7 +118,7 @@ struct SharedContentMigrationTests {
         try await EstateFormatStore(storage: storage).stamp(
             EstateFormatVersion(major: 0, minor: 9), now: now)
         await #expect(throws: GLKMigrationCatalogError.self) {
-            try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now)
+            try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: now, offlineUpgrade: true)
         }
         #expect(try await storage.rowStore.count(table: "chunks", where: nil) == 1)
     }

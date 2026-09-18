@@ -24,13 +24,18 @@
 // proportional to its token COUNT, so "most dissimilar" is unambiguous (no
 // cosine ties). Mirrors the Swift fixture so both ports drop the same tail.
 
+// the whole-record float lane is always active.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
+use engram_lib::Engram;
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallResult, GLKRecallScoring, RecallShape,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -39,7 +44,8 @@ use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
-use vectorkit::vector_store::VectorStore;
+use synapsekit::vector_store::VectorStore;
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 const NOW: i64 = 1_700_000_000;
 const MINILM_ID: &str = "minilm-v6";
@@ -68,19 +74,29 @@ fn cap_frame(content: &str) -> CaptureFrame {
     )
 }
 
-/// MONOTONIC cosine spread keyed on token COUNT: direction [cos θ, sin θ, 0…]
-/// with θ = count × 0.018 rad. The query (fewest tokens) is closest; a drawer's
-/// dissimilarity grows with its token count. Mirrors the Swift inference.
-fn minilm_monotonic_config() -> EmbeddingModelConfig {
-    EmbeddingModelConfig::MiniLM {
-        inference: Box::new(|tokens: &[i32]| {
-            let theta = tokens.len() as f32 * 0.018;
-            let mut v = vec![0.0_f32; 384];
-            v[0] = theta.cos();
-            v[1] = theta.sin();
-            Ok(v)
-        }),
+/// MONOTONIC cosine spread keyed on WORD count: direction [cos θ, sin θ, 0…]
+/// with θ = count × 0.018 rad. The query (one word) is closest; a drawer's
+/// dissimilarity grows with its word count. Registered under `MINILM_ID` so
+/// the `dense:minilm-v6` lane key the tests steer is this provider's. Mirrors
+/// the Swift `WordCountAngleProvider`.
+struct MonotonicProvider;
+impl EmbeddingProvider for MonotonicProvider {
+    fn model_id(&self) -> &str { MINILM_ID }
+    fn model_version(&self) -> &str { "1.0.0" }
+    fn embed(&self, _text: &str) -> Result<Engram, SynapseKitError> { Ok(Engram::ZERO) }
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
+        let theta = text.split_whitespace().count() as f32 * 0.018;
+        let mut v = vec![0.0_f32; 384];
+        v[0] = theta.cos();
+        v[1] = theta.sin();
+        Ok(v)
     }
+}
+
+/// `CandleNL` is the pass-through slot for a host-supplied, non-trainable
+/// provider.
+fn minilm_monotonic_config() -> EmbeddingModelConfig {
+    EmbeddingModelConfig::CandleNL { provider: Box::new(MonotonicProvider) }
 }
 
 fn make_vector_store() -> Arc<VectorStore> {
@@ -139,11 +155,15 @@ fn union_best_rrf(
     }
     let anti: HashSet<String> = anti_similar.iter().map(|s| s.to_string()).collect();
     let shape = RecallShape::new(m, Some(PINNED_FRONTIER_K)).with_anti_similar_lanes(anti);
-    GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::Rrf)
+    GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::Rrf,
+        DRAWER_COUNT,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
         .with_query_text(query)
-        .with_limit(DRAWER_COUNT)
         .with_recall_shape(shape)
 }
 
@@ -269,11 +289,15 @@ fn empty_anti_similar_equals_nil() {
 
     // Both use the engine default frontier_k (no override) → whole corpus in the
     // dense pool → pure back-compat comparison, no truncation.
-    let nil_req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::Rrf)
-        .with_query_text(&query)
-        .with_limit(DRAWER_COUNT);
+    let nil_req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::Rrf,
+        DRAWER_COUNT,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+        .with_query_text(&query);
     let empty_req = nil_req
         .clone()
         .with_recall_shape(RecallShape::new(HashMap::new(), None).with_anti_similar_lanes(HashSet::new()));

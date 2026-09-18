@@ -151,7 +151,9 @@ public extension CKErrorClass {
             // WHY: CloudKit internal error. Treat as transient; back off and retry.
             return .retryableBackoff(retryAfter: nil)
 
-        case .partialFailure:
+        case .partialFailure, .batchRequestFailed:
+            // WHY (.batchRequestFailed): one item's failure took its batch down;
+            // the items themselves are sound and the next cycle re-sends them.
             // WHY: Should not appear on a per-record result (it wraps the per-record
             // dict on the outer call). If it leaks here, treat as transient.
             return .retryableBackoff(retryAfter: nil)
@@ -166,7 +168,9 @@ public extension CKErrorClass {
             // The entry is still valid; retry on the next push cycle.
             return .retryableBackoff(retryAfter: nil)
 
-        case .assetFileNotFound, .assetFileModified:
+        case .assetFileNotFound, .assetFileModified, .assetNotAvailable:
+            // WHY (.assetNotAvailable): the asset is not yet available server-side;
+            // a later fetch finds it.
             // WHY: Asset upload problems. The asset may have been modified locally;
             // a subsequent observe-and-push cycle should resolve it.
             return .retryableBackoff(retryAfter: nil)
@@ -243,7 +247,7 @@ public extension CKErrorClass {
             // error; no retry will fix it.
             return .permanent(.other(ckError.code))
 
-        case .alreadyShared, .tooManyParticipants, .referenceViolation:
+        case .alreadyShared, .tooManyParticipants, .referenceViolation, .participantAlreadyInvited:
             // WHY: Sharing / collaboration constraints. Not applicable to the private
             // database push path but classified for completeness. Park to avoid loops.
             return .permanent(.other(ckError.code))

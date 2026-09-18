@@ -52,8 +52,10 @@ pub enum CorpusOperatingMode {
     Attached,
 }
 
-/// Validated (mode, index-unit) configuration — the constructor-time gate
-/// that rejects invalid combinations BEFORE anything is written.
+/// Validated (mode, index-unit) configuration: the constructor-time gate
+/// that rejects invalid combinations BEFORE anything is written. Twin of
+/// Swift `CorpusContentConfiguration`. Every engine indexes one composition:
+/// the content plus its `ssc_facts` supplement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CorpusContentConfiguration {
     mode: CorpusOperatingMode,

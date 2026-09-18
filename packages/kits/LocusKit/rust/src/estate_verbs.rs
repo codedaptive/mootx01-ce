@@ -44,12 +44,11 @@
 use crate::adjectives::{State, Trust};
 use crate::bitmap_evaluator::BitmapEvaluator;
 use crate::default_wings::{
-    HINT_ADDED_BY, HINT_ROOM, HINT_UDC_CODE,
-    DEFAULT_WING_NAME,
+    DEFAULT_WINGS, DEFAULT_WING_NAME, HINT_ADDED_BY, HINT_ROOM, HINT_UDC_CODE,
 };
 use crate::drawer::Drawer;
 use crate::drawer_operational::DrawerFeatureFlags;
-use crate::drawer_store::{SUBJECT_LENGTH_CONTRACT, SUBJECT_PIPELINE_AI_V1};
+use crate::drawer_store::{subject_length, SUBJECT_LENGTH_CONTRACT, SUBJECT_PIPELINE_AI_V1};
 use crate::error::LocusKitError;
 use crate::estate::Estate;
 use crate::estate_types::LatticeAnchor;
@@ -95,6 +94,8 @@ pub struct FrameFilteredDrawers {
     pub admissible: Vec<Drawer>,
     /// Every id whose row was returned by storage, regardless of frame filter.
     pub loaded_ids: HashSet<String>,
+    /// Default-sensitivity exclusions among these physically loaded IDs.
+    pub withheld_by_sensitivity: usize,
 }
 
 /// Maximum candidate count for the recall locus-lane scan.
@@ -123,7 +124,81 @@ pub(crate) mod recall_stage {
     pub const TRACE_WRITE_FAILED: &str = "recall.trace_write_failed";
 }
 
+/// Defined verb sets for the two Rust write paths that accept a
+/// caller-supplied free-form verb string (AV-01, Codex finding, commit
+/// `dc0f362`). Every other audit-write path either threads a typed
+/// `RowVerb` through `substrate_lib::audit_gate::admit` (row-mutation
+/// verbs: capture/mutate/withdraw/... — never a bare string, already
+/// constrained by the type system) or hardcodes its own verb literal
+/// internally (`append_encode_complete_marker` → `"encodeComplete"`,
+/// `append_reindex_complete_marker` → `"reindexComplete"` — not
+/// caller-reachable). These two are the exception: `verb: &str` is a
+/// public parameter, so nothing before this module stopped a caller from
+/// writing an arbitrary string into the estate's evidence surface.
+///
+/// Centralised here (not duplicated ad hoc at each call site) so the two
+/// write boundaries that key off them — `Estate::append_dream_cycle_marker`
+/// / `Estate::append_supplementary_audit` below, and
+/// `DrawerStoreCore::append_dream_cycle_marker` in
+/// `drawer_store_inmemory.rs` (the actual storage boundary shared by the
+/// SQLite, in-memory, and Postgres backends) — cannot drift apart.
+pub(crate) mod audit_verbs {
+    /// Accepted verbs for `append_dream_cycle_marker` (A3). Byte-identical
+    /// to the two raw values of the Swift port's
+    /// `DrawerStore.DreamCyclePhase: String` enum
+    /// (`start = "dreamStart"`, `end = "dreamEnd"`) — Swift enforces this
+    /// set at compile time via the enum's type; Rust has no enum threaded
+    /// through the GLK → LocusKit seam (`coordinator.rs` passes a bare
+    /// `&str`), so this constant plus `validate` is the Rust-side mirror
+    /// of that Swift type constraint.
+    pub const DREAM_CYCLE: [&str; 2] = ["dreamStart", "dreamEnd"];
+
+    /// Accepted verbs for `append_supplementary_audit`. Currently exactly
+    /// one value: GLK's dataset-handle expunge path
+    /// (`VerbSurface.expunge` / Rust `coordinator.rs` ~5548) appends a
+    /// `"datasetTableDrop"` side-channel event when a `.dataset`-kind
+    /// handle's cross-kit table-drop succeeds. A genuine new supplementary
+    /// verb is a deliberate addition to this list — never a caller-supplied
+    /// free string.
+    pub const SUPPLEMENTARY: [&str; 1] = ["datasetTableDrop"];
+
+    /// Reject a verb that is not a member of `allowed`. Returns a typed
+    /// error (never a silent drop, never a substituted default) per the
+    /// mission's discipline: a silently-dropped or silently-substituted
+    /// audit entry is worse than a rejected write, because the evidence
+    /// surface would then lie by omission.
+    pub fn validate(verb: &str, allowed: &[&str]) -> Result<(), crate::error::LocusKitError> {
+        if allowed.contains(&verb) {
+            Ok(())
+        } else {
+            Err(crate::error::LocusKitError::InvalidContent(format!(
+                "unknown audit verb {verb:?}; expected one of {allowed:?}"
+            )))
+        }
+    }
+}
+
 impl Estate {
+    /// The contradiction proposal write boundary. The drawer store performs
+    /// selected evidence revalidation and filing in one transaction.
+    pub fn atomic_file_conflict_proposal(
+        &self,
+        request: &crate::drawer_store::AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<crate::drawer_store::AtomicConflictProposalOutcome, LocusKitError> {
+        self.store.atomic_file_conflict_proposal(request, now)
+    }
+
+    /// Resolve the display coordinates for already-authorized drawer parents.
+    /// This exposes no drawer content and lets a lower transactional writer
+    /// retain the established frame-validation vocabulary.
+    pub fn resolve_drawer_node_names(
+        &self,
+        parent_node_ids: &[String],
+    ) -> Result<BTreeMap<String, (String, String)>, LocusKitError> {
+        self.store.resolve_node_names(parent_node_ids)
+    }
+
     // -----------------------------------------------------------------------
     // node-name resolution
     // -----------------------------------------------------------------------
@@ -245,9 +320,10 @@ impl Estate {
         // Subject length contract (SPEC B-18) checked at the frame boundary
         // so the error surfaces before any row exists. Empty-string subjects
         // are rejected the same way — a caller with no subject passes None
-        // (subject debt, B-21), never "". Mirrors Swift capture().
+        // (subject debt, B-21), never "". Count is grapheme clusters, the
+        // same unit Swift's String.count returns. Mirrors Swift capture().
         if let Some(ref subject) = frame.subject {
-            let n = subject.chars().count();
+            let n = subject_length(subject);
             if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
                 return Err(LocusKitError::InvalidContent(format!(
                     "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}); \
@@ -380,6 +456,9 @@ impl Estate {
             drawer.subject_at = Some(now);
         }
 
+        // New captures start with bit 27 clear: the span-encode duty picks
+        // them up through span_index_debt_batch.
+
         // add_drawer atomically maintains the per-container OR aggregate
         // (spec § 11.5 Option B): coverage is now structurally guaranteed
         // inside the DrawerStore implementation — no separate
@@ -472,10 +551,10 @@ impl Estate {
                     "embeddingModelID must not be empty".to_string(),
                 ));
             }
-            // Same subject contract as capture() (SPEC B-18): 1–120 chars
-            // when present; None files as subject debt (B-21).
+            // Same subject contract as capture() (SPEC B-18): 1–120 grapheme
+            // clusters when present; None files as subject debt (B-21).
             if let Some(ref subject) = frame.subject {
-                let n = subject.chars().count();
+                let n = subject_length(subject);
                 if n == 0 || n > SUBJECT_LENGTH_CONTRACT {
                     return Err(LocusKitError::InvalidContent(format!(
                         "subject must be 1–{SUBJECT_LENGTH_CONTRACT} characters (got {n}); \
@@ -539,15 +618,22 @@ impl Estate {
 
             let lineage_id = frame.lineage_id.unwrap_or_else(Uuid::new_v4);
             let drawer_id = Uuid::new_v4().to_string();
+            // Per-record capture timestamp (schema v1.2): when set on the
+            // frame, use it as filed_at and HLC physical-time seed for this
+            // drawer. When absent, fall back to the batch `now` — identical
+            // to all pre-v1.2 behavior where every drawer uses the batch clock.
+            let drawer_filed_at = frame.capture_date.unwrap_or(now);
             let mut drawer = Drawer::new(
                 drawer_id,
                 frame.content,
                 room_node.id.to_string(),
                 frame.added_by,
-                now,
+                drawer_filed_at,
                 frame.embedding_model_id,
             );
             drawer.adjective_bitmap = adj_bitmap;
+            // Superseding drawers start with bit 27 clear; the span-encode
+            // duty picks them up through span_index_debt_batch.
             drawer.operational_bitmap = op_bitmap;
             drawer.provenance = provenance_bitmap;
             drawer.lineage_id = lineage_id;
@@ -556,12 +642,13 @@ impl Estate {
             drawer.wikidata_qid = frame.lattice_anchor.wikidata_qid;
             drawer.wikidata_qids_secondary = frame.lattice_anchor.wikidata_qids_secondary;
             // Subject trio at birth — identical translation to capture().
+            // subject_at uses drawer_filed_at for consistency with filedAt.
             if let Some(subject) = frame.subject {
                 drawer.subject = Some(subject);
                 drawer.subject_pipeline_version = Some(SUBJECT_PIPELINE_AI_V1.to_string());
-                drawer.subject_at = Some(now);
+                drawer.subject_at = Some(drawer_filed_at);
             }
-            drawer.event_time = frame.event_time.unwrap_or(now);
+            drawer.event_time = frame.event_time.unwrap_or(drawer_filed_at);
 
             // Store drawer. Unlike capture, rollup_merkle_roots is deliberately omitted —
             // that O(N²) call is the root cause of the moot_palace_import hang (NT_R1).
@@ -637,14 +724,28 @@ impl Estate {
         let wing_node = node_store.create_node(wing_name, root.id, now)?;
         let room_node = node_store.create_node(HINT_ROOM, wing_node.id, now)?;
 
-        let drawer_id = Uuid::new_v4().to_string();
+        // Canonical charter identity: roster wings get a FIXED drawer id and
+        // the FIXED CHARTER_SEED_UNIX_MS filing instant (see default_wings.rs
+        // for the recency-exclusion and determinism rationale). Node creation
+        // above keeps the caller's `now` — only the drawer row is pinned. A
+        // wing not in the default roster falls back to random id + `now`.
+        // Twin of the Swift block in `seedWing`.
+        let roster_index = DEFAULT_WINGS.iter().position(|w| w.name == wing_name);
+        let drawer_id = roster_index
+            .map(crate::default_wings::charter_drawer_id)
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
+        let charter_stamp = if roster_index.is_some() {
+            crate::default_wings::CHARTER_SEED_UNIX_MS
+        } else {
+            now
+        };
         let lattice_anchor = LatticeAnchor::udc(HINT_UDC_CODE);
         let mut drawer = Drawer::new(
             drawer_id,
             hint.to_string(),
             room_node.id.to_string(),
             HINT_ADDED_BY.to_string(),
-            now,
+            charter_stamp,
             embedding_model_id.to_string(),
         );
         drawer.udc_code = lattice_anchor.udc_code;
@@ -661,7 +762,7 @@ impl Estate {
                 .collect(),
         );
         drawer.subject_pipeline_version = Some("seed-v1".to_string());
-        drawer.subject_at = Some(now);
+        drawer.subject_at = Some(charter_stamp);
         // add_drawer maintains the container fingerprint OR aggregate
         // (spec § 11.5), identical to the capture path. No separate
         // fingerprint call needed — coverage is structurally guaranteed.
@@ -940,7 +1041,7 @@ impl Estate {
                     degraded_stages.push(recall_stage::ROOM_FINGERPRINTS_READ_FAILED.to_string());
                     Vec::new()
                 } else {
-                    match self.store.room_level_fingerprints() {
+                    match self.room_level_fingerprints() {
                         Ok(e) => e,
                         Err(_) => {
                             degraded_stages
@@ -967,7 +1068,7 @@ impl Estate {
                             // yet (possible on an estate that never called
                             // or_in/rebuild). None → treat as surviving (sound:
                             // absent aggregate must not prune, per spec § 11.5).
-                            match self.store.get_container_fingerprint(
+                            match self.pruning_container_fingerprint(
                                 &entry.wing,
                                 crate::container_fingerprint_store::ContainerFingerprintStore::WING_ROLLUP_ROOM,
                             ) {
@@ -1062,14 +1163,18 @@ impl Estate {
         // degraded_stages is the channel. Skipped when an upstream read already
         // failed (candidates is empty for a named reason; re-evaluating would
         // only re-confirm empty).
+        let mut withheld_by_sensitivity = 0;
         let filtered: Vec<Drawer> = if !degraded_stages.is_empty() {
             Vec::new()
         } else if force_bitmap_eval {
             degraded_stages.push(recall_stage::BITMAP_EVAL_FAILED.to_string());
             Vec::new()
         } else {
-            match BitmapEvaluator::evaluate(&frame, &candidates, self.store.as_ref(), &self.resolve_node_names_for_drawers(&candidates)) {
-                Ok(f) => f,
+            match BitmapEvaluator::evaluate_result(&frame, &candidates, self.store.as_ref(), &self.resolve_node_names_for_drawers(&candidates)) {
+                Ok(evaluation) => {
+                    withheld_by_sensitivity = evaluation.withheld_by_sensitivity;
+                    evaluation.rows
+                },
                 Err(_) => {
                     degraded_stages.push(recall_stage::BITMAP_EVAL_FAILED.to_string());
                     Vec::new()
@@ -1124,6 +1229,7 @@ impl Estate {
         let page_size = frame.limit.unwrap_or(RecallStream::DEFAULT_PAGE_SIZE);
         RecallStream::new(filtered, page_size, frame.hydration_level)
             .with_degraded_stages(degraded_stages)
+            .with_withheld_by_sensitivity(withheld_by_sensitivity)
     }
 
     /// FRAME-AWARE by-id load. Loads `ids` by row, then applies the frame's
@@ -1171,8 +1277,9 @@ impl Estate {
         }
         let node_names = self.resolve_node_names_for_drawers(&loaded);
         // Evaluate with full content available for ContentMatches predicates.
-        let mut admissible =
-            BitmapEvaluator::evaluate(frame, &loaded, self.store.as_ref(), &node_names)?;
+        let evaluation = BitmapEvaluator::evaluate_result(frame, &loaded, self.store.as_ref(), &node_names)?;
+        let withheld_by_sensitivity = evaluation.withheld_by_sensitivity;
+        let mut admissible = evaluation.rows;
         // Honor BitmapOnly stripping AFTER evaluation so the hydration contract
         // for the requested level is applied to the already-filtered result set.
         if frame.hydration_level == HydrationLevel::BitmapOnly {
@@ -1183,7 +1290,32 @@ impl Estate {
         Ok(FrameFilteredDrawers {
             admissible,
             loaded_ids,
+            withheld_by_sensitivity,
         })
+    }
+
+    /// Hydrate exactly these IDs and count only default-sensitivity exclusions.
+    /// Rejected rows and loaded IDs never leave LocusKit through this API.
+    pub fn hydrate_with_sensitivity_count(
+        &self,
+        ids: &[RowID],
+        frame: &RecallFrame,
+    ) -> Result<crate::bitmap_evaluator::BitmapEvaluationResult, LocusKitError> {
+        let mut loaded = Vec::new();
+        let mut seen = HashSet::new();
+        for id in ids {
+            if seen.insert(id) {
+                if let Some(drawer) = self.store.get_drawer(id)? {
+                    loaded.push(drawer);
+                }
+            }
+        }
+        let node_names = self.resolve_node_names_for_drawers(&loaded);
+        let mut result = BitmapEvaluator::evaluate_result(frame, &loaded, self.store.as_ref(), &node_names)?;
+        if frame.hydration_level == HydrationLevel::BitmapOnly {
+            for drawer in &mut result.rows { drawer.content.clear(); }
+        }
+        Ok(result)
     }
 
     /// Delete recall-trace rows whose `recalled_at` is strictly before
@@ -1354,11 +1486,19 @@ impl Estate {
         self.store.add_kg_fact(fact)
     }
 
-    /// Retire a kg-fact by transitioning its state to `Withdrawn`. Estate-level
-    /// pass-through over `DrawerStore::withdraw_kg_fact`. Required by GLK for
-    /// the same B-1 compliance reason as `add_kg_fact`.
-    pub fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
-        self.store.withdraw_kg_fact(id, now)
+    /// Retire a kg-fact by transitioning its state to `Withdrawn` and writing a
+    /// sealed audit row. Estate-level pass-through over
+    /// `DrawerStore::withdraw_kg_fact`. `changed_by` names the actor;
+    /// `reason` is optional human-readable context. Required by GLK for B-1
+    /// compliance.
+    pub fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.withdraw_kg_fact(id, changed_by, reason, now)
     }
 
     /// All non-tombstoned diary entries in the estate, ordered by `filed_at`
@@ -1395,37 +1535,109 @@ impl Estate {
         self.store.all_drawers()
     }
 
-    /// Write the distilled representation of one drawer — all four
-    /// representation columns in one atomic UPDATE. Estate-level
-    /// pass-through over `DrawerStore::set_distilled_representation`; see
-    /// the trait method for the full contract (direct column write, no
-    /// audit event, no index-feed involvement —
-    /// SPEC_DISTILLATION_STORAGE §4/§7.2). This is the seam GLK's
-    /// distillation paths write through. Mirrors Swift
-    /// `Estate.setDistilledRepresentation`.
-    pub fn set_distilled_representation(
+    /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's
+    /// `operational_bitmap`. Estate-level pass-through over
+    /// `DrawerStore::set_anomalous_flag` — the write seam for
+    /// GeniusLocusKit's room-cohesion anomaly sweep (`anomaly_flag_sweep`).
+    ///
+    /// A DERIVED SIGNAL write: no audit event, no supersession cascade,
+    /// no lifecycle or lineage field touched. `now` is accepted for
+    /// call-site determinism but is not used by the write itself (bit 26
+    /// carries no timestamp). Returns 0 when the drawer is not found or
+    /// the bit is already in the requested state; 1 on success. Mirrors
+    /// Swift `Estate.setAnomalousFlag(drawerId:anomalous:now:)`.
+    pub fn set_anomalous_flag(
         &self,
         drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        token_count: i64,
-        generated_at: i64,
+        anomalous: bool,
+        _now: i64,
     ) -> Result<usize, LocusKitError> {
-        self.store.set_distilled_representation(
-            drawer_id,
-            distilled,
-            pipeline_version,
-            token_count,
-            generated_at,
-        )
+        // `_now` is accepted for call-site determinism discipline (mirrors
+        // Swift Estate.setAnomalousFlag) but is not used by the write itself
+        // — the anomalous bit carries no timestamp.
+        self.store.set_anomalous_flag(drawer_id, anomalous)
     }
 
-    /// Count of active drawers still awaiting distillation (§7.1
-    /// eligibility predicate as an aggregate). Estate-level pass-through
-    /// over `DrawerStore::count_undistilled` — the distillation
-    /// drain-accounting observable. Mirrors Swift `Estate.countUndistilled`.
-    pub fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        self.store.count_undistilled(pipeline_version)
+    // ── Content-derived columns and the span index bit (Encoder Rerank Program) ──
+
+    /// Write (or clear) one drawer's SSC facts. Estate-level pass-through
+    /// over `DrawerStore::set_ssc_facts` — the seam the enrichment stage
+    /// writes through after the drawer write. Mirrors Swift
+    /// `Estate.setSSCFacts(_:for:)`.
+    pub fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
+        self.store.set_ssc_facts(drawer_id, facts)
+    }
+
+    /// Set bit 27 (`SPAN_INDEXED`) on one drawer after the span-encode duty
+    /// wrote its span rows. Pass-through over `DrawerStore::set_span_indexed`.
+    /// Mirrors Swift `Estate.setSpanIndexed(drawerId:)`.
+    pub fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.store.set_span_indexed(drawer_id)
+    }
+
+    /// The span-encode duty's work items (active, non-empty, bit 27 clear),
+    /// ordered by id, paged by `after_drawer_id`. Pass-through over
+    /// `DrawerStore::span_index_debt_batch`. Mirrors Swift
+    /// `Estate.spanIndexDebtBatch(limit:afterDrawerID:)`.
+    pub fn span_index_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.span_index_debt_batch(limit, after_drawer_id)
+    }
+
+    /// Count of drawers still awaiting span encoding — the span-encode
+    /// drain's `pending`. Pass-through over
+    /// `DrawerStore::count_span_index_debt`. Mirrors Swift
+    /// `Estate.countSpanIndexDebt()`.
+    pub fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.store.count_span_index_debt()
+    }
+
+    /// Set bit 28 (`FACTS_EXTRACTED`) after one extraction attempt has
+    /// completed successfully, including the valid zero-fact outcome.
+    pub fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.store.set_facts_extracted(drawer_id)
+    }
+
+    pub fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        self.store.set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+
+    pub fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[crate::kg_fact::KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        self.store.publish_extracted_facts(source_id, expected_content, recipe_id, facts, now)
+    }
+
+    /// The distilled-fact duty's active, non-empty work items, ordered by
+    /// drawer id and paged by `after_drawer_id`.
+    pub fn fact_extraction_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.fact_extraction_debt_batch(limit, after_drawer_id)
+    }
+
+    /// Count of drawers whose current content has not completed fact
+    /// extraction under the active recipe.
+    pub fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.store.count_fact_extraction_debt()
+    }
+
+    /// Settle one source as rejected by the active recipe (bits 28 and 29).
+    /// Mirrors Swift `Estate.markFactExtractionRejected`.
+    pub fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        self.store.mark_fact_extraction_rejected(source_id, expected_content, recipe_id)
+    }
+
+    /// Live drawers the active recipe rejected (bit 29 set).
+    pub fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        self.store.count_fact_extraction_rejected()
     }
 
     /// Write one drawer's subject line (PR-01). Estate-level pass-through
@@ -1451,6 +1663,68 @@ impl Estate {
             &self.changed_by_or_estate(),
             None,
         )
+    }
+
+    /// Append an encode-completion audit marker for one encode drain unit
+    /// (A2, benchmark reset 2026-08-13). Called by the GLK drain worker's
+    /// on_encoded hook; delegates to
+    /// `DrawerStore::append_encode_complete_marker`, which seals an
+    /// informational audit event (verb `encodeComplete`, actor
+    /// `encode_worker`, reason `session=<id> rows=<n>`) with no bitmap
+    /// change. Mirrors Swift `Estate.appendEncodeCompleteMarker`.
+    pub fn append_encode_complete_marker(
+        &self,
+        first_drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store.append_encode_complete_marker(
+            first_drawer_id,
+            row_count,
+            unit_session_id,
+            completed_at,
+        )
+    }
+
+    /// Append a reindex-completion marker (C3) — the CYCLE tier-3 boundary.
+    /// Mirrors Swift `Estate.appendReindexCompleteMarker`.
+    pub fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.store
+            .append_reindex_complete_marker(row_count, unit_session_id, completed_at)
+    }
+
+    /// Estate-wide audit page in HLC order, strictly after `after` (None =
+    /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
+    /// watermark-paging seam. Mirrors Swift `Estate.auditEvents(after:limit:)`.
+    pub fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.store.audit_events(after, limit)
+    }
+
+    /// Append a dream-cycle bracket marker (A3). `verb` is `dreamStart` or
+    /// `dreamEnd`; both ends of a cycle carry the same session id so
+    /// CYCLE-dreamt time is attributable from the audit log alone.
+    /// Mirrors Swift `Estate.appendDreamCycleMarker`.
+    pub fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        // AV-01: reject before ever opening a transaction — no caller
+        // (dream markers included) writes an arbitrary verb. Mirrors the
+        // Swift port's compile-time `DreamCyclePhase` enum constraint.
+        audit_verbs::validate(verb, &audit_verbs::DREAM_CYCLE)?;
+        self.store.append_dream_cycle_marker(verb, unit_session_id, marked_at)
     }
 
     /// Count of active drawers still awaiting a subject line (PR-01
@@ -1516,6 +1790,16 @@ impl Estate {
         self.store.active_drawers_after(after_id, limit)
     }
 
+    /// Active non-dataset IDs in deterministic training order. The production
+    /// stores apply the filter, ID-only projection, ordering, and limit before
+    /// document bodies are materialized.
+    pub fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.store.active_corpus_content_ids_limited(limit)
+    }
+
     /// Fingerprints of every non-tombstoned drawer captured in the closed
     /// epoch-milliseconds window `[start_epoch, end_epoch]`, in
     /// HLC-ascending order within the window. Estate-level pass-through over
@@ -1540,7 +1824,17 @@ impl Estate {
     pub fn room_level_fingerprints(
         &self,
     ) -> Result<Vec<crate::container_fingerprint_store::RoomLevelEntry>, LocusKitError> {
-        self.store.room_level_fingerprints()
+        match &self.frozen_fingerprints {
+            Some(store) => store.room_level_entries(),
+            None => self.store.room_level_fingerprints(),
+        }
+    }
+
+    fn pruning_container_fingerprint(&self, wing: &str, room: &str) -> Result<Option<crate::container_fingerprint_store::ContainerFingerprint>, LocusKitError> {
+        match &self.frozen_fingerprints {
+            Some(store) => store.get(wing, room),
+            None => self.store.get_container_fingerprint(wing, room),
+        }
     }
 
     /// All non-tombstoned drawers in a room, ordered by `filedAt` ascending.
@@ -1730,6 +2024,26 @@ impl Estate {
         self.store.insert_recall_traces(items)
     }
 
+    /// Write one `recall_ratings` row per rating (insert or replace on
+    /// `drawer_id`). Delegates to `DrawerStore::upsert_recall_ratings`
+    /// (mirrors Swift `Estate.upsertRecallRatings`).
+    pub fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        self.store.upsert_recall_ratings(ratings)
+    }
+
+    /// Ratings for `ids`; ids without a `recall_ratings` row are absent.
+    /// Delegates to `DrawerStore::recall_ratings` (mirrors Swift
+    /// `Estate.recallRatings(ids:)`).
+    pub fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        self.store.recall_ratings(ids)
+    }
+
     /// Fetch one drawer by id (None when absent). Delegates to
     /// `DrawerStore::get_drawer` (mirrors Swift `Estate.getDrawers(ids:)`
     /// for the singular case).
@@ -1904,12 +2218,14 @@ impl Estate {
     ///
     /// Returns the full `ExpungeOutcome`: `event` is the gate-produced audit
     /// event (sealed when `seal_audit` was true, unsealed otherwise) and
-    /// `refused_sibling_ids` names every lineage member the gate refused
-    /// (accepted rows, S-3). Invariant (SPEC B-8b, MXE-FA): an expunge that
-    /// refused a sibling is not a success, and a layer that summarises it as
-    /// one is the defect — every caller must consume the outcome and
-    /// propagate, or explicitly acknowledge, the refusal. Twin of the Swift
-    /// `Estate.expunge` / `expungeReturningUnsealedEvent` wrappers.
+    /// `refused_sibling_ids` names every lineage member not tombstoned:
+    /// ceiling-refused (sensitivity exceeds `sensitivity_ceiling`; checked
+    /// before gate admission) or gate-refused (accepted rows, S-3). Invariant
+    /// (SPEC B-8b, MXE-FA): an expunge that refused a sibling is not a
+    /// success, and a layer that summarises it as one is the defect — every
+    /// caller must consume the outcome and propagate, or explicitly
+    /// acknowledge, the refusal. Twin of the Swift `Estate.expunge` /
+    /// `expungeReturningUnsealedEvent` wrappers.
     pub fn expunge(
         &self,
         row_id: &str,
@@ -1917,6 +2233,7 @@ impl Estate {
         confirmation: bool,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         if !confirmation {
             return Err(LocusKitError::InvalidContent(
@@ -1965,7 +2282,7 @@ impl Estate {
         }
 
         let outcome = self.store
-            .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit)?;
+            .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit, sensitivity_ceiling)?;
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member — not just the room of the
         // initiating drawer — so cross-room lineage expunge keeps every
@@ -2137,6 +2454,10 @@ impl Estate {
         verb: &str,
         reason: &str,
     ) -> Result<(), LocusKitError> {
+        // AV-01: same free-string defect shape as append_dream_cycle_marker
+        // above — reject before computing the content-ID or constructing
+        // the event.
+        audit_verbs::validate(verb, &audit_verbs::SUPPLEMENTARY)?;
         let event_id = substrate_lib::audit_gate::content_id(
             from.estate_uuid,
             from.row_id,
@@ -3486,6 +3807,30 @@ mod tests {
     // --- capture container-fingerprint maintenance (P0-PARITY #33) ---
 
     #[test]
+    fn frozen_open_uses_current_private_fingerprints_without_persisting() {
+        let live = make_estate();
+        let drawer = basic_capture(&live, "frozen span candidate", "study");
+        let before = live.store.room_level_fingerprints().unwrap();
+        let names = live.store.resolve_node_names(&[drawer.parent_node_id.clone()]).unwrap();
+        let (wing, _) = names.get(&drawer.parent_node_id).unwrap();
+        let wing_before = live.store.get_container_fingerprint(wing, "").unwrap();
+        live.store.set_span_indexed(&drawer.id).unwrap();
+        assert_eq!(live.store.room_level_fingerprints().unwrap(), before);
+        let manifest_before = live.store.read_manifest().unwrap();
+        let frozen = Estate::open_with_policy(
+            Arc::clone(&live.store), OwnerCredentials::new("frozen-reader"), true, true,
+        ).unwrap();
+        assert_eq!(frozen.store.room_level_fingerprints().unwrap(), before);
+        assert_eq!(frozen.store.get_container_fingerprint(wing, "").unwrap(), wing_before);
+        assert_eq!(frozen.store.read_manifest().unwrap().ed25519_public_key, manifest_before.ed25519_public_key);
+        assert_ne!(frozen.room_level_fingerprints().unwrap()[0].fingerprint.operational & DrawerFeatureFlags::SPAN_INDEXED, 0);
+        let frame = RecallFrame::new(vec![Filter::HasFeatureFlag(DrawerFeatureFlags::SPAN_INDEXED)]);
+        let hits = frozen.recall(frame, 1_700_000_000).collect_all();
+        assert!(hits.iter().any(|hit| hit.id == drawer.id));
+        assert_eq!(frozen.store.room_level_fingerprints().unwrap(), before);
+    }
+
+    #[test]
     fn capture_ors_into_room_level_container_fingerprint() {
         // After a capture the room-level container aggregate is non-empty —
         // the capture-time OR-in maintained it. Before this fix the Rust
@@ -4026,7 +4371,7 @@ mod tests {
     fn mutate_revive_from_tombstoned_refused_unrecoverable() {
         let estate = make_estate();
         let drawer = basic_capture(&estate, "tombstone target", "r");
-        estate.expunge(&drawer.id, "test", true, 0, true).unwrap();
+        estate.expunge(&drawer.id, "test", true, 0, true, crate::adjectives::AdjectiveSensitivity::Secret).unwrap();
         assert_eq!(state_of(&estate, &drawer.id), State::Tombstoned);
 
         let err = estate.mutate(&drawer.id, MutationKind::Revive, None).unwrap_err();
@@ -4750,7 +5095,7 @@ mod tests {
     fn estate_expunge_requires_confirmation() {
         let estate = make_estate();
         let d = basic_capture(&estate, "to be expunged", "office");
-        let err = estate.expunge(&d.id, "", false, 0, true).unwrap_err();
+        let err = estate.expunge(&d.id, "", false, 0, true, crate::adjectives::AdjectiveSensitivity::Secret).unwrap_err();
         assert!(
             matches!(err, LocusKitError::InvalidContent(_)),
             "expected InvalidContent for confirmation=false, got {:?}",
@@ -4766,7 +5111,7 @@ mod tests {
     fn estate_expunge_forwards_through_to_store_with_confirmation() {
         let estate = make_estate();
         let d = basic_capture(&estate, "to be expunged", "office");
-        estate.expunge(&d.id, "operator request", true, 0, true).unwrap();
+        estate.expunge(&d.id, "operator request", true, 0, true, crate::adjectives::AdjectiveSensitivity::Secret).unwrap();
         let after = estate.store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.adjective_bitmap & 0x3F, State::Tombstoned.raw_value());
         assert_ne!(
@@ -4782,7 +5127,7 @@ mod tests {
     fn estate_expunge_rejects_absent_row() {
         let estate = make_estate();
         let err = estate
-            .expunge("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "", true, 0, true)
+            .expunge("cccccccc-cccc-4ccc-8ccc-cccccccccccc", "", true, 0, true, crate::adjectives::AdjectiveSensitivity::Secret)
             .unwrap_err();
         match err {
             LocusKitError::DrawerNotFound { .. } => {}
@@ -5830,6 +6175,34 @@ mod tests {
         );
     }
 
+    /// Twin of Swift `chartersCarrySentinelIdentity`: roster-wing charters
+    /// must carry the fixed charter id and the fixed 2000-01-01 filing
+    /// instant. Failure mode this discriminates: with random UUIDs /
+    /// caller-now stamps restored, both assertions fail — the pre-fix
+    /// behavior that made same-recipe estates rank differently
+    /// (2026-08-24 replay-drift root cause). A non-roster wing keeps the
+    /// ordinary random id + caller now.
+    #[test]
+    fn roster_charters_carry_sentinel_identity() {
+        let estate = make_estate();
+        let now = 1_700_000_000_i64;
+
+        // Roster wing (index 0 in DEFAULT_WINGS): fixed identity.
+        let roster = &crate::default_wings::DEFAULT_WINGS[0];
+        let d = estate
+            .seed_wing(roster.name, roster.hint, "test-model", now)
+            .expect("seed roster wing");
+        assert_eq!(d.id, crate::default_wings::charter_drawer_id(0));
+        assert_eq!(d.filed_at, crate::default_wings::CHARTER_SEED_UNIX_MS);
+
+        // Non-roster wing: ordinary identity (random id, caller now).
+        let custom = estate
+            .seed_wing("Custom Wing", "Custom hint.", "test-model", now)
+            .expect("seed custom wing");
+        assert_ne!(custom.id, crate::default_wings::charter_drawer_id(0));
+        assert_eq!(custom.filed_at, now);
+    }
+
     // --- Timestamp-unit guards (Codex 0e9d4e43e8cc8191ac913a3fddcad48c) ---
     //
     // The whole boundary is epoch MILLISECONDS: `HLCGenerator::send` stores
@@ -5904,5 +6277,73 @@ mod tests {
             events[1].hlc.physical_time,
             events[0].hlc.physical_time
         );
+    }
+
+    // --- AV-01: estate-layer audit verb validation (Codex finding, dc0f362) ---
+    //
+    // These exercise the `Estate` API boundary (estate_verbs.rs), which is
+    // the seam GLK's coordinator actually calls through. The store-layer
+    // boundary (the same validator, reached from
+    // `DrawerStoreCore::append_dream_cycle_marker`) is covered separately
+    // in `drawer_store_inmemory.rs`'s test module — together the two
+    // suites prove the in-memory backend (the only backend these
+    // integration-style Estate tests can reach) is not more permissive
+    // than the shared store-layer boundary that also backs SQLite.
+
+    #[test]
+    fn dream_cycle_marker_every_defined_verb_writes() {
+        let estate = make_estate();
+        for verb in audit_verbs::DREAM_CYCLE {
+            estate
+                .append_dream_cycle_marker(verb, "estate-cycle-ok", 1_700_000_002_000)
+                .unwrap_or_else(|e| panic!("defined verb {verb:?} was rejected: {e:?}"));
+        }
+    }
+
+    #[test]
+    fn dream_cycle_marker_rejects_undefined_verb() {
+        let estate = make_estate();
+        let err = estate
+            .append_dream_cycle_marker("dreamSideload", "estate-cycle-bad", 1_700_000_002_000)
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::InvalidContent(_)));
+    }
+
+    #[test]
+    fn supplementary_audit_defined_verb_writes() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "dataset handle stand-in", "kitchen");
+        let from = estate
+            .store
+            .audit_events_for_row(&drawer.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .expect("capture must have produced a sealed audit event to build `from`");
+        estate
+            .append_supplementary_audit(&from, "datasetTableDrop", "dataset table dropped")
+            .expect("the one currently-defined supplementary verb must be accepted");
+        let events = estate.store.audit_events_for_row(&drawer.id).unwrap();
+        assert!(events.iter().any(|e| e.verb == "datasetTableDrop"));
+    }
+
+    #[test]
+    fn supplementary_audit_rejects_undefined_verb() {
+        let estate = make_estate();
+        let drawer = basic_capture(&estate, "dataset handle stand-in", "kitchen");
+        let from = estate
+            .store
+            .audit_events_for_row(&drawer.id)
+            .unwrap()
+            .into_iter()
+            .next()
+            .unwrap();
+        let err = estate
+            .append_supplementary_audit(&from, "datasetTableForge", "attempted forgery")
+            .unwrap_err();
+        assert!(matches!(err, LocusKitError::InvalidContent(_)));
+        // The forged verb must not appear anywhere in the row's audit trail.
+        let events = estate.store.audit_events_for_row(&drawer.id).unwrap();
+        assert!(events.iter().all(|e| e.verb != "datasetTableForge"));
     }
 }

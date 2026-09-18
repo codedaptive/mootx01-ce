@@ -31,6 +31,7 @@
 // clock. The GLK telemetry emitters stamp their own ts inside the kit.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import GeniusLocusKit
 import LocusKit
@@ -77,7 +78,7 @@ public actor EstateAdmin {
         let backend: EstateBackendKind
         /// The composition kind requested at provision time, retained for the read
         /// badge. GLK persists the kind in the manifest's kind-prefixed framework
-        /// profile, but `estate(for:)` is package-internal, so the engine keeps the
+        /// profile, but direct estate access is package-internal, so the engine keeps the
         /// kind here rather than reading it back across the kit boundary.
         let kind: EstateKind
         /// Filesystem URL of the SQLite file for this estate, or `nil` for
@@ -104,7 +105,7 @@ public actor EstateAdmin {
     /// `cacheConfig.enabled` to wrap the bare row store in `CachingRowStore`.
     private let cacheConfig: EstateCacheConfig
 
-    private let logger = Logger(subsystem: "com.mootx01.kit", category: "EstateAdmin")
+    private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "MootManager.EstateAdmin")
 
     /// Create an admin engine.
     ///

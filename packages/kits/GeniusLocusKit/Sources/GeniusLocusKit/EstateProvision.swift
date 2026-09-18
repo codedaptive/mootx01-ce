@@ -24,7 +24,7 @@ import Foundation
 /// the wiring without the caller re-specifying it.
 ///
 /// Per §1.8 of ARIA_MCP_DESKTOP_APP_CONCEPTS.md:
-///   - `.glk`         — full composition (LocusKit + VectorKit + CorpusKit)
+///   - `.glk`         — full composition (LocusKit + SynapseKit + CorpusKit)
 ///   - `.corpusOnly`  — LocusKit core + CorpusKit (no standalone VectorStore)
 ///   - `.locusOnly`   — LocusKit only (no Corpus, no VectorStore)
 ///
@@ -34,7 +34,7 @@ import Foundation
 /// multi-schema `migrate`) or use separate backends — the caller decides.
 public enum EstateKind: String, Sendable, Equatable, CaseIterable {
 
-    /// Full composition: LocusKit + VectorKit + CorpusKit.
+    /// Full composition: LocusKit + SynapseKit + CorpusKit.
     ///
     /// The write-gate, audit trail, vector index, and BM25 recall are all
     /// wired at provision time. The estate supports all nine ARIA verbs and
@@ -66,7 +66,7 @@ public enum EstateKind: String, Sendable, Equatable, CaseIterable {
 ///
 /// The identity key (Ed25519 signing key) is written to the Apple Keychain and
 /// survives process restarts. The whole-file database key (SQLCipher) is minted
-/// by `EstateKeyProvider` and stored in the Keychain keyed to the estate file
+/// by `EstateOpenPosture` and stored in the Keychain keyed to the estate file
 /// path. This is the correct posture for user-owned estates that must survive
 /// device restarts.
 ///

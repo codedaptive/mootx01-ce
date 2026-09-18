@@ -405,7 +405,7 @@ actor VectorRunner {
     // MARK: - Observation consumers
 
     private func consumeCaptured(_ obs: inout [Observation], drawer: Drawer, caseID: String) {
-        guard !obs.isEmpty, case .captured(_, let ec, let er, let eu, let esa) = obs.removeFirst() else {
+        guard !obs.isEmpty, case .captured(_, let ec, _, let eu, let esa) = obs.removeFirst() else {
             Issue.record("case \(caseID): expected captured observation")
             return
         }

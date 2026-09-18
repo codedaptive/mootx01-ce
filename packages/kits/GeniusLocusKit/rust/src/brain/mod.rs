@@ -17,13 +17,22 @@
 // submission order. Parity is on the surface vocabulary and drain
 // ordering semantics, not the storage substrate.
 
+pub mod span_encode_duty;
+pub mod fact_extraction_duty;
+pub mod fact_extraction_workflow;
+pub mod anomaly_flag_sweep;
 pub mod conflict_projection_pass;
 pub mod conflict_projection_sweep;
 pub mod review_queue;
 pub mod tiered_contradiction_search;
 pub mod meeting_decision_capture;
 pub mod consolidation_cycle;
-pub mod distillation_cycle;
+pub mod fingerprint_lane;
+pub mod enrichment_stage;
 pub mod event_lag_pairs;
 pub mod scheduler;
 pub mod signals;
+pub mod end_of_day_tournament;
+
+pub mod bounded_retraining;
+pub mod duty_queue;

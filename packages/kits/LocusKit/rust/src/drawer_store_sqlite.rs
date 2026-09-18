@@ -192,6 +192,14 @@ impl DrawerStore for SqliteDrawerStore {
         self.0.storage()
     }
 
+    fn atomic_file_conflict_proposal(
+        &self,
+        request: &crate::drawer_store::AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<crate::drawer_store::AtomicConflictProposalOutcome, LocusKitError> {
+        self.0.atomic_file_conflict_proposal(request, now)
+    }
+
     fn resolve_node_names(
         &self,
         parent_node_ids: &[String],
@@ -275,6 +283,12 @@ impl DrawerStore for SqliteDrawerStore {
         limit: usize,
     ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.0.active_drawers_after(after_id, limit)
+    }
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.0.active_corpus_content_ids_limited(limit)
     }
 
     // Forwarding overrides for the DESC bounded scan methods. Without these,
@@ -362,27 +376,57 @@ impl DrawerStore for SqliteDrawerStore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
-        self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+        self.0.expunge_gated(drawer_id, changed_by, reason, now, seal_audit, sensitivity_ceiling)
     }
-    fn set_distilled_representation(
+    fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
+        self.0.set_ssc_facts(drawer_id, facts)
+    }
+    fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.0.set_span_indexed(drawer_id)
+    }
+    fn span_index_debt_batch(
         &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
-        self.0.set_distilled_representation(
-            drawer_id,
-            distilled,
-            pipeline_version,
-            token_count,
-            generated_at,
-        )
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.span_index_debt_batch(limit, after_drawer_id)
     }
-    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        self.0.count_undistilled(pipeline_version)
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.0.count_span_index_debt()
+    }
+    fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.0.set_facts_extracted(drawer_id)
+    }
+    fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        self.0.set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+    fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[crate::kg_fact::KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        self.0.publish_extracted_facts(source_id, expected_content, recipe_id, facts, now)
+    }
+    fn fact_extraction_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
+        self.0.fact_extraction_debt_batch(limit, after_drawer_id)
+    }
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.0.count_fact_extraction_debt()
+    }
+    fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        self.0.mark_fact_extraction_rejected(source_id, expected_content, recipe_id)
+    }
+    fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        self.0.count_fact_extraction_rejected()
+    }
+    fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
+        self.0.set_anomalous_flag(drawer_id, anomalous)
     }
     fn set_subject_representation(
         &self,
@@ -401,6 +445,34 @@ impl DrawerStore for SqliteDrawerStore {
             changed_by,
             reason,
         )
+    }
+
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.append_encode_complete_marker(drawer_id, row_count, unit_session_id, completed_at)
+    }
+
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.append_dream_cycle_marker(verb, unit_session_id, marked_at)
+    }
+
+    fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.append_reindex_complete_marker(row_count, unit_session_id, completed_at)
     }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.0.count_missing_subject(pipeline_version)
@@ -546,8 +618,14 @@ impl DrawerStore for SqliteDrawerStore {
         self.0.add_kg_fact(fact)
     }
 
-    fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
-        self.0.withdraw_kg_fact(id, now)
+    fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.0.withdraw_kg_fact(id, changed_by, reason, now)
     }
 
     fn get_kg_fact(&self, id: &str) -> Result<Option<crate::kg_fact::KGFact>, LocusKitError> {
@@ -733,6 +811,20 @@ impl DrawerStore for SqliteDrawerStore {
         self.0.count_recall_traces()
     }
 
+    fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        self.0.upsert_recall_ratings(ratings)
+    }
+
+    fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        self.0.recall_ratings(ids)
+    }
+
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
         self.0.count_drawer_rows()
     }
@@ -745,6 +837,13 @@ impl DrawerStore for SqliteDrawerStore {
         self.0.count_kg_fact_rows()
     }
 
+    fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.0.audit_events(after, limit)
+    }
     fn audit_events_for_row(
         &self,
         row_id: &str,

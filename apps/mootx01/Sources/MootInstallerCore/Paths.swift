@@ -1,73 +1,25 @@
 // Paths.swift
 //
-// Resolves the user data directory that mootx01 opens. Pure
-// path math — no filesystem touching — so the logic is unit-testable
-// without spawning a process or writing under the user's home.
+// Install-side path constants: the installed binaries and symlinks, the
+// client config files, the launchd labels and plists, the logs directory,
+// and the resident daemon's port file. Pure path math over an injected home
+// directory, so the logic is unit-testable without writing under the user's
+// home.
 //
-// macOS-only per LAUNCH_PLAN.md §"The Monday cut". The single
-// supported location is the standard Application Support directory:
-//   ~/Library/Application Support/com.mootx01.ce/
-// The estate database lives at:
-//   ~/Library/Application Support/com.mootx01.ce/estate.sqlite
-//
-// MOOTX01_DATA_DIR overrides the resolved directory when set and
-// non-empty. The override exists for the installer's bash smoke
-// test (Installer/tests/test_install_sh.sh) and for any developer
-// who wants to point a separate MOOT at a sandboxed path; it is not
-// documented for end users.
+// Estates are not located here. The estate catalog (GeniusLocusKit
+// `EstateCatalog`) names every estate directory; the configuration
+// directory it lives in is computed from the platform and is the `dataDir`
+// the port-file and stats-store helpers below take.
 
 import Foundation
+import MootProductIdentity
 
 public enum MootPaths {
-
-    /// Environment variable name read in `resolveDataDirectory`.
-    /// Kept public so the bash smoke test and any future tooling
-    /// can refer to one canonical symbol rather than a literal.
-    public static let dataDirEnvVar: String = "MOOTX01_DATA_DIR"
-
-    /// File name of the persistent estate database inside the data
-    /// directory. SQLite + sqlite-vec WAL files (`-wal`, `-shm`) are
-    /// created alongside by the SQLite backend.
-    public static let estateFileName: String = "estate.sqlite"
 
     /// Default user-visible owner identifier stamped into the
     /// manifest at first-run. Surfaces in audit rows; the substrate
     /// only requires it be non-empty (LocusKit.Estate.create).
     public static let defaultOwnerIdentifier: String = "mootx01-user"
-
-    /// Resolve the data directory for this user. Reads
-    /// `MOOTX01_DATA_DIR` from `environment` when set and non-empty;
-    /// otherwise returns the macOS Application Support path under
-    /// the supplied `homeDirectory`.
-    ///
-    /// - Parameters:
-    ///   - environment: process environment dictionary. Inject in
-    ///     tests; pass `ProcessInfo.processInfo.environment` in the
-    ///     executable.
-    ///   - homeDirectory: the user's home directory. Inject in tests;
-    ///     pass `FileManager.default.homeDirectoryForCurrentUser` in
-    ///     the executable.
-    /// - Returns: the resolved data directory URL. Does not touch
-    ///   the filesystem.
-    public static func resolveDataDirectory(
-        environment: [String: String],
-        homeDirectory: URL
-    ) -> URL {
-        if let override = environment[dataDirEnvVar], !override.isEmpty {
-            return URL(fileURLWithPath: override, isDirectory: true)
-        }
-        return homeDirectory
-            .appendingPathComponent("Library", isDirectory: true)
-            .appendingPathComponent("Application Support", isDirectory: true)
-            .appendingPathComponent("com.mootx01.ce", isDirectory: true)
-    }
-
-    /// Estate database URL inside `dataDirectory`. Pure path
-    /// concatenation; the SQLite backend creates the file on first
-    /// open (PersistenceKitSQLite.SQLiteConnection makes parent dirs).
-    public static func estateURL(in dataDirectory: URL) -> URL {
-        dataDirectory.appendingPathComponent(estateFileName, isDirectory: false)
-    }
 
     /// URL of the Claude Code project-local MCP config file.
     ///
@@ -180,6 +132,22 @@ public enum MootPaths {
             .appendingPathComponent("mootx01-proxy", isDirectory: false)
     }
 
+    /// Absolute path of the same-directory botLink symlink (BL-1). Sits
+    /// beside the placed binary in `~/.mootx01/bin/` for the same
+    /// `Bundle.main` reasons as the proxy symlink above. Cloud agents exec
+    /// `mootx01-botLink <subcommand>` by this name; the argv0 name triggers
+    /// `ArgvDispatch` to prepend the `botlink` subcommand automatically.
+    ///
+    /// - Parameter homeDirectory: the user's home directory. Inject in
+    ///   tests; pass `FileManager.default.homeDirectoryForCurrentUser`.
+    /// - Returns: `<home>/.mootx01/bin/mootx01-botLink` (capital L — must
+    ///   match `ArgvDispatch.botLinkInvocationName`). Does not touch the
+    ///   filesystem.
+    public static func botLinkSymlinkURL(homeDirectory: URL) -> URL {
+        installedBinaryDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("mootx01-botLink", isDirectory: false)
+    }
+
     /// URL of the project-local Claude Code settings file.
     ///
     /// When `--local` is used during install, Claude Code is wired to
@@ -235,7 +203,7 @@ public enum MootPaths {
     /// launchd job label for the moot-mgr resident-host LaunchAgent. Used as
     /// the plist `Label`, the plist filename stem, and the `launchctl`
     /// bootstrap/bootout target (`gui/<uid>/<label>`).
-    public static let launchAgentLabel: String = "com.mootx01.mgr"
+    public static let launchAgentLabel: String = MootProductIdentity.Services.managerLabel
 
     /// Path of the moot-mgr LaunchAgent property list. Per-user LaunchAgents
     /// live under `~/Library/LaunchAgents`; launchd loads them into the user's
@@ -254,7 +222,7 @@ public enum MootPaths {
     /// launchd job label for the resident mootx01 daemon (the headless HTTP MCP
     /// server + autonomic governor). Distinct from the moot-mgr agent so the two services
     /// load independently.
-    public static let daemonLabel: String = "com.mootx01.daemon"
+    public static let daemonLabel: String = MootProductIdentity.Services.daemonLabel
 
     /// Path of the resident mootx01 daemon LaunchAgent property list.
     ///
@@ -267,17 +235,34 @@ public enum MootPaths {
             .appendingPathComponent("\(daemonLabel).plist", isDirectory: false)
     }
 
-    /// The moot-mgr stats-store path the resident daemon self-reports to
-    /// (`ARIA_MCP_STATS_STORE`). Mirrors moot-mgr's `ManagerConfig` default —
-    /// `<data-dir>/moot-mgr/stats.sqlite` — so the daemon writes exactly where
-    /// moot-mgr reads.
+    /// The computed default stats-store path for the resident daemon, with no
+    /// settings-file lookup. This is the value `mootx01 install` writes into
+    /// `config.json` when the key is absent, and the fallback used by
+    /// `daemonStatsStorePath` when no setting is configured.
     ///
-    /// - Parameter dataDir: the resolved app-support data dir (`com.mootx01.ce`).
-    public static func daemonStatsStorePath(dataDir: URL) -> String {
+    /// - Parameter dataDir: The resolved app-support data directory (`com.mootx01.ce`).
+    public static func daemonStatsStoreDefault(dataDir: URL) -> String {
         dataDir
             .appendingPathComponent("moot-mgr", isDirectory: true)
             .appendingPathComponent("stats.sqlite", isDirectory: false)
             .path
+    }
+
+    /// The moot-mgr stats-store path the resident daemon uses.
+    ///
+    /// Precedence (highest to lowest):
+    ///   1. `daemon.stats_store` key in `<dataDir>/config.json` (R6 setting,
+    ///      2026-09-09): a changeable setting that `mootx01 install` seeds and
+    ///      operators can edit.
+    ///   2. The computed default: `<dataDir>/moot-mgr/stats.sqlite`, matching
+    ///      `ManagerConfig`'s default so the daemon and moot-mgr open the same file.
+    ///
+    /// - Parameter dataDir: The resolved app-support data directory (`com.mootx01.ce`).
+    public static func daemonStatsStorePath(dataDir: URL) -> String {
+        if let configured = MootProductIdentity.Settings.load(configurationDirectory: dataDir).daemonStatsStore {
+            return configured
+        }
+        return daemonStatsStoreDefault(dataDir: dataDir)
     }
 
     /// The resident daemon's loopback HTTP port — the single source of truth for
@@ -318,5 +303,137 @@ public enum MootPaths {
             return port
         }
         return defaultResidentPort
+    }
+}
+
+// MARK: - MACD-2c2 — the signed app-like daemon bundle (KONG-4)
+//
+// The SINGLE constant surface for the daemon-bundle artifact. Every spelling
+// of the bundle's name, executable, label, plist location, and LaunchAgent
+// ProgramArguments comes from here; the Makefile, build-pkg.sh, and
+// release.yml text artifacts are verified against these constants by a
+// parity test (LaunchAgentTests §Distribution parity), so generated and
+// manual sources cannot diverge.
+
+/// Constants and path math for the signed app-like daemon provider bundle
+/// (the packaged form of the `mootx01-daemon` thin shell over
+/// MootDaemonProvider). Pure path math — no filesystem touching.
+public enum DaemonBundle {
+
+    /// The bundle's on-disk name. The pkg payload, the Makefile recipe, and
+    /// release.yml all stage exactly this name.
+    public static let bundleName = "Mootx01DaemonProvider.app"
+
+    /// The executable inside `Contents/MacOS`.
+    public static let executableName = "Mootx01DaemonProvider"
+
+    /// The bundle identifier of the direct-install daemon provider bundle.
+    /// Distinct from the SANDBOXED nested helper
+    /// (`com.codedaptive.mootx01.macos.daemonproviderhelper` in project.yml)
+    /// — same provider module, different packaging and registration channel.
+    public static let bundleIdentifier = MootProductIdentity.Apple.BundleIdentifiers.daemonProvider
+
+    /// The LaunchAgent label for the BUNDLE-form daemon registration.
+    /// Deliberately NOT `MootPaths.daemonLabel` (`com.mootx01.daemon`, the
+    /// legacy raw-serve plist): the legacy artifact is retained — plist,
+    /// label, and running job untouched — until the bundle provider proves
+    /// authenticated readiness (MACD-3), so the two registrations coexist
+    /// under the arbiter rather than replacing each other blindly.
+    public static let launchAgentLabel = MootProductIdentity.Services.daemonProviderLaunchAgentLabel
+
+    /// The shell mode the LaunchAgent invokes. Until MACD-3 activates
+    /// estate hosting, the mode fail-closes honestly (exit 4) and the plist
+    /// installs DISABLED — the arguments are the FINAL contract so upgrade
+    /// never has to rewrite the plist when activation lands.
+    public static let residentModeArgument = "resident"
+
+    /// The installed bundle location:
+    /// `<home>/.mootx01/bin/Mootx01DaemonProvider.app`. It lives inside the
+    /// `bin/` payload tree deliberately: the pkg postinstall relocates the
+    /// staged `bin/` directory wholesale, so the bundle rides the SAME
+    /// validated placement path as the CLI binaries — one relocation
+    /// contract, no second placement rule.
+    public static func installedBundleURL(homeDirectory: URL) -> URL {
+        MootPaths.installedBinaryDirURL(homeDirectory: homeDirectory)
+            .appendingPathComponent(bundleName, isDirectory: true)
+    }
+
+    /// The bundle's executable: `.../Contents/MacOS/Mootx01DaemonProvider`.
+    /// This is the path the LaunchAgent ProgramArguments carry — always
+    /// inside the bundle, never a raw binary (mission hard rule).
+    public static func bundleExecutableURL(homeDirectory: URL) -> URL {
+        installedBundleURL(homeDirectory: homeDirectory)
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("MacOS", isDirectory: true)
+            .appendingPathComponent(executableName, isDirectory: false)
+    }
+
+    /// The bundle-form LaunchAgent plist location.
+    public static func launchAgentPlistURL(homeDirectory: URL) -> URL {
+        homeDirectory
+            .appendingPathComponent("Library", isDirectory: true)
+            .appendingPathComponent("LaunchAgents", isDirectory: true)
+            .appendingPathComponent("\(launchAgentLabel).plist", isDirectory: false)
+    }
+
+    /// The exact ProgramArguments the bundle plist carries.
+    public static func programArguments(homeDirectory: URL) -> [String] {
+        [bundleExecutableURL(homeDirectory: homeDirectory).path, residentModeArgument]
+    }
+
+    /// Run one READ-ONLY mode of the installed daemon bundle executable and
+    /// capture its single-line JSON report. Shared by `install` and `upgrade`
+    /// so the two commands cannot drift (and so the drain/wait ordering is
+    /// correct in exactly one place).
+    ///
+    /// stdout AND stderr are drained to EOF BEFORE `waitUntilExit()`: a child
+    /// that fills a pipe buffer blocks forever if the parent waits first, and
+    /// a census report on a machine with many candidates is not guaranteed to
+    /// be small.
+    ///
+    /// - Parameters:
+    ///   - mode: A read-only shell mode (`census`, `self-report`). Never a
+    ///     mode with side effects.
+    ///   - homeDirectory: The user's home directory.
+    /// - Returns: The exit code and the trimmed stdout line (nil when empty).
+    public static func runReadOnlyMode(
+        _ mode: String, homeDirectory: URL
+    ) -> (code: Int32, output: String?) {
+        let executable = bundleExecutableURL(homeDirectory: homeDirectory)
+        guard FileManager.default.isExecutableFile(atPath: executable.path) else {
+            return (-1, nil)
+        }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = [mode]
+        let outPipe = Pipe()
+        let errPipe = Pipe()
+        process.standardOutput = outPipe
+        process.standardError = errPipe
+        do {
+            try process.run()
+        } catch {
+            return (-1, nil)
+        }
+        // Drain both pipes to EOF first; only then wait for the child.
+        let outData = outPipe.fileHandleForReading.readDataToEndOfFile()
+        _ = errPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let text = String(data: outData, encoding: .utf8)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (process.terminationStatus, (text?.isEmpty ?? true) ? nil : text)
+    }
+
+    /// Every artifact the daemon-bundle installation OWNS — the only things
+    /// uninstall may remove. Estate databases, migration receipts, backups,
+    /// key material, and every census candidate are NOT here and are NEVER
+    /// touched by uninstall (mission preservation contract; explicit
+    /// Delete All Data has its own separate, estate-owned flow and even that
+    /// never touches non-owned census candidates).
+    public static func ownedArtifactPaths(homeDirectory: URL) -> [String] {
+        [
+            installedBundleURL(homeDirectory: homeDirectory).path,
+            launchAgentPlistURL(homeDirectory: homeDirectory).path,
+        ]
     }
 }

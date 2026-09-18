@@ -22,6 +22,7 @@
 //! `Confidence.raw_value()` / 56 maps the 5-point ordinal to [0, 1] (matches
 //! Swift `Float($0.confidence.rawValue) / 56.0`; max raw = 56).
 
+
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::{EstateCoordinator, MatrixCalibrationCurve};
 use locus_kit::filter::RecallFrame;
@@ -109,6 +110,8 @@ pub fn run_trust_grounded_synthesis(
         .count();
     let ranked_ids: Vec<String> = drawers.iter().map(|d| d.id.clone()).collect();
 
+    // Adornments are dark (Encoder Rerank Program, 2026-09-05). DrawerRow
+    // carries only id + content; synthesis uses first-line content excerpts.
     let rows: Vec<DrawerRow> = drawers
         .iter()
         .map(|d| DrawerRow {
@@ -128,6 +131,9 @@ pub fn run_trust_grounded_synthesis(
                 wing,
                 room,
                 is_currently_believed: true,
+                // Carry provenance so make_key_insights can apply the
+                // KEYINSIGHTS-PROV = a ruling (bits 30–35 sensitivity gate).
+                provenance: d.provenance,
             }
         })
         .collect();
@@ -298,7 +304,7 @@ mod tests {
         let c2 = capture(
             &coord,
             &h,
-            "vector storage uses sqlite-vec; embeddings live in VectorKit",
+            "vector storage uses sqlite-vec; embeddings live in SynapseKit",
             SourceType::Canonical,
         );
         // One derived drawer — lower trust tier.

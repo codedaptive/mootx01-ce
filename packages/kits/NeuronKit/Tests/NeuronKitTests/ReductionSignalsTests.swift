@@ -91,18 +91,29 @@ struct ReductionSignalsTests {
 
     // MARK: - lattice
 
-    @Test("lattice proximity: exact match 1, shared prefix partial, unanchored neutral")
-    func latticeProximity() {
-        // exact
-        #expect(NeuronKit.latticeProximity(queryCode: "547.1", candidateCode: "547.1") == 1.0)
-        // shared prefix "547" over longer "547.12" (6 chars) = 3/6 = 0.5
-        #expect(NeuronKit.latticeProximity(queryCode: "547", candidateCode: "547.12") == 0.5)
-        // no shared prefix
-        #expect(NeuronKit.latticeProximity(queryCode: "547", candidateCode: "812") == 0.0)
-        // unanchored query → neutral
-        #expect(NeuronKit.latticeProximity(queryCode: "", candidateCode: "547") == 0.5)
-        // anchored query, unanchored candidate → far
-        #expect(NeuronKit.latticeProximity(queryCode: "547", candidateCode: "") == 0.0)
+    @Test("lattice anchor similarity: §8.3 semantics — null Q-ID far on its axis, unanchored query neutral")
+    func latticeAnchorSimilarity() {
+        // Unanchored query (no UDC, no Q-ID) → neutral.
+        #expect(NeuronKit.latticeAnchorSimilarity(
+            queryUDC: "", queryQID: "", candidateUDC: "547", candidateQID: "") == 0.5)
+        // Anchored query, fully unanchored candidate → far on both §8.3
+        // axes (UDC distance clamps to 1, null Q-ID = 1) → similarity 0.
+        #expect(NeuronKit.latticeAnchorSimilarity(
+            queryUDC: "547", queryQID: "", candidateUDC: "", candidateQID: "") == 0.0)
+        // Identical UDC without Q-IDs: UDC axis 0, Q-ID axis 1 (null evidence
+        // never reads as closeness) → 0.5·0 + 0.5·1 → similarity 0.5.
+        #expect(NeuronKit.latticeAnchorSimilarity(
+            queryUDC: "547.1", queryQID: "", candidateUDC: "547.1", candidateQID: "") == 0.5)
+        // "547" vs "547.12": UDC raw (0 + 3)/6 = 0.5, Q-ID axis 1
+        // → distance 0.5·0.5 + 0.5·1 = 0.75 → similarity 0.25.
+        #expect(abs(NeuronKit.latticeAnchorSimilarity(
+            queryUDC: "547", queryQID: "", candidateUDC: "547.12", candidateQID: "") - 0.25) < 1e-9)
+        // No shared prefix: UDC raw (3+3)/3 clamps to 1, Q-ID axis 1 → sim 0.
+        #expect(NeuronKit.latticeAnchorSimilarity(
+            queryUDC: "547", queryQID: "", candidateUDC: "812", candidateQID: "") == 0.0)
+        // Identical Q-ID (empty UDC on both = equal → UDC axis 0) → sim 1.
+        #expect(NeuronKit.latticeAnchorSimilarity(
+            queryUDC: "", queryQID: "Q146", candidateUDC: "", candidateQID: "Q146") == 1.0)
     }
 
     @Test("lattice signal reads the candidate UDC against the query region")

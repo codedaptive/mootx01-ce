@@ -86,6 +86,25 @@ struct RecallMatrixScorer {
         return Float(sum) / Float(matrix.liveRowCount)
     }
 
+    /// `coOccurrence` over the DECAYED O projection (§8.13, W2.5 S4-C):
+    /// identical key walk, Double weights instead of Int64 counts, same
+    /// liveRowCount normalization. Reads the arm surface only — count
+    /// scoring is untouched.
+    func coOccurrenceDecayed(queryCoords: [MatrixValueCoord],
+                             candidateCoords: [MatrixValueCoord],
+                             matrix: MatrixTier) -> Float {
+        guard matrix.liveRowCount > 0,
+              !queryCoords.isEmpty,
+              !candidateCoords.isEmpty else { return 0 }
+        var sum: Double = 0
+        for q in queryCoords {
+            for c in candidateCoords {
+                sum += matrix.coOccurrenceDecayed[MatrixCoOccurKey(q, c)] ?? 0
+            }
+        }
+        return Float(sum / Double(matrix.liveRowCount))
+    }
+
     // MARK: - temporal
 
     /// T-matrix temporal-causality score for active lag buckets.
@@ -123,5 +142,26 @@ struct RecallMatrixScorer {
             }
         }
         return Float(sum) / Float(matrix.liveRowCount)
+    }
+
+    /// `temporal` over the DECAYED T projection (§8.13, W2.5 S4-C):
+    /// identical (query, candidate, lag) walk over Double weights.
+    func temporalDecayed(queryCoords: [MatrixValueCoord],
+                         candidateCoords: [MatrixValueCoord],
+                         activeLags: [Int],
+                         matrix: MatrixTier) -> Float {
+        guard matrix.liveRowCount > 0,
+              !queryCoords.isEmpty,
+              !candidateCoords.isEmpty else { return 0 }
+        var sum: Double = 0
+        for q in queryCoords {
+            for c in candidateCoords {
+                for lag in activeLags {
+                    let key = MatrixTemporalKey(source: q, target: c, lagBucket: lag)
+                    sum += matrix.temporalCausalityDecayed[key] ?? 0
+                }
+            }
+        }
+        return Float(sum / Double(matrix.liveRowCount))
     }
 }

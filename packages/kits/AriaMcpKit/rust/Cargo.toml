@@ -17,6 +17,7 @@ path = "src/lib.rs"
 serde       = { version = "1", features = ["derive"] }
 serde_json  = { version = "1" }
 uuid        = { version = "1", features = ["v4"] }
+unicode-segmentation = "=1.13.3"
 # SHA-256 for the ARIA-layer drift-detection sidecar manifest
 # (Vault drift and candidate handling decision b). Already in the lock file as a transitive
 # dep; adding as direct dep so the version is explicit and stable.
@@ -30,6 +31,7 @@ genius-locus-kit-migrations = { path = "../../GeniusLocusKit/rust-migrations", f
 locus-kit        = { path = "../../LocusKit/rust" }
 neuron-kit       = { path = "../../NeuronKit/rust" }
 substrate-ml     = { path = "../../../libs/SubstrateML/rust" }
+context-distill-lib = { path = "../../../libs/ContextDistillLib/rust" }
 # substrate-types: direct dep for Fingerprint256 (used in moot_lens_moment
 # and moot_lens_rhythm dispatch arms that call DrawerStore::fingerprints_captured_in
 # and DrawerStore::fingerprint_bit_series). Permitted per
@@ -45,7 +47,7 @@ vault-kit        = { path = "../../VaultKit/rust" }
 # InMemoryDrawerStore — both production-path for v1. persistence-kit is
 # a regular dep, not dev-only, because it is used in the lib (estate_registry).
 persistence-kit  = { path = "../../PersistenceKit/rust" }
-# corpus-kit and vectorkit: wired by the SQLite estate constructor to light up
+# corpus-kit and synapsekit: wired by the SQLite estate constructor to light up
 # the BM25 + vector semantic-recall lanes. Mirrors AriaMCPMain.swift's
 # wireSemanticRecall branch (SQLite only). Permitted per
 # in-repository dependency direction; dependency recorded in the
@@ -56,13 +58,31 @@ corpus-kit       = { path = "../../CorpusKit/rust" }
 # in-repository dependency direction; recorded in the 6a-iii-wire
 # blast-radius report. Downstream of the providers crate — no layering inversion.
 corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
-vectorkit        = { path = "../../VectorKit/rust" }
+synapsekit        = { path = "../../SynapseKit/rust" }
 # intellectus-lib: required for Intellectus::install / set_enabled / report!()
 # in autonomic_governor.rs (Part 4) and autonomic_governor_tests.rs (Part 1).
 intellectus-lib  = { path = "../../../libs/IntellectusLib/rust" }
 # observer-sink: PersistenceStatsSink backed by StatsStore (SQLite). Wired at
-# startup via ARIA_MCP_STATS_STORE env var; see main.rs telemetry block.
+# startup by runtime.rs when in resident HTTP mode; path computed from the
+# configuration directory (ARIA_MCP_STATS_STORE env override removed per R6).
 observer-sink    = { path = "../../../libs/ObserverSink/rust" }
+# moot-product-identity: settings::load() reads config.json for
+# daemon.stats_store (R6) and the fact_extraction.* paths used by
+# build_fact_extraction_cycle in runtime.rs.
+# Per in-repository dependency direction (app/kit → lib); no inversion.
+moot-product-identity = { path = "../../../libs/MootProductIdentity/rust" }
+# fact-extraction-kit: the FactExtractor trait, needed to call spec() on
+# NuExtractWorkerClient and to cast the Arc for activate_fact_extractor.
+# fact-extraction-kit is already compiled as a transitive dep of
+# genius-locus-kit; added here as a direct dep so the trait is nameable.
+# Per in-repository dependency direction (app/kit → kit); no inversion.
+fact-extraction-kit = { path = "../../FactExtractionKit/rust" }
+# fact-extraction-kit-providers: NuExtractWorkerClient is the concrete
+# FactExtractor for signal 14. Activated at estate open when the estate
+# setting is On and all four config.json paths are present. Most installs
+# carry no model; missing assets degrade silently (signal 14 inactive),
+# never an error. Per in-repository dependency direction; no inversion.
+fact-extraction-kit-providers = { path = "../../FactExtractionKit/rust-providers" }
 # lattice-lib: the resident Autonomic Governor drives `lattice::pool_reduce`
 # (novel-token merge-back — the second dormant learning loop) on a low cadence
 # from autonomic_governor.rs. App→lib path dep (downstream→upstream), no
@@ -93,3 +113,5 @@ convergence-kit  = { path = "../../ConvergenceKit/rust" }
 # version match persistence-kit's entry exactly — Cargo deduplicates to one
 # compiled instance, adding zero build cost.
 rusqlite         = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
+
+[features]

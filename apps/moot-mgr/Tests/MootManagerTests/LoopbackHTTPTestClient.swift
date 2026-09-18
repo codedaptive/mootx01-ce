@@ -57,8 +57,9 @@ func loopbackHTTP(
     head += "Connection: close\r\n"
     for (k, v) in headers { head += "\(k): \(v)\r\n" }
     head += "Content-Length: \(bodyData.count)\r\n\r\n"
-    var request = Array(head.utf8)
-    request.append(contentsOf: bodyData)
+    // Immutable so the concurrently executing closure below captures a value,
+    // not a mutable variable.
+    let request = Array(head.utf8) + bodyData
 
     return try await withCheckedThrowingContinuation { (cont: CheckedContinuation<LoopbackHTTPResponse, Error>) in
         DispatchQueue.global(qos: .userInitiated).async {

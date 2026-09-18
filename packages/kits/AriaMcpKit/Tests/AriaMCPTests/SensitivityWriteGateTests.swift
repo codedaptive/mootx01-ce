@@ -1,0 +1,424 @@
+import Testing
+import Foundation
+import GeniusLocusKit
+import LocusKit
+import PersistenceKit
+import PersistenceKitInMemory
+@testable import AriaMCP
+
+/// Sensitivity ceiling gate for write verbs (SENS_WRITE_GATE Unit 1).
+///
+/// A caller holding only a UUID must not be able to mutate a memory that it
+/// cannot read.  Before this gate, `storedMemoryID` applied no ceiling check
+/// and a write against a `.restricted` row succeeded even when the ceiling was
+/// `.elevated`.  After the gate, every write verb routes through
+/// `gatedStoredMemoryID` which checks `context.maximumSensitivity` before
+/// handing the stored ID to the lower kit.
+///
+/// Oracle-closure rule: absent IDs and above-ceiling IDs must produce the
+/// identical `memory_not_found` refusal so neither can be distinguished.
+@Suite("Sensitivity write gate — moot_*_memory verbs", .serialized)
+struct SensitivityWriteGateTests {
+
+    // MARK: - Harness
+
+    private func openEstate(
+        in kit: GeniusLocusKit,
+        owner: OwnerCredentials
+    ) async throws -> EstateHandle {
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory
+        ))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        return try await kit.open(storage: storage, owner: owner, identityKeyStore: InMemoryEstateIdentityKeyStore())
+    }
+
+    /// Seed a memory with the given adjective sensitivity directly through
+    /// the kit, bypassing the write-gate under test.
+    @discardableResult
+    private func seed(
+        _ content: String,
+        sensitivity: AdjectiveSensitivity = .normal,
+        in handle: EstateHandle,
+        kit: GeniusLocusKit
+    ) async throws -> Drawer {
+        let frame = CaptureFrame(
+            content: content,
+            channel: .typed,
+            room: "swg-tests",
+            latticeAnchor: .udc("swg"),
+            addedBy: "swg-tests",
+            embeddingModelID: "test-model-v1",
+            sensitivity: sensitivity
+        )
+        return try await kit.capture(handle, frame)
+    }
+
+    /// Extract the structured error object from a refusal envelope.
+    private func errorObject(
+        _ result: JSONValue
+    ) -> [String: JSONValue]? {
+        result.objectValue?["structuredContent"]?.objectValue?["error"]?.objectValue
+    }
+
+    private func isError(_ result: JSONValue) -> Bool {
+        result.objectValue?["isError"]?.boolValue ?? false
+    }
+
+    // MARK: - Gate: blocked verbs
+
+    /// Gate-discrimination proof: every write verb returns `memory_not_found`
+    /// when the target memory sits above the caller's sensitivity ceiling.
+    ///
+    /// Pre-fix failure (verbatim — without `gatedStoredMemoryID` the old
+    /// `storedMemoryID` returned the stored ID regardless of sensitivity and
+    /// the lower kit applied the mutation successfully):
+    ///
+    ///     Expectation failed: isError(result)
+    ///     moot_update_memory must be blocked on a restricted memory;
+    ///     got: {"isError": false, ...}
+    ///
+    /// Post-fix (this test): isError is true, code is "memory_not_found".
+    @Test(
+        "gate blocks write verbs on above-ceiling memories",
+        arguments: [
+            ("moot_update_memory",   JSONValue.object(["mutation": .string("set_subject"), "subject": .string("blocked")])),
+            // correct_sensitivity is the mutation a regression would most plausibly re-open;
+            // the gate is kind-independent (gatedStoredMemoryID runs before lowerKind()),
+            // but the suite must name it explicitly so a per-kind guard escape is caught.
+            ("moot_update_memory",   JSONValue.object(["mutation": .string("correct_sensitivity"), "sensitivity": .string("normal")])),
+            ("moot_withdraw_memory", JSONValue.object([:])),
+            ("moot_erase_memory",    JSONValue.object(["confirmation": .bool(true)])),
+            ("moot_confirm_memory",  JSONValue.object([:])),
+            ("moot_move_memory",     JSONValue.object(["wing": .string("test"), "room": .string("test")])),
+        ] as [(String, JSONValue)]
+    )
+    func gateBlocksWriteVerbsOnAboveCeilingMemories(
+        tool: String, extraArgs: JSONValue
+    ) async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-blocked-\(tool)")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Seed a restricted memory — above the default elevated ceiling.
+        // No sensitivity grant is active, so the ceiling stays at .elevated.
+        let restricted = try await seed(
+            "restricted — must be invisible to write gate",
+            sensitivity: .restricted,
+            in: handle,
+            kit: kit
+        )
+
+        var args: [String: JSONValue] = ["memory_id": .string(restricted.id)]
+        if let extra = extraArgs.objectValue {
+            for (k, v) in extra { args[k] = v }
+        }
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        let result = try await dispatcher.dispatch(
+            name: tool,
+            arguments: .object(args)
+        )
+
+        #expect(isError(result),
+            "\(tool) must be blocked on a restricted memory; got: \(result)")
+
+        let err = try #require(errorObject(result),
+            "\(tool) refusal must carry a structured error object")
+        #expect(
+            err["code"]?.stringValue == "memory_not_found",
+            "\(tool) must return code memory_not_found; got: \(String(describing: err["code"]))")
+        #expect(
+            err["message"]?.stringValue == "No authorized memory matched the requested reference.",
+            "\(tool) message must be exact oracle-closure text; got: \(String(describing: err["message"]))")
+        #expect(
+            err["retryable"]?.boolValue == false,
+            "\(tool) memory_not_found must be non-retryable")
+    }
+
+    // MARK: - Oracle closure: restricted row ≡ nonexistent row
+
+    /// Oracle-closure proof: the refusal envelope for a restricted-row ID is
+    /// byte-identical to the refusal envelope for a freshly-generated nonexistent
+    /// UUID, for every write verb.  Neither case can be distinguished by the caller.
+    @Test(
+        "oracle closure: restricted row and nonexistent UUID produce identical refusals",
+        arguments: [
+            ("moot_update_memory",   JSONValue.object(["mutation": .string("set_subject"), "subject": .string("blocked")])),
+            // correct_sensitivity is named explicitly for the same reason as the
+            // gate-blocks test above: the gate is kind-independent but the suite
+            // must prove it for the mutation kind a regression would most plausibly
+            // re-open.
+            ("moot_update_memory",   JSONValue.object(["mutation": .string("correct_sensitivity"), "sensitivity": .string("normal")])),
+            ("moot_withdraw_memory", JSONValue.object([:])),
+            ("moot_erase_memory",    JSONValue.object(["confirmation": .bool(true)])),
+            ("moot_confirm_memory",  JSONValue.object([:])),
+            ("moot_move_memory",     JSONValue.object(["wing": .string("test"), "room": .string("test")])),
+        ] as [(String, JSONValue)]
+    )
+    func oracleClosureRestrictedEqualsNonexistent(
+        tool: String, extraArgs: JSONValue
+    ) async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-oracle-\(tool)")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        let restricted = try await seed(
+            "restricted oracle test",
+            sensitivity: .restricted,
+            in: handle,
+            kit: kit
+        )
+        let nonexistent = UUID()
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+
+        func callTool(_ id: String) async throws -> JSONValue {
+            var args: [String: JSONValue] = ["memory_id": .string(id)]
+            if let extra = extraArgs.objectValue {
+                for (k, v) in extra { args[k] = v }
+            }
+            return try await dispatcher.dispatch(name: tool, arguments: .object(args))
+        }
+
+        let restrictedResponse = try await callTool(restricted.id)
+        let nonexistentResponse = try await callTool(nonexistent.uuidString)
+
+        let restrictedErr = try #require(errorObject(restrictedResponse),
+            "restricted row refusal must carry an error object")
+        let nonexistentErr = try #require(errorObject(nonexistentResponse),
+            "nonexistent row refusal must carry an error object")
+
+        #expect(
+            restrictedErr["code"]?.stringValue == nonexistentErr["code"]?.stringValue,
+            "\(tool): restricted and nonexistent must produce the same code; got \(String(describing: restrictedErr["code"])) vs \(String(describing: nonexistentErr["code"]))")
+        #expect(
+            restrictedErr["message"]?.stringValue == nonexistentErr["message"]?.stringValue,
+            "\(tool): restricted and nonexistent must produce the same message")
+        #expect(
+            restrictedErr["retryable"]?.boolValue == nonexistentErr["retryable"]?.boolValue,
+            "\(tool): restricted and nonexistent must produce the same retryable flag")
+    }
+
+    // MARK: - Gate passes for readable rows
+
+    /// Gate passes when the memory is within the caller's sensitivity ceiling.
+    /// `correct_sensitivity` raise (normal → restricted) must succeed because
+    /// the memory is readable at `.normal`, within the default `.elevated` ceiling.
+    @Test func gatePassesForReadableRow() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-pass")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Normal-sensitivity memory — within the .elevated ceiling.
+        let normal = try await seed(
+            "normal — visible to write gate",
+            sensitivity: .normal,
+            in: handle,
+            kit: kit
+        )
+
+        let dispatcher = ToolDispatcher(kit: kit, handle: handle)
+        // Raise sensitivity: normal → restricted.  This write must succeed
+        // because the memory is readable before the mutation lands.
+        let result = try await dispatcher.dispatch(
+            name: "moot_update_memory",
+            arguments: .object([
+                "memory_id": .string(normal.id),
+                "mutation": .string("correct_sensitivity"),
+                "sensitivity": .string("restricted"),
+            ])
+        )
+        #expect(!isError(result),
+            "correct_sensitivity raise on a normal memory must succeed; got: \(result)")
+    }
+
+    // MARK: - Ledger ordering: refused write must not dereference
+
+    /// A tracking ledger that counts `recordDereferenced` calls so the
+    /// ledger-ordering test can assert the dereference did not fire.
+    private actor TrackingMemoryUsageLedger: AriaV2MemoryUsageLedger {
+        private(set) var dereferencedCallCount: Int = 0
+
+        func recordSurfaced(_ memoryIDs: [UUID], estateID: UUID, callerID: String, at: Date) async {
+            // Not under test — ignore.
+        }
+
+        func recordDereferenced(_ memoryIDs: [UUID], estateID: UUID, callerID: String, at: Date) async {
+            dereferencedCallCount += 1
+        }
+    }
+
+    /// Ledger-ordering proof: a refused write against a Restricted-sensitivity
+    /// memory must NOT fire the reward-trace dereference write.
+    ///
+    /// This test drives `AriaV2MemoryMutations` directly (bypassing
+    /// `ToolDispatcher`) so it can inject a tracking `AriaV2MemoryUsageLedger`
+    /// and observe whether `recordDereferenced` was called.
+    ///
+    /// Pre-fix failure (verbatim — before the ordering fix, `recordDereferenced`
+    /// fired before `gatedStoredMemoryID` was called, so the count rose to 1
+    /// even on a refused write):
+    ///
+    ///     Expectation failed: ledger.dereferencedCallCount == 0
+    ///     refused write against a Restricted memory must not dereference;
+    ///     dereferencedCallCount: 1
+    ///
+    /// Post-fix: dereferencedCallCount remains 0 because `recordDereferenced`
+    /// is only called inside the `do` block that follows the gate check.
+    @Test func refusedWriteDoesNotDereferenceRestricted() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-ledger-order")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Seed a restricted memory — above the default .elevated ceiling.
+        let restricted = try await seed(
+            "restricted — ledger-ordering probe",
+            sensitivity: .restricted,
+            in: handle,
+            kit: kit
+        )
+
+        // Construct AriaV2MemoryMutations directly with a tracking ledger.
+        // The context has the default maximumSensitivity = .elevated, so the
+        // gate fires for the .restricted memory.
+        let ledger = TrackingMemoryUsageLedger()
+        let context = AriaV2MemoryOperationContext(
+            estateID: handle.estateUUID,
+            callerID: "test-caller",
+            serverIdentity: "test-server",
+            usageLedger: ledger
+        )
+        let mutations = AriaV2MemoryMutations(kit: kit, handle: handle, context: context)
+
+        // Run a refused write.
+        let result = try await mutations.update(arguments: JSONValue.object([
+            "memory_id": JSONValue.string(restricted.id),
+            "mutation": JSONValue.string("confirm"),
+        ]))
+
+        // Gate must have refused.
+        #expect(isError(result),
+            "refused write must set isError=true; got: \(result)")
+
+        // Dereference must not have fired.
+        let callCount = await ledger.dereferencedCallCount
+        #expect(callCount == 0,
+            "refused write against a Restricted memory must not dereference; dereferencedCallCount: \(callCount)")
+    }
+
+    // MARK: - Finding A: non-NotFound resolution failure still dereferences
+
+    /// Resolution-failure dereference proof (Finding A).
+    ///
+    /// A non-NotFound failure inside `gatedStoredMemoryID` — for example, the
+    /// estate handle is not open in the supplied kit — must still fire the
+    /// reward-trace dereference write.  The caller demonstrated entitlement by
+    /// surfacing the row's id at recall time; a backend failure unrelated to
+    /// sensitivity does not revoke it.
+    ///
+    /// Drive: create `AriaV2MemoryMutations` with a fresh `GeniusLocusKit` that
+    /// has no estates open.  `gatedStoredMemoryID` calls
+    /// `freshKit.getDrawers(in: handle, ids:hydrationLevel:)`, which throws
+    /// `GeniusLocusKitError.estateNotOpen` — a non-
+    /// MemoryNotFoundError.
+    ///
+    /// Pre-fix failure (the bug): the non-NotFound error fell through to the
+    /// outer generic `catch`, which returned `refusal` without firing the
+    /// dereference — `dereferencedCallCount == 0`.
+    ///
+    /// Post-fix: the new inner `catch` clause fires the dereference before
+    /// returning `unavailable`, so `dereferencedCallCount == 1`.
+    @Test func admittedResolutionFailureDereferences() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-resolution-failure")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Seed a normal row to obtain a valid UUID.
+        let normal = try await seed("resolution-failure dereference probe", in: handle, kit: kit)
+
+        // A fresh kit with no estate open.  kit.getDrawers(in: handle,
+        // ids:hydrationLevel:) throws GeniusLocusKitError.estateNotOpen — a
+        // non-NotFound resolution failure.
+        let freshKit = GeniusLocusKit()
+
+        let ledger = TrackingMemoryUsageLedger()
+        let context = AriaV2MemoryOperationContext(
+            estateID: handle.estateUUID,
+            callerID: "test-caller",
+            serverIdentity: "test-server",
+            usageLedger: ledger
+        )
+        // freshKit has no estate open for this handle.
+        let mutations = AriaV2MemoryMutations(kit: freshKit, handle: handle, context: context)
+
+        let result = try await mutations.update(arguments: JSONValue.object([
+            "memory_id": JSONValue.string(normal.id),
+            "mutation": JSONValue.string("confirm"),
+        ]))
+
+        // Non-NotFound resolution failure must return an error (unavailable).
+        #expect(isError(result),
+            "non-NotFound resolution failure must set isError=true; got: \(result)")
+
+        // Dereference must have fired despite the resolution failure.
+        let callCount = await ledger.dereferencedCallCount
+        #expect(callCount == 1,
+            "non-NotFound resolution failure must still dereference; dereferencedCallCount: \(callCount)")
+    }
+
+    // MARK: - Finding C: admitted lower-kit failure still dereferences
+
+    /// Lower-kit-failure dereference proof (Finding C).
+    ///
+    /// An admitted write (gatedStoredMemoryID succeeds) that the lower kit then
+    /// refuses for a reason unrelated to sensitivity must still fire the
+    /// reward-trace dereference write.  The caller demonstrated entitlement at
+    /// recall time; a state-transition failure at the lower layer does not
+    /// revoke it.
+    ///
+    /// Drive: `update` with mutation `"reject"` on an active row.  LocusKit's
+    /// state automaton admits only pending and contested rows for the reject
+    /// transition; calling it on an active row throws `disciplineViolation`.
+    /// `gatedStoredMemoryID` succeeds (normal row, within the default elevated
+    /// ceiling), so the dereference fires before the lower-kit call, and then
+    /// `kit.mutate` throws — the `update` function returns a refusal response.
+    ///
+    /// Pre-fix: if `recordDereferenced` were placed after `kit.mutate` (the
+    /// success-only ordering), the probe returns 0.  With the current placement
+    /// (before `kit.mutate`), `dereferencedCallCount == 1`.
+    @Test func admittedLowerFailureDereferences() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "swg-lower-failure")
+        let handle = try await openEstate(in: kit, owner: owner)
+
+        // Seed a normal active row — visible to the gate, but active → rejected
+        // is not a valid state transition so kit.mutate throws disciplineViolation.
+        let normal = try await seed("lower-failure dereference probe", in: handle, kit: kit)
+
+        let ledger = TrackingMemoryUsageLedger()
+        let context = AriaV2MemoryOperationContext(
+            estateID: handle.estateUUID,
+            callerID: "test-caller",
+            serverIdentity: "test-server",
+            usageLedger: ledger
+        )
+        let mutations = AriaV2MemoryMutations(kit: kit, handle: handle, context: context)
+
+        // reject on an active row: gatedStoredMemoryID succeeds (normal, within
+        // the default elevated ceiling), then kit.mutate throws disciplineViolation.
+        let result = try await mutations.update(arguments: JSONValue.object([
+            "memory_id": JSONValue.string(normal.id),
+            "mutation": JSONValue.string("reject"),
+        ]))
+
+        // Lower-kit state-transition refusal must return an error.
+        #expect(isError(result),
+            "lower-kit disciplineViolation must set isError=true; got: \(result)")
+
+        // Dereference must have fired before the lower-kit call returned.
+        let callCount = await ledger.dereferencedCallCount
+        #expect(callCount == 1,
+            "admitted lower-kit failure must fire dereference; dereferencedCallCount: \(callCount)")
+    }
+}

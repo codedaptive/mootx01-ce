@@ -69,4 +69,50 @@ struct ArgvDispatchTests {
             argv0: "mootx01-proxy", rawArgs: ["--version"], stdinIsPipe: false
         ) == ["--version"])
     }
+
+    // MARK: — botLink argv0 dispatch (BL-1)
+
+    @Test("argv0 basename mootx01-botLink with no args injects botlink")
+    func argv0BotLinkBasenameInjectsBotlink() {
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "/Users/dev/.mootx01/bin/mootx01-botLink", rawArgs: [], stdinIsPipe: false
+        ) == ["botlink"])
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink", rawArgs: [], stdinIsPipe: true
+        ) == ["botlink"], "argv0 dispatch takes precedence over the bare-pipe serve default")
+    }
+
+    @Test("argv0 mootx01-botLink namespaces subcommand args under botlink")
+    func argv0BotLinkBasenamePrependsBotlink() {
+        // Unlike the proxy route (bare-only — ProxyCommand takes no
+        // subcommands), the botLink symlink IS the command surface for cloud
+        // agents: `mootx01-botLink ping` must reach `botlink ping`, so the
+        // route prepends rather than firing on bare argv0 only.
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "/usr/local/bin/mootx01-botLink", rawArgs: ["ping"], stdinIsPipe: false
+        ) == ["botlink", "ping"])
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink", rawArgs: ["call", "estate_ping"], stdinIsPipe: true
+        ) == ["botlink", "call", "estate_ping"])
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink", rawArgs: ["--help"], stdinIsPipe: true
+        ) == ["botlink", "--help"], "help under the symlink shows botlink usage, not the root usage")
+    }
+
+    @Test("argv0 mootx01-botLink with an explicit leading botlink does not double-prepend")
+    func argv0BotLinkExplicitBotlinkNotDoubled() {
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink", rawArgs: ["botlink", "ping"], stdinIsPipe: false
+        ) == ["botlink", "ping"])
+    }
+
+    @Test("only the exact basename mootx01-botLink triggers dispatch — a partial match does not")
+    func onlyExactBotLinkBasenameTriggersDispatch() {
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "mootx01-botLink-dev", rawArgs: [], stdinIsPipe: false
+        ) == [], "a differently-named executable must not accidentally trigger botlink dispatch")
+        #expect(ArgvDispatch.resolvedArguments(
+            argv0: "not-mootx01-botLink", rawArgs: [], stdinIsPipe: false
+        ) == [])
+    }
 }

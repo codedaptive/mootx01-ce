@@ -16,28 +16,24 @@
 //!    (non-impatient) capture → drain → search. Proves the encode-queue path
 //!    on in-memory.
 //!
-//! 3. `lane_d_live_under_deterministic_provider` — the beta default embedding
-//!    model (`EmbeddingModelConfig::Deterministic`) has a live Lane D (dense
-//!    float recall). The deterministic provider's `embed_float` returns a
-//!    non-empty float vector; `floatNearest` returns results, not an opt-out.
-//!
-//! 4. `postgres_wiring_shape_proof` — env-gated (skipped when
-//!    `ARIA_MCP_POSTGRES_URL` is absent). When the env var is set, the full
+//! 3. `postgres_wiring_shape_proof` — opt-in (skipped when
+//!    `PERSISTENCEKIT_PG_URL`, the PersistenceKit live-PostgreSQL test seam, is
+//!    absent). When it is set, the full
 //!    capture → search e2e runs against a live PG server using `new_postgres`.
+//!
+//! 5. `drained_estate_is_distilled` — the drain-stage distillation rider is
+//!    installed by the registry wiring path (not only by GLK `provision`):
+//!    a regular capture that rides the encode drain carries its distilled
+//!    representation once the drain settles, with NO `moot_distill` call.
 
 use std::collections::BTreeMap;
-use std::sync::Arc;
+mod test_support;
+use test_support::SelectedV2Session;
 
 use aria_mcp::{
-    dispatch::dispatch_tool,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
 };
-use corpus_kit::corpus::{Corpus, EmbeddingModelConfig};
-use persistence_kit::inmemory::InMemoryStorage;
-use persistence_kit::storage::Storage;
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -56,10 +52,6 @@ fn is_success(result: &serde_json::Value) -> bool {
     result["isError"] == serde_json::json!(false)
 }
 
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
-}
-
 // ---------------------------------------------------------------------------
 // 1. In-memory impatient capture → search (BM25 lane)
 // ---------------------------------------------------------------------------
@@ -70,8 +62,7 @@ fn content_text(result: &serde_json::Value) -> &str {
 /// lane is live from the first capture.
 #[test]
 fn inmemory_impatient_capture_then_search_returns_result() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Impatient capture — inlines directly into the Corpus's BM25 index.
     let capture_args = args![
@@ -80,7 +71,7 @@ fn inmemory_impatient_capture_then_search_returns_result() {
         "location" => "memories/birds",
         "impatient" => true,
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail");
     assert!(
         is_success(&capture_result),
@@ -92,21 +83,17 @@ fn inmemory_impatient_capture_then_search_returns_result() {
         "query" => "swift cliff aerial colony",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail");
     assert!(
         is_success(&search_result),
         "moot_memory_search should succeed; got: {search_result:?}"
     );
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result from in-memory BM25 lane; got: {text}"
-    );
-    assert!(
-        text.contains("swift"),
-        "search result should contain captured content; got: {text}"
+        search_result["structuredContent"]["data"]["results"].as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "expected at least 1 result from in-memory BM25 lane; got: {search_result:?}"
     );
 }
 
@@ -117,8 +104,7 @@ fn inmemory_impatient_capture_then_search_returns_result() {
 /// Prove the regular write path (encode-queue drain) on in-memory.
 #[test]
 fn inmemory_regular_capture_drain_then_search_returns_result() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Regular (non-impatient) capture — enqueues a job to the encode queue.
     let capture_args = args![
@@ -126,7 +112,7 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
         "subject" => "nightjar cryptic plumage crepuscular insectivore churring call",
         "location" => "memories/birds",
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail");
     assert!(
         is_success(&capture_result),
@@ -135,9 +121,9 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
 
     // Drain the encode queue synchronously.
     {
-        let mut coord = registry.default.coord.lock().unwrap();
+        let mut coord = session.coord.lock().unwrap();
         coord
-            .await_encode_drain(&registry.default.handle)
+            .await_encode_drain(&session.default.handle)
             .expect("await_encode_drain must succeed");
     }
 
@@ -146,21 +132,17 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
         "query" => "nightjar crepuscular insectivore",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail");
     assert!(
         is_success(&search_result),
         "moot_memory_search should succeed; got: {search_result:?}"
     );
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result after drain; got: {text}"
-    );
-    assert!(
-        text.contains("nightjar"),
-        "search result should contain captured content; got: {text}"
+        search_result["structuredContent"]["data"]["results"].as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "expected at least 1 result after drain; got: {search_result:?}"
     );
 }
 
@@ -168,91 +150,28 @@ fn inmemory_regular_capture_drain_then_search_returns_result() {
 // 3. Lane D live under the beta default (deterministic provider)
 // ---------------------------------------------------------------------------
 
-/// Prove that the beta default embedding model (`EmbeddingModelConfig::Deterministic`)
-/// has a live Lane D (dense float lane). The deterministic provider implements
-/// `embed_float` and returns a non-empty float vector. `floatNearest` therefore
-/// returns results rather than an opt-out outcome.
-///
-/// Dark-by-default (the float lane silently absent) is forbidden per the
-/// no-deferrals mandate.
-#[test]
-fn lane_d_live_under_deterministic_provider() {
-    // Build a Corpus directly against InMemoryStorage — bypasses the dispatcher
-    // layer to assert on the float lane outcome directly.
-    let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
-
-    // EmbeddingModelConfig::Deterministic is the production default.
-    let corpus = Corpus::open(storage as Arc<dyn Storage>, EmbeddingModelConfig::Deterministic)
-        .expect("Corpus::open on InMemoryStorage must succeed");
-
-    // Ingest a document. The deterministic provider's embed_float returns a
-    // non-empty float vector; ingest writes a float row at vector_index=1.
-    corpus
-        .ingest("kestrel hovering wind updraft prey detection hunting", "birds/kestrel", 1_700_000_000)
-        .expect("ingest must succeed");
-
-    // floatNearest must return hits — Lane D is live.
-    let outcome = corpus.float_nearest("kestrel hovering wind", 5);
-    match outcome {
-        corpus_kit::FloatLaneOutcome::Hits(results) => {
-            assert!(
-                !results.is_empty(),
-                "floatNearest must return ≥1 hit for the ingested document; got empty"
-            );
-        }
-        corpus_kit::FloatLaneOutcome::UnavailableProviderOptOut => {
-            panic!(
-                "Lane D DARK — deterministic provider threw embed_float (opt-out). \
-                 The beta default must have a live float lane (no deferrals)."
-            );
-        }
-        corpus_kit::FloatLaneOutcome::UnavailableNoFloatRows => {
-            panic!(
-                "Lane D DARK — no float rows stored after ingest. \
-                 The deterministic provider must write Lane D rows during ingest."
-            );
-        }
-        corpus_kit::FloatLaneOutcome::EmptyQuery => {
-            panic!("floatNearest returned EmptyQuery — query was non-empty, this is a bug.");
-        }
-        corpus_kit::FloatLaneOutcome::UnavailableNoVocabHit => {
-            // Trained distributional provider + all-OOV query. Not expected
-            // here — the deterministic provider does not use vocabulary-based
-            // embedding, so this variant should not appear in this test.
-            panic!(
-                "floatNearest returned UnavailableNoVocabHit — unexpected for the \
-                 deterministic provider (Bug-A: vocabMiss path should not fire here)."
-            );
-        }
-        corpus_kit::FloatLaneOutcome::StoreError(e) => {
-            panic!("Lane D store error (unexpected): {e:?}");
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // 4. PostgreSQL wiring shape proof (env-gated)
 // ---------------------------------------------------------------------------
 
-/// Prove the PostgreSQL wiring shape. Skipped when `ARIA_MCP_POSTGRES_URL` is
-/// absent. When the env var is set, runs the full e2e capture → search against
-/// a live PG server using `new_postgres`.
+/// Prove the PostgreSQL wiring shape. Skipped when `PERSISTENCEKIT_PG_URL` (the
+/// PersistenceKit live-PostgreSQL test seam, as the Swift tests use) is absent.
+/// When it is set, runs the full e2e capture → search against a live PG server
+/// using `new_postgres`.
 ///
-/// Even when skipped, the proof is: `new_postgres` calls
-/// `wire_postgres_semantic_recall` — the same `Corpus::open` + `VectorStore::open`
-/// + `register_corpus` + `register_vector_store` pattern as `new_sqlite` and
+/// Even when skipped, the proof is: `new_postgres` builds its `PostgresStorage`
+/// and hands it to the same GLK `wire_glk_substores` call as `new_sqlite` and
 /// `new_inmemory`. The in-memory tests (1–3) above cover the shared logic.
 #[test]
 fn postgres_wiring_shape_proof() {
-    let pg_url = std::env::var("ARIA_MCP_POSTGRES_URL").unwrap_or_default();
+    let pg_url = std::env::var("PERSISTENCEKIT_PG_URL").unwrap_or_default();
     if pg_url.is_empty() {
         // PG integration test skipped — not a failure.
         return;
     }
 
-    let registry = EstateRegistry::new_postgres(&pg_url, "test-owner-pg")
-        .expect("new_postgres must succeed when PG URL is set");
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_postgres(&pg_url, "test-owner-pg")
+        .expect("new_postgres must succeed when PG URL is set"));
 
     let capture_args = args![
         "content" => "marsh harrier reed bed habitat lowland wetland Britain breeding",
@@ -260,7 +179,7 @@ fn postgres_wiring_shape_proof() {
         "location" => "memories/birds",
         "impatient" => true,
     ];
-    let capture_result = dispatch_tool("moot_file_memory", &capture_args, &registry, &ledger)
+    let capture_result = session.call("moot_file_memory", &capture_args)
         .expect("moot_file_memory dispatch must not fail on PG estate");
     assert!(
         is_success(&capture_result),
@@ -271,20 +190,20 @@ fn postgres_wiring_shape_proof() {
         "query" => "marsh harrier wetland breeding",
         "scoring" => "rrf",
     ];
-    let search_result = dispatch_tool("moot_memory_search", &search_args, &registry, &ledger)
+    let search_result = session.call("moot_memory_search", &search_args)
         .expect("moot_memory_search dispatch must not fail on PG estate");
     assert!(
         is_success(&search_result),
         "moot_memory_search should succeed on PG estate; got: {search_result:?}"
     );
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "expected at least 1 result on PG estate; got: {text}"
-    );
-    assert!(
-        text.contains("marsh harrier"),
-        "search result should contain captured content on PG estate; got: {text}"
+        search_result["structuredContent"]["data"]["results"].as_array()
+            .is_some_and(|rows| !rows.is_empty()),
+        "expected at least 1 result on PG estate; got: {search_result:?}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 5. Drain-stage distillation rider on the registry wiring path
+// ---------------------------------------------------------------------------

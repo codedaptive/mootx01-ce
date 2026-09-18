@@ -6,7 +6,11 @@
 import ArgumentParser
 import AriaMCP
 import Foundation
+import GeniusLocusKit
+import GeniusLocusKitMigrations
 import MootInstallerCore
+import MootEstateOpen
+import MootProductIdentity
 
 struct InstallCommand: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
@@ -78,23 +82,26 @@ struct InstallCommand: AsyncParsableCommand {
         // estate will be created on first serve"), and the substrate writes the
         // SQLite file lazily on first open. So --no-encrypt cannot act now; it
         // records the choice next to the estate, and the shared open posture
-        // (EstateKeyProvider.resolveOpenPosture) honors it when the file is
+        // (EstateOpenPosture.resolve) honors it when the file is
         // finally created. Encrypted is the default: absent the marker, first
         // serve provisions a key and creates a SQLCipher estate.
         //
-        // Recorded as a marker file rather than only in the daemon environment
-        // because `mootx01 serve` run by hand carries no launchd environment, and
-        // the two must not disagree about the same estate.
+        // Recorded in the estate manifest rather than only in the daemon
+        // environment because `mootx01 serve` run by hand carries no launchd
+        // environment, and the two must not disagree about the same estate.
+        //
+        // The catalog names the default estate and its files; install inspects
+        // the same database file every opener will open.
+        let active = try EstateOpen.catalog(selecting: nil).active
         if noEncrypt {
-            let dataDir = MootPaths.resolveDataDirectory(
-                environment: ProcessInfo.processInfo.environment,
-                homeDirectory: home
-            )
-            let estateURL = MootPaths.estateURL(in: dataDir)
-            switch EstateKeyProvider.detectEstateFileState(at: estateURL) {
+            switch EstateOpenPosture.fileState(at: active.databaseURL) {
             case .absent:
                 do {
-                    try EstateKeyProvider.writeEncryptionOptOut(forEstateAt: estateURL)
+                    // The choice is recorded in the default estate's manifest, the
+                    // one record every opener reads.
+                    try EstateManifestRefresh.refresh(
+                        estate: active, format: .current,
+                        encryption: .plaintext, now: Date())
                     print("Estate encryption: DISABLED (--no-encrypt). The estate will be stored unencrypted.")
                     print("  Run `mootx01 upgrade` at any time to encrypt it.")
                 } catch {
@@ -102,7 +109,7 @@ struct InstallCommand: AsyncParsableCommand {
                     // opposite posture — the user would get an encrypted estate
                     // after asking for a plaintext one.
                     throw ValidationError(
-                        "could not record the --no-encrypt choice at \(estateURL.deletingLastPathComponent().path): \(error)")
+                        "could not record the --no-encrypt choice in the estate manifest: \(error)")
                 }
             case .plaintext:
                 print("Estate encryption: already unencrypted; --no-encrypt has nothing to change.")
@@ -112,36 +119,56 @@ struct InstallCommand: AsyncParsableCommand {
                 print("Estate encryption: the existing estate is already ENCRYPTED; --no-encrypt does not decrypt it and was ignored.")
             }
         } else {
-            // Encrypted is the default for THIS install. A stale --no-encrypt
-            // marker left by an earlier estate at the same path (a prior
+            // Encrypted is the default for THIS install. A plaintext declaration
+            // left in the manifest by an earlier estate at the same path (a prior
             // opt-out install whose database was later removed outside
             // --replace-db) must not survive to downgrade the estate this
-            // install just promised would be encrypted: resolveOpenPosture
-            // honors the marker for an ABSENT estate, so first serve would
-            // silently create plaintext (stale-marker downgrade, Codex
-            // fe2cf887). --replace-db trashes the marker with the estate in
+            // install just promised would be encrypted: EstateOpenPosture.resolve
+            // honors the declaration for an ABSENT estate, so first serve would
+            // silently create plaintext (stale-choice downgrade, Codex
+            // fe2cf887). --replace-db trashes the manifest with the estate in
             // DataRetention.applyReplace; this branch covers every other way
-            // a marker outlives its database. Only the absent case is touched
+            // a manifest outlives its database. Only the absent case is touched
             // — an existing estate's posture is a fact about the file, never
-            // the marker.
-            let dataDir = MootPaths.resolveDataDirectory(
-                environment: ProcessInfo.processInfo.environment,
-                homeDirectory: home
-            )
-            let estateURL = MootPaths.estateURL(in: dataDir)
-            if case .absent = EstateKeyProvider.detectEstateFileState(at: estateURL) {
+            // the manifest.
+            if case .absent = EstateOpenPosture.fileState(at: active.databaseURL) {
                 do {
-                    if try EstateKeyProvider.removeEncryptionOptOut(forEstateAt: estateURL) {
-                        print("Estate encryption: removed a stale --no-encrypt marker; the new estate will be created ENCRYPTED (the default).")
+                    // A manifest left by an earlier plaintext install must not
+                    // survive to downgrade the estate this install promised
+                    // would be encrypted: declare encrypted in the manifest.
+                    if EstateManifestRefresh.declaresPlaintext(active) {
+                        try EstateManifestRefresh.refresh(
+                            estate: active, format: .current, encryption: .encrypted, now: Date())
+                        print("Estate encryption: a stale --no-encrypt choice was cleared; the new estate will be created ENCRYPTED (the default).")
                     }
                 } catch {
                     // Failing to enact the default must not silently produce
                     // the opposite posture — the same rule the opt-out branch
                     // applies to recording the choice.
                     throw ValidationError(
-                        "could not remove a stale --no-encrypt marker at \(EstateKeyProvider.encryptionOptOutMarkerURL(forEstateAt: estateURL).path): \(error). Remove it manually, or pass --no-encrypt if plaintext was intended.")
+                        "could not clear a stale --no-encrypt choice in the estate manifest: \(error). Pass --no-encrypt if plaintext was intended.")
                 }
             }
+        }
+
+        // Seed the product settings file (`config.json`) with the computed
+        // default stats-store path when the key is absent. Idempotent: a
+        // second run leaves an existing value untouched (R6, 2026-09-09).
+        // `upgrade` never calls this, so the setting is install-time only
+        // unless the operator edits the file. Placed after handleExistingDatabase
+        // so a cancelled reinstall does not overwrite a previously-set operator
+        // path (W-5).
+        let configDir = MootProductIdentity.Storage.configurationDirectory
+        let defaultStatsStorePath = MootPaths.daemonStatsStoreDefault(dataDir: configDir)
+        let seeded = MootProductIdentity.Settings.seedDefaultsIfAbsent(
+            defaultStatsStorePath: defaultStatsStorePath,
+            configurationDirectory: configDir
+        )
+        if !seeded {
+            // Non-fatal: the daemon and moot-mgr fall back to the same computed
+            // default when no setting is present. Warn so the operator can
+            // investigate permission issues (twin of Rust: "could not seed config.json").
+            fputs("mootx01: warning: could not seed config.json\n", stderr)
         }
 
         // Resolve the SOURCE binary (the running executable). We never
@@ -227,10 +254,14 @@ struct InstallCommand: AsyncParsableCommand {
 
         // plugins the CLI installer knows how to detect and
         // defer to. Keyed by client id → the plugin registry id
-        // (`installed_plugins.json`'s top-level key). Only Claude Code has a
-        // live plugin today; the table is intentionally small rather than
-        // guessed for hosts with no shipped plugin yet.
-        let pluginOwnedClients: [String: String] = ["claude-code": "mootx01@mootx01"]
+        // (`installed_plugins.json`'s top-level key for Claude, config.toml +
+        // package cache for Codex). Both shipped plugins own the same daemon
+        // connection and must not coexist with an installer-written direct MCP
+        // entry.
+        let pluginOwnedClients: [String: String] = [
+            "claude-code": "mootx01@mootx01",
+            "codex": "mootx01@mootx01",
+        ]
 
         for client in clients {
             // Adams #5: gate on installed AND enabled — Claude Code tracks
@@ -240,7 +271,9 @@ struct InstallCommand: AsyncParsableCommand {
             // entry in that state would leave the client with nothing.
             if !noDaemon,
                let pluginID = pluginOwnedClients[client.id],
-               PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home) {
+               (client.id == "codex"
+                    ? PluginDetector.ownsCodexConnection(pluginID: pluginID, homeDirectory: home)
+                    : PluginDetector.ownsConnection(pluginID: pluginID, homeDirectory: home)) {
                 // The plugin is the preferred connection owner (§1): still
                 // place the binary/daemon (done above, unconditionally) but
                 // skip writing a competing direct entry, and clean up any
@@ -313,7 +346,7 @@ struct InstallCommand: AsyncParsableCommand {
         //                          before mergeTiered adds anything still
         //                          missing; both write BOTH the direct
         //                          (mcp__mootx01__) and plugin
-        //                          (mcp__plugin_mootx01_mootx01__) namespaces
+        //                          (mcp__plugin_mootx01_memory__) namespaces
         //                          — a rule under only one matches zero calls
         //                          made through the other Claude Code
         //                          connection.
@@ -391,7 +424,10 @@ struct InstallCommand: AsyncParsableCommand {
                     // resident daemon carries the vault posture in its own
                     // launchd environment (`daemonEnv` above), independent
                     // of this call.
-                    let outcome = try DepthInstaller.apply(
+                    let outcome = try client.id == "codex" && depth == .plugin
+                        ? CodexPluginInstaller.apply(homeDirectory: home, binaryPath: binaryPath,
+                            upgradeOnly: false, vaultOff: vaultOff)
+                        : DepthInstaller.apply(
                         clientID: client.id,
                         depth: depth,
                         homeDirectory: home,
@@ -482,6 +518,10 @@ struct InstallCommand: AsyncParsableCommand {
                     print("")
                     print("  ✗ Could not start the management console via launchd: \(message)")
                     print("    Start it manually any time with:  moot-mgr serve")
+                case .installedDisabled:
+                    // install() never returns this case (it belongs to the
+                    // daemon-bundle flow below); the vocabulary is one enum.
+                    break
                 case .binaryNotFound:
                     print("")
                     print("  ⓘ Management console binary missing — run `moot-mgr serve` manually.")
@@ -503,31 +543,65 @@ struct InstallCommand: AsyncParsableCommand {
         // so the console observes it out of the box. macOS-only (launchd).
         #if os(macOS)
         if !noDaemon {
-            let dataDir = MootPaths.resolveDataDirectory(
-                environment: ProcessInfo.processInfo.environment,
-                homeDirectory: home
-            )
+            // MACD-3B3: authenticate and classify an existing provider before
+            // making any registration decision. A healthy bundled owner makes
+            // this a client-only install; a version mismatch blocks a second
+            // provider. Absent or unauthenticated ownership proceeds through
+            // the normal Community bundle/legacy selection below.
+            let ownerOutcome = ProviderOwnershipProbe().detect(homeDirectory: home)
+            if ownerOutcome.requiresClientOnlyInstall {
+                print("")
+                print("  ✓ Using MOOTx01-App resident provider — MCP clients wired; daemon registration skipped.")
+                if case .healthy(_, let preferredKind) = ownerOutcome,
+                   let preferredKind {
+                    print("    Preferred provider: \(preferredKind.rawValue)")
+                }
+            } else if ownerOutcome.blocksInstallByVersionMismatch {
+                if case .incompatible(let verdict) = ownerOutcome {
+                    print("")
+                    print("  ✗ Provider version mismatch: \(verdict.rawValue)")
+                    print("    A second provider was not started. Resolve the version mismatch and re-run.")
+                }
+            } else {
+                if case .unauthenticated = ownerOutcome {
+                    print("")
+                    print("  ⚠ A provider is present but could not be authenticated.")
+                    print("    Installing normally; the existing process is not stopped.")
+                }
+
+            switch BundleSignatureVerifier.production.gate(homeDirectory: home) {
+            case .verified:
+                // The signed provider bundle is the Community 1.1 production
+                // daemon. Remove the legacy raw-serve registration before
+                // starting it so two launchd jobs can never race for custody.
+                LaunchAgent.uninstallDaemon(homeDirectory: home)
+                installDaemonBundleIfPresent(home: home)
+            case .unverified:
+                // Surface the signature refusal without removing or starting
+                // either provider. The verifier runs again inside the helper
+                // so one message path owns the bounded diagnostic.
+                installDaemonBundleIfPresent(home: home)
+            case .absent:
             // MOOTX01_VAULT: "0" = vault-off (--vault-off); "1" = vault-on (default).
             // The flag pair is mutually exclusive by convention: if both are set
             // (CLI parse does not block this) --vault-off wins (safer default).
             // When neither is set, vault is on (the open 1.0 Vault posture: default = vault-on).
             let vaultValue = vaultOff ? "0" : "1"
-            // MOOTX01_ENCRYPT: "0" = --no-encrypt, "1" = encrypted (default).
-            // Recorded for observability and parity with MOOTX01_VAULT. The
-            // AUTHORITATIVE signal is the marker file written above, because a
-            // hand-run `mootx01 serve` carries no launchd environment at all and
-            // the two must never disagree about the same estate.
-            let encryptValue = noEncrypt ? "0" : "1"
             // MOOTX01_SUBJECT_RIDER: "0" = --subject-rider-off; "1" = on
             // (the rider-default ruling, 2026-08-02). Availability is still
             // checked at serve; this only records the operator's choice.
             let subjectRiderValue = subjectRiderOff ? "0" : "1"
+            // The daemon finds its estate through the catalog in the platform
+            // configuration directory, so no data-directory or encryption value
+            // travels in the environment: the estate manifest is the one record
+            // of the at-rest posture, and a hand-run `mootx01 serve` reads the
+            // same catalog and manifest as the launchd daemon.
+            // ARIA_MCP_STATS_STORE is no longer injected here (R6): the daemon
+            // resolves its stats store path from MootPaths.daemonStatsStorePath
+            // directly, the same path moot-mgr reads. No env carry needed.
             let daemonEnv = [
                 "MOOTX01_HTTP_PORT": String(MootPaths.defaultResidentPort),
-                "MOOTX01_DATA_DIR": dataDir.path,
-                "ARIA_MCP_STATS_STORE": MootPaths.daemonStatsStorePath(dataDir: dataDir),
                 "MOOTX01_VAULT": vaultValue,
-                "MOOTX01_ENCRYPT": encryptValue,
                 "MOOTX01_SUBJECT_RIDER": subjectRiderValue,
             ]
             switch LaunchAgent.installDaemon(binaryPath: binaryPath, homeDirectory: home, environment: daemonEnv) {
@@ -540,9 +614,16 @@ struct InstallCommand: AsyncParsableCommand {
                 print("")
                 print("  ✗ Could not start the resident daemon via launchd: \(message)")
                 print("    Start it manually any time with:  mootx01 serve --http 4242")
+            case .installedDisabled:
+                // installDaemon() never returns this case (it belongs to the
+                // daemon-bundle flow below); the vocabulary is one enum.
+                break
             case .binaryNotFound:
                 print("")
                 print("  ⓘ mootx01 binary missing — run `mootx01 serve --http 4242` manually.")
+            }
+
+            }
             }
         }
         #endif
@@ -642,7 +723,7 @@ struct InstallCommand: AsyncParsableCommand {
 
     // MARK: - Existing-database disposition (reinstall contract)
 
-    /// Reuse-or-replace flow for a pre-existing estate database. The
+    /// Reuse-or-replace flow for a pre-existing default estate. The
     /// decision matrix lives in `DataRetention.decideExistingDb`
     /// (unit-tested); this wrapper owns the prompts, the service stop, and
     /// the exit codes. Mirrors `handle_existing_database` in the Rust
@@ -650,10 +731,42 @@ struct InstallCommand: AsyncParsableCommand {
     /// daemon is alive (systemd/task platforms, where the user stops the
     /// service), whereas here the launchd services are booted out before
     /// the stores move and the normal install flow re-registers them.
+    ///
+    /// The existing estate is the catalog's default record. Opening the
+    /// catalog creates it on a first install, which is what install is for.
     private func handleExistingDatabase(homeDirectory home: URL) throws {
-        let environment = ProcessInfo.processInfo.environment
-        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
-        guard DataRetention.defaultEstateExists(in: dataDir) else { return }
+        var catalog: EstateCatalog
+        do {
+            catalog = try EstateOpen.catalog(selecting: nil)
+        } catch {
+            print("  ✗ \(error)")
+            throw ExitCode.failure
+        }
+        guard let record = catalog.record(named: EstateCatalog.defaultName) else { return }
+        let configuration = EstateCatalog.configurationDirectory
+        let estateFiles = record.ownedFileURLs + [record.legacyEncryptionOptOutURL]
+
+        #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG && os(macOS)
+        // Install over a 1.0.x install: the estate sits flat in the
+        // configuration directory. That is a mandatory reuse — move it into
+        // the record's directory and adopt it; no prompt. Only ever true once
+        // per machine (see FlatLayoutStep).
+        if FlatLayoutStep.pending(record) {
+            stopResidentServices(homeDirectory: home)
+            guard FlatLayoutStep.migrate(record) else { throw ExitCode.failure }
+            do {
+                try DataRetention.applyReuse(configurationDirectory: configuration)
+                try catalog.activate(name: record.name)
+                print("  ✓ Existing estate adopted as the default estate; moot-mgr history reset.")
+            } catch {
+                print("  ✗ Could not adopt the existing estate: \(error)")
+                throw ExitCode.failure
+            }
+            return
+        }
+        #endif
+
+        guard DataRetention.estateExists(databaseURL: record.databaseURL) else { return }
 
         let flag: DataRetention.ExistingDbChoice? =
             reuseDb ? .reuse : (replaceDb ? .replace : nil)
@@ -662,7 +775,7 @@ struct InstallCommand: AsyncParsableCommand {
             yes: yes,
             interactive: isatty(STDIN_FILENO) != 0,
             choose: {
-                print("\nAn existing MOOTx01 database was found at \(dataDir.path).")
+                print("\nAn existing MOOTx01 estate was found at \(record.directory.path).")
                 print("Reuse it, or replace it with a fresh one? [reuse/replace] (reuse): ", terminator: "")
                 return readLine()?.trimmingCharacters(in: .whitespaces).lowercased() == "replace"
             },
@@ -683,19 +796,21 @@ struct InstallCommand: AsyncParsableCommand {
         case .reuse:
             stopResidentServices(homeDirectory: home)
             do {
-                try DataRetention.applyReuse(in: dataDir)
-                print("  ✓ Existing database adopted as the default estate; moot-mgr history reset.")
+                try DataRetention.applyReuse(configurationDirectory: configuration)
+                try catalog.activate(name: record.name)
+                print("  ✓ Existing estate adopted as the default estate; moot-mgr history reset.")
             } catch {
-                print("  ✗ Could not adopt the existing database: \(error)")
+                print("  ✗ Could not adopt the existing estate: \(error)")
                 throw ExitCode.failure
             }
         case .replace:
             stopResidentServices(homeDirectory: home)
             do {
-                try DataRetention.applyReplace(in: dataDir)
-                print("  ✓ Previous database moved to \(DataRetention.trashName); a fresh estate will be created on first serve.")
+                try DataRetention.applyReplace(estateFiles: estateFiles, configurationDirectory: configuration)
+                try catalog.activate(name: record.name)
+                print("  ✓ Previous estate moved to \(DataRetention.trashName); a fresh estate will be created on first serve.")
             } catch {
-                print("  ✗ Could not replace the database: \(error)")
+                print("  ✗ Could not replace the estate: \(error)")
                 throw ExitCode.failure
             }
         }
@@ -711,4 +826,58 @@ struct InstallCommand: AsyncParsableCommand {
         LaunchAgent.uninstall(homeDirectory: home)
         #endif
     }
+
+    // MARK: - MACD-2c2 daemon bundle (macOS)
+
+    #if os(macOS)
+    /// Register and start the enabled daemon provider bundle, then run its
+    /// read-only census. Honest skips otherwise:
+    /// the census requires the SIGNED provider (only it can observe the
+    /// canonical App Group tier), so no bundle means no census — never a
+    /// CLI-side imitation of it.
+    private func installDaemonBundleIfPresent(home: URL) {
+        // Verify the static signature before either registration or census.
+        // A planted executable must never become a launchd target, even if a
+        // later activation step would otherwise reject it.
+        switch BundleSignatureVerifier.production.gate(homeDirectory: home) {
+        case .absent:
+            print("")
+            print("  ⓘ Daemon provider bundle not present — using the legacy resident service.")
+            return
+        case .unverified(let message):
+            print("")
+            print("  \(message)")
+            print("    Daemon bundle activation skipped until the signature is repaired.")
+            return
+        case .verified:
+            break
+        }
+        switch LaunchAgent.activateDaemonBundleEnabled(homeDirectory: home) {
+        case let .installed(plistPath, endpointURL):
+            print("")
+            print("  ✓ Community daemon provider running (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("    MCP endpoint: \(endpointURL)")
+            print("    LaunchAgent: \(plistPath)")
+        case let .launchctlFailed(message):
+            print("")
+            print("  ✗ Could not start the daemon provider bundle: \(message)")
+            return
+        case .binaryNotFound:
+            print("")
+            print("  ✗ Daemon provider bundle executable is missing.")
+            return
+        case .installedDisabled:
+            return
+        }
+        // Read-only census through the signed provider. Classifications and
+        // digests only — the provider prints no raw paths.
+        let census = DaemonBundle.runReadOnlyMode("census", homeDirectory: home)
+        if let output = census.output, census.code == 0 {
+            print("  Census (read-only, provider-reported):")
+            print("    \(output)")
+        } else {
+            print("  ⓘ Census unavailable (provider exit \(census.code)).")
+        }
+    }
+    #endif
 }

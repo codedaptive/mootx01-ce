@@ -90,6 +90,18 @@ table=corpus_provider_coverage
   col=updated_at type=timestamp null=0 default=- role=-
   pk=content_id,model_id
   appendOnly=0 hashable=0
+table=corpus_provider_term_dictionary
+  col=term_id type=int null=0 default=- role=-
+  col=term type=text null=0 default=- role=-
+  col=models type=int null=0 default=- role=-
+  pk=term_id
+  appendOnly=0 hashable=0
+table=corpus_provider_term_payload
+  col=model_id type=int null=0 default=- role=-
+  col=term_id type=int null=0 default=- role=-
+  col=vector type=blob null=0 default=- role=-
+  pk=model_id,term_id
+  appendOnly=0 hashable=0
 table=corpus_provider_vocab
   col=model_id type=text null=0 default=- role=-
   col=model_version type=text null=0 default=- role=-
@@ -139,10 +151,7 @@ table=drawers
   col=keyID type=text null=1 default=- role=-
   col=content_hash type=blob null=1 default=- role=-
   col=content_fingerprint type=blob null=1 default=- role=-
-  col=distilled type=text null=1 default=- role=-
-  col=distilled_pipeline_version type=text null=1 default=- role=-
-  col=distilled_token_count type=int null=1 default=- role=-
-  col=distilled_at type=timestamp null=1 default=- role=-
+  col=ssc_facts type=text null=1 default=- role=-
   col=subject type=text null=1 default=- role=-
   col=subject_pipeline_version type=text null=1 default=- role=-
   col=subject_at type=timestamp null=1 default=- role=-
@@ -152,11 +161,40 @@ table=drawers
   gen=g_operational_channel type=int
   pk=id
   appendOnly=0 hashable=1
+table=encoder_models
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=dim type=int null=0 default=- role=-
+  col=query_prefix type=text null=0 default=- role=-
+  col=doc_prefix type=text null=0 default=- role=-
+  col=pooling type=text null=0 default=- role=-
+  col=tokenizer_hash type=text null=0 default=- role=-
+  col=window_words type=int null=0 default=- role=-
+  col=overlap_divisor type=int null=0 default=- role=-
+  col=max_spans type=int null=0 default=- role=-
+  col=max_sequence type=int null=0 default=- role=-
+  col=is_active type=int null=0 default=int role=-
+  col=ext type=json null=1 default=- role=-
+  pk=model_id
+  appendOnly=0 hashable=0
 table=erasure_ledger
   col=drawer_id type=text null=0 default=- role=-
   col=erased_hlc type=hlc null=0 default=- role=-
   pk=drawer_id
   appendOnly=1 hashable=0
+table=fact_extractor_models
+  col=recipe_id type=text null=0 default=- role=-
+  col=provider_id type=text null=0 default=- role=-
+  col=model_id type=text null=0 default=- role=-
+  col=model_version type=text null=0 default=- role=-
+  col=schema_version type=text null=0 default=- role=-
+  col=extractor_kind type=text null=0 default=- role=-
+  col=maximum_input_characters type=int null=0 default=- role=-
+  col=maximum_facts_per_source type=int null=0 default=- role=-
+  col=is_active type=int null=0 default=int role=-
+  col=ext type=json null=1 default=- role=-
+  pk=recipe_id
+  appendOnly=0 hashable=0
 table=glk_estate_format
   col=id type=text null=0 default=- role=-
   col=major type=int null=0 default=- role=-
@@ -181,6 +219,15 @@ table=grants
   col=decay_floor type=int null=1 default=- role=-
   col=ext type=json null=1 default=- role=-
   pk=id
+  appendOnly=0 hashable=0
+table=hnsw_graph
+  col=model_id type=text null=0 default=- role=-
+  col=node_idx type=int null=0 default=- role=-
+  col=node_id type=text null=0 default=- role=-
+  col=layer type=int null=0 default=- role=-
+  col=neighbours type=blob null=0 default=- role=-
+  col=generation type=int null=0 default=int role=-
+  pk=model_id,node_idx,layer
   appendOnly=0 hashable=0
 table=iix_doclens
   col=item_id type=text null=0 default=- role=-
@@ -210,6 +257,18 @@ table=kg_facts
   col=addedBy type=text null=0 default=- role=-
   col=foreignSourceKey type=text null=0 default=- role=-
   col=foreignRecordID type=text null=0 default=- role=-
+  col=evidenceQuote type=text null=0 default=- role=-
+  col=evidenceStart type=int null=0 default=int role=-
+  col=evidenceEnd type=int null=0 default=int role=-
+  col=evidenceStartUTF8Byte type=int null=0 default=int role=-
+  col=evidenceEndUTF8Byte type=int null=0 default=int role=-
+  col=sourceDigest type=text null=0 default=- role=-
+  col=extractorProviderID type=text null=0 default=- role=-
+  col=extractorModelID type=text null=0 default=- role=-
+  col=extractorModelVersion type=text null=0 default=- role=-
+  col=extractionSchemaVersion type=text null=0 default=- role=-
+  col=searchProjection type=text null=0 default=- role=-
+  col=searchProjectionVersion type=text null=0 default=- role=-
   col=adjectiveBitmap type=bitmap null=0 default=bitmap role=-
   col=operationalBitmap type=bitmap null=0 default=bitmap role=-
   col=provenanceBitmap type=bitmap null=0 default=bitmap role=-
@@ -241,12 +300,56 @@ table=manifest
   col=value type=text null=0 default=- role=-
   pk=key
   appendOnly=0 hashable=0
-table=matrix_snapshot
+table=matrix_calibration
   col=estate_id type=text null=0 default=- role=-
-  col=schema_version type=int null=0 default=- role=-
-  col=snapshot type=blob null=0 default=- role=-
-  col=last_hlc type=text null=0 default=- role=-
+  col=model_id type=text null=0 default=- role=-
+  col=bucket type=int null=0 default=- role=-
+  col=count type=int null=0 default=- role=-
+  col=success_rate type=float null=0 default=- role=-
+  col=updated_seconds type=float null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=estate_id,model_id,bucket
+  appendOnly=0 hashable=0
+table=matrix_cells
+  col=estate_id type=text null=0 default=- role=-
+  col=generation type=text null=0 default=- role=-
+  col=cell_id type=text null=0 default=- role=-
+  col=family type=text null=0 default=- role=-
+  col=a_field type=text null=0 default=- role=-
+  col=a_kind type=text null=0 default=- role=-
+  col=a_value type=text null=0 default=- role=-
+  col=b_field type=text null=0 default=- role=-
+  col=b_kind type=text null=0 default=- role=-
+  col=b_value type=text null=0 default=- role=-
+  col=lag type=int null=0 default=- role=-
+  col=count type=int null=1 default=- role=-
+  col=decayed type=float null=1 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=estate_id,generation,cell_id
+  appendOnly=0 hashable=0
+table=matrix_generations
+  col=estate_id type=text null=0 default=- role=-
+  col=generation type=text null=0 default=- role=-
+  col=phase type=text null=0 default=- role=-
+  col=cell_count type=int null=0 default=- role=-
+  col=live_row_count type=int null=0 default=- role=-
+  col=last_physical_ms type=int null=0 default=- role=-
+  col=last_logical type=int null=0 default=- role=-
+  col=last_node type=int null=0 default=- role=-
+  col=temporal_physical_ms type=int null=0 default=- role=-
+  col=temporal_logical type=int null=0 default=- role=-
+  col=temporal_node type=int null=0 default=- role=-
+  col=decayed_as_of_ms type=int null=0 default=- role=-
   col=updated_at type=timestamp null=0 default=- role=-
+  col=ext type=json null=1 default=- role=-
+  pk=estate_id,generation
+  appendOnly=0 hashable=0
+table=matrix_state
+  col=estate_id type=text null=0 default=- role=-
+  col=active_generation type=text null=1 default=- role=-
+  col=migration_phase type=text null=0 default=- role=-
+  col=reclaimed_bytes type=int null=0 default=- role=-
+  col=reason type=text null=1 default=- role=-
   col=ext type=json null=1 default=- role=-
   pk=estate_id
   appendOnly=0 hashable=0
@@ -298,6 +401,9 @@ table=recall_trace
   col=recalledAt type=timestamp null=0 default=- role=-
   col=score type=float null=1 default=- role=-
   col=operationalBitmap type=bitmap null=0 default=bitmap role=-
+  col=door type=text null=1 default=- role=-
+  col=composition type=text null=1 default=- role=-
+  col=laneRanks type=text null=1 default=- role=-
   col=ext type=json null=1 default=- role=-
   pk=id
   appendOnly=0 hashable=0
@@ -350,6 +456,13 @@ table=tunnels
   col=ext type=json null=1 default=- role=-
   pk=id
   appendOnly=0 hashable=0
+table=vector_generations
+  col=model_id type=text null=0 default=- role=-
+  col=serving_generation type=int null=0 default=int role=-
+  col=shadow_generation type=int null=1 default=- role=-
+  col=shadow_state type=text null=1 default=- role=-
+  pk=model_id
+  appendOnly=0 hashable=0
 table=vector_rep_claims
   col=model_id type=text null=0 default=- role=-
   col=model_version type=text null=0 default=- role=-
@@ -370,8 +483,9 @@ table=vectors
   col=scale type=float null=1 default=- role=-
   col=filed_at type=timestamp null=0 default=- role=-
   col=ext type=json null=1 default=- role=-
+  col=generation type=int null=0 default=int role=-
   pk=id
-  unique=item_id,vector_index,model_id
+  unique=item_id,vector_index,model_id,generation
   appendOnly=0 hashable=0
 index=idx_associations_source table=associations cols=sourceWing,sourceRoom unique=0
 index=idx_associations_target table=associations cols=targetWing,targetRoom unique=0
@@ -379,6 +493,7 @@ index=idx_associations_udcCode table=associations cols=udcCode unique=0
 index=idx_diary_agent table=diary cols=agentName unique=0
 index=idx_diary_filedAt table=diary cols=filedAt unique=0
 index=idx_diary_wing table=diary cols=wing unique=0
+index=idx_drawers_filedAt table=drawers cols=filedAt unique=0
 index=idx_drawers_lineageID table=drawers cols=lineageID unique=0
 index=idx_drawers_operational_channel table=drawers cols=g_operational_channel unique=0
 index=idx_drawers_parent_node_id table=drawers cols=parent_node_id unique=0
@@ -411,4 +526,5 @@ index=idx_tunnels_target table=tunnels cols=targetWing,targetRoom unique=0
 index=idx_vector_rep_claims_consumer table=vector_rep_claims cols=consumer unique=0
 index=idx_vectors_filed_at_item table=vectors cols=filed_at,item_id unique=0
 index=idx_vectors_item table=vectors cols=item_id unique=0
+index=idx_vectors_model_generation table=vectors cols=model_id,generation unique=0
 index=idx_vectors_model_item table=vectors cols=model_id,item_id unique=0

@@ -25,29 +25,22 @@ import MootGateway   // MootBridge, GatewayRuntime, GatewayCall — the MOOT sea
 // --------------------------------------------------------------------
 //   * MootNotepadApp (this file): on launch we point the process-wide
 //     `GatewayRuntime` at a durable SQLite file inside the app sandbox, then
-//     hand the same bridge to the UI. Sharing ONE bridge means the UI and the
-//     App Intents (Siri / Shortcuts) read and write the SAME notes.
+//     hand the same bridge to the UI. One bridge, one estate.
 //   * NotepadModel (NotepadView.swift): the @MainActor view-model. Every method
 //     on it is a thin wrapper that calls the bridge and turns the result into
 //     SwiftUI state. This is where the MOOT calls actually happen.
 //   * NotepadView (NotepadView.swift): the list + editor UI.
-//   * MootNotepadShortcuts (MootNotepadShortcuts.swift): registers the two
-//     system App Intents so "Hey Siri, capture this in MootNotepad" works.
 //
-// THE ONE EDGE YOU MUST UNDERSTAND
-// --------------------------------
-// The ARIA tool surface answers in TEXT, not in structured note objects.
-// `moot_memory_search` returns lines shaped like:
-//
-//     found 3 memory(s)
-//     <id>  [room]  <preview>
-//     <id>  [room]  <preview>
-//
-// So to build a list of note rows, we PARSE those lines (see Note.parse in
-// NotepadView.swift). A production app would prefer a structured recall tool
-// that returns real drawer objects; until that exists, text parsing is the
-// documented integration approach. We flag this everywhere it bites us with
-// a // NOTE(integrate): comment.
+// THE ONE CONTRACT YOU MUST UNDERSTAND
+// ------------------------------------
+// Every ARIA tool answers with TEXT for people, and the recall family
+// (`moot_memory_search`, `moot_memory_get`, …) also answers with a
+// `structuredContent` block: `{ "results": [ { "id", "room", "subject",
+// "content" }, … ] }`. Search rows are travel rows — id, subject, room, no
+// body. `moot_memory_get` with `ids:[…]` and `depth:"full"` returns the
+// verbatim content for a batch of ids in one call. An app reads
+// `IntentCallResult.structured` and never re-parses the text (see Note in
+// NotepadView.swift).
 //
 // PLATFORMS: universal — the same SwiftUI code compiles for iOS and macOS.
 
@@ -86,10 +79,8 @@ struct MootNotepadApp: App {
         // STEP 2 — Point the process-wide runtime at that file.
         //
         // `GatewayRuntime.shared` is a singleton actor that holds the ONE
-        // MootBridge for the whole process. Calling `bridge()` here registers
-        // it with `IntentRuntimeBridge`; App Intents (instantiated by the
-        // system) then resolve through `IntentRuntimeBridge.shared.bridge()`.
-        // Configuring before the UI asks guarantees the UI and Siri share one estate.
+        // MootBridge for the whole process. Configuring before the UI asks
+        // guarantees the first attachment lands on this file.
         await GatewayRuntime.shared.configure(databaseURL: dbURL)
 
         // STEP 3 — Acquire the bridge and hand it to the UI.

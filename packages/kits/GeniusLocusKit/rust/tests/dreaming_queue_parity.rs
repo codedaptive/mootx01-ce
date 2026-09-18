@@ -13,8 +13,8 @@
 //   5. Payload round-trip: the enqueued DreamingItem contains the surfaced drawer ids.
 //
 // Production path: `EstateCoordinator::recall_scored` with
-// `request.origin = RecallOrigin::External` — called by `run_memory_search` for
-// moot_memory_search, moot_recall_precise, moot_recall_shaped.
+// `request.origin = RecallOrigin::External` — called by the ARIA v2 memory
+// operations for moot_memory_search, moot_recall_precise, moot_recall_shaped.
 //
 // All tests use an InMemory estate so no temp-dir cleanup is needed.
 
@@ -24,7 +24,9 @@ use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::DreamingItem;
 use genius_locus_kit::handle::EstateHandle;
 use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-    RecallFallbackPolicy};
+    RecallFallbackPolicy,
+    RecallOrigin,
+};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -84,21 +86,26 @@ fn capture_drawers(
 /// Build an external-origin GLKRecallRequest for the LocusOnly lane.
 /// This is the production MCP path: recall_scored with origin=External.
 fn external_recall_request() -> GLKRecallRequest {
-    GLKRecallRequest::new(recall_all())
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
-        .external() // B-10a: only ARIA boundary sets External
+    GLKRecallRequest::new(
+        recall_all(),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    )
 }
 
 /// Build an internal-origin GLKRecallRequest. Must NEVER enqueue dreaming items.
 fn internal_recall_request() -> GLKRecallRequest {
-    GLKRecallRequest::new(recall_all())
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
+    GLKRecallRequest::new(
+        recall_all(),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
     // origin defaults to Internal — B-10a
 }
 
@@ -122,7 +129,7 @@ fn t6_r01_external_origin_recall_scored_surfacing_two_or_more_drawers_enqueues_o
     // Capture 3 drawers so recall has content to surface.
     let _captured_ids = capture_drawers(&mut coord, &handle, 3);
 
-    // External-origin scored recall — the production MCP path (run_memory_search).
+    // External-origin scored recall — the production MCP path (moot_memory_search).
     let result = coord
         .recall_scored(&handle, external_recall_request(), NOW_MS)
         .expect("recall_scored");

@@ -6,12 +6,13 @@
 // the conflict-policy switch in ApplyInbound.swift.
 
 import Foundation
+import MootProductIdentity
 import CloudKit
 import ConvergenceKit
 import PersistenceKit
 import os
 
-private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitCloudKit.Engine")
 
 // MARK: - DecodedRecord → SyncRecord conversion (skew-queue enqueue, R9)
 
@@ -130,14 +131,26 @@ extension CloudKitStateActor {
         // any records that fail to decode will be counted as conflicts in the main
         // loop below where the error is properly classified.
         let batchKeys: [(table: String, rowKey: UUID)] = pulledRecords.compactMap { record in
-            guard let decoded = try? CKRecordMapping.decode(record) else { return nil }
+            // Representation-aware decode: use the zone's declared HLC wire format.
+            // Decode failures here are silent (try?) — they are counted as conflicts
+            // in the main loop below where the error is properly classified.
+            guard let decoded = try? CKRecordMapping.decode(
+                record,
+                representation: manifest.hlcWireRepresentation
+            ) else { return nil }
             return (table: decoded.table, rowKey: decoded.rowKey)
         }
         let preloadedSyncHLCs = try? await readSyncHLCs(batch: batchKeys, storage: storage)
 
         for record in pulledRecords {
             do {
-                let decoded = try CKRecordMapping.decode(record)
+                // Representation-aware decode: use the zone's declared HLC wire format.
+                // Fails closed on mixed representation (legacyPacked zone receives fullWidthV2
+                // record, or vice versa) — SyncError.decodingFailure counted as conflict below.
+                let decoded = try CKRecordMapping.decode(
+                    record,
+                    representation: manifest.hlcWireRepresentation
+                )
                 guard decoded.kitID == manifest.kitID else {
                     throw SyncError.kitMismatch(expected: manifest.kitID, received: decoded.kitID)
                 }
@@ -224,10 +237,10 @@ extension CloudKitStateActor {
             appliedCount += 1
         }
 
-        // Post-apply integrity hook (R3): invoked once per batch when at least
-        // one record was applied. Hook throws count as one additional conflict
-        // but never abort the cycle. Hook writes carry origin == .local and
-        // flow into the outbox (hook-writes-must-ship, Kong Q2).
+        // Post-apply boundaries: the integrity hook remains a non-fatal repair
+        // seam. The commit barrier is a must-succeed semantic boundary and runs
+        // before cursor persistence; a throw leaves the cursor uncommitted so
+        // the already-applied, idempotent batch is offered again.
         if appliedCount > 0 {
             let batch = AppliedBatch(
                 storage: storage,
@@ -235,6 +248,7 @@ extension CloudKitStateActor {
                 deletedByTable: deletedByTable
             )
             conflicts += await invokeIntegrityHook(manifest.postApplyIntegrityHook, batch: batch)
+            try await manifest.postApplyCommitBarrier?(batch)
         }
 
         serverChangeToken = newToken

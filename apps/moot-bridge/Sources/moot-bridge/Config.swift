@@ -110,29 +110,38 @@ struct VerbMap: Codable, Sendable, Equatable {
     /// `moot_file_memory` requires one (`location`); MemPalace's
     /// `mempalace_add_drawer` requires two (`wing` + `room`). A map (not a single
     /// key) covers both without a per-server special case. Default:
-    /// `{ "location": "bridge/mirror" }` — the mootx01 write case. Set to `{}` for
+    /// `{ "wing": "bridge", "location": "mirror" }` — the mootx01 write case. Set to `{}` for
     /// a write tool that needs only content.
     let constantArgs: [String: String]
     /// How this server encodes the result of `query` (and how a write response
     /// carries its assigned id). Default: `mootText`.
     let resultFormat: ResultFormat
+    /// The argument key under which `write` requires a one-sentence subject, or
+    /// nil when the write tool takes none. mootx01's `moot_file_memory`
+    /// requires `subject` (≤120 characters) and refuses a call without it, so a
+    /// mirrored write from a server that has no subject notion must carry one
+    /// the bridge derives from the content (its first line, cut to the limit).
+    /// MemPalace's `mempalace_add_drawer` takes none. Default: nil.
+    let subjectArg: String?
 
     init(write: String,
          query: String,
          contentArg: String = "content",
          queryArg: String = "query",
-         constantArgs: [String: String] = ["location": "bridge/mirror"],
-         resultFormat: ResultFormat = .mootText) {
+         constantArgs: [String: String] = ["wing": "bridge", "location": "mirror"],
+         resultFormat: ResultFormat = .mootText,
+         subjectArg: String? = nil) {
         self.write = write
         self.query = query
         self.contentArg = contentArg
         self.queryArg = queryArg
         self.constantArgs = constantArgs
         self.resultFormat = resultFormat
+        self.subjectArg = subjectArg
     }
 
     private enum CodingKeys: String, CodingKey {
-        case write, query, contentArg, queryArg, constantArgs, resultFormat
+        case write, query, contentArg, queryArg, constantArgs, resultFormat, subjectArg
     }
 
     // Custom decoder so an absent required verb surfaces as
@@ -152,9 +161,10 @@ struct VerbMap: Codable, Sendable, Equatable {
         self.contentArg = try c.decodeIfPresent(String.self, forKey: .contentArg) ?? "content"
         self.queryArg = try c.decodeIfPresent(String.self, forKey: .queryArg) ?? "query"
         self.constantArgs = try c.decodeIfPresent([String: String].self, forKey: .constantArgs)
-            ?? ["location": "bridge/mirror"]
+            ?? ["wing": "bridge", "location": "mirror"]
         self.resultFormat = try c.decodeIfPresent(ResultFormat.self, forKey: .resultFormat)
             ?? .mootText
+        self.subjectArg = try c.decodeIfPresent(String.self, forKey: .subjectArg)
     }
 }
 
@@ -163,8 +173,8 @@ struct VerbMap: Codable, Sendable, Equatable {
 /// hardcoded to MemPalace's or mootx01's tool names.
 ///
 /// `command` is the full stdio launch command (an env-var prefix is honored,
-/// e.g. `MOOTX01_DATA_DIR=/tmp/x mootx01 serve`). Treated at CLI-argument trust
-/// level, the same boundary as the benchmarker's RawMCPBackend.
+/// e.g. `SOME_VAR=value mootx01 serve --db /tmp/x/scratch`). Treated at
+/// CLI-argument trust level, the same boundary as the benchmarker's RawMCPBackend.
 struct BackendConfig: Codable, Sendable, Equatable {
     let name: String
     let command: String

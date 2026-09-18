@@ -123,7 +123,7 @@ impl DatasetHandleContent {
 ///
 /// Dataset handles carry no vector embedding — there is no content blob to
 /// embed. The sentinel satisfies `DrawerStore::add_drawer`'s non-empty
-/// validation while making the intent explicit. The VectorKit encode pipeline
+/// validation while making the intent explicit. The SynapseKit encode pipeline
 /// skips drawers whose model ID does not match a registered model.
 ///
 /// Mirrors Swift `datasetHandleEmbeddingModelID` in `DatasetHandle.swift`.
@@ -184,7 +184,7 @@ impl Estate {
         );
         // Pre-read the current operationalBitmap so the
         // has_current_representation bit (cookbook §2.4.1) can be cleared
-        // in the same UPDATE as the four distillation columns (§4 invariant).
+        // in the same UPDATE as the five distillation columns (§4 invariant).
         let current_op: i64 = row_store
             .query(T_DRAWERS, Some(&pred), &[], Some(1), None)
             .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?
@@ -196,14 +196,17 @@ impl Estate {
                 _ => None,
             })
             .unwrap_or(0);
+        // Content changed: clear the content-derived bits (19, 27, 28; factsExtracted) so the
+        // span rows are re-encoded, in the same UPDATE that NULLs the
+        // content-derived columns below.
         let cleared_op = current_op
-            & !crate::drawer_operational::DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+            & !crate::drawer_operational::DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
         let mut values = BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text(content.to_string()));
         values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(cleared_op));
-        // Content changed in place → the distilled representation (a view of
-        // the OLD content) is stale. NULL-on-edit in the same statement is
-        // the SPEC §7.3 regeneration trigger. Mirrors Swift
+        // Content changed in place → the content-derived columns (ssc_facts,
+        // subject trio) describe the OLD content. NULL-on-edit in the same
+        // statement is the regeneration trigger. Mirrors Swift
         // updateDatasetContent.
         crate::drawer_store_inmemory::insert_cleared_representation(&mut values);
         let count = row_store

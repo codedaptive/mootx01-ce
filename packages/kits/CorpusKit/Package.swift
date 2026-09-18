@@ -6,8 +6,9 @@
 //   CorpusKit           -- canonical-content engine, BM25/vector retrieval,
 //                       optional standalone passages, tokenizer protocols,
 //                       plus the legacy standalone compatibility surface
-//   CorpusKitProviders  -- text embedding providers (MiniLM, mpnet,
-//                       EmbeddingGemma) and their tokenizers
+//   CorpusKitProviders  -- text embedding providers (MiniLM and, when opted
+//                       in, the dense families and Apple encoders) and their
+//                       tokenizers
 //
 // Providers split out so the core kit stays small. Consumers that
 // only need bundle storage and BM25 do not pull in CoreML models.
@@ -16,6 +17,15 @@
 // in-repository dependency direction (P2 self-report telemetry
 // coverage, cp-corpuskit-report). IntellectusLib is a zero-dependency
 // leaf lib; layering is not inverted.
+//
+// Compile-time switches (CorpusKitProviders target):
+//
+//   AppleEncoders  (Swift trait → APPLE_ENCODERS; Swift-only, no Rust twin)
+//       Compiles NLContextualEmbeddingProvider, NLEmbeddingProvider,
+//       AppleNLProvider, and NeuralEmbedProvider. OFF by default: retained
+//       in case Apple improves the NaturalLanguage framework, or for a
+//       device class that cannot host a CoreML encoder. Enable with:
+//           swift test --traits AppleEncoders
 
 import PackageDescription
 
@@ -28,14 +38,22 @@ let package = Package(
     products: [
         .library(name: "CorpusKit", targets: ["CorpusKit"]),
         .library(name: "CorpusKitProviders", targets: ["CorpusKitProviders"]),
+        // The whole-record dense sidecar: the float query surface as `package`
+        // extensions of Corpus and CorpusContentEngine plus FloatLaneOutcome.
+        .library(name: "CorpusKitWholeRecordDense", targets: ["CorpusKitWholeRecordDense"]),
     ],
     traits: [
         .trait(
             name: "StandalonePassages",
             description: "Compile optional standalone token-window passage indexing. GeniusLocusKit/MOOTx01 intentionally leaves this trait disabled."
         ),
+        .trait(
+            name: "AppleEncoders",
+            description: "Compile Apple NL embedding providers (NLContextualEmbeddingProvider, NLEmbeddingProvider, AppleNLProvider, NeuralEmbedProvider). Off by default; retained in case Apple improves the NaturalLanguage framework, or for a device class that cannot host a CoreML encoder. Swift-only. Defines APPLE_ENCODERS; enable with `swift test --traits AppleEncoders`."
+        ),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(path: "../../libs/SubstrateTypes"),
         // SubstrateLib: MerkleHash.leaf for the ContentHashProvider callback
         // that HashingRowStore invokes on every chunk insert.
@@ -50,8 +68,7 @@ let package = Package(
         .package(path: "../../libs/SubstrateML"),
         .package(path: "../../libs/EngramLib"),
         .package(path: "../../libs/EideticLib"),
-        // LatticeLib: FDC runtime (FDC.encode) and FDCFrame parent/ancestor
-        // derivation consumed by FDCProvider in CorpusKitProviders.
+        // LatticeLib: FDC runtime and FDCFrame parent/ancestor derivation.
         // Transitive dependency of EideticLib; declared explicitly here so
         // CorpusKitProviders can import LatticeLib directly.
         // Authority: in-repository dependency direction.
@@ -62,7 +79,7 @@ let package = Package(
         .package(path: "../../libs/IntellectusLib"),
         .package(path: "../PersistenceKit"),
         .package(path: "../ConvergenceKit"),
-        .package(path: "../VectorKit"),
+        .package(path: "../SynapseKit"),
         // QueueKit: CorpusKit owns its own ingest queue + drain worker pool, so
         // it mounts a QueueKit-backed encode queue and drains it directly — the
         // SDK-standalone ingest pipeline (a Corpus queues, drains, and encodes
@@ -78,6 +95,7 @@ let package = Package(
         .target(
             name: "CorpusKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "SubstrateTypes", "SubstrateLib", "SubstrateKernel",
                 "SubstrateML",
                 "EngramLib",
@@ -99,7 +117,7 @@ let package = Package(
                 // Authority: in-repository dependency direction.
                 .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
                 .product(name: "ConvergenceKit", package: "ConvergenceKit"),
-                "VectorKit",
+                "SynapseKit",
                 // QueueKit backs the Corpus-owned ingest queue + drain worker
                 // pool (the SDK-standalone encode pipeline). See Package
                 // dependency note above.
@@ -114,9 +132,22 @@ let package = Package(
                 ),
             ]
         ),
+        // The whole-record dense sidecar: the float query surface as `package`
+        // extensions of Corpus and CorpusContentEngine plus FloatLaneOutcome.
+        .target(
+            name: "CorpusKitWholeRecordDense",
+            dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
+                "CorpusKit",
+                "SynapseKit",
+                .product(name: "IntellectusLib", package: "IntellectusLib"),
+            ],
+            path: "Sources/CorpusKitWholeRecordDense"
+        ),
         .target(
             name: "CorpusKitProviders",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "CorpusKit",
                 "SubstrateTypes",
                 // SubstrateKernel supplies the canonical float-vector ops
@@ -125,25 +156,26 @@ let package = Package(
                 "SubstrateKernel",
                 "SubstrateML",
                 "EngramLib",
-                "VectorKit",
-                // FDCProvider: text → FDC code via LatticeLib's FDC runtime
-                // (FDC.encode). Ancestor chain via FDC.ancestors(of:), the
-                // runtime façade over FDCFrame.ancestors(of:). FDC math lives
-                // in LatticeLib — not reimplemented in CorpusKitProviders.
-                // Authority: honest semantic fusion (FDC co-classification signal).
-                .product(name: "LatticeLib", package: "LatticeLib"),
+                "SynapseKit",
+                    .product(name: "LatticeLib", package: "LatticeLib"),
             ],
-            path: "Sources/CorpusKitProviders"
+            path: "Sources/CorpusKitProviders",
+            swiftSettings: [
+                // AppleEncoders trait → APPLE_ENCODERS: gates Apple NL providers.
+                // Swift-only; no Rust twin. Off by default (held for v1.2).
+                .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
+            ]
         ),
         .testTarget(
             name: "CorpusKitTests",
             dependencies: [
                 "CorpusKit",
                 "CorpusKitProviders",
-                // VectorKit supplies the EmbeddingProvider protocol the
+                "CorpusKitWholeRecordDense",
+                // SynapseKit supplies the EmbeddingProvider protocol the
                 // embedding-provider conformance gate references directly
                 // (EmbeddingProviderConformanceTests, B2-5 parity gate).
-                "VectorKit",
+                "SynapseKit",
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
                 // PersistenceKitSQLite is required by the SQLite-backed chunk HLC
                 // round-trip test (ChunkHLCRoundTripTests), which exercises the
@@ -156,9 +188,6 @@ let package = Package(
                 // IntellectusLib is required by CorpusKitTelemetryTests, which
                 // install capturing sinks and toggle the enabled flag.
                 .product(name: "IntellectusLib", package: "IntellectusLib"),
-                // LatticeLib is required by FdcProviderTests, which test
-                // FDC.ancestors(of:) — the runtime façade used by FDCProvider
-                // for the ancestor chain (Gate 2 compliance verification).
                 .product(name: "LatticeLib", package: "LatticeLib"),
             ],
             path: "Tests/CorpusKitTests",
@@ -167,13 +196,41 @@ let package = Package(
                 // finding W1). The Rust leg reads the SAME file at
                 // rust/tests/bm25_conformance_test.rs via include_bytes! up the tree.
                 .copy("../SharedVectors"),
+                // Encoder model test fixtures: vocab.txt and a placeholder
+                // .mlmodelc directory for ModelDirectoryResolver tests.
+                // Copy the model directory directly so it lands at the
+                // bundle resource root as "minilm-l6-v2-w60/" — matching
+                // the layout the production app uses (models are copied to
+                // the app bundle root in project.yml). The resolver's
+                // bundleSlot checks <bundle.resourcePath>/minilm-l6-v2-w60/.
+                // The real 90 MB .mlmodelc is never committed; the placeholder
+                // confirms directory presence without the full binary artifact.
+                .copy("../Fixtures/encoder-models/minilm-l6-v2-w60"),
             ],
             swiftSettings: [
                 .define(
                     "CORPUSKIT_STANDALONE_PASSAGES",
                     .when(traits: ["StandalonePassages"])
                 ),
+                // Apple encoder test suites compile only when the matching trait is on.
+                .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
             ]
+        ),
+        // Tests of the whole-record dense engine.
+        .testTarget(
+            name: "CorpusKitWholeRecordDenseTests",
+            dependencies: [
+                "CorpusKit",
+                "CorpusKitProviders",
+                "CorpusKitWholeRecordDense",
+                "SynapseKit",
+                "EngramLib",
+                .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                .product(name: "PersistenceKitSQLite", package: "PersistenceKit"),
+                .product(name: "SubstrateTypes", package: "SubstrateTypes"),
+                .product(name: "IntellectusLib", package: "IntellectusLib"),
+            ],
+            path: "Tests/CorpusKitWholeRecordDenseTests",
         ),
     ]
 )

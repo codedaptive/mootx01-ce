@@ -1,0 +1,666 @@
+{
+ "description": "Spanner.spans expected bounds (half-open [start,end) word ranges). Rule: word_count <= window_words -> one span (0, word_count); else step = max(1, window_words / overlap_divisor), starts 0, step, 2*step, ... while start <= word_count - window_words; if that exceeds max_spans, step widens to ceil((word_count - window_words) / (max_spans - 1)), starts run while start < word_count - window_words and the final start is pinned to word_count - window_words. Ascending start order, never longest-first.",
+ "reference": "ev-reference.py windows(): if len(words)<=W: [words]; step=max(1,W//2); range(0, max(1,len(words)-W+1), step)",
+ "cases": [
+  {
+   "word_count": 0,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     0
+    ]
+   ]
+  },
+  {
+   "word_count": 1,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     1
+    ]
+   ]
+  },
+  {
+   "word_count": 59,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     59
+    ]
+   ]
+  },
+  {
+   "word_count": 60,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     60
+    ]
+   ]
+  },
+  {
+   "word_count": 61,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     60
+    ]
+   ]
+  },
+  {
+   "word_count": 90,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     60
+    ],
+    [
+     30,
+     90
+    ]
+   ]
+  },
+  {
+   "word_count": 120,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     60
+    ],
+    [
+     30,
+     90
+    ],
+    [
+     60,
+     120
+    ]
+   ]
+  },
+  {
+   "word_count": 121,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     60
+    ],
+    [
+     30,
+     90
+    ],
+    [
+     60,
+     120
+    ]
+   ]
+  },
+  {
+   "word_count": 900,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     60
+    ],
+    [
+     30,
+     90
+    ],
+    [
+     60,
+     120
+    ],
+    [
+     90,
+     150
+    ],
+    [
+     120,
+     180
+    ],
+    [
+     150,
+     210
+    ],
+    [
+     180,
+     240
+    ],
+    [
+     210,
+     270
+    ],
+    [
+     240,
+     300
+    ],
+    [
+     270,
+     330
+    ],
+    [
+     300,
+     360
+    ],
+    [
+     330,
+     390
+    ],
+    [
+     360,
+     420
+    ],
+    [
+     390,
+     450
+    ],
+    [
+     420,
+     480
+    ],
+    [
+     450,
+     510
+    ],
+    [
+     480,
+     540
+    ],
+    [
+     510,
+     570
+    ],
+    [
+     540,
+     600
+    ],
+    [
+     570,
+     630
+    ],
+    [
+     600,
+     660
+    ],
+    [
+     630,
+     690
+    ],
+    [
+     660,
+     720
+    ],
+    [
+     690,
+     750
+    ],
+    [
+     720,
+     780
+    ],
+    [
+     750,
+     810
+    ],
+    [
+     780,
+     840
+    ],
+    [
+     810,
+     870
+    ],
+    [
+     840,
+     900
+    ]
+   ]
+  },
+  {
+   "word_count": 5000,
+   "window_words": 60,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     60
+    ],
+    [
+     160,
+     220
+    ],
+    [
+     320,
+     380
+    ],
+    [
+     480,
+     540
+    ],
+    [
+     640,
+     700
+    ],
+    [
+     800,
+     860
+    ],
+    [
+     960,
+     1020
+    ],
+    [
+     1120,
+     1180
+    ],
+    [
+     1280,
+     1340
+    ],
+    [
+     1440,
+     1500
+    ],
+    [
+     1600,
+     1660
+    ],
+    [
+     1760,
+     1820
+    ],
+    [
+     1920,
+     1980
+    ],
+    [
+     2080,
+     2140
+    ],
+    [
+     2240,
+     2300
+    ],
+    [
+     2400,
+     2460
+    ],
+    [
+     2560,
+     2620
+    ],
+    [
+     2720,
+     2780
+    ],
+    [
+     2880,
+     2940
+    ],
+    [
+     3040,
+     3100
+    ],
+    [
+     3200,
+     3260
+    ],
+    [
+     3360,
+     3420
+    ],
+    [
+     3520,
+     3580
+    ],
+    [
+     3680,
+     3740
+    ],
+    [
+     3840,
+     3900
+    ],
+    [
+     4000,
+     4060
+    ],
+    [
+     4160,
+     4220
+    ],
+    [
+     4320,
+     4380
+    ],
+    [
+     4480,
+     4540
+    ],
+    [
+     4640,
+     4700
+    ],
+    [
+     4800,
+     4860
+    ],
+    [
+     4940,
+     5000
+    ]
+   ]
+  },
+  {
+   "word_count": 0,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     0
+    ]
+   ]
+  },
+  {
+   "word_count": 1,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     1
+    ]
+   ]
+  },
+  {
+   "word_count": 59,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     59
+    ]
+   ]
+  },
+  {
+   "word_count": 60,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     60
+    ]
+   ]
+  },
+  {
+   "word_count": 61,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     61
+    ]
+   ]
+  },
+  {
+   "word_count": 90,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     90
+    ]
+   ]
+  },
+  {
+   "word_count": 120,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     120
+    ]
+   ]
+  },
+  {
+   "word_count": 121,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     121
+    ]
+   ]
+  },
+  {
+   "word_count": 900,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     150
+    ],
+    [
+     75,
+     225
+    ],
+    [
+     150,
+     300
+    ],
+    [
+     225,
+     375
+    ],
+    [
+     300,
+     450
+    ],
+    [
+     375,
+     525
+    ],
+    [
+     450,
+     600
+    ],
+    [
+     525,
+     675
+    ],
+    [
+     600,
+     750
+    ],
+    [
+     675,
+     825
+    ],
+    [
+     750,
+     900
+    ]
+   ]
+  },
+  {
+   "word_count": 5000,
+   "window_words": 150,
+   "overlap_divisor": 2,
+   "max_spans": 32,
+   "spans": [
+    [
+     0,
+     150
+    ],
+    [
+     157,
+     307
+    ],
+    [
+     314,
+     464
+    ],
+    [
+     471,
+     621
+    ],
+    [
+     628,
+     778
+    ],
+    [
+     785,
+     935
+    ],
+    [
+     942,
+     1092
+    ],
+    [
+     1099,
+     1249
+    ],
+    [
+     1256,
+     1406
+    ],
+    [
+     1413,
+     1563
+    ],
+    [
+     1570,
+     1720
+    ],
+    [
+     1727,
+     1877
+    ],
+    [
+     1884,
+     2034
+    ],
+    [
+     2041,
+     2191
+    ],
+    [
+     2198,
+     2348
+    ],
+    [
+     2355,
+     2505
+    ],
+    [
+     2512,
+     2662
+    ],
+    [
+     2669,
+     2819
+    ],
+    [
+     2826,
+     2976
+    ],
+    [
+     2983,
+     3133
+    ],
+    [
+     3140,
+     3290
+    ],
+    [
+     3297,
+     3447
+    ],
+    [
+     3454,
+     3604
+    ],
+    [
+     3611,
+     3761
+    ],
+    [
+     3768,
+     3918
+    ],
+    [
+     3925,
+     4075
+    ],
+    [
+     4082,
+     4232
+    ],
+    [
+     4239,
+     4389
+    ],
+    [
+     4396,
+     4546
+    ],
+    [
+     4553,
+     4703
+    ],
+    [
+     4710,
+     4860
+    ],
+    [
+     4850,
+     5000
+    ]
+   ]
+  }
+ ]
+}

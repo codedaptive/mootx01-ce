@@ -89,6 +89,11 @@ pub const GROUNDING_POOL_BOUND: usize = 200;
 pub struct GroundedOutput {
     pub context: ContextDocument,
     pub drawer_count: usize,
+    /// Drawer IDs of the ranked, capped, provenance-gated pool that fed the
+    /// synthesis, in rank order (ARIA_MCP_SPEC 2.0.0 § 8.7: the candidate
+    /// section renders THIS pool — the two-lane ranking is a guarantee the
+    /// presentation layer must not re-derive). Twin of Swift `rankedIDs`.
+    pub ranked_ids: Vec<String>,
 }
 
 /// Run GroundedSynthesis against the estate addressed by `handle`. Sequences
@@ -105,8 +110,8 @@ pub struct GroundedOutput {
 /// (previous behaviour). The cap is applied after reranking so the most
 /// cue-relevant drawers survive, not the most recent.
 ///
-/// `query` is the raw text for the SCORED second lane (BM25 + vector via the
-/// GLK UnionBest/Raw request). The scored lane reaches relevant rows that
+/// `query` is the raw text for the SCORED second lane (BM25 + vector via a
+/// GLK UnionBest request). The scored lane reaches relevant rows that
 /// share NO cue terms with the question. None = lexical-only grounding.
 pub fn run_grounded_synthesis(
     coord: &EstateCoordinator,
@@ -120,7 +125,8 @@ pub fn run_grounded_synthesis(
     query: Option<&str>,
 ) -> Result<GroundedOutput, RecipeRunError> {
     run_grounded_synthesis_impl(
-        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query, false,
+        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query,
+        GLKRecallScoring::Raw, false,
     )
 }
 
@@ -138,7 +144,29 @@ pub fn run_grounded_synthesis_with_provenance_gate(
     query: Option<&str>,
 ) -> Result<GroundedOutput, RecipeRunError> {
     run_grounded_synthesis_impl(
-        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query, true,
+        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query,
+        GLKRecallScoring::Raw, true,
+    )
+}
+
+/// Selected public synthesis variant. It retains the provenance gate and uses
+/// the query-aware matrix scorer so the raw UnionBest locus-first merge cannot
+/// promote recent unrelated rows above an older relevant row.
+pub fn run_grounded_synthesis_with_provenance_gate_and_scoring(
+    coord: &EstateCoordinator,
+    handle: &EstateHandle,
+    frame: RecallFrame,
+    tuning: RecallFrameTuning,
+    now: i64,
+    node_names: &std::collections::HashMap<String, (String, String)>,
+    cue_terms: &[String],
+    cap: Option<usize>,
+    query: Option<&str>,
+    scoring: GLKRecallScoring,
+) -> Result<GroundedOutput, RecipeRunError> {
+    run_grounded_synthesis_impl(
+        coord, handle, frame, tuning, now, node_names, cue_terms, cap, query,
+        scoring, true,
     )
 }
 
@@ -152,6 +180,7 @@ fn run_grounded_synthesis_impl(
     cue_terms: &[String],
     cap: Option<usize>,
     query: Option<&str>,
+    scored_lane_scoring: GLKRecallScoring,
     exclude_provenance_sensitive: bool,
 ) -> Result<GroundedOutput, RecipeRunError> {
     // B-5: verify capabilities before any substrate touch. A capability gate
@@ -175,6 +204,37 @@ fn run_grounded_synthesis_impl(
     if let Some(0) = cap {
         return Err(RecipeRunError::Recipe(RecipeError::InvalidCap { value: 0 }));
     }
+
+    // W4 recall_tuning consumption: when the caller passed the default tuning
+    // (recipe_tools.rs hardcodes RecallFrameTuning::default()), read the
+    // estate-provisioned manifest and promote its fields into the frame tuning.
+    // Mirrors Swift HybridRecall.swift:127-132 which reads the manifest at the
+    // same precedence level (caller explicit > estate provisioned > spec constant).
+    // A provisioned manifest that is the default passes through unchanged so the
+    // common unprovisioned case is a zero-cost no-op (one estate meta read +
+    // equality check, no field copies).
+    let tuning = if tuning == RecallFrameTuning::default() {
+        match coord.provisioned_recall_tuning(handle) {
+            Ok(manifest) if manifest != genius_locus_kit::RecallTuningManifest::default() => {
+                RecallFrameTuning {
+                    bm25_weight: manifest.rrf_bm25_weight,
+                    vector_weight: manifest.rrf_vector_weight,
+                    // rrf_k is u32 in RecallTuningManifest and i32 in
+                    // RecallFrameTuning; cast is safe at spec-range values (≤ 512).
+                    rrf_k: manifest.rrf_k as i32,
+                    mmr_lambda: manifest.mmr_lambda,
+                    // Preserve the caller's page_size: it is a display-paging
+                    // knob orthogonal to the RRF/MMR weights.
+                    page_size: tuning.page_size,
+                }
+            }
+            _ => tuning,
+        }
+    } else {
+        // Caller passed an explicit (non-default) tuning — honour it; the
+        // manifest has no role when the caller has made an explicit choice.
+        tuning
+    };
 
     // Emit recipe start AFTER the capability gate so we never fire a "start"
     // for an invocation that will immediately throw. `now` is the
@@ -222,13 +282,24 @@ fn run_grounded_synthesis_impl(
             let request = GLKRecallRequest {
                 frame: lane_b_frame,
                 mode: GLKRecallMode::UnionBest,
-                scoring: GLKRecallScoring::Raw,
+                scoring: scored_lane_scoring,
                 limit: pool_bound,
                 fallback: RecallFallbackPolicy::AllowDegraded,
                 query_text: Some(q.to_string()),
                 trace_limit: Some(cap.unwrap_or(tuning.page_size as usize)),
                 origin: genius_locus_kit::recall::RecallOrigin::Internal,
                 recall_shape: None,
+                // W2.5 Track R(a): recipes are internal-origin — no trace rows are
+                // written, so door/composition stay None.
+                door: None,
+                composition: None,
+                frontier_k: None,
+                // §11.18: internal recall — no anomalous-flag filter applied.
+                anomalous_filter: None,
+                // Sub-span scoring is an additive-cost stage this recipe does not
+                // request; every caller names the switch (ruling 2026-09-07).
+                sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
+                rerank_directive: None,
             };
             let result = coord
                 .recall_scored(handle, request, now)
@@ -281,18 +352,14 @@ fn run_grounded_synthesis_impl(
         None => lane_a,
     };
     if exclude_provenance_sensitive {
-        drawers.retain(|drawer| {
-            !matches!(
-                drawer.sensitivity(),
-                locus_kit::provenance::Sensitivity::Restricted
-                    | locus_kit::provenance::Sensitivity::Secret
-            )
-        });
+        drawers.retain(|drawer| public_capture_provenance(drawer.provenance));
     }
 
     // 2. Project to DrawerRow for rerank, and to per-id metadata for
     //    synthesis. Recalled rows are active, hence currently believed; the
     //    caller's recall frame governs which rows surface.
+    // Adornments are dark (Encoder Rerank Program, 2026-09-05). DrawerRow
+    // carries only id + content; synthesis uses first-line content excerpts.
     let rows: Vec<DrawerRow> = drawers
         .iter()
         .map(|d| DrawerRow {
@@ -314,6 +381,9 @@ fn run_grounded_synthesis_impl(
                     wing,
                     room,
                     is_currently_believed: true,
+                    // Carry provenance so make_key_insights can apply the
+                    // KEYINSIGHTS-PROV = a ruling (bits 30–35 sensitivity gate).
+                    provenance: d.provenance,
                 },
             )
         })
@@ -346,6 +416,30 @@ fn run_grounded_synthesis_impl(
         tuning.clone()
     };
     let reranked = rerank(&rows, &effective_tuning, cue_terms);
+
+    // Grounding is a ranking guarantee: a row that carries an explicit cue
+    // term is presented before every row that carries none. The scored lane
+    // may contribute broad semantic candidates, but the fused order depends
+    // on which evidence that lane yielded, and the two ports' scored lanes do
+    // not yield identical evidence on identical estates. The stable partition
+    // keeps the hybrid order inside each bucket and makes the cue-first
+    // contract hold in both ports by construction. Twin of the partition in
+    // Swift `GroundedSynthesis.run`; pinned by
+    // `selected_synthesis_ranks_cue_matches_before_unrelated_rows` and the
+    // Swift `testGroundedSynthesisQueryRanksCueMatchesFirst`.
+    let reranked = if cue_terms.is_empty() {
+        reranked
+    } else {
+        let normalized_cues = cue_terms
+            .iter()
+            .map(|term| term.to_lowercase())
+            .collect::<Vec<_>>();
+        let (cue_matches, other_rows): (Vec<_>, Vec<_>) = reranked.into_iter().partition(|row| {
+            let content = row.content.to_lowercase();
+            normalized_cues.iter().any(|term| content.contains(term))
+        });
+        cue_matches.into_iter().chain(other_rows).collect()
+    };
 
     // Apply cap BEFORE synthesis so the synthesizer's work is bounded by
     // the user limit, not the pool size. The cap is applied after reranking
@@ -385,7 +479,15 @@ fn run_grounded_synthesis_impl(
     Ok(GroundedOutput {
         context,
         drawer_count,
+        ranked_ids: page.rows.iter().map(|r| r.id.clone()).collect(),
     })
+}
+
+/// Public synthesis admits only the two explicitly public provenance
+/// sensitivity encodings. Unknown/reserved encodings fail closed rather than
+/// inheriting the compatibility fallback of `Drawer::sensitivity`.
+fn public_capture_provenance(provenance: i64) -> bool {
+    matches!((provenance >> 30) & 0x3f, 0 | 16)
 }
 
 #[cfg(test)]
@@ -406,6 +508,15 @@ mod tests {
     /// Empty node-name map for tests — no display-name resolution needed.
     fn empty_names() -> std::collections::HashMap<String, (String, String)> {
         std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn public_provenance_gate_uses_raw_encoding() {
+        assert!(public_capture_provenance(0_i64 << 30));
+        assert!(public_capture_provenance(16_i64 << 30));
+        assert!(!public_capture_provenance(32_i64 << 30));
+        assert!(!public_capture_provenance(48_i64 << 30));
+        assert!(!public_capture_provenance(63_i64 << 30));
     }
 
     fn coord_with_rows(contents: &[&str]) -> (EstateCoordinator, EstateHandle) {

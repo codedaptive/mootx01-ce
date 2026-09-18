@@ -62,6 +62,11 @@ struct PluginPackageShapeTests {
         // the loop body into a per-file helper would let the count-guard
         // drift away from the assertions it certifies, which is the precise
         // failure this suite exists to prevent.
+        //
+        // Key split (2026-09-16): the Claude Code plugin registers its server
+        // under MCPClients.pluginServerName ("memory"), giving tools the
+        // mcp__plugin_mootx01_memory__ prefix. Every other manifestBundle host
+        // is a direct install and keeps MCPClients.serverName ("mootx01").
         let pluginHosts = InstallBundle.embedded.hosts.values
             .filter(\.supportsPlugin)
             .sorted { $0.id < $1.id }
@@ -76,17 +81,23 @@ struct PluginPackageShapeTests {
             #expect(!maps.isEmpty,
                     "\(host.id) is plugin-capable but its package declares no MCP server map")
 
+            // claude-code's plugin package registers under pluginServerName ("memory");
+            // every other manifestBundle host is a direct install and uses serverName ("mootx01").
+            let expectedKey = host.id == "claude-code"
+                ? MCPClients.pluginServerName
+                : MCPClients.serverName
+
             for (rel, mapKey, servers) in maps {
                 let where_ = "\(host.id)/\(rel) [\(mapKey)]"
 
-                #expect(Array(servers.keys) == [MCPClients.pluginServerName],
+                #expect(Array(servers.keys) == [expectedKey],
                         """
-                        \(where_): must declare exactly the plugin server key \
-                        '\(MCPClients.pluginServerName)'; got \(servers.keys.sorted())
+                        \(where_): must declare exactly the expected server key \
+                        '\(expectedKey)'; got \(servers.keys.sorted())
                         """)
 
-                guard let entry = servers[MCPClients.pluginServerName] as? [String: Any] else {
-                    Issue.record("\(where_): no entry under '\(MCPClients.pluginServerName)'")
+                guard let entry = servers[expectedKey] as? [String: Any] else {
+                    Issue.record("\(where_): no entry under '\(expectedKey)'")
                     continue
                 }
 
@@ -119,34 +130,95 @@ struct PluginPackageShapeTests {
                 """)
     }
 
-    /// The constant the installer reads must be the key the packager writes.
-    /// `MCPClients.pluginServerName` is a mirror of generated data; this is
-    /// the test that keeps the mirror honest. It is the direct tripwire for
-    /// a repeat of 7f64973aa, where the generated key moved and the
-    /// installer's copy did not.
+    /// The constant the installer reads must be the key the packager writes for
+    /// the Claude Code plugin package specifically. `MCPClients.pluginServerName`
+    /// is a mirror of generated data; this is the test that keeps the mirror
+    /// faithful. It is the direct tripwire for a repeat of 7f64973aa, where the
+    /// generated key moved and the installer's copy did not.
+    ///
+    /// Only the claude-code package is checked here because claude-code is the
+    /// only host whose plugin package uses `pluginServerName` ("memory"). Direct-
+    /// install packages for other hosts use `serverName` ("mootx01") and are
+    /// covered by `pluginPackageEntriesAreHTTPShaped`.
     @Test("MCPClients.pluginServerName matches the key the packager actually emits")
     func pluginServerNameMatchesGeneratedPackages() throws {
         let emitted = Set(
-            InstallBundle.embedded.hosts.values
-                .filter(\.supportsPlugin)
-                .flatMap { Self.serverMaps(forHostID: $0.id) }
-                .flatMap(\.servers.keys)
+            Self.serverMaps(forHostID: "claude-code").flatMap(\.servers.keys)
         )
         #expect(emitted == [MCPClients.pluginServerName],
                 """
-                the generated packages are the authority for the plugin server key; \
+                the generated claude-code package is the authority for the plugin server key; \
                 MCPClients.pluginServerName is '\(MCPClients.pluginServerName)' but the \
-                packages emit \(emitted.sorted())
+                claude-code package emits \(emitted.sorted())
                 """)
     }
 
-    /// The two keys are deliberately different (7f64973aa): a plugin entry is
-    /// namespaced under the plugin id by the host, so it reads as
-    /// `plugin:mootx01:memory`; a direct entry has no such namespace and keeps
-    /// `mootx01`. Collapsing them would break the plugin-ownership hook's
-    /// ability to spot a competing direct entry.
-    @Test("the plugin server key and the direct-entry server key stay distinct")
+    /// The plugin and direct server keys are intentionally distinct: the plugin
+    /// registers under `"memory"` (prefix `mcp__plugin_mootx01_memory__`) while
+    /// direct installs continue to use `"mootx01"` (prefix `mcp__mootx01__`).
+    @Test("the plugin server key and the direct-entry server key are distinct")
     func pluginAndDirectServerKeysAreDistinct() {
         #expect(MCPClients.pluginServerName != MCPClients.serverName)
+        #expect(MCPClients.pluginServerName == "memory")
+        #expect(MCPClients.serverName == "mootx01")
+    }
+
+    /// Recursively collects every `type: "command"` hook's `command` string
+    /// from a decoded hooks-wiring JSON object. Mirrors the packager-side
+    /// walk in tools/moot-packager GeneratorTests — keep the two in sync.
+    private static func hookCommandStrings(in value: Any) -> [String] {
+        if let dict = value as? [String: Any] {
+            var found: [String] = []
+            if dict["type"] as? String == "command", let command = dict["command"] as? String {
+                found.append(command)
+            }
+            found += dict.values.flatMap(hookCommandStrings)
+            return found
+        }
+        if let arr = value as? [Any] {
+            return arr.flatMap(hookCommandStrings)
+        }
+        return []
+    }
+
+    /// Every token of `command` that names `mootx01` bare — no `/` in the
+    /// token. Tokens are maximal runs between whitespace, shell separators,
+    /// quote characters, and backticks, so `exec mootx01 …`,
+    /// `env mootx01 …`, `sh -c 'mootx01 …'`, and both command-substitution
+    /// forms are all caught, not just a bare head token. Mirrors
+    /// bareMootx01Tokens in tools/moot-packager GeneratorTests.
+    private static func bareMootx01Tokens(in command: String) -> [String] {
+        command
+            .components(separatedBy: CharacterSet(charactersIn: " \t;&|()'\"`"))
+            .filter { $0 == "mootx01" }
+    }
+
+    /// No Codex lifecycle hook command shipped by the INSTALLER may resolve
+    /// `mootx01` via bare PATH order. The packager's GeneratorTests guard
+    /// the generated trees and checked-in wiring files; each PORT guards the
+    /// embedded carrier it compiles — this test covers the Swift embed
+    /// (`InstallBundle.embedded`, the packages map `mootx01 install`
+    /// materializes), and the Rust twin in core/depth.rs
+    /// (`embedded_codex_hook_commands_never_resolve_via_bare_path`) covers
+    /// the include_str! bundle. Asserted against the decoded bundle (never a
+    /// substring scan of the EmbeddedArtifactsV2 literal), at the same
+    /// generation boundary as the rest of this suite. A stale or hand-edited
+    /// embed that reintroduces a bare invocation fails here even when every
+    /// checked-in wiring file is clean — this repo has shipped stale embeds
+    /// before (v1.0.31, per tools/moot-packager/regen.sh's header).
+    @Test("no embedded Codex hook command resolves mootx01 via bare PATH")
+    func codexEmbeddedHookCommandsNeverResolveViaBarePATH() throws {
+        let wiring = InstallBundle.embedded.packageFiles(forHostID: "codex")[".codex/hooks.json"]
+        let unwrapped = try #require(
+            wiring, "embedded codex package carries no .codex/hooks.json — bundle shape changed?")
+
+        let root = try JSONSerialization.jsonObject(with: Data(unwrapped.utf8))
+        let commands = Self.hookCommandStrings(in: root)
+        #expect(!commands.isEmpty,
+                "embedded codex hooks wiring carries no commands — wiring shape changed?")
+        for command in commands {
+            #expect(Self.bareMootx01Tokens(in: command).isEmpty,
+                    "embedded codex hooks wiring resolves mootx01 via bare PATH: \(command)")
+        }
     }
 }

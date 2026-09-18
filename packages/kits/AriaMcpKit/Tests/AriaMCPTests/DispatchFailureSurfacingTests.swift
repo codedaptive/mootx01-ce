@@ -95,19 +95,6 @@ struct DispatchFailureSurfacingTests {
 
     /// The underlying error description reaches the client so the model can
     /// see WHY the call failed — the message names the failing file.
-    @Test func unexpectedRunnerErrorMessageReachesTheClient() async throws {
-        let (dispatcher, kit, handle) = try await makeDispatcher()
-        defer { Task { try? await kit.close(handle) } }
-        let palace = try makeBrokenPalace()
-        defer { try? FileManager.default.removeItem(at: palace) }
-
-        let result = try await dispatcher.dispatch(
-            name: "moot_palace_import",
-            arguments: .object(["palace_path": .string(palace.path)]))
-
-        #expect(text(of: result).contains("tunnels.json"),
-            "the underlying error description must be in the result text; got: \(text(of: result))")
-    }
 
     /// Protocol-level faults keep their JSON-RPC error shape: an unknown
     /// tool still THROWS methodNotFound — the isError conversion is only

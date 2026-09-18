@@ -1,4 +1,5 @@
-// LsaProvider.swift
+// LsaProvider.swift — Latent Semantic Analysis embedding provider.
+// Part of the default recall ensemble alongside RandomIndexingProvider.
 //
 // Latent Semantic Analysis (LSA / LSI) distributional-semantics
 // embedding provider. Part 2 of the honest semantic fusion honest
@@ -85,7 +86,7 @@ import SubstrateKernel
 // SubstrateML: JacobiSVD (deterministic one-sided Jacobi SVD) and
 // FloatSimHash.project (canonical projection to Engram).
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -102,8 +103,8 @@ import VectorKit
 // MARK: - Constants
 
 /// FloatSimHash projection seed for LSA. Encodes "LSA_V1_M" in ASCII.
-/// MUST differ from riProjectionSeed and ppmiProjectionSeed so LSA
-/// engrams key to a separate storage bucket when all three providers
+/// MUST differ from riProjectionSeed so LSA
+/// engrams key to a separate storage bucket when both providers
 /// coexist in one estate. Must not drift from the Rust constant
 /// LSA_PROJECTION_SEED.
 public let lsaProjectionSeed: UInt64 = 0x4C53415F56315F4D
@@ -139,7 +140,7 @@ public let lsaDefaultRank: Int = 64
 ///
 /// ## Conformance
 ///
-/// Conforms to `VectorKit.EmbeddingProvider`.
+/// Conforms to `SynapseKit.EmbeddingProvider`.
 /// modelID = "lsa-v1", modelVersion = "1.1.0".
 /// Projection seed = `lsaProjectionSeed`.
 ///
@@ -256,13 +257,25 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     ///
     /// Natural log on both sides; add-1 smoothing in IDF denominator.
     public func finalize() {
+        _ = finalize(budget: .unbounded)
+    }
+
+    /// Finalize within the caller's document, sweep, deadline, and task-
+    /// cancellation budget. Cancellation is checked inside the Jacobi sweep so
+    /// a resident retrain does not have to wait for the full factorization.
+    @discardableResult
+    public func finalize(budget: RetrainingBudget) -> RetrainingOutcome {
         let N = counts.documentCount
-        guard N > 0, counts.vocabularySize > 0 else { return }
+        guard N <= budget.maxDocuments else {
+            return .skipped(.documentLimit(actual: N, limit: budget.maxDocuments))
+        }
+        if let reason = budget.cancellationReason { return .skipped(reason) }
+        guard N > 0, counts.vocabularySize > 0 else { return .completed }
 
         // factor over a reduced, informative sub-vocabulary so the
         // dense SVD is `docs × K` (feasible) instead of `docs × full-vocab`
         // (~10^15 ops, infeasible). The reduced vocab is a corpus property
-        // shared with NMF; it is frozen here and drives query projection.
+        // (`ReducedVocab`); it is frozen here and drives query projection.
         // `vocabSize` below is the REDUCED column count — the SVD block that
         // follows is unchanged and keys on it.
         let reduced = selectReducedVocabulary(
@@ -273,15 +286,15 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         )
         basisVocab = reduced.termToColumn
         let vocabSize = reduced.size
-        guard vocabSize > 0 else { svd = nil; idfWeights = []; return }
+        guard vocabSize > 0 else { svd = nil; idfWeights = []; return .completed }
 
         // IDF over REDUCED columns, using the full-corpus df (informativeness is
-        // corpus-wide). idfWeights[col] = log((N+1)/(df+1)); natural log with
-        // add-1 smoothing — matches Rust's f32::ln().
+        // corpus-wide), through the one smoothed IDF every distributional
+        // provider shares: idfWeights[col] = max(0, ln((N+1)/(df+1))).
         idfWeights = [Float](repeating: 0, count: vocabSize)
         for (fullIdx, col) in reduced.fullIndexToColumn {
-            let df = counts.dfCounts[fullIdx] ?? 0
-            idfWeights[col] = max(0, log(Float(N + 1) / Float(df + 1)))
+            idfWeights[col] = smoothedInverseDocumentFrequency(
+                documentFrequency: counts.dfCounts[fullIdx] ?? 0, documentCount: N)
         }
 
         // Build the TF-IDF matrix M (numDocs × K, row-major). Map each doc's TF
@@ -306,7 +319,13 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         // for on-device estates; we handle both orientations.
         if N >= vocabSize {
             // Tall matrix: SVD on M directly (numDocs × vocabSize).
-            svd = JacobiSVD.decompose(A: M, rank: effectiveRank, sweeps: svdSweeps)
+            do {
+                svd = try JacobiSVD.decompose(
+                    A: M, rank: effectiveRank, sweeps: min(svdSweeps, budget.maxSweeps),
+                    shouldCancel: { budget.cancellationReason != nil })
+            } catch {
+                return .skipped(budget.cancellationReason ?? .cancelled)
+            }
         } else {
             // Wide matrix: SVD on Mᵀ (vocabSize × numDocs), then swap U/Vt.
             var Mt: [[Float]] = [[Float]](repeating: [Float](repeating: 0, count: N), count: vocabSize)
@@ -315,7 +334,14 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
                     Mt[j][i] = M[i][j]
                 }
             }
-            let transposedSVD = JacobiSVD.decompose(A: Mt, rank: effectiveRank, sweeps: svdSweeps)
+            let transposedSVD: SVDResult
+            do {
+                transposedSVD = try JacobiSVD.decompose(
+                    A: Mt, rank: effectiveRank, sweeps: min(svdSweeps, budget.maxSweeps),
+                    shouldCancel: { budget.cancellationReason != nil })
+            } catch {
+                return .skipped(budget.cancellationReason ?? .cancelled)
+            }
             // Swap: U becomes Vt, Vt becomes U (transposed).
             // For the wide case: M = V Σ Uᵀ where V is vocabSize × k,
             // U is numDocs × k. We want docVec = U[d] · Σ and queryVec
@@ -334,6 +360,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
             }
             svd = SVDResult(U: uNew, singularValues: transposedSVD.singularValues, Vt: vtNew, rank: k)
         }
+        return .completed
     }
 
     // MARK: EmbeddingProvider
@@ -357,7 +384,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// the projection produces an all-zero result (e.g. all-zero SVD from a
     /// 1-doc corpus — a basis quality issue, not a vocabulary miss).
     ///
-    /// Throws `VectorKitError.embedFloatVocabMiss` when the provider HAS a
+    /// Throws `SynapseKitError.embedFloatVocabMiss` when the provider HAS a
     /// finalized basis and non-empty vocabulary, but all query tokens are
     /// OOV — distinguishing a vocabulary coverage gap from a structural
     /// opt-out so `Corpus.floatNearest` maps to the correct dark-lane reason.
@@ -375,7 +402,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
         // throw embedFloatVocabMiss so the corpus layer surfaces the reason.
         let hasInVocab = terms.contains { basisVocab[$0] != nil }
         guard hasInVocab else {
-            throw VectorKitError.embedFloatVocabMiss(
+            throw SynapseKitError.embedFloatVocabMiss(
                 "lsa: reduced vocab size \(basisVocab.count), but 0 of \(terms.count) query token(s) matched"
             )
         }
@@ -512,7 +539,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     /// the corpus has fewer documents or terms than requested).
     public var effectiveRank: Int { svd?.rank ?? 0 }
 
-    // MARK: Basis serialization (mission 6a-i)
+    // MARK: Basis serialization
 
     /// 4-byte magic identifying an LSA basis blob ("LSB1").
     static let basisMagic: [UInt8] = Array("LSB1".utf8)
@@ -660,7 +687,7 @@ public final class LsaProvider: EmbeddingProvider, @unchecked Sendable {
     }
 }
 
-// MARK: - TrainableEmbeddingBasis (mission 6a-ii-α)
+// MARK: - TrainableEmbeddingBasis
 
 extension LsaProvider: TrainableEmbeddingBasis {
 
@@ -672,13 +699,27 @@ extension LsaProvider: TrainableEmbeddingBasis {
     /// one document column per text. The `finalize()` pass then computes the
     /// TF-IDF matrix and runs the deterministic Jacobi SVD. This reproduces the
     /// exact trained+finalized state of per-document `train` + `finalize`, so a
-    /// basis serialized after `trainOnCorpus` is byte-identical to the 6a-i
+    /// basis serialized after `trainOnCorpus` is byte-identical to the shared
     /// fixture trained on the same texts.
     public func trainOnCorpus(texts: [String]) {
         for text in texts {
             train(document: text)
         }
         finalize()
+    }
+
+    public func trainOnCorpus(
+        texts: [String], budget: RetrainingBudget
+    ) -> RetrainingOutcome {
+        guard texts.count <= budget.maxDocuments else {
+            return .skipped(.documentLimit(actual: texts.count, limit: budget.maxDocuments))
+        }
+        if let reason = budget.cancellationReason { return .skipped(reason) }
+        for text in texts {
+            if let reason = budget.cancellationReason { return .skipped(reason) }
+            train(document: text)
+        }
+        return finalize(budget: budget)
     }
 
     /// Streamed-training page: the same per-document accumulation
@@ -694,7 +735,7 @@ extension LsaProvider: TrainableEmbeddingBasis {
     }
 
     /// Reconstruct a fresh `LsaProvider` from a serialized basis, type-erased.
-    /// Delegates to `init(deserializing:)` (6a-i).
+    /// Delegates to `init(deserializing:)`.
     public func reconstructBasis(from basis: Data) throws -> any EmbeddingProvider & Sendable {
         try LsaProvider(deserializing: basis)
     }
@@ -718,6 +759,18 @@ extension LsaProvider: TrainableEmbeddingBasis {
     public func addToCounts(text: String) {
         counts.addDocumentForCountsAnchor(text)
     }
+
+    /// LSA's counts blob holds only vocabulary and documentCount trigger anchors —
+    /// NOT the per-document TF rows the TF-IDF matrix and Jacobi SVD require.
+    /// `finalize()` needs the full per-document term-frequency input, which is
+    /// re-derived by re-tokenizing the corpus at refactor time (open design
+    /// decision: re-tokenize at refactor). No counts-only basis derivation is
+    /// possible; this method makes no state change and returns `false`.
+    ///
+    /// This explicit override documents at-site why LSA cannot support
+    /// counts-only refactoring, rather than relying silently on the protocol
+    /// default. The caller must keep the corpus re-tokenization path.
+    public func finalizeFromCounts() -> Bool { false }
 
     /// Maintained vocabulary size for the growth trigger.
     public var countsVocabularySize: Int { counts.vocabularySize }

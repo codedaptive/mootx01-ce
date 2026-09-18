@@ -290,79 +290,6 @@ struct MatrixTierTests {
         }
     }
 
-    // MARK: - Persistence
-
-    @Test
-    func inMemoryModeRebuildsButDoesNotPersist() throws {
-        var log = UnifiedAuditLog()
-        let row = UUID()
-        log.add(captureEntry(row: row, field: "bm.x",
-                             value: .bitmap(0b11), at: hlc(1)))
-
-        let backend = MatrixPersistenceBackend(mode: .inMemory)
-        let snap = try backend.rebuild(from: log)
-        #expect(snap.tier.liveRowCount == 1)
-        // .inMemory load always returns nil — no on-disk state.
-        #expect(try backend.load() == nil)
-    }
-
-    @Test
-    func snapshottedModeRoundTripsExactly() throws {
-        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("matrix-snap-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        var log = UnifiedAuditLog()
-        let row1 = UUID()
-        let row2 = UUID()
-        log.add(captureEntry(row: row1, field: "bm.a",
-                             value: .bitmap(0b1011), at: hlc(10)))
-        log.add(captureEntry(row: row2, field: "bm.a",
-                             value: .bitmap(0b0011), at: hlc(20)))
-        log.add(captureEntry(row: row2, field: "bm.b",
-                             value: .bitmap(0b1100), at: hlc(20)))
-
-        let backend = MatrixPersistenceBackend(
-            mode: .snapshotted(file: tmp)
-        )
-        let snap1 = try backend.rebuild(from: log)
-
-        let backend2 = MatrixPersistenceBackend(
-            mode: .snapshotted(file: tmp)
-        )
-        let loaded = try backend2.load()
-        #expect(loaded != nil)
-        #expect(loaded?.tier == snap1.tier)
-        #expect(loaded?.calibration == snap1.calibration)
-        #expect(loaded?.hlcWatermark == snap1.hlcWatermark)
-    }
-
-    @Test
-    func persistenceModesAgreeOnTier() throws {
-        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("matrix-eq-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: tmp) }
-
-        var log = UnifiedAuditLog()
-        let row1 = UUID()
-        let row2 = UUID()
-        log.add(captureEntry(row: row1, field: "bm.x",
-                             value: .bitmap(0b1), at: hlc(1)))
-        log.add(captureEntry(row: row2, field: "bm.x",
-                             value: .bitmap(0b1), at: hlc(2)))
-        log.add(captureEntry(row: row2, field: "bm.y",
-                             value: .bitmap(0b10), at: hlc(2)))
-
-        let mem = MatrixPersistenceBackend(mode: .inMemory)
-        let snap = MatrixPersistenceBackend(mode: .snapshotted(file: tmp))
-
-        let memOut = try mem.rebuild(from: log)
-        let snapOut = try snap.rebuild(from: log)
-
-        #expect(memOut.tier == snapOut.tier,
-                "both modes must produce the same matrix tier")
-    }
-
     // MARK: - Conformance: boundary prune (Finding #4) + backdated eventTime (Finding #3)
 
     /// Finding #4 conformance (codex 98a790c2): incremental T rebuild must keep
@@ -455,7 +382,7 @@ struct MatrixTierTests {
         let evtA: Int64 = 1_000_000
         let evtB: Int64 =   900_000   // before A in world time
 
-        var eventTimes: [UUID: Int64] = [rowA: evtA, rowB: evtB]
+        let eventTimes: [UUID: Int64] = [rowA: evtA, rowB: evtB]
 
         // Prefix log: only A.
         var prefixLog = UnifiedAuditLog()
@@ -550,5 +477,45 @@ struct MatrixTierTests {
                                     seed: 42, maxIterations: 20)
         #expect(a.w == b.w)
         #expect(a.h == b.h)
+    }
+
+    // MARK: - S4-C decayed projections (§8.13)
+
+    @Test("decayed O: one bundle, two coords, one half-life age → weight exactly 0.5")
+    func decayedCoOccurrenceHalfLifePin() {
+        // One capture bundle at t=0 carrying two coordinates → exactly one
+        // O pair. Decay clock exactly one τ_O (60d) later → weight 0.5.
+        // Cross-port pin: the Rust twin asserts the identical literal.
+        let row = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
+        var log = UnifiedAuditLog()
+        log.add(captureEntry(row: row, field: "bm.x", value: .bitmap(1), at: hlc(0)))
+        log.add(captureEntry(row: row, field: "bm.y", value: .bitmap(2), at: hlc(0)))
+        let nowMs = Int64(60 * 86_400) * 1000
+        let projection = MatrixTier.decayedCoOccurrence(from: log, nowMs: nowMs)
+        #expect(projection.count == 1)
+        let key = MatrixCoOccurKey(
+            MatrixValueCoord(fieldPath: "bm.x", value: .bitmap(1)),
+            MatrixValueCoord(fieldPath: "bm.y", value: .bitmap(2)))
+        let weight = projection[key]
+        #expect(weight != nil && abs(weight! - 0.5) < 1e-12)
+    }
+
+    @Test("decayed T rides rebuildTemporal's decay clock and stamps decayedAsOfMs")
+    func decayedTemporalPin() {
+        let rowA = UUID(uuidString: "00000000-0000-0000-0000-00000000000A")!
+        let rowB = UUID(uuidString: "00000000-0000-0000-0000-00000000000B")!
+        var log = UnifiedAuditLog()
+        log.add(captureEntry(row: rowA, field: "bm.x", value: .bitmap(1), at: hlc(0)))
+        log.add(captureEntry(row: rowB, field: "bm.x", value: .bitmap(2), at: hlc(600_000)))
+        // Decay clock one τ_T (30d) after the pair's NEWER entry → 0.5.
+        let nowMs = 600_000 + Int64(30 * 86_400) * 1000
+        let tier = MatrixTier.rebuildTemporal(from: log, decayNowMs: nowMs)
+        #expect(tier.decayedAsOfMs == nowMs)
+        #expect(tier.temporalCausalityDecayed.count == 1)
+        let weight = tier.temporalCausalityDecayed.values.first
+        #expect(weight != nil && abs(weight! - 0.5) < 1e-12)
+        // No decay clock → projections stay empty (counts untouched flow).
+        let plain = MatrixTier.rebuildTemporal(from: log)
+        #expect(plain.temporalCausalityDecayed.isEmpty && plain.decayedAsOfMs == 0)
     }
 }

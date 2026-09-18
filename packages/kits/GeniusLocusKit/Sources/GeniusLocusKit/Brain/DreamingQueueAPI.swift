@@ -18,6 +18,7 @@
 // No drain loop. Just `queue.send(_:)`.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import PersistenceKit
 import PersistenceKitSQLite
@@ -32,7 +33,7 @@ internal extension GeniusLocusKit {
     /// `internal` so DreamingReads.swift (same module, different file) can
     /// reference `Self.dreamLog` without a per-file logger duplicate.
     static var dreamLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - Lazy mount
@@ -329,7 +330,7 @@ public extension GeniusLocusKit {
     ///     never needs reclaim; the SQLite variant may on a rare multi-process restart).
     ///
     /// The "encode" stream is NOT swept here: the encode drainer is a background
-    /// task inside the same resident process (CorpusKit's `runIngestDrainLoop`).
+    /// task inside the same resident process (CorpusKit's `ingestDrainPass` worker).
     /// When it dies, the process restarts entirely, triggering the on-mount reclaim
     /// in `mountIngestQueue`. A mid-run encode-worker death in a live process would
     /// mean the entire actor crashed, which also restarts. No separate periodic

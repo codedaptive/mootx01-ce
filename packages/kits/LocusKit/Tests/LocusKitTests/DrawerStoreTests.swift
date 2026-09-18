@@ -37,6 +37,9 @@ struct DrawerStoreTests {
         chunkIndex: Int? = nil,
         filedAt: Date? = nil
     ) -> Drawer {
+        // operationalBitmap is 0 by default. Round-trip tests compare the constructed
+        // struct against getDrawer() results; drawerValues stores operationalBitmap
+        // as-is, so both sides agree at 0. Bits 27-30 are FREE (ADORN-STORE-02 v17).
         Drawer(
             id: TestStorage.tid(id),
             content: "content-\(id)",
@@ -45,7 +48,8 @@ struct DrawerStoreTests {
             chunkIndex: chunkIndex,
             addedBy: "bilby",
             filedAt: filedAt ?? t(1_700_000_000),
-            embeddingModelID: "minilm-v6"
+            embeddingModelID: "minilm-v6",
+            operationalBitmap: 0
         )
     }
 
@@ -59,6 +63,50 @@ struct DrawerStoreTests {
         try await store.addDrawer(d)
         let loaded = try await store.getDrawer(id: d.id)
         #expect(loaded == d)
+    }
+
+    @Test("active corpus IDs filter in storage before applying the deterministic limit")
+    func activeCorpusContentIDsAreFilteredBeforeLimit() async throws {
+        let (store, url) = try await makeStore()
+        defer { cleanup(url) }
+
+        func drawer(
+            _ id: String,
+            content: String,
+            filedAt: TimeInterval,
+            embeddingModelID: String = "minilm-v6",
+            tombstonedAt: Date? = nil,
+            operationalBitmap: Int64 = 0
+        ) -> Drawer {
+            Drawer(
+                id: TestStorage.tid(id),
+                content: content,
+                parentNodeId: "test-parent",
+                addedBy: "bilby",
+                filedAt: t(filedAt),
+                embeddingModelID: embeddingModelID,
+                tombstonedAt: tombstonedAt,
+                operationalBitmap: operationalBitmap
+            )
+        }
+
+        let datasetKind = Int64(ContentKind.dataset.rawValue) << 6
+        let rows = [
+            drawer("empty", content: "placeholder", filedAt: 1),
+            drawer("dataset", content: "dataset", filedAt: 2, operationalBitmap: datasetKind),
+            drawer("tombstoned", content: "removed", filedAt: 3, tombstonedAt: t(4)),
+            drawer("beta", content: "beta", filedAt: 10),
+            drawer("alpha", content: "alpha", filedAt: 10),
+            drawer("gamma", content: "gamma", filedAt: 10),
+        ]
+        for row in rows { try await store.addDrawer(row) }
+        _ = try await store.storage.rowStore.update(
+            table: "drawers",
+            values: ["content": .text("")],
+            where: .eq(Column(table: "drawers", name: "id"), .text(TestStorage.tid("empty"))))
+
+        let ids = try await store.activeCorpusContentIDs(limit: 2)
+        #expect(ids == [TestStorage.tid("alpha"), TestStorage.tid("beta")])
     }
 
     @Test("getDrawer returns nil for unknown id")
@@ -92,6 +140,28 @@ struct DrawerStoreTests {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
         #expect(try await store.getDrawers(ids: []) == [])
+    }
+
+    @Test("strict active maintenance page fails instead of skipping a corrupt row")
+    func strictActivePageRejectsCorruptDrawer() async throws {
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let storage = TestStorage.sqlite(url)
+        let store = try await DrawerStore(storage: storage)
+        let corrupt = sampleDrawer(id: "00000000-0000-4000-8000-000000000001")
+        let later = sampleDrawer(id: "00000000-0000-4000-8000-000000000002")
+        try await store.addDrawer(corrupt)
+        try await store.addDrawer(later)
+        _ = try await storage.rowStore.update(
+            table: "drawers",
+            values: ["lineageID": .text("not-a-uuid")],
+            where: .eq(Column(table: "drawers", name: "id"), .text(corrupt.id)))
+
+        let resilient = try await store.activeDrawersAfter(id: nil, limit: 200)
+        #expect(resilient.map(\.id) == [later.id])
+        await #expect(throws: (any Error).self) {
+            _ = try await store.activeDrawersAfterStrict(id: nil, limit: 200)
+        }
     }
 
     @Test("getDrawers(ids:) omits unknown ids and de-duplicates repeats")
@@ -556,7 +626,9 @@ struct DrawerStoreTests {
     /// Round-trip a non-trivial operational bitmap value through insert
     /// and fetch. `0x42` is the canonical mission test bitmap:
     /// captureChannel=ocr(2) | contentKind=code(1<<6) = 0x42.
-    /// (The earlier 0x1412 set capture_channel to 18 — illegal: legal [0..5].)
+    /// drawerValues uses the struct's operationalBitmap directly (no OR-in of
+    /// bit 27); EstateVerbs.capture() sets bit 27 on the struct before calling
+    /// addDrawer. Tests that call addDrawer directly get exactly what they pass.
     @Test("addDrawer persists operationalBitmap and fetch returns it byte-for-byte")
     func operationalBitmapRoundTrip() async throws {
         let (store, url) = try await makeStore()
@@ -568,17 +640,21 @@ struct DrawerStoreTests {
         )
         try await store.addDrawer(d)
         let loaded = try await store.getDrawer(id: TestStorage.tid("ob-1"))
+        // Stored value is exactly what was passed in the struct; bit 27 is not
+        // ORed in by drawerValues — that was the removed OR-at-persist hack.
         #expect(loaded?.operationalBitmap == 0x42)
     }
 
-    /// A drawer constructed without an explicit `operationalBitmap`
-    /// argument round-trips with the column-default value of 0.
+    /// A drawer constructed without an explicit `operationalBitmap` argument
+    /// is stored with whatever is in the struct (default = 0); no write path
+    /// ORs bits into it at insert.
     @Test("addDrawer persists default operationalBitmap = 0")
     func operationalBitmapDefaultZero() async throws {
         let (store, url) = try await makeStore()
         defer { cleanup(url) }
         try await store.addDrawer(sampleDrawer(id: "ob-default"))
         let loaded = try await store.getDrawer(id: TestStorage.tid("ob-default"))
+        // Struct has operationalBitmap = 0; drawerValues stores it as-is.
         #expect(loaded?.operationalBitmap == 0)
     }
 

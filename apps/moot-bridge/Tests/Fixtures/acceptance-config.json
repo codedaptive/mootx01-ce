@@ -7,20 +7,32 @@
       "query": "mempalace_search",
       "contentArg": "content",
       "queryArg": "query",
-      "constantArgs": { "wing": "scratch", "room": "notes" },
-      "resultFormat": { "kind": "jsonObjects", "contentKey": "text" }
+      "constantArgs": {
+        "wing": "scratch",
+        "room": "notes"
+      },
+      "resultFormat": {
+        "kind": "jsonObjects",
+        "contentKey": "text"
+      }
     }
   },
   "backendB": {
     "name": "mootx01",
-    "command": "MOOTX01_DATA_DIR=__MOOT_DIR__ mootx01 serve",
+    "command": "mootx01 serve --db __MOOT_DIR__/bridge",
     "verbMap": {
       "write": "moot_file_memory",
       "query": "moot_memory_search",
       "contentArg": "content",
       "queryArg": "query",
-      "constantArgs": { "location": "scratch/notes" },
-      "resultFormat": { "kind": "mootText" }
+      "subjectArg": "subject",
+      "constantArgs": {
+        "wing": "scratch",
+        "location": "notes"
+      },
+      "resultFormat": {
+        "kind": "mootText"
+      }
     }
   },
   "primary": "mempalace"

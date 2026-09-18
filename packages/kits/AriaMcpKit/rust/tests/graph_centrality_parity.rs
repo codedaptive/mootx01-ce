@@ -28,6 +28,8 @@ use neuron_kit::graph_centrality::{
 };
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, GraphCache,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::estate_types::LatticeAnchor;
@@ -296,10 +298,14 @@ fn recall_reads_live_graph_column() {
     // The producer registered the cache on the shared coordinator — recall it.
     let coord = registry.coord.lock().unwrap();
     let h = &registry.default.handle;
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::MatrixAware)
-        .with_limit(50);
+    let req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::MatrixAware,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    );
     let result = coord.recall_scored(h, req, NOW + 10).expect("recall");
 
     let hub_hit = result

@@ -274,18 +274,10 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                     .into(),
             required_capabilities: vec![NeuronKitCapability::ExploratoryRecall],
         },
-        // Distillation-family recipes. Descriptions match Swift byte-for-byte
-        // (SPEC_DISTILLATION_STORAGE §3/§10.3 — the factoid tier is retired).
-        RecipeDescriptor {
-            name: "distill".into(),
-            version: "2.0.0".into(),
-            description:
-                "Distill working memory: populate the on-row distilled representation \
-                (token-economical prose) of every active item whose representation \
-                is missing or stale. Idempotent by the NULL predicate."
-                    .into(),
-            required_capabilities: vec![],
-        },
+        // Distilled-recall recipe: exact-search geometry with inline
+        // distilled-representation hydration — the ContextDistillLib converter
+        // runs at read time, so every row renders without a sweep dependency.
+        // Description matches Swift RecipeCatalog.swift byte-for-byte.
         RecipeDescriptor {
             name: "distilled_recall".into(),
             version: "2.0.0".into(),
@@ -293,6 +285,21 @@ pub fn recipe_catalog() -> Vec<RecipeDescriptor> {
                 "Distilled recall: exact-search geometry over originals with the \
                 hydration selector pinned to `distilled` — identical ranking to \
                 exact search, smaller payloads, per-hit token counts."
+                    .into(),
+            required_capabilities: vec![],
+        },
+        // Escalation-ladder recall recipe (D10): runs cheap-first stages and
+        // stops at the first confident result. Stage 1 = session_hybrid preset,
+        // Stage 2 = PreciseRecall hamming+text. Federation is PARKED.
+        // Description matches Swift RecipeCatalog.swift byte-for-byte.
+        RecipeDescriptor {
+            name: "walk_recall".into(),
+            version: "1.0.0".into(),
+            description:
+                "Escalation-ladder recall: run a cheap session_hybrid stage first and stop \
+                when the top-gap is confident (≥ 0.25); escalate to a precise hamming+text \
+                re-rank only when Stage 1 is insufficient. Faster than precise recall for \
+                the common case; falls back gracefully when the estate needs the extra precision."
                     .into(),
             required_capabilities: vec![],
         },
@@ -318,15 +325,15 @@ mod tests {
 
     #[test]
     fn catalog_lists_all_shipped_recipes() {
-        // All 30 catalog entries register in both versions
+        // All 29 catalog entries register in both versions
         // (LENS_DISCOVERABILITY_DECISION v2.0): the 2 foundational recipes
         // plus the 16 reasoning lenses (14 + lens_contradiction + node_motion)
         // plus the 3 analytics lenses plus
         // the 4 temporal/entropy lenses (moment, rhythm, precedence, complexity)
         // plus the steerable-fusion recipe (shaped_recall)
         // plus the exploratory-recall recipe (recall_exploratory)
-        // plus 2 distillation recipes (distill, distilled_recall —
-        // recollect retired with the factoid tier, SPEC §11)
+        // plus distilled_recall (inline rendering, no sweep dependency)
+        // plus the escalation-ladder recipe (walk_recall, D10)
         // = 29 total.
         let mut names = recipe_names();
         names.sort();
@@ -340,7 +347,6 @@ mod tests {
                 "cohesion",
                 "complexity",
                 "constellation",
-                "distill",
                 "distilled_recall",
                 "drift",
                 "estate_divergence",
@@ -362,6 +368,7 @@ mod tests {
                 "theme_weather",
                 "trust_grounded_synthesis",
                 "tunnel_successor",
+                "walk_recall",
             ]
         );
     }
@@ -504,16 +511,15 @@ mod tests {
     }
 
     #[test]
-    fn distill_descriptor_matches_swift() {
-        // Byte-for-byte parity anchor with Swift Distill recipe
-        // metadata (`Distill.swift`).
-        let d = recipe_descriptor("distill").unwrap();
+    fn distilled_recall_descriptor_matches_swift() {
+        // Byte-for-byte parity anchor with Swift DistilledRecall recipe metadata.
+        let d = recipe_descriptor("distilled_recall").unwrap();
         assert_eq!(d.version, "2.0.0");
         assert_eq!(
             d.description,
-            "Distill working memory: populate the on-row distilled representation \
-            (token-economical prose) of every active item whose representation \
-            is missing or stale. Idempotent by the NULL predicate."
+            "Distilled recall: exact-search geometry over originals with the \
+                hydration selector pinned to `distilled` — identical ranking to \
+                exact search, smaller payloads, per-hit token counts."
         );
         assert!(d.required_capabilities.is_empty());
     }

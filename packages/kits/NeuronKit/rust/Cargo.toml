@@ -73,3 +73,5 @@ persistence-kit = { path = "../../PersistenceKit/rust" }
 # Listed separately in [dependencies] above; the dev-dependencies entry is
 # kept for any test helpers that need v4 generation.
 uuid = { version = "1", features = ["v4"] }
+
+[features]

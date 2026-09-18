@@ -10,7 +10,7 @@
 //
 // ── Why this daemon talks to seams, not to GLK verbs ──────────────────
 // MOOTx01 invariant B-1: NeuronKit never executes SQL and never calls
-// LocusKit / VectorKit / CorpusKit directly; the estate handle is the only
+// LocusKit / SynapseKit / CorpusKit directly; the estate handle is the only
 // write surface. Even with `propose` now live (Brain layer landed in
 // GLK-02), no estate verb reads RecallTraceItem rows, reads existing
 // Tunnels, or writes a DiaryEntry. So the daemon depends on
@@ -117,6 +117,27 @@ public protocol DreamingProposalSink: Sendable {
     ///   - changedBy: agent name performing the retirement.
     ///   - now:       deterministic clock value from the caller.
     func retireTunnel(id: String, changedBy: String, now: Date) async throws
+
+    /// A3 (benchmark reset 2026-08-13): dream-cycle lifecycle bracket,
+    /// start side. The daemon mints one session id per cycle and calls this
+    /// before step 1. Production adapters append a `dreamStart` audit
+    /// marker so CYCLE-dreamt time is attributable from the audit log.
+    /// Non-throwing by design: a marker failure must never fail the cycle.
+    func dreamCycleWillStart(sessionID: String, now: Date) async
+
+    /// A3: dream-cycle lifecycle bracket, end side — same session id as the
+    /// matching `dreamCycleWillStart`. Called after the cycle's last write;
+    /// an aborted cycle (throw) emits no end marker, which honestly records
+    /// the abort in the audit trail.
+    func dreamCycleDidEnd(sessionID: String, now: Date) async
+}
+
+/// Default no-ops so existing sinks and test fakes compile unchanged —
+/// same compatibility pattern as the T13 reader defaults below. Production
+/// (`EstateDreamingSink`) overrides both with audit-marker writes.
+public extension DreamingProposalSink {
+    func dreamCycleWillStart(sessionID: String, now: Date) async {}
+    func dreamCycleDidEnd(sessionID: String, now: Date) async {}
 }
 
 // MARK: - Protocol default implementations for test-fake compatibility
@@ -211,6 +232,30 @@ public actor DreamingDaemon {
     /// crosses the vocab-growth fraction/floor. Nil disables auto-reindex (correct
     /// for test environments that do not wire a live Corpus).
     private let growthProbe: (any CorpusGrowthProbe)?
+
+    /// Optional hook for the THETA-gate daily basis retrain. When non-nil,
+    /// the daemon calls `ThetaBasisRetrainHook.retrain(now:)` once per THETA
+    /// cycle — regardless of whether consolidation produced proposals — so the
+    /// embedding basis stays current with ingested content on a daily cadence.
+    /// Nil disables the duty (correct for LocusOnly estates and tests). Failures
+    /// are logged at the error level but do not abort the THETA cycle.
+    private let thetaRetrainHook: (any ThetaBasisRetrainHook)?
+
+    /// Optional HNSW graph maintenance seam for the cadence duties.
+    ///
+    /// When non-nil the daemon calls `HNSWGraphMaintenance` methods at the
+    /// appropriate cadences:
+    ///   • ALPHA shadow swap fires → the swap publishes a coherent new-generation
+    ///     graph atomically inside VectorStore.publishShadowGeneration; no
+    ///     separate HNSW maintenance call is needed after the swap completes.
+    ///   • THETA basis retrain fires → `rebuildFloatIndex(now:)` (graph rebuilt
+    ///     from re-embedded vectors so topology matches new geometry).
+    ///   • BETA compaction fires → `compactFloatIndexTombstones(now:)` (tombstones
+    ///     swept) and `reclaimSupersededGenerations(now:)` (superseded vector rows
+    ///     deleted from the estate, clearing 'pending-reclaim' registry state).
+    /// Nil safely disables all HNSW duties (correct for estates with no float
+    /// lane and for tests that do not require approximate NN).
+    private let hnswMaintenance: (any HNSWGraphMaintenance)?
 
     /// Fractional vocabulary growth above which the daemon triggers a corpus
     /// basis retrain. Defaults to `autoReindexVocabGrowthFraction` (0.10). See
@@ -314,6 +359,18 @@ public actor DreamingDaemon {
     ///   - reindexVocabGrowthFloor: absolute floor on new vocabulary terms before
     ///     a retrain, regardless of the fraction. Defaults to
     ///     `autoReindexVocabGrowthFloor` (25 terms).
+    ///   - thetaRetrainHook: optional hook for the THETA-gate daily basis retrain.
+    ///     When non-nil, the daemon calls `ThetaBasisRetrainHook.retrain(now:)` once
+    ///     per THETA cycle so the embedding basis stays current on a daily cadence.
+    ///     Defaults to nil (duty disabled). Production callers pass an
+    ///     `EstateThetaBasisRetrainHook` to activate the daily retrain lane.
+    ///   - hnswMaintenance: optional HNSW graph maintenance seam. When non-nil,
+    ///     the daemon calls `rebuildFloatIndex` on THETA after basis retrain,
+    ///     `compactFloatIndexTombstones` and `reclaimSupersededGenerations` on BETA.
+    ///     The ALPHA shadow swap publishes a coherent new-generation graph atomically
+    ///     inside publishShadowGeneration; no separate clear duty fires after the swap.
+    ///     Defaults to nil (all HNSW duties disabled). Production callers pass an
+    ///     `EstateHNSWGraphMaintenance` to activate the approximate NN maintenance lane.
     public init(
         reader: DreamingSubstrateReader,
         sink: DreamingProposalSink,
@@ -324,7 +381,9 @@ public actor DreamingDaemon {
         policy: DreamingPolicy = .default,
         growthProbe: (any CorpusGrowthProbe)? = nil,
         reindexVocabGrowthFraction: Double = autoReindexVocabGrowthFraction,
-        reindexVocabGrowthFloor: Int = autoReindexVocabGrowthFloor
+        reindexVocabGrowthFloor: Int = autoReindexVocabGrowthFloor,
+        thetaRetrainHook: (any ThetaBasisRetrainHook)? = nil,
+        hnswMaintenance: (any HNSWGraphMaintenance)? = nil
     ) {
         self.reader = reader
         self.sink = sink
@@ -336,6 +395,8 @@ public actor DreamingDaemon {
         self.growthProbe = growthProbe
         self.reindexVocabGrowthFraction = reindexVocabGrowthFraction
         self.reindexVocabGrowthFloor = reindexVocabGrowthFloor
+        self.thetaRetrainHook = thetaRetrainHook
+        self.hnswMaintenance = hnswMaintenance
     }
 
     // MARK: - Policy registration (§ 3.1 registration API)
@@ -593,6 +654,14 @@ public actor DreamingDaemon {
         // is off (the default), the autoclosure is never evaluated.
         // `neuronkit.dream.cycle` with status "start" marks the boundary where
         // the daemon begins reading the substrate (Activity view, GUI §4.4).
+        // A3 dream-cycle bracket: one session id per cycle, start marker
+        // before step 1, end marker after the last write. The id is minted
+        // here (identity, not computation — same rationale as QueueKit's
+        // SessionID.mint()); determinism of the cycle's outputs is a
+        // function of `now` and the substrate, unaffected by the id.
+        let cycleSessionID = UUID().uuidString.lowercased()
+        await sink.dreamCycleWillStart(sessionID: cycleSessionID, now: now)
+
         let cycleStartTs = now.timeIntervalSince1970
         Intellectus.report(.metric(
             name: "neuronkit.dream.cycle",
@@ -776,7 +845,7 @@ public actor DreamingDaemon {
         ))
 
         // ── Auto-reindex step: trigger corpus basis retrain on vocab growth ─
-        // Distributional embedding providers (RI / PPMI / LSA / NMF) freeze
+        // Distributional embedding providers (RI / LSA) freeze
         // their vocabulary at training time. Terms ingested after the last
         // retrain are OOV and produce zero-vectors in the dense lane, silently
         // missing novel content. The growth probe reads the maintained VOCABULARY
@@ -826,10 +895,33 @@ public actor DreamingDaemon {
                             ],
                             ts: now.timeIntervalSince1970
                         ))
-                        try await probe.reindex(now: now)
-                        // Advance baseline to the vocabulary at retrain time so the
-                        // next window measures growth from this retrain.
-                        lastReindexVocab = liveVocab
+                        let completed = try await probe.reindex(now: now)
+                        // F11: a DEGRADED retrain (a backstop was reached, the
+                        // serving basis was kept) must not advance the baseline
+                        // — the drift that hit the backstop would otherwise be
+                        // silently accepted as caught up, and the next window
+                        // would measure growth from a basis that was never
+                        // actually retrained. Advance only on a full retrain,
+                        // to the vocabulary at retrain time, so the next window
+                        // measures growth from this retrain.
+                        if completed {
+                            lastReindexVocab = liveVocab
+                        } else {
+                            Intellectus.report(.metric(
+                                name: "neuronkit.dream.auto_reindex_degraded",
+                                value: Double(delta),
+                                tags: ["cycle": "\(cycleCount)", "live_vocab": "\(liveVocab)"],
+                                ts: now.timeIntervalSince1970
+                            ))
+                        }
+                        // ALPHA HNSW note: no separate HNSW clear fires here.
+                        // probe.reindex() shadow-swaps the corpus internally —
+                        // VectorStore.publishShadowGeneration rebuilds the HNSW
+                        // graph from the new serving rows inside the same atomic
+                        // operation. The graph is coherent immediately after the
+                        // swap; clearing it would destroy the newly-published
+                        // graph and reopen the serving gap the swap was designed
+                        // to close. (Reviewer ruling F-3, VEC-SHADOWSWAP-01 BRR.)
                     }
                 }
             } catch {
@@ -880,6 +972,9 @@ public actor DreamingDaemon {
         // the cadence tracks only timer fires; the event path leaves it
         // unchanged so event fires in `.hybrid` mode do not reset the
         // timer countdown. The two paths are fully independent.
+        // A3 end bracket — same session id as the start marker above.
+        await sink.dreamCycleDidEnd(sessionID: cycleSessionID, now: now)
+
         return DreamingCycleReport(
             tickedAt: now,
             candidatesConsidered: observations.count,
@@ -924,6 +1019,158 @@ public actor DreamingDaemon {
     public func omegaDue(now: Date) -> Bool {
         guard let last = lastOmegaRunAt else { return true }
         return now.timeIntervalSince(last) >= Self.omegaCadenceSecs
+    }
+
+    // MARK: - THETA-gate basis-retrain helper
+
+    /// Fire the THETA basis-retrain hook when the drift gate warrants it,
+    /// catching and logging any error.
+    ///
+    /// Called at both exit paths of `runThetaCycle` so the duty fires at most
+    /// once per THETA gate invocation. Failures are non-fatal: a stale basis
+    /// degrades dense recall but does not break the daemon's proposal and diary
+    /// functions.
+    ///
+    /// **Drift gate behaviour (when `growthProbe` is wired):**
+    ///   - `lastReindexVocab == -1` (first ever cycle): fire immediately.
+    ///     THETA acts as a backstop for a dormant ALPHA path on a fresh estate.
+    ///   - Subsequent cycles: fire only when vocabulary has grown by at least
+    ///     `max(reindexVocabGrowthFloor, ceil(fraction × baseline))` terms
+    ///     since the last retrain — the same gate ALPHA's growth probe uses.
+    ///   - After a successful retrain: `lastReindexVocab` advances so ALPHA's
+    ///     next delta window starts from the post-retrain baseline. The caller
+    ///     persists the updated baseline via `saveDaemonState` after `fireTheta`
+    ///     returns.
+    ///   - Probe error: fire unconditionally (safe fallback, same as nil-probe path).
+    ///
+    /// **Without `growthProbe` (nil):** fire unconditionally on every THETA
+    /// invocation — correct for LocusOnly estates and tests that do not wire
+    /// a Corpus. This matches the pre-CORPUS-SCOPE-01 behaviour.
+    ///
+    /// - Parameters:
+    ///   - retrainHook: the wired hook, or nil if duty is disabled.
+    ///   - now: deterministic timestamp forwarded to `retrain(now:)`.
+    private func fireTheta(
+        retrainHook: (any ThetaBasisRetrainHook)?,
+        now: Date
+    ) async {
+        guard let hook = retrainHook else { return }
+
+        // Drift gate: when a corpus growth probe is wired, apply the same
+        // vocabulary-growth threshold the ALPHA auto-reindex step uses.
+        // THETA is a backstop for a failing dreaming daemon, not a second
+        // unconditional trigger — if ALPHA has been running correctly the
+        // drift delta will be under the threshold and THETA skips the retrain.
+        var vocabAtCheckTime: Int? = nil
+        if let probe = growthProbe {
+            do {
+                let liveVocab = try await probe.vocabAnchor()
+                if lastReindexVocab != -1 {
+                    // Not the first-ever retrain: apply drift gate.
+                    let fractional = Int(
+                        (Double(lastReindexVocab) * reindexVocabGrowthFraction).rounded(.up))
+                    let trigger = max(reindexVocabGrowthFloor, fractional)
+                    let delta = liveVocab - lastReindexVocab
+                    if delta < trigger {
+                        // Drift below threshold — ALPHA is keeping the basis
+                        // current; THETA defers this cycle.
+                        Intellectus.report(.metric(
+                            name: "neuronkit.dream.theta_retrain_skipped",
+                            value: Double(delta),
+                            tags: [
+                                "cycle": "\(cycleCount)",
+                                "live_vocab": "\(liveVocab)",
+                                "delta": "\(delta)",
+                                "trigger": "\(trigger)",
+                            ],
+                            ts: now.timeIntervalSince1970
+                        ))
+                        return
+                    }
+                }
+                // Retrain is warranted (first cycle OR drift ≥ trigger).
+                // Record the current vocab to advance lastReindexVocab on success.
+                vocabAtCheckTime = liveVocab
+            } catch {
+                // Probe error: fire unconditionally (safe fallback — a probe
+                // error cannot silently skip a needed retrain).
+            }
+        }
+
+        do {
+            let completed = try await hook.retrain(now: now)
+            // Advance the shared vocabulary baseline after a successful THETA
+            // retrain so ALPHA's next delta window starts from this retrain point.
+            // Without a probe (vocabAtCheckTime == nil), lastReindexVocab is
+            // managed exclusively by ALPHA and must not be touched here.
+            // F11: a DEGRADED retrain (`completed == false` — a backstop was
+            // reached, the serving basis was kept) must not advance the
+            // baseline either, for the same reason as the ALPHA gate above:
+            // the drift that hit the backstop must still be there on the next
+            // cycle, not silently accepted as caught up.
+            if completed, let lv = vocabAtCheckTime {
+                lastReindexVocab = lv
+            }
+            Intellectus.report(.metric(
+                name: completed ? "neuronkit.dream.theta_retrain" : "neuronkit.dream.theta_retrain_degraded",
+                value: 1.0,
+                tags: ["status": completed ? "ok" : "degraded", "cycle": "\(cycleCount)"],
+                ts: now.timeIntervalSince1970
+            ))
+        } catch {
+            // Log at error level so operators can investigate, but the cycle
+            // continues — a stale basis degrades recall, it does not break the
+            // daemon's proposal and diary functions.
+            Intellectus.report(.metric(
+                name: "neuronkit.dream.theta_retrain_error",
+                value: 1.0,
+                tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                ts: now.timeIntervalSince1970
+            ))
+        }
+    }
+
+    // MARK: - THETA-gate HNSW rebuild helper
+
+    /// Fire the THETA HNSW graph rebuild, catching and logging any error.
+    ///
+    /// Called at both exit paths of `runThetaCycle` (the early-return no-data
+    /// path and the main consolidation path) so the graph rebuild fires
+    /// exactly once per THETA gate invocation — same pattern as `fireTheta`.
+    /// Called AFTER `fireTheta` so the rebuild reads freshly re-embedded vectors
+    /// from the `vectors` table.
+    ///
+    /// Failures are non-fatal: a stale HNSW graph degrades nearest-query
+    /// performance (falls back to exact FloatBruteForceIndex scan) but does
+    /// not break correctness.
+    ///
+    /// - Parameters:
+    ///   - maintenance: the wired maintenance seam, or nil if duty is disabled.
+    ///   - now: deterministic timestamp forwarded to `rebuildFloatIndex(now:)`.
+    private func fireThetaHNSWRebuild(
+        maintenance: (any HNSWGraphMaintenance)?,
+        now: Date
+    ) async {
+        guard let m = maintenance else { return }
+        do {
+            try await m.rebuildFloatIndex(now: now)
+            Intellectus.report(.metric(
+                name: "neuronkit.dream.hnsw_rebuild",
+                value: 1.0,
+                tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                ts: now.timeIntervalSince1970
+            ))
+        } catch {
+            // Log at error level so operators can investigate, but the cycle
+            // continues — a stale graph degrades nearest performance; it does
+            // not break correctness (exact scan remains the fallback).
+            Intellectus.report(.metric(
+                name: "neuronkit.dream.hnsw_rebuild_error",
+                value: 1.0,
+                tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                ts: now.timeIntervalSince1970
+            ))
+        }
     }
 
     // MARK: - REM-THETA cycle
@@ -998,6 +1245,26 @@ public actor DreamingDaemon {
             // gate measures from this run (avoids a burst of empty theta cycles
             // on a low-recall estate).
             lastThetaRunAt = now
+            try await policyStore.saveDaemonState(currentDaemonState())
+            // Daily basis retrain fires on every THETA gate invocation, including
+            // the no-data early-return path. A stale basis degrades dense recall
+            // regardless of whether THETA had anything to consolidate today.
+            await fireTheta(retrainHook: thetaRetrainHook, now: now)
+            // HNSW rebuild fires after the retrain so the graph is built from
+            // the freshly re-embedded vectors. Same non-fatal pattern as the
+            // retrain itself.
+            await fireThetaHNSWRebuild(maintenance: hnswMaintenance, now: now)
+            // Second persist: capture the updated lastReindexVocab baseline that
+            // fireTheta may have advanced above. The first save (before fireTheta)
+            // locks in lastThetaRunAt; this save locks in the retrain baseline so
+            // a restart loads the post-retrain value rather than the stale
+            // pre-retrain one — which on an estate where only THETA has ever
+            // retrained is still the -1 sentinel, and the sentinel makes
+            // fireTheta retrain unconditionally on every restart.
+            // fireTheta catches all errors internally, so this point is always
+            // reachable. Using try await for consistency with the pre-retrain save;
+            // the default store implementation is a no-op, and the manifest-backed
+            // store is a cheap write — no dirty-flag guard is needed.
             try await policyStore.saveDaemonState(currentDaemonState())
             return nil
         }
@@ -1095,6 +1362,27 @@ public actor DreamingDaemon {
 
         // Advance the THETA last-run timestamp and persist daemon state.
         lastThetaRunAt = now
+        try await policyStore.saveDaemonState(currentDaemonState())
+
+        // Daily basis retrain: fire after the diary write and timestamp advance
+        // so a retrain failure cannot interfere with the consolidation result
+        // or the cycle's persistence step. Failure is logged but non-fatal.
+        await fireTheta(retrainHook: thetaRetrainHook, now: now)
+        // HNSW rebuild fires after the retrain so the graph is built from the
+        // freshly re-embedded vectors. Non-fatal; see fireThetaHNSWRebuild.
+        await fireThetaHNSWRebuild(maintenance: hnswMaintenance, now: now)
+        // Second persist: capture the updated lastReindexVocab baseline that
+        // fireTheta may have advanced above. The first save (before fireTheta)
+        // locks in lastThetaRunAt and the consolidation result; this save locks
+        // in the retrain baseline so a restart loads the post-retrain value
+        // rather than the stale pre-retrain one — which on an estate where only
+        // THETA has ever retrained is still the -1 sentinel, and the sentinel
+        // makes fireTheta retrain unconditionally on every restart.
+        // fireTheta catches all errors internally, so this point is always
+        // reachable. Using try await for consistency
+        // with the pre-retrain save; the default store implementation is a
+        // no-op, and the manifest-backed store is a cheap write — no dirty-flag
+        // guard is needed.
         try await policyStore.saveDaemonState(currentDaemonState())
 
         return DreamingCycleReport(
@@ -1202,6 +1490,55 @@ public actor DreamingDaemon {
         // a proposal. For now, no telemetry: the cycle is internal bookkeeping.
         _ = prunedConsolidated  // used by tests; suppress unused-result warning
         _ = prunedCoRecall
+
+        // BETA duties on the maintenance seam. Duty 1 (whole-record float lane
+        // only): compact tombstones accumulated in the float-index graph since
+        // the last BETA or THETA cycle. Items updated or deleted between runs
+        // leave tombstone slots that waste memory and slightly degrade graph
+        // quality (dead edges still occupy neighbour lists). Failure is non-fatal.
+        if let m = hnswMaintenance {
+            do {
+                try await m.compactFloatIndexTombstones(now: now)
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.hnsw_compact",
+                    value: 1.0,
+                    tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            } catch {
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.hnsw_compact_error",
+                    value: 1.0,
+                    tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            }
+
+            // BETA HNSW duty 2: reclaim superseded-generation vector rows left
+            // 'pending-reclaim' after a shadow swap publish. Deletes vectors +
+            // hnsw_graph rows whose generation is neither the serving generation
+            // nor an active shadow build, then clears 'pending-reclaim' registry
+            // state. Idempotent and resumable — re-running after a kill finishes
+            // without error and changes no query result. Failure is non-fatal;
+            // reclamation will be retried on the next BETA cycle.
+            do {
+                try await m.reclaimSupersededGenerations(now: now)
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.hnsw_reclaim",
+                    value: 1.0,
+                    tags: ["status": "ok", "cycle": "\(cycleCount)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            } catch {
+                Intellectus.report(.metric(
+                    name: "neuronkit.dream.hnsw_reclaim_error",
+                    value: 1.0,
+                    tags: ["cycle": "\(cycleCount)", "error": "\(error)"],
+                    ts: now.timeIntervalSince1970
+                ))
+            }
+        }
+
         return nil
     }
 

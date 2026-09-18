@@ -173,7 +173,7 @@ impl BundleStore {
             hashable_tables,
             hash_provider: Box::new(|_table, row_key, values| {
                 // Extract chunk text for hashing. Vectors live in
-                // VectorKit (not inline), so vector input is empty.
+                // SynapseKit (not inline), so vector input is empty.
                 let content_bytes: Vec<u8> = match values.get("text") {
                     Some(TypedValue::Text(t)) => t.as_bytes().to_vec(),
                     _ => Vec::new(),
@@ -445,6 +445,30 @@ impl BundleStore {
             .storage
             .row_store()
             .query_as_of("chunks", None, &order, None, None, as_of)
+            .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
+        Ok(rows.iter().filter_map(decode_chunk).collect())
+    }
+
+    pub fn active_chunks_limited(
+        &self,
+        limit: usize,
+        removed_source_ids: &std::collections::HashSet<String>,
+    ) -> CorpusKitResult<Vec<Chunk>> {
+        let predicate = if removed_source_ids.is_empty() {
+            None
+        } else {
+            let mut removed: Vec<String> = removed_source_ids.iter().cloned().collect();
+            removed.sort();
+            Some(StoragePredicate::Not(Box::new(StoragePredicate::In(
+                Column::new("chunks", "source_id"),
+                removed.into_iter().map(TypedValue::Text).collect(),
+            ))))
+        };
+        let order = vec![OrderClause::new(
+            Column::new("chunks", "hlc"), OrderDirection::Ascending,
+        )];
+        let rows = self.storage.row_store()
+            .query_as_of("chunks", predicate.as_ref(), &order, Some(limit), None, None)
             .map_err(|e| CorpusKitError::StoreUnavailable(e.to_string()))?;
         Ok(rows.iter().filter_map(decode_chunk).collect())
     }

@@ -14,7 +14,7 @@ date: "2026-06-16"
 
 - One of: **macOS 15+** (Swift build), **Linux** x86_64/arm64, or **Windows** x86_64 (both Rust builds) — all host a local estate; see [Linux and Windows](#linux-and-windows) for those paths
 - At least one supported AI client installed: **Claude Desktop**, **Claude Code**,
-  **Cursor**, **Cline**, or **Continue**
+  **Cursor**, **Cline**, **Continue**, or **Grok CLI**
 - The `mootx01` binary built or downloaded from the release archive and
   placed somewhere on your filesystem
 
@@ -84,6 +84,7 @@ what each client's config format supports:
 | **Cursor** | HTTP | Same daemon URL |
 | **Cline** | HTTP | Same daemon URL |
 | **Continue** | HTTP | Same daemon URL (YAML format: `streamable-http`) |
+| **Grok CLI** | HTTP | Same daemon URL (TOML: `[mcp_servers.mootx01]` + `url`) |
 | **Claude Desktop** | stdio → proxy bridge | `mootx01 proxy --http` into the resident daemon |
 
 **Claude Desktop is wired differently, but still shares the daemon.** Its config
@@ -351,7 +352,7 @@ lives at:
 
 - **macOS** — `~/Library/Application Support/com.mootx01.ce/`
 - **Linux** — `~/.local/share/mootx01/` (or `$XDG_DATA_HOME/mootx01/`)
-- **Windows** — `%LOCALAPPDATA%\MOOTx01\`
+- **Windows** — `%LOCALAPPDATA%\com.mootx01.ce\`
 
 A full uninstall run from a terminal then **offers** to remove that data (the
 estate databases and the moot-mgr history). Removal always requires typing

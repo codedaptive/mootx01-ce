@@ -86,6 +86,19 @@ struct ContextSynthesisEngineTests {
         #expect(doc.keyInsights == ["line one", "single line", "three"])
     }
 
+    @Test("key insights fall back to content for all rows (adornment augmentation removed)")
+    func keyInsightsFallbackToContentForAllRows() {
+        // Adornment augmentation removed in Encoder Rerank Program (2026-09-05).
+        // The synthesizer now always returns the first line of content per row.
+        let rows = [
+            drawer(content: "first line\nbody"),
+            drawer(content: "single line"),
+        ]
+        let page = RecallStream.Page(rows: rows, pageIndex: 0, isLast: true)
+        let doc = ContextSynthesisEngine.synthesize(page: page)
+        #expect(doc.keyInsights == ["first line", "single line"])
+    }
+
     @Test("success rate is bounded in [0, 1] (bounds smoke)")
     func successRateCountsCurrentlyBelievedFraction() {
         // adjectiveBitmap = 0 -> state .active (raw 0, Cluster A) -> isCurrentlyBelieved == true

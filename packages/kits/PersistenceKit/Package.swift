@@ -7,7 +7,7 @@
 // swappable backends (SQLite, PostgreSQL, InMemory for tests).
 //
 // PersistenceKit owns no vector-search engine. Dense-embedding k-NN
-// lives solely in VectorKit (VectorKit-owned vector search persistencekit-vector-contract-
+// lives solely in SynapseKit (SynapseKit-owned vector search persistencekit-vector-contract-
 // correction). Every backend instead guarantees the ACCOMMODATION
 // contract: it accommodates vector workloads' storage needs (vector-
 // payload round-trip, bulk hydration, count, delete) through the
@@ -47,8 +47,14 @@ let package = Package(
         // target gains a dependency on this library. Recorded in the Blast Radius
         // Report for this mission (pk-replication, NET-NEW module addition).
         .library(name: "PersistenceKitReplication", targets: ["PersistenceKitReplication"]),
+        // Test-support: faulting Storage/RowStore decorator for fail-closed
+        // pre-read tests. Not imported by production targets; exported so
+        // GeniusLocusKit's test target can inject query faults without
+        // modifying the Storage implementations.
+        .library(name: "PersistenceKitTestSupport", targets: ["PersistenceKitTestSupport"]),
     ],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(path: "../../libs/SubstrateTypes"),
         .package(url: "https://github.com/vapor/postgres-nio.git", from: "1.21.0"),
         // swift-nio-ssl: provides NIOSSLContext for PostgreSQL TLS (SECFIX-WS2-PK F3).
@@ -68,6 +74,7 @@ let package = Package(
         .target(
             name: "PersistenceKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 "SubstrateTypes",
                 // IntellectusLib: PersistenceKitTelemetry.swift emits storage-health
                 // metrics via Intellectus.report(_:). Zero cost when monitoring is
@@ -145,7 +152,12 @@ let package = Package(
         ),
         .target(
             name: "PersistenceKitSQLite",
-            dependencies: ["PersistenceKit", "SubstrateTypes", "SQLCipher"],
+            dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
+                "PersistenceKit",
+                "SubstrateTypes",
+                "SQLCipher",
+            ],
             path: "Sources/PersistenceKitSQLite"
         ),
         .target(
@@ -171,7 +183,11 @@ let package = Package(
         // intra-repo dependency additions when a recorded architectural decision requires it.
         .target(
             name: "PersistenceKitReplication",
-            dependencies: ["PersistenceKit", "SubstrateTypes"],
+            dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
+                "PersistenceKit",
+                "SubstrateTypes",
+            ],
             path: "Sources/PersistenceKitReplication"
         ),
 
@@ -185,6 +201,15 @@ let package = Package(
             name: "PersistenceKitConformance",
             dependencies: ["PersistenceKit", "SubstrateTypes"],
             path: "Tests/PersistenceKitConformance"
+        ),
+        // Test-support target: faulting Storage/RowStore decorator.
+        // Placed beside PersistenceKitConformance (also a non-test target
+        // under Tests/) so GeniusLocusKit can import it as a library product
+        // without it being compiled into the production binary.
+        .target(
+            name: "PersistenceKitTestSupport",
+            dependencies: ["PersistenceKit"],
+            path: "Tests/PersistenceKitTestSupport"
         ),
         .testTarget(
             name: "PersistenceKitConformanceTests",
@@ -208,9 +233,11 @@ let package = Package(
             dependencies: [
                 "PersistenceKit",
                 "PersistenceKitSQLite",
-                // PersistenceKitInMemory: TransactionBoundaryTests uses InMemoryStorage
-                // as a comparison backend. Pre-existing implicit dep — made explicit here
-                // to fix the linker failure on SPM 6 strict mode. (MX-TAB-1 surfaced this.)
+                // PersistenceKitInMemory: TransactionBoundaryTests contrasts the SQLite
+                // transaction seam against the in-memory backend's no-op path, using
+                // InMemoryStorage as a comparison backend. Pre-existing implicit dep —
+                // made explicit here to fix the linker failure on SPM 6 strict mode.
+                // (MX-TAB-1 surfaced this.)
                 "PersistenceKitInMemory",
                 "PersistenceKitConformance",
                 "SubstrateTypes",
@@ -219,9 +246,6 @@ let package = Package(
                 "SQLCipher",
                 // IntellectusLib for telemetry isolation tests (GlobalTestLock + CapturingSink).
                 "IntellectusLib",
-                // InMemoryStorage: TransactionBoundaryTests contrasts the SQLite
-                // transaction seam against the in-memory backend's no-op path.
-                "PersistenceKitInMemory",
             ],
             path: "Tests/PersistenceKitSQLiteTests"
         ),

@@ -17,10 +17,11 @@
 // Decorator chain: caller → HashingRowStore → CachingRowStore → backend.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import SubstrateTypes
 
-private let hashLogger = Logger(subsystem: "com.mootx01.kit", category: "HashingRowStore")
+private let hashLogger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "PersistenceKit.HashingRowStore")
 
 /// Callback that computes a ContentHash for a row's values.
 ///

@@ -4,7 +4,7 @@
 //
 // O — contradictory hint: moot_memory_search appended "No results / Try
 //     broader terms" even when results were present (the substring "0 memory"
-//     matched "20 memory(s)"). Fix: gate on "found 0 memory" prefix.
+//     matched "20 memory(s)"). Fix: gate on "found 0 candidate memories" prefix.
 //
 // J — move_memory ignores wing: moot_move_memory accepted a `wing` argument
 //     but silently dropped it, leaving the drawer in its original wing.
@@ -45,7 +45,7 @@ struct SurfaceHintAndMoveWingTests {
     // MARK: - Bug O: coaching hint fires only on zero results
 
     /// File a memory, search for it, then verify the "No results" coaching hint
-    /// does NOT appear. The test asserts the result does not contain "found 0 memory",
+    /// does NOT appear. The test asserts the result does not contain "found 0 candidate memories",
     /// confirming the hint fires only on genuine zero results, not on counts that
     /// happen to contain "0" as a substring.
     @Test("moot_memory_search with results does not emit No-results hint")
@@ -75,18 +75,22 @@ struct SurfaceHintAndMoveWingTests {
 
         // The result must show at least one hit.
         #expect(
-            !searchText.contains("found 0 memory"),
+            !searchText.contains("found 0 candidate memories"),
             "search must return at least one hit; got: \(searchText)"
         )
         // The no-results hint must NOT be present because results were returned.
-        // Hint text matches Rust coaching_engine.rs trigger 2.
+        // v2 hint text (capital N) from AriaV2Coach.swift:91 — asserting the
+        // case-sensitive form discriminates; the old lowercase check always passed
+        // even when the hint fired. AriaV2Envelope.applyHint (AriaV2Envelope.swift:93)
+        // appends "\nhint: " to content[0].text when a hint fires; its absence
+        // also proves no hint was appended.
         #expect(
-            !searchText.contains("no memories matched"),
+            !searchText.contains("No memories matched"),
             "No-results hint must not fire when search returned results; got: \(searchText)"
         )
         #expect(
-            !searchText.contains("broaden the query"),
-            "Broaden-query hint must not fire when search returned results; got: \(searchText)"
+            !searchText.contains("\nhint: "),
+            "No hint token must appear in compact text when results are present; got: \(searchText)"
         )
     }
 
@@ -107,13 +111,16 @@ struct SurfaceHintAndMoveWingTests {
 
         // Must report zero hits.
         #expect(
-            searchText.contains("found 0 memory"),
+            searchText.contains("found 0 candidate memories"),
             "zero-result search must report 0 memories; got: \(searchText)"
         )
-        // The coaching hint must fire on genuine zero results.
-        // Hint text matches Rust coaching_engine.rs trigger 2.
+        // The no-results coaching hint IS in compact text, not only in structuredContent.
+        // AriaV2Envelope.applyHint (AriaV2Envelope.swift:88-93) appends "\nhint: " + hint
+        // to content[0].text. AriaV2Coach.hintForMemorySearch (AriaV2Coach.swift:89-93)
+        // fires on zero results with: "No memories matched. File content with
+        // moot_file_memory first, then search with a focused term."
         #expect(
-            searchText.contains("no memories matched") || searchText.contains("broaden the query"),
+            searchText.contains("No memories matched"),
             "No-results coaching hint must fire when search returned 0 hits; got: \(searchText)"
         )
     }
@@ -126,11 +133,15 @@ struct SurfaceHintAndMoveWingTests {
     ///
     /// Before the fix: ReanchorFrame had no toWing field; the wing arg was
     /// silently ignored and the drawer stayed in its original wing.
+    ///
+    /// v2 changes: memory_id (not id), room (not location).
+    /// v2 compact text: "Moved memory {uuid}." (capital M, no wing/room in compact text).
+    /// Wing and room appear in structuredContent.data.placement — verified via "\(moveResult)".
     @Test("moot_move_memory with wing argument reanchors to target wing")
     func moveMemoryHonorsWing() async throws {
         let dispatcher = try await makeDispatcher()
 
-        // File a memory into wing "OriginWing" (explicitly passed; not using the default wing).
+        // File a memory into wing "OriginWing".
         let fileResult = try await dispatcher.dispatch(
             name: "moot_file_memory",
             arguments: .object([
@@ -151,32 +162,34 @@ struct SurfaceHintAndMoveWingTests {
             return
         }
         let afterPrefix = String(fileText[idRange.upperBound...])
-        // ID is the first whitespace-delimited token after the prefix.
         let memID = String(afterPrefix.prefix(while: { !$0.isWhitespace }))
         #expect(!memID.isEmpty, "must extract a non-empty memory ID from: \(fileText)")
 
         // Move the memory to "TargetWing/target-room".
+        // v2 arg names: memory_id (not id), room (not location).
         let moveResult = try await dispatcher.dispatch(
             name: "moot_move_memory",
             arguments: .object([
-                "id": .string(memID),
-                "location": .string("target-room"),
+                "memory_id": .string(memID),
+                "room": .string("target-room"),
                 "wing": .string("TargetWing"),
             ])
         )
         let moveText = text(of: moveResult)
+        // v2 compact text: "Moved memory {uuid}." (capital M).
         #expect(
-            moveText.contains("moved memory"),
+            moveText.contains("Moved memory"),
             "move_memory must report success; got: \(moveText)"
         )
-        // The success text must name both the wing and the room.
+        // v2 placement details are in structuredContent.data.placement — verify via string repr.
+        let moveResultStr = "\(moveResult)"
         #expect(
-            moveText.contains("TargetWing"),
-            "move result must name the target wing; got: \(moveText)"
+            moveResultStr.contains("TargetWing"),
+            "move result must name the target wing in placement; got: \(moveResultStr)"
         )
         #expect(
-            moveText.contains("target-room"),
-            "move result must name the target room; got: \(moveText)"
+            moveResultStr.contains("target-room"),
+            "move result must name the target room in placement; got: \(moveResultStr)"
         )
 
         // Recall scoped to "TargetWing" must find the memory.
@@ -189,7 +202,7 @@ struct SurfaceHintAndMoveWingTests {
         )
         let targetText = text(of: targetRecall)
         #expect(
-            !targetText.contains("found 0 memory"),
+            !targetText.contains("found 0 candidate memories"),
             "recall in TargetWing must find the moved memory; got: \(targetText)"
         )
 
@@ -203,14 +216,21 @@ struct SurfaceHintAndMoveWingTests {
         )
         let originText = text(of: originRecall)
         #expect(
-            originText.contains("found 0 memory"),
+            originText.contains("found 0 candidate memories"),
             "recall in OriginWing must return 0 hits after cross-wing move; got: \(originText)"
         )
     }
 
-    /// Verify that moot_move_memory without a wing argument still performs a
-    /// room-only move — existing behavior is unchanged when wing is omitted.
-    @Test("moot_move_memory without wing argument performs room-only move")
+    // MARK: - Bug J (row 45): BLOCKED
+
+    /// BLOCKED: AriaV2SelectedCatalog.swift:812-818 declares
+    /// `required: ["memory_id", "wing", "room"]` for moot_move_memory —
+    /// there is no room-only move path in v2. A caller that omits `wing`
+    /// receives a decoder rejection before the operation runs.
+    /// Awaiting a v2 spec decision: either add an optional-wing code path or
+    /// remove the room-only-move contract from the spec.
+    /// Do not delete; do not weaken to pass.
+    @Test(.disabled("BLOCKED: AriaV2SelectedCatalog.swift:812-818 requires wing; no room-only move path exists in v2"))
     func moveMemoryRoomOnlyWhenNoWing() async throws {
         let dispatcher = try await makeDispatcher()
 
@@ -263,7 +283,7 @@ struct SurfaceHintAndMoveWingTests {
         )
         let recallText = text(of: recall)
         #expect(
-            !recallText.contains("found 0 memory"),
+            !recallText.contains("found 0 candidate memories"),
             "after room-only move, memory must still be in StableWing; got: \(recallText)"
         )
     }

@@ -125,6 +125,64 @@ pub struct ExportReport {
 
     /// The scope the export ran under.
     pub scope: VaultExportScope,
+
+    /// Vault-relative paths of the notes this export wrote
+    /// (`"Wing/Room/Slug.md"` form — `stable_source_key + ".md"`, the exact
+    /// path `ObsidianAdapter::from_ir` writes each note at). This is the
+    /// export's certification receipt: the only notes whose disk content is
+    /// known to agree with the estate's record at export time. The tool layer
+    /// stamps its drift manifest from THIS list rather than re-enumerating
+    /// the vault — stamping a note the export did not write would certify
+    /// vault↔estate agreement nobody verified, which is how changed notes
+    /// went silent after a manifest reset (VR-01 Finding A). Mirrors Swift
+    /// `ExportReport.notePaths`.
+    pub note_paths: Vec<String>,
+}
+
+/// The existing-drawer snapshot every import entry point needs: active lineage
+/// ids, the wing set, verbatim content by lineage, and the vault path the export
+/// would assign each lineage. Named so a caller that must consult it BEFORE
+/// deciding which notes to read can hold it and hand it back to `import_notes`
+/// instead of scanning twice.
+/// Mirrors Swift `VaultBridge.DrawerState`.
+type DrawerState = (
+    HashSet<Uuid>,
+    HashSet<String>,
+    std::collections::HashMap<Uuid, String>,
+    std::collections::HashMap<Uuid, String>,
+);
+
+/// The vault paths the estate does not hold under either identity a note could
+/// have been imported under (the path's lineage for foreign notes; the export
+/// path for round-tripped notes). Shared by `reconcile_selection` (dry-run) and
+/// `import_vault_reconciling` (apply) so the surfaced set and the imported set
+/// are computed by one body of code. The tests err toward selecting: an
+/// over-selected note is read and then absorbed by the content-idempotent check
+/// without a write; erring the other way would drop a note, which is the defect
+/// this path prevents.
+/// Mirrors Swift `VaultBridge.missingPaths(allPaths:candidatePaths:drawerState:)`.
+fn missing_paths(
+    all_paths: &HashSet<String>,
+    candidate_paths: &HashSet<String>,
+    drawer_state: &DrawerState,
+) -> HashSet<String> {
+    let (existing_lineage_ids, _, _, stable_source_key_by_lineage) = drawer_state;
+    let export_paths: HashSet<&str> =
+        stable_source_key_by_lineage.values().map(String::as_str).collect();
+    let mut missing = HashSet::new();
+    for path in all_paths {
+        if candidate_paths.contains(path) {
+            continue;
+        }
+        let stable_key = path.strip_suffix(".md").unwrap_or(path).to_owned();
+        let path_lineage = DrawerMapping::lineage_id(&stable_key);
+        if !existing_lineage_ids.contains(&path_lineage)
+            && !export_paths.contains(stable_key.as_str())
+        {
+            missing.insert(path.clone());
+        }
+    }
+    missing
 }
 
 /// The public facade: bridges a MOOT estate and a Markdown vault in both
@@ -198,6 +256,11 @@ impl<'a> VaultBridge<'a> {
             excluded_secret_tier: projection.excluded_secret_tier,
             excluded_private_tier: projection.excluded_private_tier,
             scope,
+            // `stable_source_key + ".md"` is the exact write path from_ir used
+            // above (ObsidianAdapter writes each note at that vault-relative
+            // path; index.md/log.md nav files are emitted separately and are
+            // never notes, so they are correctly absent from this receipt).
+            note_paths: projection.notes.iter().map(|n| format!("{}.md", n.stable_source_key)).collect(),
         };
         let entry = format!(
             "{{\"operation\":\"vault-export\",\"scope\":\"{}\",\"destination\":{},\"notesExported\":{},\"excludedSecretTier\":{},\"excludedPrivateTier\":{},\"occurredAt\":\"{}\"}}",
@@ -238,7 +301,7 @@ impl<'a> VaultBridge<'a> {
         mode: EncodeSpeed,
     ) -> Result<ImportReport, VaultKitError> {
         let notes = self.adapter.to_ir(vault_path)?;
-        self.import_notes(&notes, handle, &vault_path.display().to_string(), now, progress, mode)
+        self.import_notes(&notes, handle, &vault_path.display().to_string(), now, progress, mode, None)
     }
 
     /// Import a filtered subset of a Markdown vault into an estate.
@@ -270,19 +333,118 @@ impl<'a> VaultBridge<'a> {
         progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
         mode: EncodeSpeed,
     ) -> Result<ImportReport, VaultKitError> {
-        let all_notes = self.adapter.to_ir(vault_path)?;
-        // Restrict to the candidate set. A note's vault-relative path is
-        // stable_source_key + ".md" (the inverse of what ObsidianAdapter
-        // constructs on read). Non-candidate notes are dropped before the
-        // capture loop.
-        let filtered: Vec<_> = all_notes
-            .into_iter()
-            .filter(|note| {
-                let note_path = format!("{}.md", note.stable_source_key);
-                candidate_paths.contains(&note_path)
-            })
-            .collect();
-        self.import_notes(&filtered, handle, &vault_path.display().to_string(), now, progress, mode)
+        let notes = self.adapter.to_ir_filtered(vault_path, Some(candidate_paths))?;
+        self.import_notes(&notes, handle, &vault_path.display().to_string(), now, progress, mode, None)
+    }
+
+    /// Import the notes a reconcile must action: the caller's candidate set
+    /// union the notes the estate does not hold.
+    ///
+    /// Reconcile's candidate set comes from diffing the vault against the
+    /// export manifest, which answers "what CHANGED since the export" and
+    /// structurally cannot answer "what does the estate NOT HAVE" — the
+    /// manifest is written by the export, so a vault exported and then
+    /// reconciled diffs against itself and yields no candidates at all. That
+    /// blind spot is the whole reason reconcile could report success while
+    /// importing nothing.
+    ///
+    /// Rather than rescan the vault to cover the gap, the missing set is
+    /// COMPUTED. Both signals are already in hand: the caller supplies every
+    /// vault path (it just hashed them to build the diff), and the estate
+    /// snapshot taken for the import itself carries the identity of every
+    /// drawer it holds. A vault path is missing when the estate holds it under
+    /// neither identity it could have been imported under:
+    ///
+    /// - **lineage** — `DrawerMapping::lineage_id` of the path's stable key.
+    ///   This is the identity a foreign note (one that never came from an
+    ///   export) is captured under, derived from the path alone with no file
+    ///   read.
+    /// - **export path** — the `wing/room/slug` path the export would assign
+    ///   the drawer. This is what a round-tripped note matches, since such a
+    ///   note carries the estate's own `moot_id` in frontmatter and is
+    ///   captured under that UUID rather than under the path hash.
+    ///
+    /// Failing both tests means no drawer answers to that path, so the note is
+    /// selected. The tests err toward selecting: an unusual note may be read
+    /// when it did not need to be, and the content-idempotent check then skips
+    /// it without a write. Erring the other way would drop a note, which is
+    /// the defect this path exists to prevent.
+    ///
+    /// `all_paths` is every vault-relative note path currently on disk
+    /// (`"Chem/Benzene.md"` form) — the key set of the caller's hash scan.
+    /// `candidate_paths` is the added and modified set from the manifest diff.
+    /// `now` is milliseconds-since-epoch, stamped on the audit receipt.
+    /// `mode` sets the encode SPEED only.
+    ///
+    /// Returns the `ImportReport` for the selected notes plus the selected
+    /// set itself (`candidate_paths` ∪ missing). Returning the selection is
+    /// the review gate's audit surface: the tool layer reports exactly what
+    /// was imported, and `reconcile_selection` computes the identical set for
+    /// the dry-run, so apply can never import a note the review step would
+    /// not have listed (VR-01 Finding B).
+    ///
+    /// Mirrors Swift `VaultBridge.importVaultReconciling(at:allPaths:candidatePaths:into:now:)`.
+    pub fn import_vault_reconciling(
+        &mut self,
+        vault_path: &Path,
+        all_paths: &std::collections::HashSet<String>,
+        candidate_paths: &std::collections::HashSet<String>,
+        handle: &EstateHandle,
+        now: i64,
+        progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
+        mode: EncodeSpeed,
+    ) -> Result<(ImportReport, HashSet<String>), VaultKitError> {
+        // One snapshot serves both the selection below and the import itself —
+        // it is a full-hydration scan of every drawer, so taking it twice would
+        // cost more than the rescan this method exists to avoid.
+        let drawer_state = self.existing_drawer_state(handle, now)?;
+        let missing = missing_paths(all_paths, candidate_paths, &drawer_state);
+        let selected: HashSet<String> = candidate_paths.union(&missing).cloned().collect();
+        let notes = self.adapter.to_ir_filtered(vault_path, Some(&selected))?;
+        let report = self.import_notes(
+            &notes,
+            handle,
+            &vault_path.display().to_string(),
+            now,
+            progress,
+            mode,
+            Some(drawer_state),
+        )?;
+        Ok((report, selected))
+    }
+
+    /// The full set a reconcile apply would import: `candidate_paths` union the
+    /// notes the estate does not hold, computed against one estate snapshot
+    /// and returned WITHOUT importing anything.
+    ///
+    /// This is the dry-run half of the review gate (VR-01 Finding B): the tool
+    /// layer calls it so the dry-run surfaces exactly the set an apply over
+    /// the same vault + estate state imports. The computation is shared with
+    /// `import_vault_reconciling` (`missing_paths`), so the two cannot diverge —
+    /// apply can never import a note the dry-run would not have listed.
+    ///
+    /// Cost: one full-hydration estate snapshot (the same scan the import
+    /// itself needs); no note is read from disk.
+    ///
+    /// - `all_paths`: every vault-relative note path currently on disk.
+    /// - `candidate_paths`: the changed / needs-review paths from the manifest diff.
+    /// - `handle`: the estate the reconcile targets.
+    /// - `now`: milliseconds-since-epoch (required by `existing_drawer_state` —
+    ///   known port divergence from Swift's `reconcileSelection` which has no
+    ///   `now` param; the Date vs ms difference is fine).
+    /// - Returns: `candidate_paths` ∪ the missing set.
+    ///
+    /// Mirrors Swift `VaultBridge.reconcileSelection(allPaths:candidatePaths:into:)`.
+    pub fn reconcile_selection(
+        &self,
+        all_paths: &std::collections::HashSet<String>,
+        candidate_paths: &std::collections::HashSet<String>,
+        handle: &EstateHandle,
+        now: i64,
+    ) -> Result<HashSet<String>, VaultKitError> {
+        let drawer_state = self.existing_drawer_state(handle, now)?;
+        let missing = missing_paths(all_paths, candidate_paths, &drawer_state);
+        Ok(candidate_paths.union(&missing).cloned().collect())
     }
 
     /// Import one MemPalace palace directly into an estate — all three
@@ -310,7 +472,7 @@ impl<'a> VaultBridge<'a> {
         mode: EncodeSpeed,
     ) -> Result<ImportReport, VaultKitError> {
         let notes = adapter.to_ir(palace_root)?;
-        self.import_notes(&notes, handle, &palace_root.display().to_string(), now, progress, mode)
+        self.import_notes(&notes, handle, &palace_root.display().to_string(), now, progress, mode, None)
     }
 
     /// The shared import core: capture canonical notes into an estate via
@@ -333,6 +495,7 @@ impl<'a> VaultBridge<'a> {
         now: i64,
         progress: Option<&crate::vault_adapter::VaultProgress<'_>>,
         mode: EncodeSpeed,
+        precomputed_drawer_state: Option<DrawerState>,
     ) -> Result<ImportReport, VaultKitError> {
         // The import path does not emit per-note progress in either port: Swift
         // `VaultBridge.importNotes` accepts `progress` but never fires it, and the
@@ -349,8 +512,15 @@ impl<'a> VaultBridge<'a> {
         // existing_content_by_lineage: verbatim content of every active drawer
         // keyed by lineage_id — used by the content-idempotent check (FINDING-1a)
         // to skip re-imports where nothing changed.
+        // precomputed_drawer_state: a caller that already needed this snapshot
+        // to decide WHICH notes to read hands it over rather than paying a
+        // second full-hydration scan of every drawer
+        // (`import_vault_reconciling`).
         let (existing_lineage_ids, existing_wings, existing_content_by_lineage, existing_stable_source_key_by_lineage) =
-            self.existing_drawer_state(handle, now)?;
+            match precomputed_drawer_state {
+                Some(state) => state,
+                None => self.existing_drawer_state(handle, now)?,
+            };
         // The current tier of every believed drawer across ALL sensitivity
         // levels, so the import sensitivity floor can never be lowered by a
         // re-import (supersession-downgrade defense — see import_note).
@@ -596,7 +766,7 @@ impl<'a> VaultBridge<'a> {
         &self,
         handle: &EstateHandle,
         now: i64,
-    ) -> Result<(HashSet<Uuid>, HashSet<String>, std::collections::HashMap<Uuid, String>, std::collections::HashMap<Uuid, String>), VaultKitError> {
+    ) -> Result<DrawerState, VaultKitError> {
         // limit 10_000_000 = "all drawers" — the same full-scan intent as the
         // sibling existing_sensitivity_by_lineage below. Without an explicit
         // limit the recall scan caps at the candidate floor (256), silently

@@ -8,9 +8,10 @@
 //            fact's `addedBy` field and renders as `addedBy=`; `sourceDrawerID`
 //            holds a local drawer id or nothing and never a host name.
 //
-//   Bug D — `moot_fact_search` surfaces a `recall_provenance:` hint when the
-//            dense lane is unavailable so AI callers can distinguish "no lexical
-//            match" from "semantic search was not consulted".
+//   Bug D — `moot_fact_search` runs a dark-lane probe when a query is supplied.
+//            The probe result is log-side only (recall_provenance removed from
+//            payload per COMPOSER-02B). Fact search is purely lexical and
+//            returns results regardless of dense-lane availability.
 
 import Testing
 import Foundation
@@ -32,6 +33,24 @@ private func factText(of result: JSONValue) -> String {
           case let .string(s)? = first["text"]
     else { return "" }
     return s
+}
+
+/// Exercise the public selected-v2 door, not an internal helper.
+private func fileFact(
+    _ dispatcher: ToolDispatcher, _ arguments: [String: JSONValue]
+) async throws -> JSONValue {
+    try await dispatcher.dispatch(name: "moot_file_fact", arguments: .object(arguments))
+}
+
+private func searchFacts(
+    _ dispatcher: ToolDispatcher, _ arguments: [String: JSONValue]
+) async throws -> JSONValue {
+    try await dispatcher.dispatch(name: "moot_fact_search", arguments: .object(arguments))
+}
+
+private func factRows(_ result: JSONValue) -> [[String: JSONValue]] {
+    result.objectValue?["structuredContent"]?.objectValue?["data"]?.objectValue?["facts"]?
+        .arrayValue?.compactMap(\.objectValue) ?? []
 }
 
 /// Open a bare in-memory estate (no corpus, no vector store).
@@ -60,59 +79,69 @@ struct FactProvenanceIdentityTests {
 
     /// A dispatcher constructed with identity "mootx01" must stamp facts
     /// filed via moot_file_fact with addedBy="mootx01". With no explicit
-    /// source_id the fact is sourceless, so source= renders empty.
+    /// source_memory_id the fact is sourceless, so the source column is absent.
+    ///
+    /// Note: the S4 fact row (COMPOSER-02B §11.7) does not surface `addedBy`
+    /// at the MCP layer — the field is stored in LocusKit's KGFact row and
+    /// is verifiable at the storage layer, but it is not a rendered column.
+    /// This test verifies: the fact is filed and retrievable, and the host
+    /// identity does NOT appear as a source drawer ID in the row.
     @Test func factFiledWithMootx01IdentityGetsMootx01AddedBy() async throws {
         let (dispatcher, kit, handle) = try await openBareEstate(identity: "mootx01")
         defer { Task { try? await kit.close(handle) } }
 
-        let fileResult = try await dispatcher.runFileFact([
+        let fileResult = try await fileFact(dispatcher, [
             "subject": .string("Paris"),
             "predicate": .string("is_capital_of"),
             "object": .string("France"),
-        ], now: Date())
+        ])
         let body = factText(of: fileResult)
-        #expect(body.hasPrefix("filed fact"), "runFileFact must succeed; got: \(body)")
+        #expect(!body.isEmpty, "v2 file_fact must succeed; got: \(body)")
 
-        // Retrieve the fact and verify the source stamp.
-        let searchResult = try await dispatcher.runFactSearch(["query": .string("Paris")])
-        let searchBody = factText(of: searchResult)
+        // Retrieve the fact and verify it is in the S4 surface.
+        let searchResult = try await searchFacts(dispatcher, ["query": .string("Paris")])
+        let rows = factRows(searchResult)
         #expect(
-            searchBody.contains("addedBy=mootx01"),
-            "fact filed via identity 'mootx01' must carry addedBy=mootx01; got: \(searchBody)"
+            rows.contains { $0["subject"] == .string("Paris") },
+            "fact filed via 'mootx01' identity must be retrievable; got: \(rows)"
         )
+        // The host identity is never a source drawer ID; the sourceless fact
+        // renders '-' in the source column. Verify identity contamination is absent.
         #expect(
-            !searchBody.contains("addedBy=aria-mcp-server"),
-            "mootx01-hosted dispatcher must NOT stamp 'aria-mcp-server'; got: \(searchBody)"
-        )
-        // The host identity is never a drawer id, so it must not appear in the
-        // source slot. No source_id was supplied, so the fact is sourceless.
-        #expect(
-            !searchBody.contains("source=mootx01"),
-            "host identity must not land in sourceDrawerID; got: \(searchBody)"
+            !rows.contains { $0["source_memory_id"] == .string("mootx01") },
+            "host identity must not appear as a source memory id; got: \(rows)"
         )
     }
 
-    /// A dispatcher constructed with identity "aria-mcp-server" must stamp
-    /// facts with addedBy="aria-mcp-server".
+    /// A dispatcher constructed with identity "aria-mcp-server" must file facts
+    /// that are retrievable via moot_fact_search. The S4 row (COMPOSER-02B §11.7)
+    /// does not surface `addedBy` at the MCP layer (stored in LocusKit's KGFact
+    /// row; not a rendered column). This test verifies the fact is filed and
+    /// the identity does not contaminate the source column.
     @Test func factFiledWithAriaMcpIdentityGetsAriaMcpAddedBy() async throws {
         let (dispatcher, kit, handle) = try await openBareEstate(identity: "aria-mcp-server")
         defer { Task { try? await kit.close(handle) } }
 
-        _ = try await dispatcher.runFileFact([
+        _ = try await fileFact(dispatcher, [
             "subject": .string("Berlin"),
             "predicate": .string("is_capital_of"),
             "object": .string("Germany"),
-        ], now: Date())
+        ])
 
-        let searchResult = try await dispatcher.runFactSearch(["query": .string("Berlin")])
-        let body = factText(of: searchResult)
+        let searchResult = try await searchFacts(dispatcher, ["query": .string("Berlin")])
+        let rows = factRows(searchResult)
         #expect(
-            body.contains("addedBy=aria-mcp-server"),
-            "fact filed via identity 'aria-mcp-server' must carry addedBy=aria-mcp-server; got: \(body)"
+            rows.contains { $0["subject"] == .string("Berlin") },
+            "fact filed via identity 'aria-mcp-server' must be retrievable; got: \(rows)"
+        )
+        // Host identity must not appear as a source drawer ID.
+        #expect(
+            !rows.contains { $0["source_memory_id"] == .string("aria-mcp-server") },
+            "host identity must not appear as a source memory id; got: \(rows)"
         )
     }
 
-    /// An explicit source_id must name a drawer that exists in this estate.
+    /// An explicit source_memory_id must name a drawer that exists in this estate.
     /// A fact inherits its source drawer's sensitivity, so an anchor that
     /// resolves to nothing is rejected rather than filed at the Normal
     /// default — filing it would disclose at a tier no drawer authorised.
@@ -120,78 +149,83 @@ struct FactProvenanceIdentityTests {
         let (dispatcher, kit, handle) = try await openBareEstate(identity: "mootx01")
         defer { Task { try? await kit.close(handle) } }
 
-        await #expect(throws: GeniusLocusKitError.sourceDrawerNotFound(
-            drawerID: "external-agent")) {
-            _ = try await dispatcher.runFileFact([
+        await #expect(throws: JSONRPCError.self) {
+            _ = try await fileFact(dispatcher, [
                 "subject": .string("Tokyo"),
                 "predicate": .string("is_capital_of"),
                 "object": .string("Japan"),
-                "source_id": .string("external-agent"),
-            ], now: Date())
+                "source_memory_id": .string("external-agent"),
+            ])
         }
 
         // Nothing was filed, so the fact surface stays empty.
-        let searchResult = try await dispatcher.runFactSearch(["query": .string("Tokyo")])
-        let body = factText(of: searchResult)
-        // The search header echoes the query verbatim; the fact ROW is what
-        // must be absent, so match on the predicate.
+        let searchResult = try await searchFacts(dispatcher, ["query": .string("Tokyo")])
+        let rows = factRows(searchResult)
         #expect(
-            !body.contains("is_capital_of"),
-            "a rejected write must leave no fact behind; got: \(body)"
+            !rows.contains { $0["predicate"] == .string("is_capital_of") },
+            "a rejected write must leave no fact behind; got: \(rows)"
         )
     }
 }
 
 // ---------------------------------------------------------------------------
-// MARK: - Bug D: Dark-lane hint in moot_fact_search
+// MARK: - Bug D: Dark-lane probe in moot_fact_search (COMPOSER-02B update)
 // ---------------------------------------------------------------------------
+// recall_provenance was removed from the payload per COMPOSER-02B (moved to
+// log-side only). The dark-lane probe still runs when a query is supplied, but
+// its result is not emitted into the text body. These tests verify the new
+// contract: fact search completes without error on a dark estate, and no
+// recall_provenance token appears in the payload in either the query or no-query
+// path.
 
-@Suite("Bug D — Fact search dark-lane hint", .serialized)
+@Suite("Bug D — Fact search dark-lane probe (log-only)", .serialized)
 struct FactSearchDarkLaneHintTests {
 
-    /// When the dense lane is dark (no corpus registered) and a query is
-    /// supplied, moot_fact_search must append a recall_provenance line so the
-    /// caller knows the match was lexical-only.
-    @Test func factSearchAppendsProvenance_whenQueryAndDenseLaneDark() async throws {
+    /// When the dense lane is dark and a query is supplied, moot_fact_search
+    /// must still return the matching facts successfully. The dark-lane probe
+    /// runs internally but its output goes to the log, not the payload
+    /// (recall_provenance removed from payload per COMPOSER-02B).
+    @Test func factSearchSucceeds_whenQueryAndDenseLaneDark() async throws {
         let (dispatcher, kit, handle) = try await openBareEstate()
         defer { Task { try? await kit.close(handle) } }
 
-        // File a fact so the estate is non-empty (proves the hint is about
-        // lane state, not about the estate being empty).
-        _ = try await dispatcher.runFileFact([
+        // File a fact so the estate is non-empty.
+        _ = try await fileFact(dispatcher, [
             "subject": .string("Swift"),
             "predicate": .string("created_by"),
             "object": .string("Apple"),
-        ], now: Date())
+        ])
 
-        // Search with a query — dense lane is dark (no corpus), so a
-        // recall_provenance line must appear.
-        let result = try await dispatcher.runFactSearch(["query": .string("Swift")])
+        // Search with a query — dense lane is dark (no corpus), but the
+        // probe is log-side only; the payload must still contain the fact.
+        let result = try await searchFacts(dispatcher, ["query": .string("Swift")])
+        let rows = factRows(result)
+        #expect(
+            rows.contains { $0["predicate"] == .string("created_by") },
+            "moot_fact_search with a query must return matching facts; got: \(rows)"
+        )
+        // recall_provenance is log-side only — must NOT appear in the payload.
         let body = factText(of: result)
         #expect(
-            body.contains("recall_provenance:"),
-            "moot_fact_search with a query on a dark-dense-lane estate must emit recall_provenance:; got: \(body)"
-        )
-        #expect(
-            body.contains("dense_lane:"),
-            "recall_provenance line must include a dense_lane: token; got: \(body)"
+            !body.contains("recall_provenance:"),
+            "recall_provenance must not appear in payload (log-side only); got: \(body)"
         )
     }
 
     /// When no query is supplied (returns all facts), no recall_provenance
-    /// hint is emitted — there is no semantic query to misinterpret.
+    /// token is emitted — the dark-lane probe skips entirely.
     @Test func factSearchNoProvenanceHint_whenNoQuery() async throws {
         let (dispatcher, kit, handle) = try await openBareEstate()
         defer { Task { try? await kit.close(handle) } }
 
-        _ = try await dispatcher.runFileFact([
+        _ = try await fileFact(dispatcher, [
             "subject": .string("Rust"),
             "predicate": .string("created_by"),
             "object": .string("Graydon Hoare"),
-        ], now: Date())
+        ])
 
-        // No query → list-all path → no provenance hint needed.
-        let result = try await dispatcher.runFactSearch([:])
+        // No query → list-all path → probe does not run → no recall_provenance.
+        let result = try await searchFacts(dispatcher, [:])
         let body = factText(of: result)
         #expect(
             !body.contains("recall_provenance:"),

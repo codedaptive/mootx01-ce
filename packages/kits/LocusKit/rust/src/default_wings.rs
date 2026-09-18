@@ -39,6 +39,22 @@ pub const HINT_UDC_CODE: &str = "001";
 /// This is an HONEST PROVENANCE VALUE only. No code may branch on it.
 pub const HINT_ADDED_BY: &str = "estate-provision";
 
+/// Fixed filing instant for charter hint drawers: 2000-01-01T00:00:00Z in
+/// Unix MILLISECONDS (substrate i64-ms convention). Charters are reference
+/// documentation, not recent memories: a provision-wall-clock stamp made them
+/// the newest rows in every fresh estate (winning recency contests against
+/// real memories) and varied per build (the 2026-08-24 benchmark replay-drift
+/// root cause). Twin of Swift `charterSeedDate`.
+pub const CHARTER_SEED_UNIX_MS: i64 = 946_684_800_000;
+
+/// Fixed drawer id for the default-wing charter at `index` in `DEFAULT_WINGS`
+/// (index 0 → …0001). Seed data carries well-known IDs so charters are
+/// directly addressable and never enter random-UUID tie-break noise. Twin of
+/// Swift `charterDrawerID(forWingIndex:)`.
+pub fn charter_drawer_id(index: usize) -> String {
+    format!("00000000-0000-0000-0000-{:012X}", index + 1)
+}
+
 /// A single default wing definition: name + its hint text.
 /// Hint text is the wing's role description, stored verbatim in the
 /// `AI_Charter_Hint` room so recalls against that wing surface its purpose.

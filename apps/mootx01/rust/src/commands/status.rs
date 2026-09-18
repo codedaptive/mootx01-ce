@@ -1,11 +1,12 @@
 //! commands/status.rs — §4.5: server state, active estate, wired clients.
 //!
 //! Liveness is determined by the daemon's port file plus a loopback TCP probe —
-//! the resident daemon writes `daemon.port` and `mootx01.pid` (serve, §3); a
-//! TCP probe of the recorded port is portable across Unix and Windows where a
-//! kill(pid, 0) check is not. Stale pid/port files are cleaned here. Swift
-//! StatusCommand uses kill(pid, 0) on the PID file and cleans only the PID
-//! file; both produce equivalent liveness results for normal daemon states.
+//! the resident daemon writes `daemon.port` in the configuration directory and
+//! `estate.pid` in the estate it serves (serve, §3); a TCP probe of the
+//! recorded port is portable across Unix and Windows where a kill(pid, 0)
+//! check is not. Stale pid/port files are cleaned here. Swift StatusCommand
+//! uses kill(pid, 0) on the PID file and cleans only the PID file; both
+//! produce equivalent liveness results for normal daemon states.
 //!
 //! Wired-client detection is format-aware (JSON / TOML / YAML), matching the
 //! Swift StatusCommand which also delegates to format-aware wired detection.
@@ -14,19 +15,28 @@ use std::net::TcpStream;
 use std::process::ExitCode;
 use std::time::Duration;
 
+use genius_locus_kit::EstateCatalog;
+
 use crate::core::{clients, paths};
 use crate::exit;
 
 pub fn run() -> ExitCode {
-    let data = paths::data_dir();
+    let data = EstateCatalog::configuration_directory();
     let home = home_dir();
+    // Active estate, from the catalog. Status reports; it does not create the
+    // catalog, so a machine that has never run install or serve says so.
+    let active = EstateCatalog::load().map(|catalog| catalog.active().clone());
 
     println!("mootx01 status");
     println!("─────────────────────────────────");
 
-    // Server liveness: daemon.port + TCP probe; PID from mootx01.pid.
+    // Server liveness: daemon.port + TCP probe; PID from the active estate's
+    // `estate.pid` marker (the served estate is the catalog's active record).
     let port_file = paths::daemon_port_file(&data);
-    let pid_file = data.join("mootx01.pid");
+    let pid_file = active
+        .as_ref()
+        .map(|record| record.pid_path())
+        .unwrap_or_else(|_| data.join("estate.pid"));
     let live_port = paths::read_port_file(&port_file).filter(|&p| probe(p));
     match live_port {
         Some(_) => {
@@ -50,19 +60,17 @@ pub fn run() -> ExitCode {
         }
     }
 
-    // Active estate.
-    let active = paths::active_estate(&data);
-    println!("Active estate: {active}");
-
-    // Estate file info.
-    let estate = paths::estate_sqlite_path(&data, &active);
-    match std::fs::metadata(&estate) {
-        Ok(m) => println!(
-            "Estate file: {} ({})",
-            estate.display(),
-            format_bytes(m.len())
-        ),
-        Err(_) => println!("Estate file: not yet created (run `mootx01 serve` to initialise)"),
+    // Active estate and its file.
+    match &active {
+        Ok(record) => {
+            println!("Active estate: {}", record.name);
+            let estate = record.database_path();
+            match std::fs::metadata(&estate) {
+                Ok(m) => println!("Estate file: {} ({})", estate.display(), format_bytes(m.len())),
+                Err(_) => println!("Estate file: not yet created (run `mootx01 serve` to initialise)"),
+            }
+        }
+        Err(error) => println!("Active estate: none ({error})"),
     }
 
     // Wired clients.

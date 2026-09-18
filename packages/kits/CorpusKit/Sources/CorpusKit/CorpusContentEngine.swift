@@ -33,16 +33,65 @@
 
 import EngramLib
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import PersistenceKit
 import PersistenceKitSQLite
 import QueueKit
 import SubstrateTypes
-import VectorKit
+import SynapseKit
 
 // Logger shared by the engine and its queue extension (CorpusContentEngineQueue.swift).
-private let contentEngineLog = Logger(subsystem: "com.mootx01.kit", category: "CorpusKit")
+private let contentEngineLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "CorpusKit")
+
+// MARK: - Training path decision seam (module-level; shared by CorpusContentEngine and Corpus)
+
+/// The reason-carrying outcome of a training pass, recorded per modelID.
+/// Both `CorpusContentEngine.trainTrainableSlots` (attached mode) and
+/// `Corpus.reindex` (standalone mode) record one of these per trainable slot.
+///
+/// Value trees conform to Equatable so tests can assert on structure directly
+/// rather than on derived outputs (house rule for Equatable value trees).
+public enum TrainingPathDecision: Equatable, Sendable {
+    /// Counts path succeeded: the persisted counts row was fully restored;
+    /// the pending delta (attached) or population (standalone) was empty —
+    /// no corpus text was paged.
+    case countsRestore
+    /// Counts path succeeded: `folded` non-subsumed reference rows were
+    /// delta-folded into the restored counts — `folded` bodies were paged.
+    case countsDeltaFold(folded: Int)
+    /// Corpus path ran; `reason` names why the counts path was not taken.
+    case corpus(CorpusPathReason)
+}
+
+/// Reason a training pass fell back to the full corpus re-tokenize path.
+public enum CorpusPathReason: Equatable, Sendable {
+    /// No persisted basis row exists for this provider key — this is a genuine
+    /// first training, forced or not. An untrained slot on a non-force call also
+    /// records this reason when it trains via the corpus path.
+    case firstTrain
+    /// No persisted counts row found for this provider key.
+    case noCountsRow
+    /// `finalizeFromCounts()` returned false — the provider cannot derive its
+    /// basis from counts alone (LSA). Corpus re-tokenization is required.
+    case notCountsCapable
+    /// The pending delta is non-empty but `countsDeltaFoldSafe` is false (RI).
+    /// RI is restore-only; a non-empty delta forces the corpus path.
+    case deltaNotFoldSafe
+    /// The provider's accumulation is order-sensitive and the maintained counts'
+    /// fold-order provenance cannot be proven equal to the canonical training
+    /// order (standalone RI: live counts fold in ingest-arrival order;
+    /// from-scratch trains in active-chunk order).
+    case foldOrderProvenanceUnknown
+    /// Population mismatch: the frozen base count plus pending deltas does not
+    /// equal the current active-ID count (attached), or the live doc count does
+    /// not match the active-chunk count (standalone). Full corpus retrain required.
+    case populationMismatch
+    /// A non-subsumed pending reference's contentID resolved to nil from the source.
+    /// The corpus path heals by deleting all refs and republishing.
+    case pendingUnresolvable
+}
 
 // MARK: - Results
 
@@ -130,13 +179,13 @@ public struct ContentIndexJob: Sendable, Codable, Equatable {
 /// GLK/MOOTx01 build this compiles to the identity function because passage
 /// keys cannot be produced. The parsing branch exists only in standalone
 /// passage builds.
-enum IndexUnitIdentity {
+package enum IndexUnitIdentity {
     /// Reserved internal separator. Content IDs reject it in every build so
     /// a database created without passages can safely enable them only via an
     /// explicit future rebuild.
-    static let reservedSeparator = "\u{1F}"
+    package static let reservedSeparator = "\u{1F}"
 
-    static func contentID(fromItemKey key: String) -> CorpusContentID {
+    package static func contentID(fromItemKey key: String) -> CorpusContentID {
 #if CORPUSKIT_STANDALONE_PASSAGES
         guard let range = key.range(of: reservedSeparator) else { return key }
         return String(key[key.startIndex..<range.lowerBound])
@@ -237,14 +286,21 @@ public actor CorpusContentEngine {
     /// The consumer name this engine claims representations under.
     public static let claimsConsumer = "corpus"
 
+    /// The vector lanes this engine writes, claims and deletes per slot:
+    /// lane 0 is the 256-bit engram row every build writes; lane 1 is the
+    /// whole-record float row (lane 1). Both lanes are always claimed;
+    /// whose float rows the 1.6 to 1.7 capsule vacuumed (and whose lane-1
+    /// claim it released) is never re-claimed by `reconcileConfiguredProviders`.
+    static let claimedLanes: [Int] = [0, 1]
+
     /// Reserved checkpoint row recording the last APPLIED feed cursor —
     /// the lane-level cursor a remove records (a removed ID has no
     /// per-content checkpoint row to carry it). The reserved ID starts
     /// with the key separator, which no validated content ID can.
     static let feedCursorRowID = "\u{1F}feed"
 
-    private struct Slot {
-        var provider: any EmbeddingProvider
+    package struct Slot {
+        package var provider: any EmbeddingProvider
         let freshBasisBlob: Data?
         var countsAccumulator: (any TrainableEmbeddingBasis)?
         var countsDocumentCount: Int
@@ -279,16 +335,16 @@ public actor CorpusContentEngine {
     let storage: any Storage
     private let configuration: CorpusContentConfiguration
     // Internal so the queue drain worker resolves records at work time.
-    let source: any CorpusContentSource
+    package let source: any CorpusContentSource
     private let invertedIndex: InvertedIndexStore
-    private let vectorStore: VectorStore
+    package let vectorStore: VectorStore
     private let basisStore: BasisStore
     private let countsStore: CorpusProviderCountsStore
     private let indexState: CorpusIndexStateStore
     private let coverageStore: CorpusProviderCoverageStore
     private let providerConfigurationStore: CorpusProviderConfigurationStore
     private let claims: VectorRepresentationClaims
-    private var slots: [Slot]
+    package var slots: [Slot]
     /// Set after an ambiguous counts/checkpoint transaction failure. The next
     /// queue attempt must rehydrate the in-memory accumulators from durable
     /// state before it can fold another content reference.
@@ -324,29 +380,42 @@ public actor CorpusContentEngine {
     var ingestHLC = HLCGenerator(nodeID: 1)
     /// Invoked AFTER a drained batch indexes, with the affected canonical
     /// content IDs (Drawer IDs) — GLK's room-rollup coordination hook.
-    public var onEncoded: (@Sendable ([String]) async -> Void)?
+    public var onEncoded: (@Sendable ([String], String) async -> Void)?
 
     /// Cancel the drain worker and release the lease on teardown (mirror of
-    /// `Corpus.deinit`; the explicit path is `dropIngestQueue()`).
+    /// `Corpus.deinit`; the explicit path is `dropIngestQueue()`). Reachable
+    /// while the queue is mounted because the worker resolves the engine for
+    /// one pass at a time and the GLK rider captures it weakly. Rust twin:
+    /// `impl Drop for CorpusContentEngine`.
     deinit {
         ingestDrainWorker?.cancel()
         drainLease?.release()
     }
 
     /// Construct the engine over a validated configuration and content
-    /// source. Applies the mode's profile declaration plus the VectorKit
+    /// source. Applies the mode's profile declaration plus the SynapseKit
     /// and claims schemas (all additive/idempotent). In attached mode NO
     /// canonical content table is created.
     public init(
         storage: any Storage,
         configuration: CorpusContentConfiguration,
         source: any CorpusContentSource,
-        models: [EmbeddingModel] = [.default]
+        models: [EmbeddingModel] = [.default],
+        frozen: Bool = false
     ) async throws {
         guard !models.isEmpty else {
             throw CorpusKitError.invalidConfiguration(
                 "CorpusContentEngine requires at least one embedding model")
         }
+        if frozen {
+            guard configuration.mode == .attached else {
+                throw CorpusKitError.invalidConfiguration("frozen corpus requires attached storage")
+            }
+            for schema in [CorpusSchemaProfile.attachedDeclaration, VectorStore.schemaDeclaration,
+                           VectorRepresentationClaims.schemaDeclaration] {
+                try await storage.openExisting(schema: schema)
+            }
+        } else {
         switch configuration.mode {
         case .standalone:
 #if CORPUSKIT_STANDALONE_PASSAGES
@@ -362,15 +431,26 @@ public actor CorpusContentEngine {
         case .attached:
             try await storage.migrate(to: CorpusSchemaProfile.attachedDeclaration)
         }
+        // SECURITY: a populated estate opened before the VectorKit → SynapseKit
+        // rename keys its two vector-tier ledger rows (store and claims) by the
+        // old ids; migrating under the new ids without moving those rows
+        // replays both ladders from version 0 — the vector ladder folds every
+        // row's generation to 0. Both renames run first; a conflicted ledger
+        // (rows under both ids) is left as it is with one warning and the
+        // estate still opens — each migrate below reads its ladder position
+        // from the current-id row, so nothing replays.
+        try await VectorStore.prepareSchemaLedger(storage: storage)
         try await storage.migrate(to: VectorStore.schemaDeclaration)
+        try await VectorRepresentationClaims.prepareSchemaLedger(storage: storage)
         try await storage.migrate(to: VectorRepresentationClaims.schemaDeclaration)
 
+        }
         self.storage = storage
         self.configuration = configuration
         self.source = source
         self.invertedIndex = InvertedIndexStore(storage: storage)
         self.vectorStore = VectorStore(
-            storage: storage, sidecarURL: VectorStore.defaultSidecarURL(for: storage))
+            storage: storage, sidecarURL: frozen ? nil : VectorStore.defaultSidecarURL(for: storage))
         self.basisStore = BasisStore(storage: storage)
         self.countsStore = CorpusProviderCountsStore(storage: storage)
         self.indexState = CorpusIndexStateStore(storage: storage)
@@ -388,14 +468,14 @@ public actor CorpusContentEngine {
                 basisStore: basisStore,
                 countsStore: countsStore)
             // Basis-generation digest: stateless slots derive it from the
-            // model version; trainable slots from the PERSISTED basis blob
-            // (empty until trained — coverage is never written untrained).
+            // model version; trainable slots from the PERSISTED basis blob the
+            // slot was reconstructed from (empty until trained, and empty when
+            // the persisted blob was refused for format-version skew — coverage
+            // is never written untrained, so the retrain re-covers every row).
             let digest: String
             if model.isTrainable {
-                if let persisted = try await basisStore.load(
-                    modelID: resolved.provider.modelID,
-                    modelVersion: resolved.provider.modelVersion) {
-                    digest = CorpusContentDigest.digest(persisted.basis)
+                if let served = resolved.servedBasis {
+                    digest = CorpusContentDigest.digest(served)
                 } else {
                     digest = Self.untrainedDigest
                 }
@@ -482,7 +562,7 @@ public actor CorpusContentEngine {
     /// lifecycle paths can pre-claim at construction.
     public func registerClaims(now: Date) async throws {
         for (index, slot) in slots.enumerated() {
-            for lane: Int in [0, 1] {
+            for lane: Int in Self.claimedLanes {
                 // Attached mode writes binary (lane 0) rows for the DEFAULT
                 // slot only — GLK's Hamming readers all probe the default
                 // model — so non-default binary claims are not registered
@@ -506,7 +586,7 @@ public actor CorpusContentEngine {
     /// Reopen/replay is idempotent.
     public func reconcileConfiguredProviders(now: Date) async throws {
         let desired = Set(slots.enumerated().flatMap { index, slot -> [VectorRepresentationKey] in
-            [0, 1].compactMap { lane in
+            Self.claimedLanes.compactMap { lane in
                 if lane == 0 && index != 0 && configuration.mode == .attached { return nil }
                 return VectorRepresentationKey(
                     modelID: slot.provider.modelID,
@@ -543,6 +623,27 @@ public actor CorpusContentEngine {
                 try await vectorStore.deleteVectors(keys: exact)
             }
             retiredProviders.insert("\(key.modelID)\u{1F}\(key.modelVersion)")
+        }
+
+        // A provider whose persisted basis or counts row names a (modelID,
+        // modelVersion) no slot carries any more is retired even when it held
+        // no representation claim: a non-default attached slot writes no
+        // vector row in the default build (the engram row is the default
+        // slot's, the whole-record float row is the sidecar's), so the claims
+        // diff alone cannot see it leave.
+        let desiredProviders = Set(slots.map {
+            "\($0.provider.modelID)\u{1F}\($0.provider.modelVersion)"
+        })
+        for table in ["corpus_provider_basis", "corpus_provider_counts"] {
+            let persisted = try await storage.rowStore.query(
+                table: table, where: .isTrue, orderBy: [], limit: nil, offset: nil,
+                columns: ["model_id", "model_version"])
+            for row in persisted {
+                guard case let .text(modelID)? = row["model_id"],
+                      case let .text(modelVersion)? = row["model_version"] else { continue }
+                let encoded = "\(modelID)\u{1F}\(modelVersion)"
+                if !desiredProviders.contains(encoded) { retiredProviders.insert(encoded) }
+            }
         }
 
         let desiredModelIDs = Set(slots.map { $0.provider.modelID })
@@ -668,7 +769,7 @@ public actor CorpusContentEngine {
 
     // MARK: - Content validation
 
-    private func validate(id: CorpusContentID) throws {
+    package func validate(id: CorpusContentID) throws {
         guard !id.isEmpty, !id.contains(IndexUnitIdentity.reservedSeparator) else {
             throw CorpusKitError.invalidConfiguration(
                 "content IDs must be non-empty and must not contain the U+001F separator")
@@ -692,66 +793,6 @@ public actor CorpusContentEngine {
         // idle — see settleYoungBasisIfGrown.
         try await settleYoungBasisIfGrown(now: now, requireIdleInFlight: true)
         return true
-    }
-
-    /// Re-embed ONLY the dense float (Lane D) vector for a single content ID.
-    ///
-    /// Resolves the current record from the source — picking up any newly-written
-    /// `denseCompositionText` (e.g. a distillate written by the GLK distillation
-    /// rider) — and writes a fresh float-vector row (vectorIndex: 1) for each
-    /// active slot. Only the float (dense RI) lane is updated; BM25, binary
-    /// (Hamming) vectors, coverage, and the idempotence checkpoint are untouched.
-    ///
-    /// **Why not the full index path?** The idempotence gate keys on the CONTENT
-    /// digest (unchanged by distillation). Calling `index(force: true)` would
-    /// bypass the gate but would also re-run BM25 indexing — unnecessary and
-    /// potentially disruptive to IDF state. This method bypasses BOTH the gate
-    /// AND the BM25 path by targeting only the float lane directly. §9 BM25
-    /// isolation (SPEC_DISTILLATION_STORAGE) is preserved: the content and digest
-    /// are unchanged, so BM25 scores remain byte-identical before and after.
-    ///
-    /// **Concurrency:** routes through the CCE actor (not direct to `VectorStore`)
-    /// so `countsAdmission` serialization is maintained against concurrent
-    /// trainable-slot operations (FINDING_11X_MAINTENANCE_WALK_2026-07-28
-    /// constraint 3). Returns false only when the content ID no longer resolves
-    /// in the source; derived state is left unchanged in that case.
-    ///
-    /// - Parameters:
-    ///   - id: The content ID to re-embed.
-    ///   - now: The operation timestamp (passed in — never read inside the engine).
-    /// - Returns: true when live content was found and re-embedded; false when
-    ///   the ID no longer resolves.
-    @discardableResult
-    public func recomposeDenseVector(id: CorpusContentID, now: Date) async throws -> Bool {
-        try validate(id: id)
-        guard let record = try await source.record(for: id) else {
-            return false
-        }
-        try await recomposeDenseFloat(record: record, now: now)
-        return true
-    }
-
-    /// Dense-float-only vector upsert for one content record. Writes the float
-    /// (vectorIndex: 1) row across all active slots using `effectiveDenseText`.
-    /// Does NOT touch BM25, binary vectors, coverage, or the checkpoint.
-    /// Called by `recomposeDenseVector` and the drain/sweep integration points.
-    private func recomposeDenseFloat(record: CorpusContentRecord, now: Date) async throws {
-        let unit = IndexUnit(
-            key: record.id, text: record.text, denseText: record.denseCompositionText)
-        var rows: [VectorPayloadInput] = []
-        for slot in slots {
-            let (_, floats) = try await slot.provider.embedPair(unit.effectiveDenseText)
-            guard !floats.isEmpty else { continue }
-            rows.append(VectorPayloadInput(
-                itemID: unit.key, vectorIndex: 1,
-                payload: VectorPayload(floats: floats),
-                modelID: slot.provider.modelID,
-                modelVersion: slot.provider.modelVersion,
-                filedAt: now))
-        }
-        if !rows.isEmpty {
-            try await vectorStore.addPayloads(rows)
-        }
     }
 
     /// STRUCTURAL index for the migration's rebuild phase: BM25 postings,
@@ -800,7 +841,7 @@ public actor CorpusContentEngine {
     /// on the serial `prepareIndex` path because it also mutates range rows.
     private func indexWholeContentBatch(
         ids: [CorpusContentID], now: Date, parallelism: Int?,
-        slotScope: SlotScope, force: Bool
+        slotScope: SlotScope, laneScope: LaneScope = .all, force: Bool
     ) async throws -> Int {
         guard !ids.isEmpty else { return 0 }
         guard case .wholeContent = configuration.indexUnit else {
@@ -829,13 +870,33 @@ public actor CorpusContentEngine {
         }
         guard !records.isEmpty else { return 0 }
 
+        // Coverage gate (non-forced path only): pre-fetch per-slot covered IDs so
+        // embedQueueRecords can skip (record, slot) pairs already current under the
+        // active basis digest. Forced reindex bypasses this — a retrain changes the
+        // basis digest, making prior coverage rows stale by definition.
+        var coveredBySlot: [String: Set<CorpusContentID>] = [:]
+        if !force {
+            for slot in slots {
+                guard slot.basisDigest != Self.untrainedDigest else { continue }
+                let covered = try await coverageStore.coveredContentIDs(
+                    modelID: slot.provider.modelID, basisDigest: slot.basisDigest)
+                coveredBySlot[slot.provider.modelID] = covered
+            }
+        }
+
         // Delegate the bounded parallel embed phase to the shared kernel,
         // which also services the queue drain path.
         let cap = max(1, parallelism ?? ProcessInfo.processInfo.activeProcessorCount)
-        let prepared = try await embedQueueRecords(records, slotScope: slotScope, cap: cap, now: now)
+        let prepared = try await embedQueueRecords(
+            records, slotScope: slotScope, laneScope: laneScope,
+            coveredBySlot: coveredBySlot, cap: cap, now: now)
 
-        for item in prepared {
-            try await invertedIndex.index(itemID: item.record.id, tokens: item.tokens, now: now)
+        // Dense-only lane: BM25 IDF weights are unchanged by a basis retrain;
+        // skip the write to preserve existing postings intact.
+        if laneScope == .all {
+            for item in prepared {
+                try await invertedIndex.index(itemID: item.record.id, tokens: item.tokens, now: now)
+            }
         }
         let vectorRows = prepared.flatMap(\.vectorRows)
         if !vectorRows.isEmpty { try await vectorStore.addPayloads(vectorRows) }
@@ -920,9 +981,23 @@ public actor CorpusContentEngine {
     /// `slotScope` follows the same semantics as `indexWholeContentBatch`:
     ///   - `.all`: embed across every active provider slot.
     ///   - `.statelessOnly`: skip trainable slots (migration / backfill path).
+    ///   - `.slot(String)`: embed exactly one provider by model ID.
+    ///
+    /// `laneScope` selects which derived lanes are written:
+    ///   - `.all`: BM25 tokens + binary (vectorIndex 0) + dense (vectorIndex 1).
+    ///   - `.dense`: dense float lane only; BM25 tokens are returned empty
+    ///     (the caller skips the BM25 write), binary rows are not produced,
+    ///     and non-trainable slots are excluded.
+    ///
+    /// `coveredBySlot`: optional pre-fetched coverage keyed by modelID.
+    ///   When provided, (record, slot) pairs already covered under the active
+    ///   basis digest are skipped — their vectors are current and re-embedding
+    ///   is waste.
     func embedQueueRecords(
         _ records: [CorpusContentRecord],
         slotScope: SlotScope,
+        laneScope: LaneScope = .all,
+        coveredBySlot: [String: Set<CorpusContentID>] = [:],
         cap: Int,
         now: Date
     ) async throws -> [PreparedStructuralRecord] {
@@ -931,21 +1006,31 @@ public actor CorpusContentEngine {
         // so the parallel tasks never re-enter the actor for slot reads.
         let providers = slots.enumerated().compactMap { index, slot -> StructuralProvider? in
             if slotScope == .statelessOnly, slot.freshBasisBlob != nil { return nil }
+            if case .slot(let targetModelID) = slotScope,
+               slot.provider.modelID != targetModelID { return nil }
+            // Dense-only lane excludes non-trainable providers (deterministic, NL):
+            // their vectors are item-local and unchanged by a basis retrain.
+            if laneScope == .dense, slot.freshBasisBlob == nil { return nil }
             // A trainable slot with no trained basis cannot embed yet.
             if slot.freshBasisBlob != nil, slot.basisDigest == Self.untrainedDigest { return nil }
+            // Binary (Hamming) lane: default slot in attached mode, all slots in standalone.
+            // Dense-only lane omits binary entirely — only vectorIndex 1 rows are written.
+            let writeBinary = (index == 0 || configuration.mode == .standalone)
+                && laneScope == .all
             return StructuralProvider(
                 provider: slot.provider,
                 modelID: slot.provider.modelID,
                 modelVersion: slot.provider.modelVersion,
                 basisDigest: slot.basisDigest,
-                writeBinary: index == 0 || configuration.mode == .standalone)
+                writeBinary: writeBinary)
         }
-        // No active providers: return skeleton records (BM25 will still run).
+        // No active providers: return skeleton records (BM25 will still run for .all).
         guard !providers.isEmpty else {
             return records.map { record in
                 PreparedStructuralRecord(
                     record: record,
-                    tokens: CorpusDefaultTokenizer().keywordTokens(record.text),
+                    tokens: laneScope == .dense
+                        ? [] : CorpusDefaultTokenizer().keywordTokens(record.text),
                     vectorRows: [],
                     covered: [])
             }
@@ -959,6 +1044,10 @@ public actor CorpusContentEngine {
             // text otherwise). BM25 tokens always use the lexical text.
             let denseText = record.effectiveDenseText
             for target in providers {
+                // Coverage gate: skip (record, slot) pairs already current under
+                // the active basis digest. Their vectors are durable — re-embedding
+                // produces the same result at wasted compute cost.
+                if coveredBySlot[target.modelID]?.contains(record.id) == true { continue }
                 let (engram, floats) = try await target.provider.embedPair(denseText)
                 if target.writeBinary {
                     rows.append(VectorPayloadInput(
@@ -978,8 +1067,12 @@ public actor CorpusContentEngine {
             }
             return PreparedStructuralRecord(
                 record: record,
-                // BM25 keyword tokens: always lexical text, never dense text.
-                tokens: CorpusDefaultTokenizer().keywordTokens(record.text),
+                // Dense-only lane: BM25 IDF weights are unchanged by a basis retrain;
+                // return empty tokens so the caller skips the BM25 write. This keeps
+                // existing IDF state intact — the same invariant recomposeDenseFloat
+                // enforces for the single-ID distillation path.
+                tokens: laneScope == .dense
+                    ? [] : CorpusDefaultTokenizer().keywordTokens(record.text),
                 vectorRows: rows,
                 covered: covered)
         }
@@ -1029,7 +1122,17 @@ public actor CorpusContentEngine {
         //   (3) fold-in — stable basis, no retrain.
         // Called once per batch (not per job); decisions are serialized here
         // before the Phase 2 parallel embed fan-out.
-        let batchNow = Date()
+        //
+        // The batch instant is DERIVED FROM THE JOBS, never from Date():
+        // the MAX of the batch's submission HLC physical times (each job's
+        // capture instant — the same clock the per-job workNow uses below).
+        // A wall-clock read here stamped drain-worker training and embeds
+        // with load-dependent times, breaking the pass-`now`-in determinism
+        // rule for every caller whose clock is pinned (the bench-clock seam
+        // rides tool calls; this background worker never sees it) —
+        // REPLAY_DRIFT_RCA 2026-08-26, kinsta facts 11–12.
+        let batchNow = Date(timeIntervalSince1970:
+            Double(jobs.map(\.submittedAt.physicalTime).max() ?? 0) / 1000.0)
         try await batchTrainIfNeeded(now: batchNow)
         // registerClaims: idempotent — upserts claims only when absent; calling
         // once per batch eliminates N×slots unconditional upserts (Cause 2 fix).
@@ -1196,10 +1299,23 @@ public actor CorpusContentEngine {
             pendingWork.map(\.record), slotScope: .all, cap: cap, now: batchNow)
 
         // Phase 3: serial storage writes for the embedded batch.
-        // BM25 — one index call per record.
-        for (work, item) in zip(pendingWork, embedded) {
-            try await invertedIndex.index(
-                itemID: item.record.id, tokens: item.tokens, now: work.workNow)
+        // BM25 — one index call per record, ALL inside ONE storage
+        // transaction (DRAIN-BATCH-TXN, 2026-08-29): index() upserts one row
+        // per TERM, and autocommitted per-term writes made SQLite's WAL
+        // autocheckpoint fsync the volume every ~1000 frames — sampled at
+        // 98% of drain wall time on an external drive, freezing large-estate
+        // encode backfills. One commit per batch = one checkpoint's worth of
+        // WAL growth, and the batch lands atomically.
+        let batchIndex = self.invertedIndex
+        let batchPairs = zip(pendingWork, embedded).map {
+            (id: $1.record.id, tokens: $1.tokens, now: $0.workNow)
+        }
+        try await storage.transaction(isolation: .serializable) { txn in
+            for pair in batchPairs {
+                try await batchIndex.index(
+                    itemID: pair.id, tokens: pair.tokens, now: pair.now,
+                    into: txn.rowStore)
+            }
         }
         // Vector rows — ONE addPayloads call for the entire batch (Cause 5 fix).
         let allVectorRows = embedded.flatMap(\.vectorRows)
@@ -1717,11 +1833,21 @@ public actor CorpusContentEngine {
         }
     }
 
-    /// Which slots an indexing pass embeds. `.all` is the ordinary path;
-    /// `.statelessOnly` is the migration's structural rebuild — BM25 +
-    /// checkpoints + stateless-slot vectors, with trainable slots deferred
-    /// to the train + backfill phases.
-    enum SlotScope: Sendable { case all, statelessOnly }
+    /// Which slots an indexing pass embeds.
+    ///   - `.all`: all configured slots (ordinary ingest and reindex).
+    ///   - `.statelessOnly`: BM25 + checkpoints + stateless-slot vectors only;
+    ///     trainable slots are deferred to the train + backfill phases (migration path).
+    ///   - `.slot(String)`: exactly one provider by model ID — used when one
+    ///     drifted provider does not warrant a full multi-slot retrain.
+    enum SlotScope: Sendable, Equatable { case all, statelessOnly, slot(String) }
+
+    /// Which vector lanes an indexing pass writes.
+    ///   - `.all`: BM25, binary (Hamming), and dense (float) lanes (ordinary path).
+    ///   - `.dense`: float-vector lane only — used for basis-only retrains where
+    ///     distributional weights changed but BM25 IDF and binary fingerprints are
+    ///     unchanged. Skips BM25 write, binary rows, and non-trainable slots (whose
+    ///     vectors are item-local and basis-invariant).
+    public enum LaneScope: Sendable, Equatable { case all, dense }
 
     private func index(
         record: CorpusContentRecord, appliedCursor: String?, force: Bool, now: Date,
@@ -1789,6 +1915,8 @@ public actor CorpusContentEngine {
             case .all: break
             case .statelessOnly:
                 if slot.freshBasisBlob != nil { continue }
+            case .slot(let targetModelID):
+                if slot.provider.modelID != targetModelID { continue }
             }
             // A trainable slot with no trained basis cannot embed; the
             // train + backfill phases cover it (never write vectors or
@@ -1848,20 +1976,28 @@ public actor CorpusContentEngine {
 
     /// One index unit: its derived-row key plus the two text surfaces.
     ///
-    /// `text` is always the LEXICAL text — used for BM25 keyword tokenisation.
+    /// `text` is the LEXICAL text — used for BM25 keyword tokenisation. For
+    /// whole-content units it is the verbatim canonical text PLUS the
+    /// `ssc_facts` supplement tokens from the `drawers.ssc_facts` column
+    /// (`SSCFacts.lexicalSupplement`, schema 19: facts are pre-computed at
+    /// ingest and stored in a dedicated column; the verbatim canonical text
+    /// is never modified and remains the payload).
     /// `denseText` is the dense-composition text for the float vector lane; nil
     /// means fall back to `text` (default). Separating the two here keeps the
     /// BM25 / dense-embedding split explicit through every downstream code path
     /// that receives an `IndexUnit`.
-    private struct IndexUnit {
-        let key: String
+    package struct IndexUnit {
+        package let key: String
         /// Lexical text — BM25 tokenisation only.
-        let text: String
+        package let text: String
         /// Dense-composition text for vector embedding. nil → use `text`.
-        let denseText: String?
+        package let denseText: String?
         /// The text the engine passes to `embedPair`. Returns `denseText`
         /// when set, falls back to `text`.
-        var effectiveDenseText: String { denseText ?? text }
+        package var effectiveDenseText: String { denseText ?? text }
+        package init(key: String, text: String, denseText: String?) {
+            self.key = key; self.text = text; self.denseText = denseText
+        }
     }
 
     /// Compute the record's index units under the configured policy,
@@ -1879,8 +2015,12 @@ public actor CorpusContentEngine {
             // Whole-content unit: lexical text for BM25; dense-composition
             // text (when set) for vector embedding. The two paths stay
             // independent through replaceUnits and prepareIndex.
+            // Lexical text = verbatim + trailer tokens (anarrow shape). The
+            // supplement affects TOKENISATION only; the returned payload is
+            // resolved from the canonical record, never from this unit.
             units = [IndexUnit(
-                key: record.id, text: record.text,
+                key: record.id,
+                text: record.text + SSCFacts.lexicalSupplement(record.sscFacts),
                 denseText: record.denseCompositionText)]
 #if CORPUSKIT_STANDALONE_PASSAGES
         case .tokenWindows(let window, let overlap):
@@ -1958,7 +2098,7 @@ public actor CorpusContentEngine {
         for key in unitKeys.sorted() {
             try await invertedIndex.remove(itemID: key)
             for slot in slots {
-                for lane: Int in [0, 1] {
+                for lane: Int in Self.claimedLanes {
                     if shared.contains("\(slot.provider.modelID)|\(lane)") { continue }
                     vectorKeys.append(VectorExactKey(
                         itemID: key, vectorIndex: lane,
@@ -1975,7 +2115,7 @@ public actor CorpusContentEngine {
     private func sharedRepresentationFamilies() async throws -> Set<String> {
         var shared: Set<String> = []
         for slot in slots {
-            for lane: Int in [0, 1] {
+            for lane: Int in Self.claimedLanes {
                 let claimants = try await claims.claimants(
                     key: VectorRepresentationKey(
                         modelID: slot.provider.modelID,
@@ -2184,6 +2324,22 @@ public actor CorpusContentEngine {
         _trainFaultBeforeCommitModelID = beforeCommitModelID
     }
 
+    // MARK: - Training path decision seam (module-level types above; actor storage below)
+
+    /// Per-modelID training decisions from the most recent `trainTrainableSlots`
+    /// call. Reset at the start of each call. Internal (not private) so that
+    /// `@testable` tests can read it.
+    var _trainingPathDecisions: [String: TrainingPathDecision] = [:]
+
+    /// Read the training decision recorded for `modelID` during the most recent
+    /// `trainTrainableSlots` pass. Returns nil for slots that were skipped because
+    /// the call was non-forced and the slot was already trained (basisDigest is not
+    /// the untrained sentinel) — the drift gate owns WHEN a retrain fires.
+    /// Test seam — not for production use.
+    public func _trainingPathDecision(for modelID: String) -> TrainingPathDecision? {
+        _trainingPathDecisions[modelID]
+    }
+
     /// One provider's immutable input to the bounded training fan-out.
     private struct ProviderTrainingJob: Sendable {
         let slotIndex: Int
@@ -2203,6 +2359,10 @@ public actor CorpusContentEngine {
         let countsRow: PersistedCounts
         let basisDigest: String
         let subsumedReferences: [PersistedCountsReference]
+        /// Content IDs that listed in activeContentIDs() but resolved nil from
+        /// the source during corpus preparation. Each will become a non-subsumed
+        /// sentinel reference row after publication (F-6).
+        let skippedIDs: [CorpusContentID]
     }
 
     /// Conservative memory admission for concurrent provider training. The
@@ -2234,8 +2394,9 @@ public actor CorpusContentEngine {
         allIDs: [CorpusContentID],
         indexedStates: [CorpusContentID: CorpusIndexState],
         source: any CorpusContentSource,
-        now: Date
-    ) async throws -> PreparedProviderTraining {
+        now: Date,
+        budget: RetrainingBudget?
+    ) async throws -> (PreparedProviderTraining, RetrainingOutcome) {
         let provider = try job.witness.reconstructBasis(from: job.freshBasisBlob)
         guard let trainable = provider as? any TrainableEmbeddingBasis else {
             throw CorpusKitError.notTrainable(
@@ -2250,7 +2411,15 @@ public actor CorpusContentEngine {
         }
 
         var subsumedPendingReferences: [PersistedCountsReference] = []
+        // F-6: IDs that listed in activeContentIDs() but resolved nil from the
+        // source during corpus preparation. Each becomes a non-subsumed sentinel
+        // reference row after the publication transaction so that
+        // trainedChunkCount + |pending| == |allIDs| stays population-consistent
+        // by construction. The actor logs them at warning level before upserting.
+        var skippedIDs: [CorpusContentID] = []
         var documentCount = 0
+        var allTexts: [String] = []
+        if budget != nil { allTexts.reserveCapacity(allIDs.count) }
         var cursor = 0
         while cursor < allIDs.count {
             let end = min(cursor + Self.trainingPageSize, allIDs.count)
@@ -2283,18 +2452,31 @@ public actor CorpusContentEngine {
                                 updatedAt: now,
                                 isSubsumed: true))
                     }
+                } else {
+                    // F-6: source returned nil for a listed ID — skipped. A sentinel
+                    // reference row is written after publication (non-subsumed, so it
+                    // counts as a pending delta on the next pass) to keep the
+                    // population invariant: trainedChunkCount + |pending| == |allIDs|.
+                    skippedIDs.append(id)
                 }
             }
-            trainable.accumulateTraining(texts: texts)
+            if budget == nil { trainable.accumulateTraining(texts: texts) }
+            else { allTexts.append(contentsOf: texts) }
             for text in texts { countsAccumulator.addToCounts(text: text) }
             documentCount += texts.count
             cursor = end
         }
-        trainable.finalizeTraining()
+        let outcome: RetrainingOutcome
+        if let budget {
+            outcome = trainable.trainOnCorpus(texts: allTexts, budget: budget)
+        } else {
+            trainable.finalizeTraining()
+            outcome = .completed
+        }
 
         let basisBlob = trainable.serializeBasis()
         let digest = CorpusContentDigest.digest(basisBlob)
-        return PreparedProviderTraining(
+        return (PreparedProviderTraining(
             job: job,
             provider: provider,
             countsAccumulator: countsAccumulator,
@@ -2312,7 +2494,8 @@ public actor CorpusContentEngine {
                 vocabSize: countsAccumulator.countsVocabularySize,
                 updatedAt: now),
             basisDigest: digest,
-            subsumedReferences: subsumedPendingReferences)
+            subsumedReferences: subsumedPendingReferences,
+            skippedIDs: skippedIDs), outcome)
     }
 
     /// Stream-train every trainable slot that lacks a CURRENT basis (or
@@ -2334,7 +2517,9 @@ public actor CorpusContentEngine {
     ///   trained and already-current alike).
     @discardableResult
     public func trainTrainableSlots(
-        now: Date, force: Bool = false
+        now: Date, force: Bool = false,
+        budget: RetrainingBudget? = nil,
+        boundedIDs: [CorpusContentID]? = nil
     ) async throws -> [String: String] {
         // Publication replaces the base snapshot and deletes only reference
         // deltas represented by that snapshot. Prevent a reentrant admission
@@ -2345,6 +2530,10 @@ public actor CorpusContentEngine {
             try await indexState.allStates()
                 .filter { $0.contentID != Self.feedCursorRowID }
                 .map { ($0.contentID, $0) })
+        // Reset the per-pass decision seam before any path is chosen.
+        // Placement here (before the slot loop) ensures no stale decision from
+        // a prior pass survives into the current guard evaluation.
+        _trainingPathDecisions.removeAll()
         var digests: [String: String] = [:]
         var jobs: [ProviderTrainingJob] = []
         for slotIndex in slots.indices {
@@ -2352,12 +2541,11 @@ public actor CorpusContentEngine {
                   let fresh = slots[slotIndex].provider as? any TrainableEmbeddingBasis
             else { continue }
             let modelID = slots[slotIndex].provider.modelID
-            if !force, slots[slotIndex].basisDigest != Self.untrainedDigest {
-                // Already trained (persisted basis loaded at open or a
-                // prior pass this run) — resume skips it.
-                digests[modelID] = slots[slotIndex].basisDigest
-                continue
-            }
+            // Every slot (trained or untrained) enters the job queue so the
+            // counts-path guards can evaluate already-trained slots with pending
+            // delta refs. The counts path emits countsRestore and continues
+            // without republication when the population guard passes and no
+            // pending refs are present.
             jobs.append(ProviderTrainingJob(
                 slotIndex: slotIndex,
                 modelID: modelID,
@@ -2366,10 +2554,263 @@ public actor CorpusContentEngine {
                 witness: fresh))
         }
 
-        let allIDs = try await source.activeContentIDs()
+        let allIDs: [CorpusContentID]
+        if let boundedIDs { allIDs = boundedIDs }
+        else { allIDs = try await source.activeContentIDs() }
         guard !allIDs.isEmpty else { return digests }
-        let cap = Self.providerTrainingParallelism(
-            contentCount: allIDs.count, providerCount: jobs.count)
+
+        // Part B — counts-path attempt (serial, on actor) before the corpus-path
+        // fan-out. Each job is either published here (counts path) or deferred to
+        // prepareProviderTraining (corpus path). The guard sequence is strict: the
+        // first failure records a named reason and falls to the corpus path.
+        var remainingJobs: [ProviderTrainingJob] = []
+        // Track total trained slots for the generation-counter bump. Counts-path
+        // and corpus-path publications both count as successful retrains.
+        var trainedSlotsCount = 0
+
+        for job in jobs {
+            if budget != nil {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+            // Load the persisted basis row once; used for the firstTrain check and Guard 5.
+            let basisRow = try await basisStore.load(
+                modelID: job.modelID, modelVersion: job.modelVersion)
+
+            // Non-force trained-slot skip: a slot already trained (basisDigest differs
+            // from the untrained sentinel) records its current digest and is skipped —
+            // the drift gate owns WHEN a retrain fires. The decision seam records
+            // nothing for skipped slots (nil/absent semantics); callers can distinguish
+            // a skip from any training decision by checking for nil from
+            // _trainingPathDecision(for:).
+            if !force && slots[job.slotIndex].basisDigest != Self.untrainedDigest {
+                digests[job.modelID] = slots[job.slotIndex].basisDigest
+                continue
+            }
+
+            // firstTrain: no persisted basis row exists for this provider key, OR
+            // the slot opened untrained because the persisted row was refused for
+            // format-version skew — either way there is no current basis to
+            // restore around, so this is a from-scratch training, forced or not.
+            // force==true with a served basis falls through to the counts-path
+            // guard chain below.
+            guard basisRow != nil, slots[job.slotIndex].basisDigest != Self.untrainedDigest else {
+                _trainingPathDecisions[job.modelID] = .corpus(.firstTrain)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 2: counts row absent → cannot restore counts.
+            guard let _ = try await countsStore.load(
+                modelID: job.modelID, modelVersion: job.modelVersion)
+            else {
+                _trainingPathDecisions[job.modelID] = .corpus(.noCountsRow)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 3: capability probe — reconstruct a fresh instance and call
+            // finalizeFromCounts(). Returns false for LSA (it keeps the
+            // corpus path and re-tokenizes at refactor time — the escape clause
+            // documented in the design doc §3). finalizeFromCounts() may mutate
+            // the probe instance; it is discarded after this guard.
+            let capabilityProbe = try job.witness.reconstructBasis(from: job.freshBasisBlob)
+            guard let probeTrainable = capabilityProbe as? any TrainableEmbeddingBasis,
+                  probeTrainable.finalizeFromCounts()
+            else {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 4: pending-delta safety.
+            // pending = non-subsumed references for (modelID, modelVersion) — content
+            // that was admitted after the last publication but is not yet in the base.
+            // RI (RandomIndexing): countsDeltaFoldSafe == false because float context
+            // vector addition is not associative; a non-empty delta forces corpus path.
+            // LSA: countsDeltaFoldSafe == false (its counts blob holds no TF rows).
+            let allRefs = try await countsStore.references(
+                modelID: job.modelID, modelVersion: job.modelVersion)
+            let pendingRefs = allRefs.filter { !$0.isSubsumed }
+            if !pendingRefs.isEmpty && !job.witness.countsDeltaFoldSafe {
+                _trainingPathDecisions[job.modelID] = .corpus(.deltaNotFoldSafe)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 5: population guard. Both sides quoted here per the wave process gate.
+            // LHS: basisRow.trainedChunkCount — resolved records folded at publication
+            //   (this func's corpus-path publication ~:2590-2595) — the frozen base;
+            //   sole writers are training publications committed in the SAME serializable
+            //   transaction as the counts row.
+            // RHS: allIDs.count — current listed IDs from source.activeContentIDs().
+            // Require basisRow.trainedChunkCount + pending.count == allIDs.count.
+            // This is population-consistent BY CONSTRUCTION: skipped IDs (section C)
+            // become non-subsumed reference rows after corpus-path publication, so they
+            // appear in pending on the next pass. A revision or removal drives
+            // LHS != RHS → corpus path. PersistedCounts.documentCount is NEVER used
+            // here (it is the LIVE monotonic anchor, not the frozen base).
+            guard let frozenBase = basisRow,
+                  frozenBase.trainedChunkCount + pendingRefs.count == allIDs.count
+            else {
+                _trainingPathDecisions[job.modelID] = .corpus(.populationMismatch)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 6: delta fold.
+            // pendingRefs may be empty (countsRestore case: the existing basis already
+            // reflects the full corpus). An empty pending set flows through the SAME
+            // counts path with zero folds: restore counts, finalize, publish
+            // (identical-bytes basis upsert with trainedAt = now, persistCounts, no
+            // reference deletes), install slot, bump generation, record countsRestore.
+            // The win is ZERO TEXT PAGING — publication is never skipped.
+            // Reconstruct TWO fresh instances from the factory blob:
+            //   serving — trained and finalized; will be installed as the slot provider.
+            //   newAccum — same state; will replace the slot's counts accumulator for
+            //              ongoing ingest folds.
+            let servingProvider = try job.witness.reconstructBasis(from: job.freshBasisBlob)
+            guard let servingTrainable = servingProvider as? any TrainableEmbeddingBasis else {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+            let newAccumProvider = try job.witness.reconstructBasis(from: job.freshBasisBlob)
+            guard let newAccumTrainable = newAccumProvider as? any TrainableEmbeddingBasis else {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Restore the persisted counts into BOTH instances. The store prefers v4
+            // integer-keyed term rows and falls back to the legacy single blob — the
+            // same decision point as the on-open restore path, kept in the store so the
+            // two paths cannot diverge.
+            //
+            // Both restores must be attempted before checking the results. A false from
+            // either restore means: no counts row (deleted between the deferred-job
+            // scheduling and now), or the row carries the migration invalidation sentinel
+            // (an empty blob written by `mootx01 upgrade`). Either cause means the counts
+            // path cannot proceed for this job — fall back to the corpus path.
+            let restoredServing = try await countsStore.restoreCounts(
+                into: servingTrainable,
+                modelID: job.modelID, modelVersion: job.modelVersion)
+            let restoredAccum = try await countsStore.restoreCounts(
+                into: newAccumTrainable,
+                modelID: job.modelID, modelVersion: job.modelVersion)
+            guard restoredServing && restoredAccum else {
+                _trainingPathDecisions[job.modelID] = .corpus(.noCountsRow)
+                remainingJobs.append(job)
+                continue
+            }
+
+            // For each pending ref sorted by contentID ascending: resolve the record
+            // from the source and fold into BOTH instances. Count every record() call
+            // (bodies-paged metric exposed via the decision enum).
+            let sortedPending = pendingRefs.sorted { $0.contentID < $1.contentID }
+            var bodiesPaged = 0
+            var unresolvable = false
+            for ref in sortedPending {
+                guard let record = try await source.record(for: ref.contentID) else {
+                    // pendingUnresolvable: discard the counts-path attempt entirely.
+                    // The corpus path immediately heals: it deletes all refs and
+                    // republishes from the full corpus.
+                    _trainingPathDecisions[job.modelID] = .corpus(.pendingUnresolvable)
+                    unresolvable = true
+                    break
+                }
+                servingTrainable.addToCounts(text: record.effectiveDenseText)
+                newAccumTrainable.addToCounts(text: record.effectiveDenseText)
+                bodiesPaged += 1
+            }
+            if unresolvable {
+                remainingJobs.append(job)
+                continue
+            }
+
+            // Guard 7: finalize. Guaranteed true by the Guard 3 probe; treat false as
+            // notCountsCapable defensively (should never happen if the probe was correct).
+            guard servingTrainable.finalizeFromCounts() else {
+                _trainingPathDecisions[job.modelID] = .corpus(.notCountsCapable)
+                remainingJobs.append(job)
+                continue
+            }
+            let countsBasisBlob = servingTrainable.serializeBasis()
+            let countsBasisDigest = CorpusContentDigest.digest(countsBasisBlob)
+            let countsDocumentCount = frozenBase.trainedChunkCount + pendingRefs.count
+
+            // Guard 8: publication — same shape as the corpus-path transaction.
+            // CRITICAL ordering: per-reference delete instead of deleteReferences.
+            // Existing subsumed markers must survive — they are consumed by delayed
+            // admissions that already held a training-snapshot marker when the last
+            // corpus-path publication ran. deleteReferences would erase them.
+            if _trainFaultBeforeCommitModelID == job.modelID {
+                _trainFaultBeforeCommitModelID = nil
+                throw CorpusKitError.invalidConfiguration(
+                    "injected training fault before commit: \(job.modelID)")
+            }
+            let countsBasisRow = PersistedBasis(
+                modelID: job.modelID, modelVersion: job.modelVersion,
+                basis: countsBasisBlob, trainedAt: now,
+                trainedChunkCount: countsDocumentCount)
+            let basisStoreRef = basisStore
+            let countsStoreRef = countsStore
+            let pendingToDelete = sortedPending
+            let modelIDForTxn = job.modelID
+            let modelVersionForTxn = job.modelVersion
+            try await storage.transaction(isolation: .serializable) { txn in
+                try await basisStoreRef.upsert(countsBasisRow, into: txn.rowStore)
+                // Routed through persistCounts so vocabulary-scale providers write
+                // as term rows rather than one bind (ee#49).
+                try await countsStoreRef.persistCounts(
+                    provider: newAccumTrainable,
+                    modelID: modelIDForTxn,
+                    modelVersion: modelVersionForTxn,
+                    documentCount: countsDocumentCount,
+                    vocabSize: newAccumTrainable.countsVocabularySize,
+                    updatedAt: now,
+                    into: txn.rowStore)
+                // Per-reference delete: consume only the folded pending refs.
+                // DO NOT call deleteReferences here — that deletes ALL refs
+                // (including subsumed markers needed for delayed admissions).
+                for ref in pendingToDelete {
+                    try await countsStoreRef.deleteReference(
+                        modelID: modelIDForTxn, modelVersion: modelVersionForTxn,
+                        contentID: ref.contentID, into: txn.rowStore)
+                }
+            }
+
+            // Install the counts-path result into the slot (same fields as the
+            // corpus-path publication below).
+            let slotIdx = job.slotIndex
+            slots[slotIdx].provider = servingProvider
+            slots[slotIdx].basisDigest = countsBasisDigest
+            slots[slotIdx].countsAccumulator = newAccumTrainable
+            slots[slotIdx].countsDocumentCount = countsDocumentCount
+            slots[slotIdx].growthTermDigests = []
+            slots[slotIdx].countsVocabAnchor = newAccumTrainable.countsVocabularySize
+            digests[job.modelID] = countsBasisDigest
+            trainedSlotsCount += 1
+
+            if _trainFaultAfterModelID == job.modelID {
+                _trainFaultAfterModelID = nil
+                throw CorpusKitError.invalidConfiguration(
+                    "injected training fault after commit: \(job.modelID)")
+            }
+
+            // Guard 9: record the decision.
+            _trainingPathDecisions[job.modelID] = pendingRefs.isEmpty
+                ? .countsRestore
+                : .countsDeltaFold(folded: pendingRefs.count)
+        }
+        // Remaining jobs (counts-path failures) go to the corpus-path fan-out.
+        jobs = remainingJobs
+
+        let cap = budget == nil
+            ? Self.providerTrainingParallelism(
+                contentCount: allIDs.count, providerCount: jobs.count)
+            : max(1, jobs.count)
         let trainingSource = source
 
         var start = 0
@@ -2378,20 +2819,28 @@ public actor CorpusContentEngine {
             var prepared = [PreparedProviderTraining?](
                 repeating: nil, count: end - start)
             try await withThrowingTaskGroup(
-                of: (Int, PreparedProviderTraining).self
+                of: (Int, PreparedProviderTraining, RetrainingOutcome).self
             ) { group in
                 for offset in 0..<(end - start) {
                     let job = jobs[start + offset]
                     group.addTask {
-                        (offset, try await Self.prepareProviderTraining(
+                        let (prepared, outcome) = try await Self.prepareProviderTraining(
                             job: job,
                             allIDs: allIDs,
                             indexedStates: indexedStates,
                             source: trainingSource,
-                            now: now))
+                            now: now,
+                            budget: budget)
+                        return (offset, prepared, outcome)
                     }
                 }
-                for try await (offset, result) in group {
+                for try await (offset, result, outcome) in group {
+                    guard outcome == .completed else {
+                        if case .skipped(let reason) = outcome {
+                            throw CorpusKitError.retrainingSkipped(reason)
+                        }
+                        continue
+                    }
                     prepared[offset] = result
                 }
             }
@@ -2407,6 +2856,9 @@ public actor CorpusContentEngine {
                 }
                 let basisStore = self.basisStore
                 let countsStore = self.countsStore
+                let skippedForTxn = result.skippedIDs
+                let indexedStatesForTxn = indexedStates
+                let nowForTxn = now
                 try await storage.transaction(isolation: .serializable) { txn in
                     try await basisStore.upsert(result.basisRow, into: txn.rowStore)
                     // Routed through persistCounts so a provider whose counts
@@ -2420,7 +2872,12 @@ public actor CorpusContentEngine {
                         documentCount: result.countsRow.documentCount,
                         vocabSize: result.countsRow.vocabSize,
                         updatedAt: result.countsRow.updatedAt,
-                        into: txn.rowStore)
+                        into: txn.rowStore,
+                        // The training commit is the full-corpus retrain the
+                        // migration queues, so this is the one write path
+                        // entitled to replace the invalidation sentinel. Every
+                        // other path leaves it standing.
+                        clearsInvalidation: true)
                     try await countsStore.deleteReferences(
                         modelID: result.job.modelID,
                         modelVersion: result.job.modelVersion,
@@ -2429,6 +2886,40 @@ public actor CorpusContentEngine {
                         try await countsStore.upsertReference(
                             reference, into: txn.rowStore)
                     }
+                    // F-6: upsert sentinel reference rows for IDs that listed in
+                    // activeContentIDs() but resolved nil during corpus preparation.
+                    // ORDERING MATTERS (G-6d): this upsert runs AFTER deleteReferences
+                    // so the sentinel rows are not silently erased by the delete.
+                    // Rationale: an identity listed but unresolved at publication is
+                    // by definition not in the trained base — exactly what a
+                    // non-subsumed reference row means. This keeps
+                    // trainedChunkCount + |pending| == |allIDs| population-consistent
+                    // by construction, so the counts-path population guard passes
+                    // on the next pass once the identity becomes resolvable.
+                    // Sentinel revision/digest: taken from indexed state when present
+                    // (the last successfully indexed revision), else revision 0 /
+                    // digest "" to signal "never indexed". The sentinel must never
+                    // be treated as subsumed (isSubsumed: false).
+                    for skippedID in skippedForTxn {
+                        let indexed = indexedStatesForTxn[skippedID]
+                        try await countsStore.upsertReference(
+                            PersistedCountsReference(
+                                modelID: result.job.modelID,
+                                modelVersion: result.job.modelVersion,
+                                contentID: skippedID,
+                                revision: indexed?.revision ?? 0,
+                                digest: indexed?.digest ?? "",
+                                updatedAt: nowForTxn,
+                                isSubsumed: false,
+                                growthTermDigests: []),
+                            into: txn.rowStore)
+                    }
+                }
+                // Log skipped IDs at warning level outside the transaction closure.
+                for skippedID in result.skippedIDs {
+                    let mid = result.job.modelID
+                    contentEngineLog.warning(
+                        "trainTrainableSlots: source returned nil for listed ID \(skippedID, privacy: .public) during corpus preparation for \(mid, privacy: .public) — sentinel reference row written")
                 }
                 let slotIndex = result.job.slotIndex
                 slots[slotIndex].provider = result.provider
@@ -2439,6 +2930,7 @@ public actor CorpusContentEngine {
                 slots[slotIndex].growthTermDigests = []
                 slots[slotIndex].countsVocabAnchor = result.countsRow.vocabSize
                 digests[modelID] = result.basisDigest
+                trainedSlotsCount += 1
 
                 if _trainFaultAfterModelID == modelID {
                     _trainFaultAfterModelID = nil
@@ -2450,11 +2942,11 @@ public actor CorpusContentEngine {
         }
 
         // Bump the global basis-generation counter after any successful
-        // retrain pass (whether force or first-ingest). This invalidates all
-        // existing coverage bitmap bits via generation mismatch — no estate-wide
-        // write; backfill lazily re-stamps each row under the new generation.
-        // Only bump when at least one slot was (re)trained.
-        if !jobs.isEmpty {
+        // retrain pass (whether force or first-ingest, counts path or corpus path).
+        // This invalidates all existing coverage bitmap bits via generation mismatch
+        // — no estate-wide write; backfill lazily re-stamps each row under the new
+        // generation. Bump when any slot was (re)trained on either path.
+        if trainedSlotsCount > 0 {
             let newGeneration = try await indexState.incrementBasisGeneration()
             if newGeneration == 0 {
                 // Wraparound: the 4-bit counter rolled from 15 back to 0.
@@ -2512,45 +3004,193 @@ public actor CorpusContentEngine {
     }
 
     /// Retrain every trainable slot from scratch on the full active corpus
-    /// and re-index every active content row. Deterministic ascending-ID
-    /// streaming order. Training is streamed (bounded) and each provider's
-    /// basis+counts commit is atomic.
-    public func reindex(now: Date) async throws {
-        _ = try await trainTrainableSlots(now: now, force: true)
-        // Bulk-write bracket (same idiom as reconcileConfiguredProviders and
-        // the drain worker): defer the resident dense index for the whole
-        // O(corpus) rewrite and publish ONCE — per-record invalidation makes
-        // an estate-scale retrain rebuild the resident index per write.
-        try await vectorStore.beginDeferredIndex()
-        let ids = try await source.activeContentIDs()
-        if case .wholeContent = configuration.indexUnit {
-            // Bound both task admission and prepared-result memory. The batch
-            // kernel preserves input order and advances each checkpoint only
-            // after BM25, vectors, and coverage are durable.
-            for batch in ids.chunked(into: 500) {
-                _ = try await indexWholeContentBatch(
-                    ids: batch, now: now, parallelism: nil,
-                    slotScope: .all, force: true)
+    /// and re-index every active content row without a serving gap.
+    ///
+    /// The operation is a shadow swap: trainable slots (RI, LSA)
+    /// write new vectors into a shadow generation that is invisible to queries
+    /// until the atomic publish at the end. The serving generation remains
+    /// readable throughout the build. On publish, VectorStore flips the
+    /// serving generation in one transaction and rebuilds the HNSW graph from
+    /// the new serving rows inside the same operation. Non-trainable slots
+    /// (stateless) write directly to the serving generation as
+    /// today; the deferred-index bracket batches their resident-index updates.
+    ///
+    /// On failure mid-way (any thrown error after beginShadowGeneration and before
+    /// publishShadowGeneration commits), abandonShadowGeneration is called to remove
+    /// shadow vectors and clear the registry entry (shadow_state → NULL, shadow_generation
+    /// → NULL). The original error is always rethrown — swallowing it would be worse
+    /// than the bug. The old serving generation remains intact and keeps serving.
+    ///
+    /// `rebuildAfterPhysicalRemoval` calls this method and rides the swap
+    /// unchanged — its caller resets in-memory state before calling reindex,
+    /// so the shadow-swap path is transparent to it.
+    ///
+    /// - Parameters:
+    ///   - now: Deterministic operation timestamp (passed in — never `Date()` inside
+    ///     the engine per the CLAUDE.md determinism rule).
+    ///   - laneScope: Which derived lanes to write. Defaults to `.all`. Pass `.dense`
+    ///     for basis-only retrains where BM25 IDF weights and binary fingerprints are
+    ///     unchanged — this skips the BM25 write and binary rows, embedding only the
+    ///     float-vector lane. Mirrors `recomposeDenseFloat` but applied corpus-wide.
+    public func reindex(now: Date, laneScope: LaneScope = .all) async throws {
+        _ = try await reindexImpl(now: now, laneScope: laneScope, budget: nil, boundedIDs: nil)
+    }
+
+    @discardableResult
+    public func reindex(
+        now: Date, budget: RetrainingBudget, laneScope: LaneScope = .all
+    ) async throws -> CorpusRetrainingReport {
+        let admissionLimit = budget.maxDocuments == Int.max
+            ? Int.max : budget.maxDocuments + 1
+        let ids = try await source.activeContentIDs(limit: admissionLimit)
+        let trainableIDs = slots
+            .filter { $0.provider is (any TrainableEmbeddingBasis) }
+            .map { $0.provider.modelID }
+        guard ids.count <= budget.maxDocuments else {
+            let reason = RetrainingSkipReason.documentLimit(
+                actual: ids.count, limit: budget.maxDocuments)
+            guard !trainableIDs.isEmpty else {
+                throw CorpusKitError.retrainingSkipped(reason)
             }
-        } else {
-            // Standalone passage policies also replace durable range rows;
-            // keep that mutation path serialized and policy-bound.
-            for id in ids {
-                guard let record = try await source.record(for: id) else {
-                    try await clearDerivedState(id: id, now: now)
-                    continue
-                }
-                if let checkpoint = try await prepareIndex(
-                    record: record, appliedCursor: nil, force: true, now: now,
-                    slotScope: .all
-                ) {
-                    try await indexState.advance(checkpoint)
-                }
-            }
+            return CorpusRetrainingReport(
+                completedModelIDs: [],
+                skippedModelIDs: Dictionary(uniqueKeysWithValues:
+                    trainableIDs.map { ($0, reason) }))
         }
+        if let reason = budget.cancellationReason {
+            guard !trainableIDs.isEmpty else {
+                throw CorpusKitError.retrainingSkipped(reason)
+            }
+            return CorpusRetrainingReport(
+                completedModelIDs: [],
+                skippedModelIDs: Dictionary(uniqueKeysWithValues:
+                    trainableIDs.map { ($0, reason) }))
+        }
+        return try await reindexImpl(
+            now: now, laneScope: laneScope, budget: budget, boundedIDs: ids)
+    }
+
+    private func reindexImpl(
+        now: Date, laneScope: LaneScope,
+        budget: RetrainingBudget?, boundedIDs: [CorpusContentID]?
+    ) async throws -> CorpusRetrainingReport {
+        // Identify trainable model IDs: slots whose provider is a TrainableEmbeddingBasis
+        // (RI, LSA). Their new vectors will be written into a shadow
+        // generation and published atomically. Stateless slots are not swapped.
+        let trainableModelIDs = slots
+            .filter { $0.provider is (any TrainableEmbeddingBasis) }
+            .map { $0.provider.modelID }
+
+        // Open a shadow generation for each trainable model BEFORE training begins.
+        // The VectorStore will route all subsequent addPayloads calls for these models
+        // to the shadow generation automatically — the indexWholeContentBatch code
+        // does not need to know which models are in shadow. Non-trainable model writes
+        // land on the serving generation unchanged (their resident structures continue
+        // serving throughout the build).
+        if !trainableModelIDs.isEmpty {
+            try await vectorStore.beginShadowGeneration(modelIDs: trainableModelIDs)
+        }
+
+        // Guard: wrap the entire span between beginShadowGeneration and the commit
+        // point (publishShadowGeneration) in a do/catch. Any throw — during
+        // training, the write pass, or publish itself — triggers abandonShadowGeneration
+        // before the error is rethrown. This ensures no vectors are left at a shadow
+        // generation that will never become visible (the third state the governing
+        // invariant forbids).
+        //
+        // Abort / publish are structurally mutual-exclusive by the do/catch shape:
+        // publish is inside the do block; if it succeeds the catch does not run,
+        // so abandon is never called after a successful commit. The brief asked for
+        // deliberate ordering rather than relying on abandon being a no-op after
+        // publish — this structure provides it.
+        //
+        // Deferred-index bracket (beginDeferredIndex / publishResidentIndex): the
+        // deferred bracket tracks in-memory resident index updates only; underlying
+        // storage writes for non-trainable models are committed as they occur. If
+        // reindex fails after beginDeferredIndex, the in-memory binary resident index
+        // is stale but storage is consistent — no data is in a permanently invisible
+        // state. The next successful reindex's publishResidentIndex call corrects the
+        // in-memory state. No explicit "cancelDeferredIndex" operation is available
+        // or needed; the stale state is transient and self-correcting.
+        do {
+            // Retrain all trainable slots from scratch — produces the new basis blobs
+            // that the subsequent re-embed pass will use. No vector rows are written here.
+            _ = try await trainTrainableSlots(
+                now: now, force: true, budget: budget, boundedIDs: boundedIDs)
+
+            // Bulk-write bracket for non-trainable model writes (stateless
+            // slots): defers resident dense-index updates for the O(corpus) pass and
+            // publishes once at the end. Trainable-model writes bypass resident structures
+            // by VectorStore shadow-write contract (shadow rows never enter the binary lane,
+            // float indices, or HNSW structures during the build phase).
+            try await vectorStore.beginDeferredIndex()
+
+            let ids: [CorpusContentID]
+            if let boundedIDs { ids = boundedIDs }
+            else { ids = try await source.activeContentIDs() }
+            if case .wholeContent = configuration.indexUnit {
+                // Bound both task admission and prepared-result memory. The batch
+                // kernel preserves input order and advances each checkpoint only
+                // after BM25, vectors, and coverage are durable.
+                for batch in ids.chunked(into: 500) {
+                    _ = try await indexWholeContentBatch(
+                        ids: batch, now: now, parallelism: nil,
+                        slotScope: .all, laneScope: laneScope, force: true)
+                }
+            } else {
+                // Standalone passage mode: always full-lane (LaneScope.all).
+                // Dense-only partial reindex is available on the wholeContent path only.
+                for id in ids {
+                    guard let record = try await source.record(for: id) else {
+                        try await clearDerivedState(id: id, now: now)
+                        continue
+                    }
+                    if let checkpoint = try await prepareIndex(
+                        record: record, appliedCursor: nil, force: true, now: now,
+                        slotScope: .all
+                    ) {
+                        try await indexState.advance(checkpoint)
+                    }
+                }
+            }
+
+            // Atomic publish for trainable models: one storage transaction flips
+            // serving_generation to shadow_generation, sets shadow_state 'pending-reclaim'
+            // on the old generation's rows, and rebuilds the HNSW graph from the new
+            // serving rows before returning. A reader sees the old set or the new set,
+            // never a mixture. Old-generation rows are left 'pending-reclaim'; deletion
+            // is REM-BETA's duty (idempotent, resumable, not called here).
+            if !trainableModelIDs.isEmpty {
+                try await vectorStore.publishShadowGeneration(modelIDs: trainableModelIDs)
+            }
+        } catch CorpusKitError.retrainingSkipped(let reason) {
+            if !trainableModelIDs.isEmpty {
+                _ = try? await vectorStore.abandonShadowGeneration(modelIDs: trainableModelIDs)
+            }
+            return CorpusRetrainingReport(
+                completedModelIDs: [],
+                skippedModelIDs: Dictionary(uniqueKeysWithValues:
+                    trainableModelIDs.map { ($0, reason) }))
+        } catch {
+            // Abort the shadow generation before rethrowing: delete shadow vectors and
+            // clear shadow_generation / shadow_state in the registry. abandonShadowGeneration
+            // is idempotent — calling it when no shadow is open is a safe no-op.
+            // try? discards any error from the abort itself; the ORIGINAL error is what
+            // the caller needs to see.
+            if !trainableModelIDs.isEmpty {
+                _ = try? await vectorStore.abandonShadowGeneration(modelIDs: trainableModelIDs)
+            }
+            throw error
+        }
+
+        // Publish deferred resident index for non-trainable model writes — the binary
+        // lane (MIH + brute-force) gets its one bulk rebuild here, same as before.
         try await vectorStore.publishResidentIndex()
+
         try await providerConfigurationStore.markCurrent(
             providerGenerationToken(), now: now)
+        return CorpusRetrainingReport(
+            completedModelIDs: trainableModelIDs.sorted())
     }
 
     // MARK: - Maintained counts
@@ -2866,6 +3506,20 @@ public actor CorpusContentEngine {
             .map { ($0.contentID, $0.revision, $0.digest) }
     }
 
+    /// All non-cursor index-state rows for this corpus engine, without
+    /// filtering by content ID.
+    ///
+    /// GeniusLocusKit calls this to compare each drawer's `distilledAt` instant
+    /// against the corresponding index row's `updatedAt`, detecting the mid-run
+    /// crash scenario where the distillation sweep committed but the reindex did
+    /// not. The feed-cursor sentinel row is excluded (same filter as
+    /// `indexCoverageAttestations`). Mirrors Rust
+    /// `CorpusContentEngine::all_index_states`.
+    public func allIndexStates() async throws -> [CorpusIndexState] {
+        try await indexState.allStates()
+            .filter { $0.contentID != Self.feedCursorRowID }
+    }
+
     /// Indexed content-row count (content-unit semantics — canonical rows,
     /// not chunks). The estate drain status reports this.
     public func count() async throws -> Int {
@@ -2915,7 +3569,7 @@ public actor CorpusContentEngine {
         for id in ids {
             for key in try await unitKeys(for: id) {
                 for slot in slots {
-                    for lane: Int in [0, 1] {
+                    for lane: Int in Self.claimedLanes {
                         if shared.contains("\(slot.provider.modelID)|\(lane)") { continue }
                         keys.append(VectorExactKey(
                             itemID: key, vectorIndex: lane,
@@ -2933,65 +3587,12 @@ public actor CorpusContentEngine {
         try await claims.releaseAllClaims(consumer: Self.claimsConsumer)
     }
 
-    // MARK: - Per-signal dense float lanes (the RecallDirector seam)
-
-    /// Per-signal dense float NEAREST recall — content-ID keyed. One
-    /// `(modelID, outcome)` pair per held slot, in slot order. Hit item IDs
-    /// are canonical content IDs (passage keys aggregate to their content
-    /// ID before ranking).
-    public func floatNearestPerSignal(
-        query: String, limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        await floatPerSignal(query: query, limit: limit, direction: .nearest)
-    }
-
-    /// Single-signal dense float nearest recall — the DEFAULT slot's
-    /// outcome (compatibility convenience over `floatNearestPerSignal`).
-    public func floatNearest(query: String, limit: Int) async -> FloatLaneOutcome {
-        await floatNearestPerSignal(query: query, limit: limit).first?.outcome ?? .emptyQuery
-    }
-
-    /// Per-signal dense float FARTHEST (anti-similarity) recall.
-    public func floatFarthestPerSignal(
-        query: String, limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        await floatPerSignal(query: query, limit: limit, direction: .farthest)
-    }
-
-    /// Per-signal dense float nearest recall WITH per-query discrimination signal.
-    ///
-    /// Same semantics and return shape as `floatNearestPerSignal`, but each entry
-    /// carries an optional `FloatDiscriminationSignal` alongside the outcome.
-    /// Discrimination is non-nil exactly when the outcome is `.hits` with ≥1 result.
-    ///
-    /// **Measurement only:** no behaviour change inside `CorpusContentEngine`.
-    /// RecallDirector (GLK) consumes the signal to discount the dense contribution
-    /// when the lane self-reports degeneracy. Standalone consumers may use the signal
-    /// for their own fusion decisions.
-    ///
-    /// See `FloatDiscriminationSignal` for the statistic definition and threshold guidance.
-    public func floatNearestPerSignalWithDiscrimination(
-        query: String, limit: Int
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome, discrimination: FloatDiscriminationSignal?)] {
-        let perSignal = await floatNearestPerSignal(query: query, limit: limit)
-        return perSignal.map { entry in
-            (modelID: entry.modelID,
-             outcome: entry.outcome,
-             discrimination: Corpus.discriminationSignal(from: entry.outcome))
-        }
-    }
-
     /// Test-only: when non-nil, the next per-signal float call reports
     /// `.storeError(this)` for the DEFAULT slot (single-use), mirroring the
     /// legacy `Corpus._testForceFloatStoreError` seam so GLK's dark-lane
     /// chain tests exercise the store-error contract. Never set in
     /// production.
-    var _forcedFloatError: Error? = nil
-
-    /// Install the single-use forced float store error (test seam).
-    public func _testForceFloatStoreError(_ error: Error) {
-        _forcedFloatError = error
-    }
+    package var _forcedFloatError: Error? = nil
 
     /// Test-only ingest failure hook: invoked with the content ID BEFORE the
     /// drain processes a job; a throw simulates a transient index failure so
@@ -3005,141 +3606,37 @@ public actor CorpusContentEngine {
 
     // MARK: - Sub-span max-cosine scoring (MISSION_11X_RECALL_GAP_01 Item 1)
 
-    /// Score a bounded candidate set at sub-span granularity (transient).
+    /// Score a candidate set at sub-span granularity (transient) under a budget.
     ///
-    /// Delegates to `SubSpanScoring.score(query:candidateIDs:source:provider:)`,
+    /// Delegates to `SubSpanScoring.score(query:candidateIDs:source:provider:budget:)`,
     /// passing the engine's own `source` (the `CorpusContentSource` — works for
     /// BOTH standalone `CorpusDocumentStore` and GLK's LocusKit-backed adapter)
     /// and the DEFAULT slot's provider.
     ///
     /// Sub-span vectors are computed on the fly and DISCARDED — zero persistence.
-    /// Compute is bounded by `candidateIDs.count`, not corpus size.
+    /// Compute is bounded by `budget` (a per-record byte cap and an aggregate
+    /// window budget), not by the candidate set or the corpus; `candidateIDs`
+    /// is a priority order the budget serves front first.
     ///
     /// - Parameters:
     ///   - query: The query text to score against.
-    ///   - candidateIDs: Bounded content ID set (typically ~40 from the pool).
-    /// - Returns: Max-cosine ∈ [0,1] per candidate ID. Missing keys → 0.0.
+    ///   - candidateIDs: Content IDs in priority order.
+    ///   - budget: The work bound (default `SubSpanBudget.default`).
+    /// - Returns: The scores (max-cosine ∈ [0,1] per scored candidate), the
+    ///   truncation flag, the unscored ids and the window count.
     public func scoreSubSpans(
         query: String,
-        candidateIDs: [CorpusContentID]
-    ) async -> [CorpusContentID: Float] {
+        candidateIDs: [CorpusContentID],
+        budget: SubSpanBudget = .default
+    ) async -> SubSpanScoringOutcome {
         await SubSpanScoring.score(
             query: query,
             candidateIDs: candidateIDs,
             source: source,
-            provider: slots[0].provider)
+            provider: slots[0].provider,
+            budget: budget)
     }
 
-    private func floatPerSignal(
-        query: String, limit: Int, direction: SearchDirection
-    ) async -> [(modelID: String, outcome: FloatLaneOutcome)] {
-        guard limit > 0, !query.isEmpty else {
-            return slots.map { (modelID: $0.provider.modelID, outcome: .emptyQuery) }
-        }
-        // Consume the forced-error seam for the DEFAULT slot (nearest path
-        // only — same contract as the legacy engine's seam).
-        var forcedDefault: FloatLaneOutcome? = nil
-        if direction == .nearest, let forced = _forcedFloatError {
-            _forcedFloatError = nil
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.store_error", value: 1.0,
-                tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-            forcedDefault = .storeError(forced)
-        }
-        var results: [(modelID: String, outcome: FloatLaneOutcome)] = []
-        results.reserveCapacity(slots.count)
-        for (slotIndex, slot) in slots.enumerated() {
-            if slotIndex == 0, let forced = forcedDefault {
-                results.append((slot.provider.modelID, forced))
-                continue
-            }
-            let provider = slot.provider
-            let probe: [Float]
-            do {
-                let result = try await provider.embedFloat(query)
-                guard !result.isEmpty else {
-                    Intellectus.report(.metric(
-                        name: "corpus.float_lane.dark_provider", value: 1.0,
-                        tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                    results.append((provider.modelID, .unavailableProviderOptOut))
-                    continue
-                }
-                probe = result
-            } catch VectorKitError.embedFloatVocabMiss {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_vocab_miss", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .unavailableNoVocabHit))
-                continue
-            } catch {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_provider", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .unavailableProviderOptOut))
-                continue
-            }
-            let matches: [VectorMatch]
-            do {
-                switch direction {
-                case .nearest:
-                    matches = try await vectorStore.findNearestFloat(
-                        probe: probe, modelID: provider.modelID, limit: limit * 4)
-                case .farthest:
-                    matches = try await vectorStore.findFarthestFloat(
-                        probe: probe, modelID: provider.modelID, limit: limit * 4)
-                }
-            } catch {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.store_error", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .storeError(error)))
-                continue
-            }
-            guard !matches.isEmpty else {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_no_rows", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .unavailableNoFloatRows))
-                continue
-            }
-            // Aggregate unit hits to canonical content IDs — DIRECT identity;
-            // a passage key parses to its content ID, a whole-content key IS it.
-            var byContent: [String: Float] = [:]
-            for match in matches {
-                let id = IndexUnitIdentity.contentID(fromItemKey: match.itemID)
-                let similarity = 1.0 - Float(match.distance) / 10_000.0
-                switch direction {
-                case .nearest:
-                    byContent[id] = max(byContent[id] ?? -Float.greatestFiniteMagnitude, similarity)
-                case .farthest:
-                    byContent[id] = min(byContent[id] ?? Float.greatestFiniteMagnitude, similarity)
-                }
-            }
-            guard !byContent.isEmpty else {
-                Intellectus.report(.metric(
-                    name: "corpus.float_lane.dark_no_rows", value: 1.0,
-                    tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-                results.append((provider.modelID, .unavailableNoFloatRows))
-                continue
-            }
-            var ranked = byContent.map { (itemID: $0.key, similarity: $0.value) }
-            ranked.sort { a, b in
-                if a.similarity != b.similarity {
-                    switch direction {
-                    case .nearest: return a.similarity > b.similarity
-                    case .farthest: return a.similarity < b.similarity
-                    }
-                }
-                return a.itemID < b.itemID
-            }
-            let hits = Array(ranked.prefix(limit))
-            Intellectus.report(.metric(
-                name: "corpus.float_lane.hit", value: Double(hits.count),
-                tags: ["kit": "CorpusKit"], ts: Date().timeIntervalSince1970))
-            results.append((provider.modelID, .hits(hits)))
-        }
-        return results
-    }
 }
 
 

@@ -13,6 +13,7 @@
 
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 struct UninstallCommand: AsyncParsableCommand {
@@ -98,6 +99,20 @@ struct UninstallCommand: AsyncParsableCommand {
             print("  ✓ Stopped and removed the management console (launchd).")
             LaunchAgent.uninstallDaemon(homeDirectory: home)
             print("  ✓ Stopped and removed the resident mootx01 daemon (launchd).")
+            LaunchAgent.uninstallDaemonBundle(homeDirectory: home)
+            print("  ✓ Stopped and removed the Community daemon provider (launchd).")
+
+            // MACD-2c2 preservation contract: uninstall removes ONLY the
+            // artifacts this installation OWNS (DaemonBundle.ownedArtifactPaths
+            // — the disabled bundle registration plist here, and the bundle
+            // itself via removePlacedBinary's ~/.mootx01 teardown below).
+            // The estate databases, migration receipts, backups, and the
+            // Keychain credential authority (K_install, estate keys) are NOT
+            // owned artifacts and survive every uninstall; the separate
+            // explicit data-removal flow below is the only thing that may
+            // touch estate data, and even it never touches non-owned census
+            // candidates (other editions' default estates).
+            print("  ⓘ Estate data, migration receipts, backups, and Keychain credentials are preserved.")
             #endif
 
             // Tear down Harness Memory Mode state BEFORE removing the binary —
@@ -109,7 +124,7 @@ struct UninstallCommand: AsyncParsableCommand {
             let harnessHookURL = HarnessMemoryPaths.hookScriptURL(homeDirectory: home)
             let harnessClaudeURL = HarnessMemoryPaths.globalCLAUDEMDURL(homeDirectory: home)
             let harnessWasActive = FileManager.default.fileExists(atPath: harnessHookURL.path)
-            try? HarnessMemorySettings.disable(settingsURL: harnessSettingsURL, homeDirectory: home)
+            _ = try? HarnessMemorySettings.disable(settingsURL: harnessSettingsURL, homeDirectory: home)
             try? HarnessMemoryHook.remove(at: harnessHookURL)
             try? HarnessMemoryCLAUDE.disable(at: harnessClaudeURL)
             if harnessWasActive {
@@ -138,14 +153,35 @@ struct UninstallCommand: AsyncParsableCommand {
         print("\nDone. Restart your MCP client to apply changes.")
     }
 
-    /// Offer/confirm/trash the data directory. The decision matrix lives in
-    /// `DataRetention.decideDataRemoval` (unit-tested); this wrapper owns
-    /// the prompts and the exit codes.
+    /// Offer/confirm/trash the configuration directory. The decision matrix
+    /// lives in `DataRetention.decideDataRemoval` (unit-tested); this wrapper
+    /// owns the prompts and the exit codes. The inventory is the catalog's:
+    /// a missing or unreadable catalog means no estates to report, and the
+    /// directory is offered on the strength of the mgr store alone.
     private func removeUserData() throws {
-        let environment = ProcessInfo.processInfo.environment
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dataDir = MootPaths.resolveDataDirectory(environment: environment, homeDirectory: home)
-        guard let inventory = DataRetention.dataInventory(in: dataDir) else { return }
+        let dataDir = EstateCatalog.configurationDirectory
+        let records = (try? EstateCatalog.load())?.records ?? []
+        let defaultRecord = records.first { $0.name == EstateCatalog.defaultName }
+        let registeredEstateFiles = records.flatMap {
+            $0.ownedFileURLs + [$0.legacyEncryptionOptOutURL]
+        }
+        let externalEstateFiles = DataRetention.externalEstateFiles(
+            configurationDirectory: dataDir,
+            registeredEstateFiles: registeredEstateFiles
+        )
+        guard let inventory = DataRetention.dataInventory(
+            defaultDatabaseURL: defaultRecord?.databaseURL,
+            namedDatabaseURLs: records.filter { $0.name != EstateCatalog.defaultName }.map(\.databaseURL),
+            configurationDirectory: dataDir)
+        else { return }
+
+        func printExternalEstateFiles() {
+            guard !externalEstateFiles.isEmpty else { return }
+            print("  External registered estate files:")
+            for file in externalEstateFiles {
+                print("    \(file.path)")
+            }
+        }
 
         let decision = DataRetention.decideDataRemoval(
             purge: purge,
@@ -154,12 +190,14 @@ struct UninstallCommand: AsyncParsableCommand {
             offer: {
                 print("\nYour data is still in place at \(dataDir.path):")
                 print("  \(inventory)")
+                printExternalEstateFiles()
                 print("Remove it too? [y/N]: ", terminator: "")
                 let answer = readLine()?.trimmingCharacters(in: .whitespaces).lowercased() ?? ""
                 return answer == "y" || answer == "yes"
             },
             confirm: {
                 print("WARNING: this DESTROYS all MOOTx01 memory data (\(inventory)).")
+                printExternalEstateFiles()
                 print("It will be moved to \(DataRetention.trashName) (recoverable until you empty it).")
                 print("Type 'yes' to confirm: ", terminator: "")
                 return readLine()?.trimmingCharacters(in: .whitespaces) == "yes"
@@ -174,11 +212,14 @@ struct UninstallCommand: AsyncParsableCommand {
             throw ExitCode.failure
         case .trash:
             do {
-                try DataRetention.trashDataDirectory(dataDir)
-                print("  ✓ Data moved to \(DataRetention.trashName): \(dataDir.path)")
+                try DataRetention.trashDataDirectory(
+                    dataDir,
+                    registeredEstateFiles: registeredEstateFiles
+                )
+                print("  ✓ All registered estate data moved to \(DataRetention.trashName).")
             } catch {
-                print("  ✗ Could not move \(dataDir.path) to \(DataRetention.trashName): \(error)")
-                print("    Data left in place.")
+                print("  ✗ Could not move all registered estate data to \(DataRetention.trashName): \(error)")
+                print("    Some data may remain in place; the catalog move is attempted only after every external estate moves.")
                 throw ExitCode.failure
             }
         }

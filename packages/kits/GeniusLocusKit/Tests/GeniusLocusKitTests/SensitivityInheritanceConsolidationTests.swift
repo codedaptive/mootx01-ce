@@ -26,7 +26,7 @@ import Foundation
 import LocusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 @testable import SubstrateML
 @testable import GeniusLocusKit
@@ -94,8 +94,7 @@ struct SensitivityInheritanceConsolidationTests {
         }
         _ = try await captureItem(body: clusterBodies[3], sensitivity: .restricted, kit: kit, handle: handle)
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         let produced = try await kit.consolidationSweep(
             handle: handle,
@@ -121,8 +120,7 @@ struct SensitivityInheritanceConsolidationTests {
             _ = try await captureItem(body: body, sensitivity: .normal, kit: kit, handle: handle)
         }
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         let produced = try await kit.consolidationSweep(
             handle: handle,
@@ -150,8 +148,7 @@ struct SensitivityInheritanceConsolidationTests {
         }
         _ = try await captureItem(body: clusterBodies[3], sensitivity: .restricted, kit: kit, handle: handle)
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         _ = try await kit.consolidationSweep(
             handle: handle,
@@ -161,9 +158,7 @@ struct SensitivityInheritanceConsolidationTests {
         // A fifth NORMAL item arrives and folds in.
         let fifthBody = "Project Falcon deadline moved to March. Falcon deploy target is the staging cluster. Maria confirmed the Falcon rollout checklist."
         _ = try await captureItem(body: fifthBody, sensitivity: .normal, kit: kit, handle: handle)
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn,
-            now: aged.addingTimeInterval(3_600), limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: aged.addingTimeInterval(3_600))
 
         var foldConfig = ConsolidationConfig()
         foldConfig.hammingCeiling = 90
@@ -192,7 +187,7 @@ struct SensitivityInheritanceConsolidationTests {
     // MARK: - VagueRecall hop-1 ceiling (§D.3)
 
     @Test("secret vague item is invisible to vagueRecall hop-1 (§D.3 ≤ elevated ceiling)")
-    func secretVagueInvisibleToVagueRecall() async throws {
+    func vagueWithheldCountExcludesPrimarySecretCandidate() async throws {
         let (kit, handle) = try await openEstate()
         let now = Date()
 
@@ -201,8 +196,7 @@ struct SensitivityInheritanceConsolidationTests {
             _ = try await captureItem(body: body, sensitivity: .secret, kit: kit, handle: handle)
         }
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         let produced = try await kit.consolidationSweep(
             handle: handle,
@@ -229,6 +223,8 @@ struct SensitivityInheritanceConsolidationTests {
         }
         #expect(!hasSecretConstituentViaHop1,
                 "hop-2 must not surface .secret constituents via a .secret vague item (hop-1 gates)")
+        #expect(result.withheldBySensitivity == 1,
+                "only the secret hop-1 vague candidate counts; constituents do not")
     }
 
     @Test("elevated vague item IS visible to vagueRecall hop-1")
@@ -240,8 +236,7 @@ struct SensitivityInheritanceConsolidationTests {
             _ = try await captureItem(body: body, sensitivity: .elevated, kit: kit, handle: handle)
         }
 
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let aged = now.addingTimeInterval(91 * 86_400)
         _ = try await kit.consolidationSweep(
             handle: handle,
@@ -280,8 +275,7 @@ struct SensitivityInheritanceConsolidationTests {
         }
         _ = try await captureItem(body: clusterBodies[3], sensitivity: .restricted,
                                   kit: kit, handle: handle)
-        _ = try await kit.distillItemsSweep(
-            handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: now, limit: nil)
+        _ = try await kit.fingerprintAllDrawers(handle: handle, now: now)
         let produced = try await kit.consolidationSweep(
             handle: handle, distillFn: GeniusLocusKit.defaultDistillFn, now: aged)
         #expect(produced == 1, "setup: cluster must consolidate to one vague item")
@@ -340,4 +334,3 @@ struct SensitivityInheritanceConsolidationTests {
                 "sweep 2: repair prologue must be idempotent on a correctly-stamped estate")
     }
 }
-

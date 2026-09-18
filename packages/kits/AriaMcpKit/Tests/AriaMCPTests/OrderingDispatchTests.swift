@@ -91,8 +91,9 @@ struct OrderingDispatchTests {
         #expect(!isError, "ordering=byRelevanceDesc must not produce an error result")
         let text = result.objectValue?["content"]?
             .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
+        // S1 header: "found 1 candidate memory, one per line" (COMPOSER-02B §11.1)
         #expect(
-            text.contains("found 1 memory"),
+            text.contains("found 1 candidate memory"),
             "byRelevanceDesc must find the filed memory; got: \(text)"
         )
     }
@@ -104,17 +105,17 @@ struct OrderingDispatchTests {
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("any-query"),
+                "query": .string("empty-estate-query"),
                 "ordering": .string("byRelevanceDesc"),
             ])
         )
         let isError = result.objectValue?["isError"]?.boolValue ?? true
-        #expect(!isError, "ordering=byRelevanceDesc on empty estate must not error; got: \(result)")
+        #expect(!isError, "byRelevanceDesc on an empty estate must succeed with zero hits")
         let text = result.objectValue?["content"]?
             .arrayValue?.first?.objectValue?["text"]?.stringValue ?? ""
         #expect(
-            text.contains("found 0 memory"),
-            "empty estate must return 0 memories; got: \(text)"
+            text.contains("found 0 candidate memories"),
+            "byRelevanceDesc on an empty estate must report zero hits; got: \(text)"
         )
     }
 
@@ -122,21 +123,17 @@ struct OrderingDispatchTests {
 
     /// The moot_memory_search tool schema must advertise "byRelevanceDesc" in the
     /// ordering field description so clients can discover the spelling.
-    @Test func memorySearchSchemaAdvertisesByRelevanceDesc() {
-        let tools = ToolProjection.tools()
-        guard let searchTool = tools.first(where: { $0.name == "moot_memory_search" }) else {
-            Issue.record("moot_memory_search not found in tool list")
+    @Test func memorySearchSchemaAdvertisesByRelevanceDesc() throws {
+        guard let tool = ToolProjection.tools().first(where: { $0.name == "moot_memory_search" }),
+              let props = tool.inputSchema.objectValue?["properties"]?.objectValue,
+              let orderingProp = props["ordering"]?.objectValue,
+              let desc = orderingProp["description"]?.stringValue
+        else {
+            Issue.record("moot_memory_search must have an ordering property with a description")
             return
         }
-        let properties = searchTool.inputSchema.objectValue?["properties"]?.objectValue ?? [:]
-        guard let orderingDesc = properties["ordering"]?.objectValue?["description"]?.stringValue else {
-            Issue.record("moot_memory_search schema must have an ordering property with a description")
-            return
-        }
-        #expect(
-            orderingDesc.contains("byRelevanceDesc"),
-            "ordering description must advertise byRelevanceDesc; got: \(orderingDesc)"
-        )
+        #expect(desc.contains("byRelevanceDesc"),
+                "ordering description must mention 'byRelevanceDesc'; got: \(desc)")
     }
 
     // MARK: - C. Other orderings unchanged
@@ -144,11 +141,11 @@ struct OrderingDispatchTests {
     /// byCaptureTimeDesc (the default) must succeed as before.
     @Test func byCaptureTimeDescSucceeds() async throws {
         let dispatcher = try await makeDispatcher()
-        try await fileMemory(content: "capture-time-desc-test", location: "test", dispatcher: dispatcher)
+        try await fileMemory(content: "byCaptureTimeDesc-ordering-test", location: "test", dispatcher: dispatcher)
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("capture-time-desc-test"),
+                "query": .string("byCaptureTimeDesc-ordering-test"),
                 "ordering": .string("byCaptureTimeDesc"),
             ])
         )
@@ -159,11 +156,11 @@ struct OrderingDispatchTests {
     /// byCaptureTimeAsc must succeed as before.
     @Test func byCaptureTimeAscSucceeds() async throws {
         let dispatcher = try await makeDispatcher()
-        try await fileMemory(content: "capture-time-asc-test", location: "test", dispatcher: dispatcher)
+        try await fileMemory(content: "byCaptureTimeAsc-ordering-test", location: "test", dispatcher: dispatcher)
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("capture-time-asc-test"),
+                "query": .string("byCaptureTimeAsc-ordering-test"),
                 "ordering": .string("byCaptureTimeAsc"),
             ])
         )
@@ -174,11 +171,11 @@ struct OrderingDispatchTests {
     /// byRoomAsc must succeed as before.
     @Test func byRoomAscSucceeds() async throws {
         let dispatcher = try await makeDispatcher()
-        try await fileMemory(content: "room-asc-test", location: "test", dispatcher: dispatcher)
+        try await fileMemory(content: "byRoomAsc-ordering-test", location: "test", dispatcher: dispatcher)
         let result = try await dispatcher.dispatch(
             name: "moot_memory_search",
             arguments: .object([
-                "query": .string("room-asc-test"),
+                "query": .string("byRoomAsc-ordering-test"),
                 "ordering": .string("byRoomAsc"),
             ])
         )

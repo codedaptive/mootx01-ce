@@ -1,0 +1,213 @@
+// SpanVectorStoreTests.swift
+//
+// Encoder span rows in the vectors table (ENCODER_RERANK_CONTRACT §3):
+// writeSpanVectors / spanVectors / deleteSpanVectors / reclaimRetiredVectorRows.
+//
+// Failure modes pinned:
+//   1. Round trip: 3 spans written under one item come back in index order
+//      with their int8 bytes, scale and ext bounds intact. A port that stores
+//      bytes without two's-complement conversion, drops the scale, or mangles
+//      the ext JSON fails here.
+//   2. Replace, never append: a second writeSpanVectors with 2 spans leaves
+//      exactly 2 rows. A port that upserts by (item, index) leaves the stale
+//      third span; a port that inserts without deleting hits the UNIQUE
+//      constraint or returns 5 rows.
+//   3. Reclaim: rows under a retired model id and rows at a non-serving
+//      generation are deleted; serving rows of a live model survive.
+
+import Testing
+import EngramLib
+import Foundation
+import PersistenceKit
+@testable import SynapseKit
+
+@Suite("SpanVectorStore", .serialized)
+struct SpanVectorStoreTests {
+
+    private func makeStore() async throws -> VectorStore {
+        let storage = try makeScratchStorage()
+        try await storage.open(schema: VectorStore.schemaDeclaration)
+        return VectorStore(storage: storage)
+    }
+
+    private func span(_ index: UInt32, _ bytes: [Int8], scale: Float, start: Int, end: Int) -> SpanVectorInput {
+        SpanVectorInput(index: index, int8: bytes, scale: scale, startWord: start, endWord: end,
+                        contentVersion: "cv-\(index)")
+    }
+
+    @Test("three spans round-trip in index order with bounds, scale and bytes intact")
+    func roundTrip() async throws {
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_757_000_000)
+        // Written out of order on purpose: the read path orders by vector_index.
+        let spans = [
+            span(2, [127, -127, 0, 5], scale: 0.0078, start: 60, end: 120),
+            span(0, [1, -1, 2, -2], scale: 0.5, start: 0, end: 60),
+            span(1, [-128, 127, 64, -64], scale: 0.25, start: 30, end: 90),
+        ]
+        try await store.writeSpanVectors(itemID: "item-a", modelID: "minilm-l6-v2-w60",
+                                         modelVersion: "r1", spans: spans, filedAt: now)
+        let rows = try await store.spanVectors(itemIDs: ["item-a", "item-missing"], modelID: "minilm-l6-v2-w60")
+        #expect(rows.keys.sorted() == ["item-a"], "items without span rows are absent")
+        let got = try #require(rows["item-a"])
+        #expect(got.map(\.index) == [0, 1, 2])
+        #expect(got[1].int8 == [-128, 127, 64, -64], "two's-complement bytes survive the BLOB round trip")
+        #expect(got[1].scale == Float(0.25))
+        #expect(got[2].startWord == 60 && got[2].endWord == 120 && got[2].contentVersion == "cv-2")
+        // A different model id sees nothing: spans are keyed by model identity.
+        let other = try await store.spanVectors(itemIDs: ["item-a"], modelID: "minilm-l6-v2-w150")
+        #expect(other.isEmpty)
+    }
+
+    @Test("strict snapshot retains a malformed serving row and its receipt fails after a generation flip")
+    func strictSnapshotReceipt() async throws {
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_757_000_000)
+        let model = "minilm-l6-v2-w60"
+        try await store.writeSpanVectors(itemID: "strict-item", modelID: model, modelVersion: "r1", spans: [
+            span(0, [1, 2, 3, 4], scale: 1, start: 0, end: 4),
+            span(1, [5, 6, 7, 8], scale: 1, start: 2, end: 6),
+            span(2, [9, 10, 11, 12], scale: 1, start: 4, end: 8),
+        ], filedAt: now)
+        _ = try await store.storage.rowStore.delete(
+            table: "vectors",
+            where: .and([
+                .eq(Column(table: "vectors", name: "item_id"), .text("strict-item")),
+                .eq(Column(table: "vectors", name: "model_id"), .text(model)),
+                .eq(Column(table: "vectors", name: "vector_index"), .int(1)),
+                .eq(Column(table: "vectors", name: "kind"), .int(Int64(VectorKind.int8.rawValue))),
+                .eq(Column(table: "vectors", name: "generation"), .int(0)),
+            ]))
+        _ = try await store.storage.rowStore.insert(table: "vectors", values: [
+            "id": .uuid(UUID()), "item_id": .text("strict-item"), "vector_index": .int(1),
+            "model_id": .text(model), "model_version": .text("r1"),
+            "kind": .int(Int64(VectorKind.int8.rawValue)), "dim": .int(4),
+            "payload": .blob(Data([5, 6, 7, 8])), "scale": .float(1),
+            "filed_at": .timestamp(now), "ext": .text("not-json"), "generation": .int(0),
+        ])
+
+        let receipt = try await store.strictSpanVectorSnapshot(itemIDs: ["strict-item"], modelID: model)
+        #expect(receipt.servingGeneration == 0)
+        #expect(receipt.rows["strict-item"]?.map(\.index) == [0, 2])
+        #expect(receipt.malformedRows == [StrictSpanVectorMalformedRow(itemID: "strict-item", index: 1)])
+        #expect(try await store.spanVectors(itemIDs: ["strict-item"], modelID: model)["strict-item"]?.count == 2,
+                "the generic tolerant API keeps skipping the malformed row")
+        #expect(try await store.revalidatesStrictSpanVectorSnapshot(receipt))
+
+        _ = try await store.beginShadowGeneration(modelIDs: [model])
+        try await store.publishShadowGeneration(modelIDs: [model])
+        #expect(try await store.revalidatesStrictSpanVectorSnapshot(receipt) == false)
+    }
+
+    @Test("a second write replaces the span set; it never appends")
+    func replaceNotAppend() async throws {
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_757_000_000)
+        let model = "minilm-l6-v2-w60"
+        try await store.writeSpanVectors(itemID: "item-b", modelID: model, modelVersion: "r1", spans: [
+            span(0, [1, 2], scale: 1, start: 0, end: 60),
+            span(1, [3, 4], scale: 1, start: 30, end: 90),
+            span(2, [5, 6], scale: 1, start: 60, end: 100),
+        ], filedAt: now)
+        try await store.writeSpanVectors(itemID: "item-b", modelID: model, modelVersion: "r1", spans: [
+            span(0, [9, 9], scale: 2, start: 0, end: 40),
+            span(1, [8, 8], scale: 2, start: 20, end: 55),
+        ], filedAt: now)
+        let got = try #require(try await store.spanVectors(itemIDs: ["item-b"], modelID: model)["item-b"])
+        #expect(got.count == 2, "stale span 2 must not survive the replace")
+        #expect(got.map(\.int8) == [[9, 9], [8, 8]])
+        #expect(got.map(\.endWord) == [40, 55])
+        // Malformed input is rejected before any row changes.
+        await #expect(throws: SynapseKitError.self) {
+            try await store.writeSpanVectors(itemID: "item-b", modelID: model, modelVersion: "r1", spans: [
+                span(0, [1, 2], scale: 1, start: 0, end: 60),
+                span(1, [1, 2, 3], scale: 1, start: 30, end: 90),
+            ], filedAt: now)
+        }
+        let after = try #require(try await store.spanVectors(itemIDs: ["item-b"], modelID: model)["item-b"])
+        #expect(after.count == 2, "a rejected write leaves the prior span set in place")
+        try await store.deleteSpanVectors(itemID: "item-b", modelID: model)
+        #expect(try await store.spanVectors(itemIDs: ["item-b"], modelID: model).isEmpty)
+    }
+
+    @Test("reclaim removes retired-model rows and non-serving generations, keeps serving rows")
+    func reclaim() async throws {
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_757_000_000)
+        // Live model: two serving rows (generation 0).
+        try await store.addPayload(itemID: "i1", vectorIndex: 0, payload: VectorPayload(floats: [1, 0]),
+                                   modelID: "live-v1", modelVersion: "1", filedAt: now)
+        try await store.addPayload(itemID: "i2", vectorIndex: 0, payload: VectorPayload(floats: [0, 1]),
+                                   modelID: "live-v1", modelVersion: "1", filedAt: now)
+        // Retired family rows.
+        try await store.addPayload(itemID: "i1", vectorIndex: 0, payload: VectorPayload(floats: [1, 0]),
+                                   modelID: "lsa-v1", modelVersion: "1", filedAt: now)
+        try await store.addPayload(itemID: "i2", vectorIndex: 0, payload: VectorPayload(floats: [0, 1]),
+                                   modelID: "fdc-v1", modelVersion: "1", filedAt: now)
+        // A non-serving generation row for the live model, written raw
+        // (generation 7 while the model serves generation 0).
+        _ = try await store.storage.rowStore.insert(table: "vectors", values: [
+            "id": .uuid(UUID()), "item_id": .text("i3"), "vector_index": .int(0),
+            "model_id": .text("live-v1"), "model_version": .text("1"),
+            "kind": .int(1), "dim": .int(2),
+            "payload": .blob(Data(VectorPayload(floats: [1, 1]).bytes)),
+            "scale": .null, "filed_at": .timestamp(now), "generation": .int(7),
+        ])
+        let counts = try await store.reclaimRetiredVectorRows(retiredModelIDs: ["lsa-v1", "nmf-v1", "ppmi-v1", "fdc-v1"])
+        #expect(counts.retiredModelRows == 2)
+        #expect(counts.nonServingRows == 1)
+        let remaining = try await store.storage.rowStore.query(
+            table: "vectors", where: .isTrue, orderBy: [], limit: nil, offset: nil, columns: ["model_id", "generation"])
+        #expect(remaining.count == 2)
+        #expect(remaining.allSatisfy { $0["model_id"] == .text("live-v1") && $0["generation"] == .int(0) })
+    }
+
+    @Test("whole-record vacuum removes every float row and graph row, keeps binary and span rows")
+    func wholeRecordVacuum() async throws {
+        await GlobalTestLock.shared.acquire()
+        defer { Task { await GlobalTestLock.shared.release() } }
+        let store = try await makeStore()
+        let now = Date(timeIntervalSince1970: 1_757_000_000)
+        // Binary rows (kind 0) at lane 0 and float rows (kind 1) at lane 1 for
+        // two models; span rows (kind 2) under the encoder model.
+        for model in ["live-v1", "other-v1"] {
+            try await store.addPayload(itemID: "i1", vectorIndex: 0,
+                                       payload: VectorPayload(kind: .binary, dim: 256, bytes: [UInt8](repeating: 0x0F, count: 32)),
+                                       modelID: model, modelVersion: "1", filedAt: now)
+            try await store.addPayload(itemID: "i1", vectorIndex: 1, payload: VectorPayload(floats: [1, 0]),
+                                       modelID: model, modelVersion: "1", filedAt: now)
+        }
+        try await store.writeSpanVectors(itemID: "i1", modelID: "arctic-embed-s-w60", modelVersion: "1", spans: [
+            span(0, [1, 2], scale: 1, start: 0, end: 30),
+        ], filedAt: now)
+        try await store.flush()
+        _ = try await store.storage.rowStore.insert(table: "hnsw_graph", values: [
+            "model_id": .text("live-v1"), "node_idx": .int(0), "node_id": .text("i1"),
+            "layer": .int(0), "neighbours": .blob(Data([0, 0, 0, 0])), "generation": .int(0),
+        ])
+        let counts = try await store.reclaimWholeRecordFloatRows()
+        #expect(counts.floatRows == 2)
+        #expect(counts.graphRows == 1)
+        let remaining = try await store.storage.rowStore.query(
+            table: "vectors", where: .isTrue, orderBy: [], limit: nil, offset: nil, columns: ["kind"])
+        let kinds = remaining.compactMap { row -> Int64? in
+            if case let .int(kind)? = row["kind"] { return kind }
+            return nil
+        }.sorted()
+        #expect(kinds == [0, 0, 2])
+        #expect(try await store.storage.rowStore.count(table: "hnsw_graph", where: nil) == 0)
+        // A second pass finds nothing and the binary lane still serves.
+        let again = try await store.reclaimWholeRecordFloatRows()
+        #expect(again.floatRows == 0 && again.graphRows == 0)
+        let probe = Engram(blocks: 0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F, 0x0F0F_0F0F_0F0F_0F0F)
+        #expect(try await store.findNearest(probe: probe, modelID: "live-v1", limit: 5).map(\.itemID) == ["i1"])
+    }
+}

@@ -73,10 +73,15 @@ struct BundleMaterializerTests {
         let lineage = "00000000-0000-0000-0000-0000000000" + String(id.suffix(2))
         let lineageID = UUID(uuidString: lineage) ?? UUID()
         let content = "c-" + id
+        // Bits 27-30 are FREE (ADORN-STORE-02 v17): new drawers start with
+        // operationalBitmap 0. The fingerprint() function hashes operationalBitmap;
+        // the constructed struct and the stored row must agree for CountVector256
+        // folds to produce the expected result.
         return Drawer(id: TestStorage.tid(id), content: content, parentNodeId: parentNodeId, addedBy: "test",
                       filedAt: Date(timeIntervalSince1970: 1_700_000_000),
                       embeddingModelID: "m",
                       adjectiveBitmap: adjective,
+                      operationalBitmap: 0,
                       lineageID: lineageID)
     }
 

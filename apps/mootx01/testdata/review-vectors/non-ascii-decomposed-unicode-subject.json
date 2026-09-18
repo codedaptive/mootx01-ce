@@ -1,0 +1,83 @@
+{
+  "description": "Two drawers with NFD and NFC subject forms that normalize to the same NFC key (écafe); must be grouped as duplicates. Validates F9 NFC normalization in Rust.",
+  "drawers": [
+    {
+      "content": "NFD content",
+      "filedAt": "2026-08-24T08:01:00.000Z",
+      "id": "d2000000-0000-0000-0000-000000000001",
+      "subject": "écafe",
+      "tombstonedAt": null
+    },
+    {
+      "content": "NFC content",
+      "filedAt": "2026-08-24T08:00:00.000Z",
+      "id": "d2000000-0000-0000-0000-000000000002",
+      "subject": "écafe",
+      "tombstonedAt": null
+    }
+  ],
+  "expectedSession": {
+    "actions": [
+      {
+        "expectedEffect": "Mark 'écafe' as reviewed.",
+        "id": "475827f8-d276-5cda-a13c-8d9d49124f9c",
+        "isReversible": true,
+        "reversalAvailable": false
+      },
+      {
+        "expectedEffect": "Mark 'écafe' as reviewed.",
+        "id": "50176ce1-b48e-5146-92a9-1357e1e897dc",
+        "isReversible": true,
+        "reversalAvailable": false
+      }
+    ],
+    "completionStatus": {
+      "state": "inProgress"
+    },
+    "duplicateGroups": [
+      {
+        "choices": [
+          {
+            "description": "Keep the newer record and archive the older one.",
+            "id": "f9046364-c0ca-5d40-8973-d389c22dbb57"
+          },
+          {
+            "description": "Merge content into the newer record and archive the older one.",
+            "id": "9bf17880-3ab1-5f8f-a0e4-820ad4eecdd9"
+          }
+        ],
+        "id": "b55c7b81-d7a9-5f3f-9cf3-3054abdced72",
+        "reason": "Records share the same canonical subject.",
+        "recordIDs": [
+          "d2000000-0000-0000-0000-000000000001",
+          "d2000000-0000-0000-0000-000000000002"
+        ]
+      }
+    ],
+    "generatedAt": "2026-08-24T09:00:00.000Z",
+    "id": "4a678187-4a24-5759-adc1-dc210a38a4cb",
+    "kind": "morning",
+    "sections": [
+      {
+        "id": "764d96d4-604c-5028-aa8c-c52442d26564",
+        "items": [
+          {
+            "detail": "NFD content",
+            "id": "94eaa61a-7e0f-5e54-a2b3-ec457fb28017",
+            "subject": "écafe"
+          },
+          {
+            "detail": "NFC content",
+            "id": "a53ff52e-6f6d-559d-9e65-872f3597bc3a",
+            "subject": "écafe"
+          }
+        ],
+        "title": "First priorities"
+      }
+    ],
+    "sourceEstateState": "sha256:629760659563a04f88c98a94de3f2c6c:2"
+  },
+  "kind": "morning",
+  "now": "2026-08-24T09:00:00.000Z",
+  "vectorID": "non-ascii-decomposed-unicode-subject"
+}

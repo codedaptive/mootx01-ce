@@ -13,8 +13,8 @@ import Testing
 /// operational feature-flag region is full — see
 /// PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and no Bool stored property. Every
 /// content-touching write NULLs the trio in the same statement, exactly as
-/// it NULLs the distilled quad: derived text must not outlive the content
-/// it summarizes.
+/// it NULLs `ssc_facts`: derived text must not outlive the content it
+/// summarizes.
 ///
 /// The Rust suite `subject_representation_tests` mirrors this file
 /// case-for-case (twin-parity gate).
@@ -526,6 +526,9 @@ private struct SetSubjectAuditFailingStorage: Storage {
     }
     func currentSchemaVersion(for kitID: String) async throws -> Int {
         try await inner.currentSchemaVersion(for: kitID)
+    }
+    func renameSchemaKit(from oldKitID: String, to newKitID: String) async throws -> SchemaKitRenameOutcome {
+        try await inner.renameSchemaKit(from: oldKitID, to: newKitID)
     }
     func migrate(to schema: SchemaDeclaration) async throws {
         try await inner.migrate(to: schema)

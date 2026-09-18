@@ -57,7 +57,7 @@ This specification does NOT define:
 - The fingerprint representation, kernel dispatch, or the bit-for-bit
   reference obligation — those are SubstrateLib's (`SUBSTRATELIB_SPEC.md`).
 - Where engrams are stored or how vectors are indexed — see
-  `VECTORKIT_SPEC.md` and `PERSISTENCEKIT_SPEC.md`.
+  `SYNAPSEKIT_SPEC.md` and `PERSISTENCEKIT_SPEC.md`.
 
 ## § 3 — Position in the kit family
 
@@ -66,13 +66,13 @@ SubstrateLib
    ▲
 EngramLib   ← depends on SubstrateLib
    ▲
-   ├── VectorKit   (engram distance in ANN ranking)
+   ├── SynapseKit   (engram distance in ANN ranking)
    └── (reasoning layers needing typed similarity)
 ```
 
 **Depends on:** SubstrateLib.
 
-**Consumed by:** VectorKit and any layer that needs typed engram
+**Consumed by:** SynapseKit and any layer that needs typed engram
 similarity without touching kernels directly.
 
 ## § 4 — Invariants

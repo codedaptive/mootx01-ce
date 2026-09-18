@@ -60,6 +60,9 @@ pub fn hybrid_recall(
         .map(|d| DrawerRow {
             id: d.id.clone(),
             content: d.content.clone(),
+            // Adornments are dark (Encoder Rerank Program, 2026-09-05).
+            // DrawerRow carries only id + content; synthesis uses first-line
+            // content excerpts with no adornment augmentation.
         })
         .collect();
 
@@ -100,6 +103,10 @@ pub fn hybrid_recall(
 /// engine consumes. The Rust version is conformance-gated against the
 /// Swift engine over shared vectors of this shape; full
 /// `LocusKit.Drawer` round-trip lives in the LocusKit Rust version.
+///
+/// Adornments are dark (Encoder Rerank Program, 2026-09-05). The struct
+/// carries only the fields required by the pure synthesis engine; adornment
+/// augmentation is off and `make_key_insights` reads first-line content only.
 #[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct DrawerRow {
     pub id: String,

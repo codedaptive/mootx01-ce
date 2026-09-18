@@ -106,6 +106,7 @@ impl CorpusContentStore for InMemoryContentAdapter {
                 digest: digest.clone(),
                 text: text.to_string(),
                 dense_composition_text: None,
+                ssc_facts: None, // supplied by GLK layer (schema 19)
             };
             state.records.insert(id.to_string(), bumped.clone());
             let seq = state.next_seq;
@@ -126,6 +127,7 @@ impl CorpusContentStore for InMemoryContentAdapter {
             digest: digest.clone(),
             text: text.to_string(),
             dense_composition_text: None,
+            ssc_facts: None, // supplied by GLK layer (schema 19)
         };
         state.records.insert(id.to_string(), fresh.clone());
         let seq = state.next_seq;
@@ -425,6 +427,11 @@ fn attached_profile_contains_no_canonical_content_table() {
         // canonical content could land — which a per-term vector column does
         // not offer.
         "corpus_provider_vocab",
+        // v4 integer-keyed pair (CORPUS-COUNTS-01). Same derived-vocabulary
+        // reasoning: dictionary `term TEXT` is tokens, payload carries only
+        // integer keys and vector bytes. Twin of the Swift boundary list.
+        "corpus_provider_term_dictionary",
+        "corpus_provider_term_payload",
     ]
     .into_iter()
     .collect();

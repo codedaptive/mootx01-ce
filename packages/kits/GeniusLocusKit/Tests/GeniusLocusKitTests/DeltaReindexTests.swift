@@ -28,7 +28,7 @@ import LocusKit
 @testable import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 import QueueKit
 @testable import GeniusLocusKit
@@ -165,7 +165,8 @@ struct DeltaReindexTests {
                 scoring: .raw,
                 limit: 50,
                 fallback: .failClosed,
-                queryText: "zanzibar quixotic"
+                queryText: "zanzibar quixotic",
+                origin: .internal
             ))
         // Assert by drawer ID: .structured hydration deliberately returns
         // drawers WITHOUT content (content readers must request .full — the

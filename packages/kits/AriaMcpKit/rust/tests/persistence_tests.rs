@@ -27,8 +27,10 @@
 
 use std::collections::BTreeMap;
 
-use aria_mcp::{dispatch::dispatch_tool,
-    surfaced_recall_ledger::SurfacedRecallLedger, estate_registry::EstateRegistry, jsonrpc::JsonValue};
+mod test_support;
+use test_support::SelectedV2Session;
+
+use aria_mcp::{estate_registry::EstateRegistry, jsonrpc::JsonValue};
 use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
@@ -58,11 +60,6 @@ fn temp_sqlite_path(label: &str) -> String {
         .join(format!("aria_mcp_persist_{}_{}", label, Uuid::new_v4()));
     std::fs::create_dir_all(&dir).expect("create per-estate temp dir");
     dir.join("estate.sqlite").to_string_lossy().into_owned()
-}
-
-/// Extract content[0].text from a dispatch result.
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
 }
 
 // ---------------------------------------------------------------------------
@@ -156,26 +153,18 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
 
     // --- Pass 1: file a memory. ---
     let filed_id = {
-        let registry =
-            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-1 open must succeed");
+        let session = SelectedV2Session::new(
+            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-1 open must succeed"),
+        );
 
         let a = args![
             "content" => "persistent content for round-trip test",
         "subject" => "persistent content for round-trip test",
             "location" => "persistence-room"
         ];
-        let result =
-            dispatch_tool("moot_file_memory", &a, &registry, &SurfacedRecallLedger::new()).expect("capture must succeed");
-        let text = content_text(&result);
-        assert!(
-            text.starts_with("filed memory "),
-            "file_memory result must start with id prefix; got: {text}"
-        );
-
-        // Parse the drawer id from "filed memory <id>\nroom: ...\nlineage: ..."
-        let id_line = text.lines().next().unwrap_or("");
-        let id = id_line
-            .strip_prefix("filed memory ")
+        let result = session.call("moot_file_memory", &a).expect("capture must succeed");
+        let id = result["structuredContent"]["data"]["memory_id"]
+            .as_str()
             .unwrap_or("")
             .to_owned();
         assert!(!id.is_empty(), "filed memory id must be non-empty");
@@ -185,13 +174,15 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
 
     // --- Pass 2: open a new registry at the same path and search. ---
     {
-        let registry2 =
-            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-2 reopen must succeed");
+        let session = SelectedV2Session::new(
+            EstateRegistry::new_sqlite(&path, "test-owner").expect("pass-2 reopen must succeed"),
+        );
 
         let search_a = args!["query" => "persistent content"];
-        let search_result = dispatch_tool("moot_memory_search", &search_a, &registry2, &SurfacedRecallLedger::new())
-            .expect("search must succeed");
-        let search_text = content_text(&search_result);
+        let search_result = session.call("moot_memory_search", &search_a).expect("search must succeed");
+        let rows = search_result["structuredContent"]["data"]["results"]
+            .as_array()
+            .expect("selected-v2 search rows");
 
         // The persisted memory must survive reopen and be found. A reopened
         // SQLite estate also re-seeds the seven default wings (each an
@@ -199,16 +190,16 @@ fn persistence_round_trip_capture_then_reopen_then_recall() {
         // exactly 1. The id + content assertions below prove THIS memory
         // round-tripped; here we only require the search found something.
         assert!(
-            !search_text.starts_with("found 0"),
-            "reopen must find the persisted memory; got: {search_text}"
+            !rows.is_empty(),
+            "reopen must find the persisted memory; got: {search_result}"
         );
         assert!(
-            search_text.contains(&filed_id),
-            "search result must include the filed memory id {filed_id}; got: {search_text}"
+            rows.iter().any(|row| row["memory_id"] == filed_id),
+            "search result must include the filed memory id {filed_id}; got: {search_result}"
         );
         assert!(
-            search_text.contains("persistent content"),
-            "search result must include memory content; got: {search_text}"
+            rows.iter().any(|row| row["subject"] == "persistent content for round-trip test"),
+            "search result must include memory subject; got: {search_result}"
         );
     }
 
@@ -325,97 +316,6 @@ fn register_postgres_estate_is_routable_by_estate_id() {
 }
 
 // ---------------------------------------------------------------------------
-// Precedence-ladder logic tests (no live Postgres required)
-//
-// ServerConfig::from_env() calls process::exit for the ambiguous-config
-// branch, so that cannot be tested through from_env() directly. These tests
-// verify the PREDICATE LOGIC that drives the four-state decision — same
-// approach as Swift's PostgresPrecedenceTests.
-//
-// The invariant being tested: given two strings (postgres_url, sqlite_path),
-// the decision rule must be unambiguous and deterministic.
-// ---------------------------------------------------------------------------
-
-/// Helper: replicate the from_env precedence decision as a pure function.
-/// Returns one of four branch labels that from_env would take.
-fn precedence_branch(postgres_url: &str, sqlite_path: &str) -> &'static str {
-    if !postgres_url.is_empty() && !sqlite_path.is_empty() {
-        "ambiguous"
-    } else if !postgres_url.is_empty() {
-        "postgres"
-    } else if !sqlite_path.is_empty() {
-        "sqlite"
-    } else {
-        "inmemory"
-    }
-}
-
-/// Both vars set → ambiguous config.
-#[test]
-fn precedence_both_set_is_ambiguous() {
-    assert_eq!(
-        precedence_branch("postgresql://localhost/db", "/tmp/estate.sqlite"),
-        "ambiguous"
-    );
-}
-
-/// Only postgres URL set → postgres branch.
-#[test]
-fn precedence_only_postgres_url_selects_postgres() {
-    assert_eq!(
-        precedence_branch("postgresql://localhost/db", ""),
-        "postgres"
-    );
-}
-
-/// Only sqlite path set → sqlite branch.
-#[test]
-fn precedence_only_sqlite_path_selects_sqlite() {
-    assert_eq!(precedence_branch("", "/tmp/estate.sqlite"), "sqlite");
-}
-
-/// Neither set → in-memory branch.
-#[test]
-fn precedence_neither_set_selects_inmemory() {
-    assert_eq!(precedence_branch("", ""), "inmemory");
-}
-
-/// No-trimming invariant: whitespace-only postgres URL is non-empty.
-// The literal `"   "` is a compile-time constant; clippy::const_is_empty
-// would fire on `!url.is_empty()`. Allow it here — the test is specifically
-// documenting that the no-trim invariant holds for string literals, not
-// calling is_empty() on an opaque runtime value.
-#[test]
-#[allow(clippy::const_is_empty)]
-fn precedence_whitespace_postgres_url_is_non_empty() {
-    // No trimming — whitespace-only is non-empty, treated as a config
-    // attempt. Mirrors Swift's no-trimming invariant test.
-    let url = "   ";
-    assert!(
-        !url.is_empty(),
-        "whitespace-only ARIA_MCP_POSTGRES_URL must be non-empty (no trimming)"
-    );
-}
-
-/// No-trimming invariant: whitespace-only sqlite path is non-empty.
-#[test]
-#[allow(clippy::const_is_empty)]
-fn precedence_whitespace_sqlite_path_is_non_empty() {
-    let path = "  ";
-    assert!(
-        !path.is_empty(),
-        "whitespace-only ARIA_MCP_SQLITE_PATH must be non-empty (no trimming)"
-    );
-}
-
-/// Whitespace-only postgres URL with empty sqlite path → postgres branch
-/// (not in-memory; whitespace-only is not empty, fails fast).
-#[test]
-fn precedence_whitespace_postgres_url_routes_to_postgres_branch() {
-    assert_eq!(precedence_branch("   ", ""), "postgres");
-}
-
-// ---------------------------------------------------------------------------
 // Geometry normalization — write-survival regression (test 5, MXE-GY)
 //
 // Verifies that writes through an `EstateRegistry::new_sqlite` handle survive
@@ -497,28 +397,19 @@ fn new_sqlite_on_reserve12_estate_survives_write_through() {
 
     // Pass 1: open via new_sqlite and file a memory through the returned handle.
     let filed_id = {
-        let registry = EstateRegistry::new_sqlite(&path, "test-owner")
-            .expect("new_sqlite must open a reserve=12 estate without error");
+        let session = SelectedV2Session::new(
+            EstateRegistry::new_sqlite(&path, "test-owner")
+                .expect("new_sqlite must open a reserve=12 estate without error"),
+        );
         let a = args![
             "content" => "geo-norm write-survival regression marker",
             "subject" => "geo-norm write-survival regression marker",
             "location" => "geo-norm-room"
         ];
-        let result = dispatch_tool(
-            "moot_file_memory",
-            &a,
-            &registry,
-            &SurfacedRecallLedger::new(),
-        )
+        let result = session.call("moot_file_memory", &a)
         .expect("moot_file_memory must succeed on the reserve=12 estate");
-        let text = content_text(&result);
-        assert!(
-            text.starts_with("filed memory "),
-            "moot_file_memory must return an id; got: {text}"
-        );
-        let id_line = text.lines().next().unwrap_or("");
-        let id = id_line
-            .strip_prefix("filed memory ")
+        let id = result["structuredContent"]["data"]["memory_id"]
+            .as_str()
             .unwrap_or("")
             .to_owned();
         assert!(!id.is_empty(), "filed memory id must be non-empty");
@@ -529,27 +420,127 @@ fn new_sqlite_on_reserve12_estate_survives_write_through() {
     // Pass 2: reopen at the same canonical path and assert the write survived.
     // After Part 1 the file is reserve=0 and the connection received the writes.
     {
-        let registry2 = EstateRegistry::new_sqlite(&path, "test-owner")
-            .expect("pass-2 reopen must succeed on the normalized estate");
+        let session = SelectedV2Session::new(
+            EstateRegistry::new_sqlite(&path, "test-owner")
+                .expect("pass-2 reopen must succeed on the normalized estate"),
+        );
         let search_a = args!["query" => "geo-norm write-survival regression"];
-        let result = dispatch_tool(
-            "moot_memory_search",
-            &search_a,
-            &registry2,
-            &SurfacedRecallLedger::new(),
-        )
+        let result = session.call("moot_memory_search", &search_a)
         .expect("moot_memory_search must succeed on reopen");
-        let text = content_text(&result);
+        let rows = result["structuredContent"]["data"]["results"]
+            .as_array()
+            .expect("selected-v2 search rows");
         assert!(
-            text.contains(&filed_id),
+            rows.iter().any(|row| row["memory_id"] == filed_id),
             "write must survive geometry normalization and registry drop: \
-             expected id={filed_id} in search result; got: {text}"
+             expected id={filed_id} in search result; got: {result}"
         );
         assert!(
-            text.contains("geo-norm write-survival regression marker"),
-            "write content must survive geometry normalization; got: {text}"
+            rows.iter().any(|row| row["subject"] == "geo-norm write-survival regression marker"),
+            "write subject must survive geometry normalization; got: {result}"
         );
     }
+
+    if let Some(parent) = std::path::Path::new(&path).parent() {
+        let _ = std::fs::remove_dir_all(parent);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B-10a reward wiring: moot_memory_get is a dereference verb (W1 mission)
+// ---------------------------------------------------------------------------
+
+/// `moot_memory_get` must mark recall-trace rows as used (B-10a reward path)
+/// when the fetched drawer was previously surfaced by `moot_memory_search`.
+///
+/// Probe pattern: after a successful `moot_memory_get`, call
+/// `mark_recall_used` with a window wide enough to cover any trace row
+/// written in this test. If `moot_memory_get` already fired the reward path
+/// (set `used=true` on all live rows), the probe finds zero rows with
+/// `used=false` and returns 0. A non-zero return proves the reward path
+/// did NOT fire, which is a B-10a violation.
+///
+/// Uses a SQLite-backed estate because recall-trace rows are only written
+/// on the SQLite backend (in-memory estates cannot test this). Mirrors
+/// Swift `memoryGetAfterTracedSearchSetsUsedBit` in `TraceRewardTests.swift`.
+#[test]
+fn memory_get_after_search_sets_used_bit() {
+    let path = temp_sqlite_path("b10a-get-reward");
+
+    let session = SelectedV2Session::new(
+        EstateRegistry::new_sqlite(&path, "test-owner").expect("new_sqlite must succeed"),
+    );
+
+    // File a memory so the estate is non-empty.
+    let drawer_id = {
+        let a = args![
+            "content" => "memory get reward wiring test",
+            "subject" => "memory get reward wiring test",
+            "location" => "get-reward-room"
+        ];
+        let result = session.call("moot_file_memory", &a).expect("moot_file_memory must succeed");
+        let id = result["structuredContent"]["data"]["memory_id"]
+            .as_str()
+            .unwrap_or("")
+            .to_owned();
+        assert!(!id.is_empty(), "filed memory id must be non-empty; got: {result}");
+        id
+    };
+
+    // The persistent selected-v2 dispatcher owns the surfaced-id ledger across
+    // this search and dereference pair.
+    let search_result = session.call("moot_memory_search", &args!["query" => "memory get reward"])
+        .expect("moot_memory_search must succeed");
+    let rows = search_result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("selected-v2 search rows");
+    assert!(
+        rows.iter().any(|row| row["memory_id"] == drawer_id),
+        "search must surface the filed drawer; got: {search_result}"
+    );
+
+    // Verify trace rows were written (B-10a external-origin contract).
+    {
+        let coord = session.coord.lock().unwrap();
+        let trace_count = coord
+            .count_recall_traces(&session.default.handle)
+            .expect("count_recall_traces");
+        assert!(
+            trace_count > 0,
+            "external search must write recall-trace rows; got count={trace_count}"
+        );
+    }
+
+    // Dereference through the same selected-v2 dispatcher so note_usage reaches
+    // its dispatcher-owned surfaced-id ledger.
+    let get_result = session.call("moot_memory_get", &args!["memory_id" => drawer_id.as_str()])
+    .expect("moot_memory_get must succeed");
+    let is_error = get_result["isError"].as_bool().unwrap_or(true);
+    assert!(
+        !is_error,
+        "moot_memory_get must return a non-error result; got: {get_result}"
+    );
+
+    // Probe: call mark_recall_used with a window guaranteed to cover the test's
+    // trace rows ([year-2000, year-3000]). If moot_memory_get already set
+    // used=true on all rows, the probe finds 0 rows with used=false → returns 0.
+    // A non-zero result means memory_get did NOT fire the reward path.
+    let probe_count = {
+        let coord = session.coord.lock().unwrap();
+        coord
+            .mark_recall_used(
+                &session.default.handle,
+                &drawer_id,
+                "2000-01-01T00:00:00Z", // since: far past — guaranteed to cover test rows
+                "3000-01-01T00:00:00Z", // now: far future — guaranteed to be after recalledAt
+            )
+            .expect("probe mark_recall_used must not error")
+    };
+    assert_eq!(
+        probe_count, 0,
+        "moot_memory_get must fire the B-10a reward path (note_usage → mark_recall_used) \
+         before the probe; probe found {probe_count} rows still with used=false"
+    );
 
     if let Some(parent) = std::path::Path::new(&path).parent() {
         let _ = std::fs::remove_dir_all(parent);

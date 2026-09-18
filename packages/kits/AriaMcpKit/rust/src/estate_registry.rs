@@ -10,14 +10,16 @@
 //! Three backend shapes are available, all wiring semantic recall (BM25 +
 //! vector lanes via Corpus + VectorStore) after `coord.open`:
 //!
-//! - **In-memory** (`new_inmemory`, `register_inmemory`): ephemeral, discarded
-//!   on process exit. Used by default when neither env var is set.
+//! - **In-memory** (`new_inmemory`, `new_inmemory_with`, `register_inmemory`):
+//!   ephemeral, discarded on process exit. Reached from the product only by
+//!   `--in-memory`, which serves it as a transient estate (R8, 2026-09-08):
+//!   no federation identity and no charter seeding.
 //!   **Semantic recall lanes are wired** via a separate `InMemoryStorage`
 //!   handle used exclusively by the Corpus + VectorStore. The LocusKit tables
-//!   (drawers, tunnels, kg_facts) and the CorpusKit/VectorKit tables (chunks,
+//!   (drawers, tunnels, kg_facts) and the CorpusKit/SynapseKit tables (chunks,
 //!   vectors) are disjoint namespaces — two handles on the same ephemeral store
 //!   is the in-memory equivalent of the SQLite two-handle pattern.
-//! - **SQLite** (`new_sqlite`, `register_sqlite`): WAL-mode durable estate
+//! - **SQLite** (`new_sqlite`, `new_sqlite_for_maintenance`, `register_sqlite`): WAL-mode durable estate
 //!   at a caller-supplied filesystem path. Database file is created if absent.
 //!   **Semantic recall lanes (BM25 + vector) are wired** after `coord.open` by
 //!   registering a `Corpus` and borrowing its single dense `VectorStore`
@@ -35,18 +37,16 @@
 //!   are idempotent; construction does not open a TCP connection.
 //!
 //! Persistence is server-internal — no wire change; the JSON-RPC surface is
-//! identical for all three backends. See `server::ServerConfig::from_env` for
-//! how environment variables select between them at startup.
+//! identical for all three backends. The host resolves its estate from the
+//! estate catalog and passes it in as a `server::RuntimeEstate`; nothing here
+//! reads an estate path, a connection string or a backend from the
+//! environment. See `server::ServerConfig::for_estate`.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use corpus_kit::content_engine::CorpusContentEngine;
-use corpus_kit::schema_profile::{
-    CorpusContentConfiguration, CorpusIndexUnitPolicy, CorpusOperatingMode,
-};
-use genius_locus_kit::intake::LocusDrawerContentSource;
-// The 1.0 default recall ensemble (RI/PPMI/LSA/NMF/FDC). Lives in the providers
+// The default recall ensemble (RI then LSA).
+// Lives in the providers
 // crate because it NEWs the concrete providers; this crate is downstream of it.
 use corpus_kit_providers::default_ensemble;
 use genius_locus_kit::handle::EstateHandle;
@@ -58,7 +58,7 @@ use genius_locus_kit::EstateCoordinator;
 // gate `DrainStatus::encode_settled` (PERF_W1_DRAIN_RIDER Finding 3).
 pub use genius_locus_kit::DrainStatus;
 use genius_locus_kit_migrations::run_geometry_normalization;
-use genius_locus_kit_migrations::SharedContentMigrationExt;
+use genius_locus_kit_migrations::MigrationChainExt;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
 use locus_kit::drawer_store_postgres::PostgresDrawerStore;
@@ -108,17 +108,50 @@ pub struct OpenEstate {
     /// write proposals/diary entries directly without routing through the
     /// coordinator's MCP verb layer.
     pub store: Arc<dyn DrawerStore>,
+    /// The backend THIS estate was opened on. Per entry, not per registry: a
+    /// registry whose default is SQLite can carry a PostgreSQL or in-memory
+    /// extra (`register_postgres`, `register_inmemory`), and
+    /// `/api/admin/estates` must report each one for what it is. Twin of the
+    /// Swift admin snapshot reading `kit.storageBackend(for: handle)` inside
+    /// its per-handle loop.
+    pub backend: EstateStorageBackend,
 }
 
 /// The estate registry the dispatcher uses to resolve `estateID` arguments.
 ///
 /// One default estate; zero or more additional estates keyed by UUID.
+/// Which persistence backend the registry's default estate runs on, as the
+/// admin surface reports it. Twin of Swift `GeniusLocusKit.storageBackend(for:)`
+/// (`EstateStorageBackend`): the same three words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EstateStorageBackend {
+    Sqlite,
+    Postgresql,
+    InMemory,
+}
+
+impl EstateStorageBackend {
+    /// The label `/api/admin/estates` reports.
+    pub fn label(self) -> &'static str {
+        match self {
+            EstateStorageBackend::Sqlite => "SQLite",
+            EstateStorageBackend::Postgresql => "PostgreSQL",
+            EstateStorageBackend::InMemory => "InMemory",
+        }
+    }
+}
+
 /// The default estate is in-memory, SQLite-backed, or PostgreSQL-backed
-/// depending on which env var `ServerConfig::from_env` finds set. Wire surface
-/// is identical for all three backends.
+/// depending on the `RuntimeEstate` the host resolved from the estate catalog
+/// (`ServerConfig::for_estate`). Wire surface is identical for all three
+/// backends.
+#[derive(Clone)]
 pub struct EstateRegistry {
     /// The default estate — targeted when a tool call omits `estateID`.
     pub default: OpenEstate,
+    /// The backend the default estate runs on; a fact of the open, never
+    /// read from the environment.
+    pub backend: EstateStorageBackend,
     /// All registered estates including the default, keyed by UUID.
     pub(crate) extras: HashMap<Uuid, OpenEstate>,
     /// The shared coordinator (same Arc as in every OpenEstate — single
@@ -132,11 +165,66 @@ pub struct EstateRegistry {
     pub server_identity: String,
 }
 
+/// How an estate is opened: the choices the estate's catalog record decides.
+/// Twin of the Swift `ServeCommand` decisions taken from `EstateRecord.kind`:
+/// a registered estate federates and seeds its charters; a transient one does
+/// neither; a maintenance open (`mootx01 upgrade`) converges what exists and
+/// creates nothing.
+///
+/// Every backend constructor takes one — SQLite, in-memory and PostgreSQL —
+/// so federation and charter seeding are decided by the record, never by the
+/// backend. The `Sqlite` in the name records where the type entered the
+/// codebase, not the set of backends it governs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EstateOpening {
+    /// Whether this open establishes the estate's Ed25519 federation identity.
+    pub federate: bool,
+    /// Whether the seven default wings and their charter hints are seeded.
+    pub seed_charters: bool,
+}
+
+impl EstateOpening {
+    /// A registered estate served by this machine: federates, seeds charters.
+    pub const REGISTERED: Self = Self { federate: true, seed_charters: true };
+    /// A transient estate (`--db <dir>/<name>`): holds exactly what was
+    /// imported into it, no identity, no charters.
+    pub const TRANSIENT: Self = Self { federate: false, seed_charters: false };
+    /// A maintenance open: converges existing content and creates none.
+    pub const MAINTENANCE: Self = Self { federate: false, seed_charters: false };
+
+    /// The opening a catalog record calls for when served.
+    pub fn for_record(record: &genius_locus_kit::EstateRecord) -> Self {
+        match record.kind {
+            genius_locus_kit::EstateRecordKind::Registered => Self::REGISTERED,
+            genius_locus_kit::EstateRecordKind::Transient => Self::TRANSIENT,
+        }
+    }
+}
+
 impl EstateRegistry {
-    /// Construct a registry with one new in-memory default estate.
+    /// Construct a registry with one new in-memory default estate: charters
+    /// seeded, no federation.
     ///
-    /// Used when neither `ARIA_MCP_SQLITE_PATH` nor `ARIA_MCP_POSTGRES_URL` is
-    /// set. **Semantic recall lanes (BM25 + vector) are wired** — a `Corpus` and
+    /// The test and development default, and the two halves have different
+    /// reasons. Charters are seeded because a test estate should look like a
+    /// served one, with the seven default wings in place. Federation is off
+    /// because it mints the estate's Ed25519 identity into a manifest that
+    /// dies with the process, leaving no identity for a peer to address
+    /// later; every caller of this constructor took that posture before the
+    /// opening argument existed, and none of them issues a grant.
+    ///
+    /// The product's `--in-memory` never arrives here. It calls
+    /// `new_inmemory_with(EstateOpening::TRANSIENT)`, so a RAM benchmark arm
+    /// measures a candidate pool with no charter drawers in it (R8,
+    /// 2026-09-08).
+    pub fn new_inmemory() -> Self {
+        Self::new_inmemory_with(EstateOpening { federate: false, seed_charters: true })
+    }
+
+    /// Construct a registry with one new in-memory default estate under the
+    /// opening the caller's catalog record decides.
+    ///
+    /// **Semantic recall lanes (BM25 + vector) are wired** — a `Corpus` and
     /// a `VectorStore` are registered on a second `InMemoryStorage` handle so BM25
     /// and vector recall are live from the first capture, matching the production
     /// wiring of the Swift `AriaMCPMain.swift` in-memory branch.
@@ -147,7 +235,7 @@ impl EstateRegistry {
     /// handles are `Arc<dyn Storage>` over separate `InMemoryStorage` allocations;
     /// they are disjoint table namespaces and do not interfere with each other.
     /// This is the in-memory equivalent of the SQLite two-handle pattern.
-    pub fn new_inmemory() -> Self {
+    pub fn new_inmemory_with(opening: EstateOpening) -> Self {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         let estate_id = Uuid::new_v4();
         // InMemoryDrawerStore::new allocates its own InMemoryStorage internally;
@@ -157,28 +245,44 @@ impl EstateRegistry {
         let handle = coord
             .lock()
             .unwrap()
-            .open(Arc::clone(&store), OwnerCredentials::new(DEFAULT_OWNER), 0, 100)
+            .open_with_federation(
+                Arc::clone(&store), OwnerCredentials::new(DEFAULT_OWNER), 0, 100, opening.federate)
             .expect("default estate open must succeed");
+        // A fresh in-memory estate is born with the span encoder as its default
+        // recall stage; written before wiring so this open activates it.
+        coord
+            .lock()
+            .unwrap()
+            .provision_default_encoder_if_absent(&handle)
+            .expect("default encoder provisioning must succeed on a fresh in-memory estate");
         // Wire semantic recall lanes on a second InMemoryStorage handle.
         // Panics on corpus/vector-store construction failure — this must not
         // fail in a correct build; the InMemory backend never returns I/O errors.
         wire_inmemory_semantic_recall(&handle, &coord)
             .expect("in-memory semantic recall wiring must succeed");
-        // Idempotently seed the seven default wings. Non-fatal: seeding
-        // failure logs and continues — the estate is open and functional.
-        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
-        seed_wings_non_fatal(&coord, &handle, "in-memory");
+        if opening.seed_charters {
+            // Idempotently seed the seven default wings. Non-fatal: seeding
+            // failure logs and continues — the estate is open and functional.
+            // Mirrors Swift ServeCommand's seedDefaultWings call, which runs for
+            // a registered estate only: a transient estate — and `--in-memory`
+            // always serves one (R8, 2026-09-08) — holds exactly what was
+            // imported into it, so a RAM benchmark arm measures a pool with no
+            // charter drawers in it.
+            seed_wings_non_fatal(&coord, &handle, "in-memory");
+        }
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::InMemory,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
         EstateRegistry {
             default: default_estate,
+            backend: EstateStorageBackend::InMemory,
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
@@ -214,11 +318,13 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::InMemory,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
         EstateRegistry {
             default: default_estate,
+            backend: EstateStorageBackend::InMemory,
             extras,
             coord,
             server_identity: "mootx01".to_owned(),
@@ -258,7 +364,66 @@ impl EstateRegistry {
     /// if the semantic-recall wiring (Corpus/VectorStore construction) fails.
     /// The caller should print this to stderr and exit with a nonzero code.
     pub fn new_sqlite(path: &str, owner: &str) -> Result<Self, String> {
+        Self::open_sqlite(path, owner, EstateOpening::REGISTERED, false)
+    }
+
+    /// Open a SQLite estate with the opening its catalog record decides
+    /// (`EstateOpening::for_record`): federation and charter seeding for a
+    /// registered estate, neither for a transient one.
+    pub fn new_sqlite_with(path: &str, owner: &str, opening: EstateOpening) -> Result<Self, String> {
+        Self::open_sqlite(path, owner, opening, false)
+    }
+
+    /// Open a SQLite estate for maintenance callers (e.g. `mootx01 upgrade`).
+    ///
+    /// Same open path as `new_sqlite` except that **default-wing seeding and default-minter
+    /// registration are skipped**. Upgrade is a migration vehicle: it converges what
+    /// already exists and must never create content. If a user deleted their default
+    /// wings, a maintenance open must not silently recreate them.
+    ///
+    /// Mirrors the shape of the Swift upgrade steps, which open through the bare
+    /// `GeniusLocusKit.open(storage:owner:)` path (no `seedDefaultWings` call).
+    ///
+    /// Semantic recall lanes (BM25 + vector) are still wired so corpus operations
+    /// (`reindex_corpus`, the span-encode backfill) work correctly.
+    ///
+    /// # Errors
+    ///
+    /// Same error conditions as `new_sqlite`.
+    pub fn new_sqlite_for_maintenance(path: &str, owner: &str) -> Result<Self, String> {
+        Self::open_sqlite(path, owner, EstateOpening::MAINTENANCE, true)
+    }
+
+    /// Shared SQLite open path behind `new_sqlite` and `new_sqlite_for_maintenance`.
+    /// The public entry points differ only in `opening`; everything else
+    /// (geometry normalization, store open, estate-id read-back, coordinator
+    /// admission, semantic-recall wiring) is one implementation so the ports
+    /// cannot drift between the serve and upgrade opens.
+    fn open_sqlite(path: &str, owner: &str, opening: EstateOpening, offline_upgrade: bool) -> Result<Self, String> {
+        // First run = no estate file before this open. Read before anything
+        // below can create the file; it gates the create-time defaults.
+        let first_run = !std::path::Path::new(path).exists();
+        let frozen = crate::estate_posture::EstatePosture::from_process_environment().is_frozen();
+        // This startup policy belongs to the selected v2 surface — the only
+        // surface a running server opens through; there are no v1 opens.
+        let preserve_v2_frozen_configuration = frozen;
+        if frozen && first_run {
+            return Err("frozen SQLite open requires an existing estate".to_string());
+        }
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
+        // Production model-directory resolver, installed before `coord.open`
+        // and the semantic-recall wiring below: the wiring acts on the
+        // manifest's `embedding_provider = "encoder"` by building the span
+        // encoder from the active registry row, and it can only find the
+        // bundled model through this resolver (the coordinator's default
+        // answers None for every id, which leaves recall lexical-only).
+        // Install-wide models live in the configuration directory, whichever
+        // estate is opened; the estate's own directory holds only estate files.
+        coord.lock().unwrap().set_model_directory_resolver(Box::new(
+            genius_locus_kit::BundledModelDirectoryResolver::new(
+                genius_locus_kit::EstateCatalog::configuration_directory(),
+            ),
+        ));
         // Geometry normalization must precede the estate connection so VACUUM and
         // all maintenance paths receive a reserve-0 file. SQLCipher's `attachFunc`
         // calls `sqlcipherCodecAttach(nKey=0)` for any keyless ATTACH when the main
@@ -268,10 +433,12 @@ impl EstateRegistry {
         // connection is always opened on the canonical normalized path; no stale fd
         // survives the atomic rename. Errors are parked so a geometry failure never
         // blocks the estate from opening (VACUUM will surface the issue later).
-        if let Err(e) = run_geometry_normalization(std::path::Path::new(path)) {
-            eprintln!(
-                "aria-mcp: geometry normalization for estate at {path:?}: {e} (parked; VACUUM will surface this)"
-            );
+        if !frozen {
+            if let Err(e) = run_geometry_normalization(std::path::Path::new(path)) {
+                eprintln!(
+                    "aria-mcp: geometry normalization for estate at {path:?}: {e} (parked; VACUUM will surface this)"
+                );
+            }
         }
         let store: Arc<dyn DrawerStore> = Arc::new(
             SqliteDrawerStore::from_path(path, INIT_NOW, None, SQLITE_BUSY_TIMEOUT_SECS)
@@ -288,11 +455,13 @@ impl EstateRegistry {
                 format!("aria-mcp: manifest estate_uuid is not a valid UUID at {path:?}: {e}")
             })?
         };
+        // A registered estate federates (its identity is minted on first open);
+        // a transient or maintenance open never mints one.
         let handle = coord
             .lock()
             .unwrap()
-            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
-            .expect("default sqlite estate open must succeed");
+            .open_with_policy(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100, opening.federate, frozen)
+            .map_err(|e| format!("aria-mcp: cannot open SQLite estate at {path:?}: {e:?}"))?;
 
         // Semantic recall wiring (SQLite branch only — mirrors AriaMCPMain.swift).
         //
@@ -313,7 +482,7 @@ impl EstateRegistry {
         // matching the Swift pattern and closing the platform-specific bug.
         //
         // Table namespaces remain disjoint: LocusKit owns drawers/tunnels/kg_facts;
-        // CorpusKit/VectorKit own chunks/vectors. WAL serialises all writes through
+        // CorpusKit/SynapseKit own chunks/vectors. WAL serialises all writes through
         // the single shared connection handle.
         //
         // Embedding model: Deterministic — reproducible across Swift/Rust ports,
@@ -321,12 +490,28 @@ impl EstateRegistry {
         let shared_storage = store.storage().ok_or_else(|| {
             format!("aria-mcp: SqliteDrawerStore at {path:?} did not expose its backing Storage — cannot wire semantic recall")
         })?;
-        wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord)
+        // A fresh SQLite estate (no file before this open) is born with the span
+        // encoder as its default recall stage; written before wiring so this
+        // open activates it. Existing estates get the key from `mootx01
+        // upgrade`, never from a serve open. Swift twin: ServeCommand isFirstRun.
+        if first_run {
+            coord
+                .lock()
+                .unwrap()
+                .provision_default_encoder_if_absent(&handle)
+                .map_err(|e| format!("aria-mcp: default encoder provisioning failed for {path:?}: {e:?}"))?;
+        }
+        wire_sqlite_semantic_recall(path, shared_storage, &handle, &coord, preserve_v2_frozen_configuration, offline_upgrade)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
-        // Idempotently seed the seven default wings. Non-fatal: seeding
-        // failure logs and continues — the estate is open and functional.
-        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
-        seed_wings_non_fatal(&coord, &handle, path);
+        if opening.seed_charters && !frozen {
+            // Idempotently seed the seven default wings. Non-fatal: seeding
+            // failure logs and continues — the estate is open and functional.
+            // Mirrors Swift ServeCommand's seedDefaultWings call after
+            // wireGLKSubstores, which runs for a registered estate only: a
+            // transient estate holds exactly what was imported into it, and a
+            // maintenance open (`mootx01 upgrade`) creates nothing.
+            seed_wings_non_fatal(&coord, &handle, path);
+        }
 
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
@@ -334,11 +519,13 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::Sqlite,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
         Ok(EstateRegistry {
             default: default_estate,
+            backend: EstateStorageBackend::Sqlite,
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
@@ -370,6 +557,7 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::InMemory,
         };
         self.extras.insert(estate_id, estate);
         estate_id
@@ -413,7 +601,9 @@ impl EstateRegistry {
         let shared_storage = store.storage().ok_or_else(|| {
             format!("aria-mcp: SqliteDrawerStore at {path:?} did not expose its backing Storage — cannot wire semantic recall")
         })?;
-        wire_sqlite_semantic_recall(path, shared_storage, &handle, &self.coord)
+        let preserve_v2_frozen_configuration =
+            crate::estate_posture::EstatePosture::from_process_environment().is_frozen();
+        wire_sqlite_semantic_recall(path, shared_storage, &handle, &self.coord, preserve_v2_frozen_configuration, false)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for {path:?}: {e}"))?;
         let estate = OpenEstate {
             coord: Arc::clone(&self.coord),
@@ -421,6 +611,7 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::Sqlite,
         };
         self.extras.insert(estate_id, estate);
         Ok(estate_id)
@@ -452,6 +643,20 @@ impl EstateRegistry {
     /// etc.) or if semantic-recall wiring fails. The pool itself is lazy; actual
     /// connection errors surface on first use, not here.
     pub fn new_postgres(conn_str: &str, owner: &str) -> Result<Self, String> {
+        // Charters seeded, no federation — the posture every caller of this
+        // constructor took before the opening argument existed. A host that
+        // knows its catalog record calls `new_postgres_with` instead.
+        Self::new_postgres_with(conn_str, owner, EstateOpening { federate: false, seed_charters: true })
+    }
+
+    /// Open a PostgreSQL estate with the opening its catalog record decides
+    /// (`EstateOpening::for_record`): charter seeding for a registered estate,
+    /// none for a transient one. Twin of `new_sqlite_with`.
+    pub fn new_postgres_with(
+        conn_str: &str,
+        owner: &str,
+        opening: EstateOpening,
+    ) -> Result<Self, String> {
         let coord = Arc::new(std::sync::Mutex::new(EstateCoordinator::new()));
         let store: Arc<dyn DrawerStore> = Arc::new(
             PostgresDrawerStore::from_connection_string(conn_str, INIT_NOW, None).map_err(|e| {
@@ -472,27 +677,42 @@ impl EstateRegistry {
         let handle = coord
             .lock()
             .unwrap()
-            .open(Arc::clone(&store), OwnerCredentials::new(owner), 0, 100)
+            .open_with_federation(
+                Arc::clone(&store), OwnerCredentials::new(owner), 0, 100, opening.federate)
             .expect("default postgres estate open must succeed");
+        // This entry point creates on every open (there is no first-run signal
+        // for a connection string), so the create-time default belongs here:
+        // the span encoder becomes the recall stage of an estate that names no
+        // provider; an estate that already names one is left alone.
+        coord
+            .lock()
+            .unwrap()
+            .provision_default_encoder_if_absent(&handle)
+            .map_err(|e| format!("aria-mcp: default encoder provisioning failed (postgres): {e:?}"))?;
         // Wire semantic recall lanes — same policy as new_sqlite.
         // Uses a separate PostgresStorage handle on the same connection string.
         wire_postgres_semantic_recall(conn_str, &handle, &coord)
             .map_err(|e| format!("aria-mcp: cannot wire semantic recall for postgres: {e}"))?;
-        // Idempotently seed the seven default wings. Non-fatal: seeding
-        // failure logs and continues — the estate is open and functional.
-        // Mirrors Swift ServeCommand.seedDefaultWings call after wireGLKSubstores.
-        seed_wings_non_fatal(&coord, &handle, "postgres");
+        if opening.seed_charters {
+            // Idempotently seed the seven default wings. Non-fatal: seeding
+            // failure logs and continues — the estate is open and functional.
+            // Same gate as the SQLite and in-memory constructors: the record's
+            // kind decides charters, never the backend.
+            seed_wings_non_fatal(&coord, &handle, "postgres");
+        }
         let default_estate = OpenEstate {
             coord: Arc::clone(&coord),
             handle,
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::Postgresql,
         };
         let mut extras = HashMap::new();
         extras.insert(estate_id, default_estate.clone());
         Ok(EstateRegistry {
             default: default_estate,
+            backend: EstateStorageBackend::Postgresql,
             extras,
             coord,
             // Default identity; production entry point overrides via server_identity.
@@ -535,6 +755,7 @@ impl EstateRegistry {
             estate_name: estate_id.to_string(),
             estate_id,
             store,
+            backend: EstateStorageBackend::Postgresql,
         };
         self.extras.insert(estate_id, estate);
         Ok(estate_id)
@@ -683,24 +904,25 @@ fn seed_wings_non_fatal(
 }
 
 // ---------------------------------------------------------------------------
-// CorpusKit/VectorStore vector recall wiring helpers
+// Semantic recall wiring — one seam per backend, one wire body in GLK
 // ---------------------------------------------------------------------------
-// These helpers register a Corpus (BM25 + deterministic FNV-1a + FloatSimHash
-// projection provider, Lane D) and a standalone VectorStore with the coordinator so the
-// dense float vector recall lane is live from the first capture. The embedding
-// provider is EmbeddingModelConfig::Deterministic — reproducible, no CoreML
-// required. The learned distributional embedding provider is a v1.1 mission.
+// Every served estate gets its Corpus (attached-mode CorpusContentEngine over
+// the LocusKit-backed adapter), the engine's shared dense VectorStore, the
+// on_encoded encode rider, the provisioned embedding-provider activation and
+// the eagerly mounted ingest queue from ONE place:
+// `EstateCoordinator::wire_glk_substores` (GeniusLocusKit coordinator.rs), the
+// twin of Swift `GeniusLocusKit.wireGLKSubstores`, which Swift's serve, upgrade,
+// drain and dream commands all call. The helpers below own only what differs
+// per backend before that call: which `Storage` carries the sub-store tables,
+// and whether the migration chain must prepare a durable estate first.
 // ---------------------------------------------------------------------------
 
-/// Wire the CorpusKit/VectorStore vector recall lanes for an in-memory estate.
-///
-/// Registers a Corpus (BM25 + deterministic Lane D) and a VectorStore with
-/// the coordinator so hybrid vector+BM25 recall is live from the first capture.
-/// The deterministic embedding provider (FNV-1a + FloatSimHash projection) requires no CoreML.
+/// Wire the semantic recall lanes for an in-memory estate.
 ///
 /// Called by `new_inmemory` and `register_inmemory` after `coord.open`. Creates
-/// a fresh `InMemoryStorage` handle dedicated to the Corpus + VectorStore tables
-/// and registers both with the coordinator for `handle`.
+/// a fresh `InMemoryStorage` handle dedicated to the Corpus + VectorStore
+/// tables, stamps it at the current estate format, and hands it to
+/// `wire_glk_substores`.
 ///
 /// Two `InMemoryStorage` handles: the DrawerStore already owns one (allocated
 /// inside `InMemoryDrawerStore::new`). The Corpus + VectorStore tables (chunks,
@@ -723,65 +945,26 @@ fn wire_inmemory_semantic_recall(
     EstateFormatStore::new(Arc::clone(&storage))
         .stamp(EstateFormatVersion::CURRENT, INIT_NOW)
         .map_err(|error| format!("estate-format stamp: {error:?}"))?;
-
-    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
-    // CorpusContentEngine over the LocusKit-backed adapter — canonical
-    // content lives once in Drawers; the engine keys every derived row by
-    // Drawer ID and resolves content by ID at work time (mirrors the GLK
-    // coordinator's provision wiring arms).
-    let estate = {
-        let guard = coord.lock().unwrap();
-        guard
-            .estate_for(handle)
-            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
-            .clone()
-    };
-    let config = CorpusContentConfiguration::new(
-        CorpusOperatingMode::Attached,
-        CorpusIndexUnitPolicy::WholeContent,
-    )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = CorpusContentEngine::open(
-            Arc::clone(&storage),
-            config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
-            default_ensemble(),
-        )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
-    corpus
-        .reconcile_configured_providers(INIT_NOW)
-        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
-    let corpus = Arc::new(corpus);
-    let vector_store = corpus.shared_vector_store();
-
-    // Register both with the coordinator.
-    let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::clone(&corpus));
-    guard.register_vector_store(handle, vector_store);
-    drop(guard);
-
-    Ok(())
+    wire_glk(handle, coord, storage, INIT_NOW, false)
 }
 
-/// Wire the CorpusKit/VectorStore vector recall lanes for a PostgreSQL-backed estate.
+/// Wire the semantic recall lanes for a PostgreSQL-backed estate.
 ///
-/// Registers a Corpus (BM25 + deterministic Lane D) and a VectorStore so hybrid
-/// vector+BM25 recall is live from the first capture. The deterministic embedding
-/// provider (FNV-1a + FloatSimHash projection) requires no CoreML. Called by `new_postgres` and
-/// `register_postgres` after `coord.open`. Builds a `PostgresStorage` handle on
-/// the same `conn_str` and pool defaults as the DrawerStore's underlying store,
-/// then registers a `Corpus` and a `VectorStore` with the coordinator for `handle`.
+/// Called by `new_postgres` and `register_postgres` after `coord.open`. Builds a
+/// `PostgresStorage` handle on the same `conn_str` and pool defaults as the
+/// DrawerStore's underlying store, runs the compiled migration chain on the
+/// estate, then hands the storage to `wire_glk_substores`.
 ///
 /// Pool defaults match the Swift ARIA_MCP leg and the DrawerStore's defaults
 /// (pool_size=10, connection_timeout=5.0s, idle_timeout=300.0s). The
 /// `PostgresStorage` handle uses a lazy pool — construction does not open a TCP
-/// connection. Schema migrations (`Corpus::open_many`, `VectorStore::open`) are
-/// idempotent: safe to call on an existing PG schema and on a fresh one.
+/// connection. Schema migrations are idempotent: safe to call on an existing PG
+/// schema and on a fresh one.
 ///
 /// # Errors
 ///
 /// Returns `Err(String)` if `PostgresStorage::new` fails (malformed connection
-/// string) or if Corpus/VectorStore construction fails.
+/// string), if the migration chain fails, or if the sub-store wiring fails.
 fn wire_postgres_semantic_recall(
     conn_str: &str,
     handle: &EstateHandle,
@@ -810,59 +993,21 @@ fn wire_postgres_semantic_recall(
     // for PostgreSQL estates (blast-radius INTENTIONALLY_LEFT classification).
 
     // This binary declares a 1.0 floor, so prepare the estate through the
-    // separately compiled migration capsule before current-runtime wiring.
+    // separately compiled migration capsules before current-runtime wiring.
     // A crash leaves the persisted phase/cursor resumable on the next start.
+    let now = wall_now_millis();
     {
         let mut guard = coord.lock().unwrap();
         guard
-            .run_shared_content_migration(handle, wall_now_millis(), default_ensemble())
-            .map_err(|error| format!("shared-content migration: {error:?}"))?;
+            .run_migration_chain(handle, now, default_ensemble())
+            .map_err(|error| format!("estate migration chain: {error}"))?;
     }
-    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
-    // CorpusContentEngine over the LocusKit-backed adapter — canonical
-    // content lives once in Drawers; the engine keys every derived row by
-    // Drawer ID and resolves content by ID at work time (mirrors the GLK
-    // coordinator's provision wiring arms).
-    let estate = {
-        let guard = coord.lock().unwrap();
-        guard
-            .estate_for(handle)
-            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
-            .clone()
-    };
-    let config = CorpusContentConfiguration::new(
-        CorpusOperatingMode::Attached,
-        CorpusIndexUnitPolicy::WholeContent,
-    )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = CorpusContentEngine::open(
-            Arc::clone(&storage),
-            config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
-            default_ensemble(),
-        )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
-    corpus
-        .reconcile_configured_providers(wall_now_millis())
-        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
-    let corpus = Arc::new(corpus);
-    let vector_store = corpus.shared_vector_store();
-
-    // Register both with the coordinator.
-    let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::clone(&corpus));
-    guard.register_vector_store(handle, vector_store);
-    drop(guard);
-
-    Ok(())
+    wire_glk(handle, coord, storage, now, false)
 }
 
-/// Wire the CorpusKit/VectorStore vector recall lanes for a SQLite-backed estate.
+/// Wire the semantic recall lanes for a SQLite-backed estate.
 ///
-/// Registers a Corpus (BM25 + deterministic Lane D) and a VectorStore so hybrid
-/// vector+BM25 recall is live from the first capture. The deterministic embedding
-/// provider (FNV-1a + FloatSimHash projection) requires no CoreML. Called by both
-/// `new_sqlite` and `register_sqlite` after `coord.open`.
+/// Called by both `new_sqlite` and `register_sqlite` after `coord.open`.
 ///
 /// `shared_storage` is the DrawerStore's already-open, already-keyed `Storage`
 /// handle, obtained via `DrawerStore::storage()`. Sharing this connection (rather
@@ -872,11 +1017,12 @@ fn wire_postgres_semantic_recall(
 /// WAL-mode estate fails to receive `PRAGMA key` and returns NOTADB on the first SQL.
 ///
 /// Table namespaces remain disjoint: LocusKit owns drawers/tunnels/kg_facts/…;
-/// CorpusKit/VectorKit own chunks/vectors. WAL serialises all writes through the
+/// CorpusKit/SynapseKit own chunks/vectors. WAL serialises all writes through the
 /// shared connection.
 ///
-/// Recall ensemble is the five honest signals (`default_ensemble()`:
-/// RI/PPMI/LSA/NMF/FDC) — reproducible across Swift/Rust ports, no CoreML.
+/// Recall ensemble is the deterministic signals (`default_ensemble()`:
+/// RI then LSA) — reproducible
+/// across Swift/Rust ports, no CoreML.
 /// Matches `provision`'s default and the Swift `AriaMCPMain.swift` Lane D wiring
 /// (`CorpusEnsemble.defaultEnsemble()`).
 fn wire_sqlite_semantic_recall(
@@ -884,71 +1030,53 @@ fn wire_sqlite_semantic_recall(
     shared_storage: Arc<dyn Storage>,
     handle: &EstateHandle,
     coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
+    preserve_v2_frozen_configuration: bool,
+    offline_upgrade: bool,
 ) -> Result<(), String> {
-    // Use the DrawerStore's shared storage directly — no second SqliteStorage
-    // connection. The encryption key (PRAGMA key) was already applied when the
-    // DrawerStore opened the connection; Corpus::open_many runs idempotent schema
-    // migrations (BundleStore + VectorStore tables) on the same connection.
-    let storage = shared_storage;
-
-    // This binary declares a 1.0 floor, so prepare the estate through the
-    // separately compiled migration capsule before current-runtime wiring.
-    {
+    let now = wall_now_millis();
+    if preserve_v2_frozen_configuration {
+        // A frozen v2 open must use a prepared estate. This reads the current
+        // stamp without writing an unstamped or older estate forward.
+        EstateFormatStore::new(Arc::clone(&shared_storage))
+            .require_current()
+            .map_err(|error| format!("frozen selected-v2 SQLite open requires current estate format: {error:?}"))?;
+    } else {
+        // This binary declares a 1.0 floor, so prepare the estate through the
+        // separately compiled migration capsules before current-runtime wiring.
         let mut guard = coord.lock().unwrap();
-        guard
-            .run_shared_content_migration(handle, wall_now_millis(), default_ensemble())
-            .map_err(|error| format!("shared-content migration for {path:?}: {error:?}"))?;
+        let result = if offline_upgrade {
+            guard.run_offline_migration_chain(handle, now, default_ensemble())
+        } else { guard.run_migration_chain(handle, now, default_ensemble()) };
+        result.map_err(|error| format!("estate migration chain for {path:?}: {error}"))?;
     }
-    // Shared-content 1.1: EVERY wired Corpus is the ATTACHED-mode
-    // CorpusContentEngine over the LocusKit-backed adapter — canonical
-    // content lives once in Drawers; the engine keys every derived row by
-    // Drawer ID and resolves content by ID at work time (mirrors the GLK
-    // coordinator's provision wiring arms).
-    let estate = {
-        let guard = coord.lock().unwrap();
-        guard
-            .estate_for(handle)
-            .map_err(|e| format!("estate lookup for engine wiring: {e:?}"))?
-            .clone()
-    };
-    let config = CorpusContentConfiguration::new(
-        CorpusOperatingMode::Attached,
-        CorpusIndexUnitPolicy::WholeContent,
-    )
-    .map_err(|e| format!("engine configuration: {e:?}"))?;
-    let corpus = CorpusContentEngine::open(
-            Arc::clone(&storage),
-            config,
-            Arc::new(LocusDrawerContentSource::new(estate)),
-            default_ensemble(),
-        )
-        .map_err(|e| format!("CorpusContentEngine::open failed: {e:?}"))?;
-    corpus
-        .reconcile_configured_providers(wall_now_millis())
-        .map_err(|e| format!("provider reconciliation failed: {e:?}"))?;
-    let corpus = Arc::new(corpus);
-    let vector_store = corpus.shared_vector_store();
+    wire_glk(handle, coord, shared_storage, now, preserve_v2_frozen_configuration)
+}
 
-    // Register both with the coordinator so recall_scored hybrid/corpus-only/
-    // union-best modes route through the BM25 and vector lanes.
+/// The one wire call every backend shares: `EstateCoordinator::wire_glk_substores`
+/// with the canonical five-signal ensemble. It opens the attached-mode
+/// CorpusContentEngine on `storage`, reconciles the configured providers,
+/// registers the Corpus and its shared VectorStore, opens the GLK composite
+/// schema, installs the on_encoded encode rider, acts on the estate's
+/// `embedding_provider` manifest key (`"encoder"` registers the span encoder),
+/// and eagerly mounts the Corpus ingest queue + drain worker — so a restarted
+/// daemon resumes a persisted encode backlog at open, and a standalone
+/// `drain` command (which never captures) drains. Rider before mount, encoder
+/// activation after the VectorStore is registered: the same order Swift
+/// `wireSubstores` keeps.
+fn wire_glk(
+    handle: &EstateHandle,
+    coord: &Arc<std::sync::Mutex<EstateCoordinator>>,
+    storage: Arc<dyn Storage>,
+    now_millis: i64,
+    preserve_v2_frozen_configuration: bool,
+) -> Result<(), String> {
     let mut guard = coord.lock().unwrap();
-    guard.register_corpus(handle, Arc::clone(&corpus));
-    guard.register_vector_store(handle, vector_store);
-    drop(guard);
-
-    // EAGER mount of the Corpus ingest queue + drain worker (mirrors Swift
-    // `wireSubstores`, which mounts on wire rather than lazily on first capture).
-    // T5: this is what resumes a non-empty persisted queue the moment a restarted
-    // daemon opens the estate — the lease-gated worker drains the backlog without
-    // waiting for a fresh capture — and what lets a standalone `drain` command
-    // (which never captures) actually drain. Idempotent: a later lazy mount is a
-    // no-op. Non-fatal: a mount failure logs and continues (the lazy path on the
-    // first capture is the fallback).
-    if let Err(e) = corpus.mount_ingest_queue() {
-        eprintln!("aria-mcp: corpus ingest queue eager mount failed (will mount lazily on first capture): {e:?}");
-    }
-
-    Ok(())
+    let result = if preserve_v2_frozen_configuration {
+        guard.wire_glk_substores_readonly(handle, storage, default_ensemble(), now_millis)
+    } else {
+        guard.wire_glk_substores(handle, storage, default_ensemble(), now_millis)
+    };
+    result.map_err(|e| format!("wire_glk_substores failed: {e:?}"))
 }
 
 fn wall_now_millis() -> i64 {

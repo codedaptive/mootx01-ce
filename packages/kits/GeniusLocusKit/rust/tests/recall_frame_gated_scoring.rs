@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
-use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring};
+use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin};
 use locus_kit::adjectives::AdjectiveSensitivity;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -91,21 +91,29 @@ fn make_corpus() -> Arc<CorpusContentEngine> {
 fn default_request(query: &str, limit: usize) -> GLKRecallRequest {
     let mut frame = RecallFrame::new(vec![Filter::Unconfirmed]);
     frame.hydration_level = HydrationLevel::Full;
-    GLKRecallRequest::new(frame)
-        .with_mode(GLKRecallMode::CorpusOnly)
-        .with_scoring(GLKRecallScoring::Rrf)
+    GLKRecallRequest::new(
+        frame,
+        GLKRecallMode::CorpusOnly,
+        GLKRecallScoring::Rrf,
+        limit,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
         .with_query_text(query)
-        .with_limit(limit)
 }
 
 /// Override-frame request that explicitly includes .Restricted sensitivity.
 fn restricted_override_request(query: &str) -> GLKRecallRequest {
     let frame = RecallFrame::new(vec![Filter::Unconfirmed, Filter::SensitivityAtMost(AdjectiveSensitivity::Restricted)]);
-    GLKRecallRequest::new(frame)
-        .with_mode(GLKRecallMode::CorpusOnly)
-        .with_scoring(GLKRecallScoring::Rrf)
+    GLKRecallRequest::new(
+        frame,
+        GLKRecallMode::CorpusOnly,
+        GLKRecallScoring::Rrf,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
         .with_query_text(query)
-        .with_limit(50)
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +150,50 @@ fn a_restricted_drawer_absent_from_default_recall() {
         result.hits.iter().any(|hh| hh.id == admissible.id),
         "admissible drawer MUST surface in recall; hits: {:?}",
         result.hits.iter().map(|hh| &hh.id).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        result.withheld_by_sensitivity, 1,
+        "the GLK result must carry the one default-ceiling exclusion"
+    );
+}
+
+#[test]
+fn withheld_count_uses_queried_candidates_instead_of_storage_prefix() {
+    let (mut coord, h) = open_one("withheld-query");
+    for index in 0..65 {
+        coord
+            .capture(
+                &h,
+                admissible_frame(&format!("unrelated storage prefix {index}")),
+                NOW + index,
+            )
+            .expect("capture unrelated candidate");
+    }
+    let restricted = coord
+        .capture(
+            &h,
+            restricted_frame("unique queried restricted needle"),
+            NOW + 65,
+        )
+        .expect("capture queried restricted candidate");
+    let corpus = make_corpus();
+    corpus
+        .ingest(&restricted.content, &restricted.id, NOW + 65)
+        .expect("ingest queried restricted candidate");
+    coord.register_corpus(&h, corpus);
+
+    let result = coord
+        .recall_scored(
+            &h,
+            default_request("unique queried restricted needle", 1),
+            NOW + 100,
+        )
+        .expect("recall");
+
+    assert_eq!(
+        result.withheld_by_sensitivity,
+        1,
+        "withheld counting must evaluate the query candidate, not an arbitrary storage prefix"
     );
 }
 

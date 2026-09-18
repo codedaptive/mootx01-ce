@@ -106,8 +106,25 @@ fn gss2_registered_defaults_make_signal_tick_fire() {
     let (mut governor, _registry) = make_governor();
     // Register at t=1 s so interval triggers schedule their first run relative
     // to a known instant (the scheduler stamps last_run_at at registration).
+    // All injected cycles are None → no-op defaults,
+    // unchanged behavior. Live closures are threaded via runtime.rs in the resident path.
     let registered = governor
-        .register_default_standing_signals("minilm-v6", UNIX_EPOCH + Duration::from_secs(1))
+        .register_default_standing_signals(
+            "minilm-v6",
+            UNIX_EPOCH + Duration::from_secs(1),
+            None, // hunt_cycle
+            None, // anomaly_cycle
+            None, // span_encode_cycle
+            None, // fact_extraction_cycle
+            None, // consolidation_cycle (preference-gated; absent here)
+            None, // contradiction_sweep_cycle (preference-gated; absent here)
+            None, // maintenance_cycle (preference-gated; absent here)
+            None, // decay_cycle (preference-gated; absent here)
+            None, // by_reference_cycle (preference-gated; absent here)
+            None, // fold_cycle (preference-gated; absent here)
+            None, // training_cycle (preference-gated; absent here)
+            None, // tournament_cycle (preference-gated; absent here)
+        )
         .expect("in-memory estate has a registered VectorStore → registration succeeds");
 
     // Parity: the registered count matches the GLK default-signal roster.

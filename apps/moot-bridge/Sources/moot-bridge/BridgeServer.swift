@@ -20,13 +20,12 @@ import Foundation
 //      response, id-preserving, returns to the client) AND translate the call
 //      through the secondary's verbMap and fire it at the secondary. The
 //      secondary's response is NOT returned; a secondary FAILURE is counted and
-//      swallowed so the client never sees it (backend-failure isolation, carried
-//      from ProxyServer.swift:553-559).
+//      swallowed so the client never sees it (backend-failure isolation).
 //
 //   4. READ-classified calls (query) and ANY unclassifiable tool call — go to the
 //      PRIMARY only, verbatim, id-preserving. Unclassifiable calls are NOT
-//      blind-fanned to the secondary (carried from the classify-then-translate
-//      contract): only calls we can classify and translate are mirrored.
+//      blind-fanned to the secondary (classify-then-translate contract):
+//      only calls we can classify and translate are mirrored.
 //
 //   5. bridge-owned calls (bridge_set_primary, bridge_status) — handled entirely inside
 //      the bridge; they never touch a backend transport. bridge_set_primary swaps
@@ -50,7 +49,7 @@ import Foundation
 // That is the whole point of the bridge — the AI's memory lands in MemPalace AND
 // mootx01 simultaneously. Both backends MUST therefore be writable targets the
 // operator intends to populate. For tests this means scratch backends only
-// (mempalace --palace /tmp/...; MOOTX01_DATA_DIR=/tmp/...).
+// (mempalace --palace /tmp/...; mootx01 serve --db /tmp/.../scratch).
 
 /// The classified call type for a tools/call, matched against a backend's
 /// verbMap. The bridge recognizes two verbs; everything else is unclassifiable and
@@ -314,12 +313,52 @@ final class BridgeServer {
 
         let mirrorStart = DispatchTime.now()
         do {
-            _ = try await secondaryBackend.transport.sendAndReceive(translated)
-            await stats.recordLatency(Self.elapsedSeconds(since: mirrorStart),
-                                      label: "\(secondaryBackend.name).tools/call.mirror")
+            let response = try await secondaryBackend.transport.sendAndReceive(translated)
+            // A backend that answered with a JSON-RPC error or an `isError` tool
+            // result did NOT store the write. Count it as a secondary failure,
+            // not as a completed mirror, so the stats never report a data gap
+            // as success.
+            if Self.isFailedToolResponse(response) {
+                await stats.recordSecondaryFailure()
+            } else {
+                await stats.recordLatency(Self.elapsedSeconds(since: mirrorStart),
+                                          label: "\(secondaryBackend.name).tools/call.mirror")
+            }
         } catch {
             await stats.recordSecondaryFailure()
         }
+    }
+
+    /// True when a backend's response line is a JSON-RPC `error` or a tool
+    /// result flagged `isError: true`. Exposed as `static` for unit testing.
+    static func isFailedToolResponse(_ response: Data) -> Bool {
+        guard let parsed = try? JSONDecoder().decode(JSONValue.self, from: response) else {
+            return true
+        }
+        if parsed["error"] != nil { return true }
+        if case .bool(true)? = parsed["result"]?["isError"] { return true }
+        return false
+    }
+
+    /// The subject the bridge derives for a write tool that requires one: the
+    /// content's first non-empty line, whitespace-trimmed, cut to the 120
+    /// UNICODE SCALARS mootx01 accepts. Exposed as `static` for unit testing.
+    ///
+    /// Scalars, not Characters. The receiving contract counts scalars (the
+    /// Rust server's `subject.chars().count()`), and a grapheme cluster can
+    /// carry several scalars, so a 120-Character cut could emit a subject the
+    /// server refuses — the mirror would be dropped for content whose first
+    /// line runs to combining marks or emoji. Cutting on the same unit the
+    /// receiver counts means whatever the bridge emits, the server accepts.
+    /// The two ports cut identically: Rust's `chars().take(...)` is the same
+    /// unit.
+    static let derivedSubjectLimit = 120
+    static func derivedSubject(from content: String) -> String {
+        let firstLine = content
+            .split(omittingEmptySubsequences: true, whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .first { !$0.isEmpty } ?? "memory"
+        return String(String.UnicodeScalarView(firstLine.unicodeScalars.prefix(derivedSubjectLimit)))
     }
 
     /// Forwards an arbitrary id-bearing method (e.g. initialize) to the primary
@@ -387,7 +426,7 @@ final class BridgeServer {
         writeToolText(clientID: clientID, text: lines.joined(separator: "\n"), to: clientOut)
     }
 
-    // MARK: - Classify + translate (carried from ProxyServer)
+    // MARK: - Classify + translate
 
     /// Classifies a tools/call by tool name against a verbMap. Returns the call
     /// type, or nil when the tool name matches neither verb (unclassifiable → no
@@ -434,6 +473,15 @@ final class BridgeServer {
             // secondary's. Without content there is nothing to mirror → nil.
             guard let value = clientArgs[primaryVerbMap.contentArg] else { return nil }
             secondaryArgs[secondaryVerbMap.contentArg] = value
+            // A write tool that requires a subject gets one derived from the
+            // content when the client's call carries none under that key.
+            if let subjectArg = secondaryVerbMap.subjectArg, secondaryArgs[subjectArg] == nil {
+                if let given = clientArgs[subjectArg], given.stringValue != nil {
+                    secondaryArgs[subjectArg] = given
+                } else if let text = value.stringValue {
+                    secondaryArgs[subjectArg] = .string(Self.derivedSubject(from: text))
+                }
+            }
             secondaryTool = secondaryVerbMap.write
         case .query:
             // Queries are not fanned out in normal operation (reads are
@@ -562,7 +610,7 @@ final class BridgeServer {
         clientOut.write(out)
     }
 
-    // MARK: - Line framing + timing (carried from ProxyServer)
+    // MARK: - Line framing + timing
 
     /// Monotonic elapsed seconds since a start mark.
     static func elapsedSeconds(since start: DispatchTime) -> Double {

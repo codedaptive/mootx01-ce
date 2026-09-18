@@ -151,6 +151,41 @@ impl<'a> DreamingProposalSink for EstateDreamingSink<'a> {
             self.write_errors.push(format!("retire_tunnel({tunnel_id}): {e:?}"));
         }
     }
+
+    /// A3 dream-cycle bracket, start side: `dreamStart` marker through the
+    /// GLK seam. Errors accumulate in `write_errors` (a marker failure must
+    /// never fail the cycle). `now_epoch_secs` converts to the HLC
+    /// boundary's epoch-milliseconds here, at the I/O edge.
+    fn dream_cycle_will_start(&mut self, session_id: &str, now_epoch_secs: f64) {
+        if let Err(e) = self.coordinator.append_dream_cycle_marker(
+            &self.handle,
+            "dreamStart",
+            session_id,
+            (now_epoch_secs * 1000.0) as i64,
+        ) {
+            // Best-effort, but LOGGED to stderr as well as write_errors — the
+            // accumulator is not read on the production path, and a silently
+            // failing marker facility defeats the audit purpose.
+            eprintln!("[neuronkit] dream_cycle_will_start marker failed: {e:?}");
+            self.write_errors.push(format!("dream_cycle_will_start: {e:?}"));
+        }
+    }
+
+    /// A3 end bracket — same session id as the start.
+    fn dream_cycle_did_end(&mut self, session_id: &str, now_epoch_secs: f64) {
+        if let Err(e) = self.coordinator.append_dream_cycle_marker(
+            &self.handle,
+            "dreamEnd",
+            session_id,
+            (now_epoch_secs * 1000.0) as i64,
+        ) {
+            // Best-effort, but LOGGED to stderr as well as write_errors — the
+            // accumulator is not read on the production path, and a silently
+            // failing marker facility defeats the audit purpose.
+            eprintln!("[neuronkit] dream_cycle_did_end marker failed: {e:?}");
+            self.write_errors.push(format!("dream_cycle_did_end: {e:?}"));
+        }
+    }
 }
 
 #[cfg(test)]

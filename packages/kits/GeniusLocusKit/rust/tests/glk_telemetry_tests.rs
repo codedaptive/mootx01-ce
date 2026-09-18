@@ -632,12 +632,12 @@ fn dense_store_error_emits_dark_and_store_error_counters() {
     Intellectus::install(Arc::clone(&sink) as Arc<dyn StatsSink>);
     Intellectus::set_enabled(true);
 
-    use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring};
+    use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallFallbackPolicy, RecallOrigin};
     use locus_kit::filter::{Filter, RecallFrame};
     use locus_kit::frames::CaptureFrame;
     use locus_kit::drawer_operational::CaptureChannel;
     use locus_kit::estate_types::LatticeAnchor;
-    use corpus_kit::Corpus;
+    
 
     let (store, storage) = make_stores();
     let mut coord = EstateCoordinator::new();
@@ -674,11 +674,15 @@ fn dense_store_error_emits_dark_and_store_error_counters() {
     // Force storeError on the next float_nearest (single-use test seam).
     corpus.test_force_float_store_error("forced-d6-counter");
 
-    let req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::UnionBest)
-        .with_scoring(GLKRecallScoring::Rrf)
-        .with_query_text("photosynthesis store error counter chain")
-        .with_limit(5);
+    let req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::UnionBest,
+        GLKRecallScoring::Rrf,
+        5,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+        .with_query_text("photosynthesis store error counter chain");
     let result = coord.recall_scored(&h, req, 1_700_000_001).expect("recall survives");
 
     assert_eq!(result.dense_lane_status.as_deref(), Some("dark:storeError"));

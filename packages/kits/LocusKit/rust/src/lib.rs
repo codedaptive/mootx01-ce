@@ -130,6 +130,9 @@ pub mod drawer_operational;
 pub mod drawer_state_validator;
 pub mod drawer_store;
 pub mod drawer_store_inmemory;
+// The span-encoder registry over `encoder_models` (schema v19).
+pub mod encoder_model_store;
+pub mod fact_extractor_model_store;
 pub mod drawer_store_postgres;
 pub mod drawer_store_sqlite;
 pub mod error;
@@ -144,7 +147,9 @@ pub mod forbidden_combination_validator;
 pub mod frames;
 pub mod kg_fact;
 pub mod kg_fact_identity_backfill;
+pub mod kg_fact_search_projection_backfill;
 pub mod kg_fact_operational;
+pub mod inventory_snapshot_decode;
 pub mod learned_reference;
 #[cfg(test)]
 mod learned_reference_tests;
@@ -157,6 +162,7 @@ mod proposal_tests;
 pub mod provenance;
 #[cfg(test)]
 mod reanchor_tests;
+pub mod recall_rating;
 pub mod recall_stream;
 pub mod recall_trace_item;
 pub mod schema;

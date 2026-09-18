@@ -39,7 +39,9 @@ let package = Package(
             targets: ["NeuronKit"]
         ),
     ],
+    traits: [],
     dependencies: [
+        .package(name: "MootProductIdentity", path: "../../libs/MootProductIdentity"),
         .package(path: "../../libs/EideticLib"),
         // LatticeLib supplies Tokenizer.tokenize (UAX #29 word boundaries) and
         // LatticeLib.wordClass(_:tagger:recordNovel:) with .hmm and recordNovel:false,
@@ -61,7 +63,7 @@ let package = Package(
         // GeniusLocusKit resolves `EstateHandle` and the nine estate
         // verbs (notably `recall`). All substrate writes flow through
         // this surface; NeuronKit calls no write API on LocusKit,
-        // VectorKit, CorpusKit, or PersistenceKit (B-1 invariant). LocusKit
+        // SynapseKit, CorpusKit, or PersistenceKit (B-1 invariant). LocusKit
         // is also a direct dependency because the substrate's `Drawer`
         // value type and its read-only adjective-state extensions
         // (notably `isCurrentlyBelieved`) are used to shape the
@@ -79,7 +81,7 @@ let package = Package(
         // relevance and inter-candidate similarity from that distance.
         // This is a typed-math dependency only — no substrate, SQL, or
         // estate-verb access — so it is consistent with the B-1
-        // invariant that bars direct LocusKit/VectorKit/CorpusKit calls.
+        // invariant that bars direct LocusKit/SynapseKit/CorpusKit calls.
         .package(path: "../../libs/EngramLib"),
         .package(path: "../../libs/SubstrateTypes"),
         // SubstrateML supplies the gated reasoning-lens math primitives
@@ -99,6 +101,7 @@ let package = Package(
         .target(
             name: "NeuronKit",
             dependencies: [
+                .product(name: "MootProductIdentity", package: "MootProductIdentity"),
                 .product(name: "EideticLib", package: "EideticLib"),
                 // Tokenizer + HMM wordClass tagger for the production feature extractor
                 // (HMMFeatureExtractor.swift). Direct dep required: NeuronKit calls
@@ -114,6 +117,8 @@ let package = Package(
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 // Gated lens math — see dependency note above (SPEC I-17).
                 .product(name: "SubstrateML", package: "SubstrateML"),
+            ],
+            swiftSettings: [
             ]
         ),
         .testTarget(
@@ -129,11 +134,16 @@ let package = Package(
                 // adapter delegates all three reads correctly.
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 .product(name: "PersistenceKitInMemory", package: "PersistenceKit"),
+                // PreferenceLensTests constructs RecallTraceItem values directly
+                // for the 1,000-trace window conformance vector (PREF-1).
+                .product(name: "LocusKit", package: "LocusKit"),
             ],
             // Shared conformance vectors — one artifact read by this
             // suite AND rust/tests/lens_conformance.rs (QueueKit's
             // Fixtures pattern).
-            resources: [.copy("Fixtures")]
+            resources: [.copy("Fixtures")],
+            swiftSettings: [
+            ]
         ),
     ]
 )

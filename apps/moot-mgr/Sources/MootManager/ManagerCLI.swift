@@ -99,7 +99,6 @@ public enum ManagerCLI {
       help                 Print this message
 
     ENVIRONMENT:
-      MOOT_MGR_STORE                      Override the stats-store path
       MOOT_MGR_RETENTION_SECONDS          Retention window in seconds (default 604800 = 7d)
       MOOT_MGR_RETENTION_CADENCE_SECONDS  Resident retention-loop cadence (default 3600 = 1h)
       MOOT_MGR_HTTP_PORT                  Loopback HTTP read-API port (serve; default 4200)

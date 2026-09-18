@@ -1,0 +1,16 @@
+{
+  "_comment": "Golden-pin fixture for PeriodicCoach.renderBlock() template-5 tie case — shared by Swift and Rust ports. Both ports must produce identical output after the name-ascending tiebreak is applied to topMode. Filing wins over Recall (F < R) despite equal attribution counts.",
+  "snapshot": {
+    "totalCalls": 10,
+    "toolCounts": {
+      "moot_estate_status": 4,
+      "moot_memory_search": 2
+    },
+    "bigramCounts": {},
+    "modeAttributionCounts": {
+      "Recall": 3,
+      "Filing": 3
+    }
+  },
+  "expected_block": "[Moot coaching · call 10]\nFocused Filing session — 3 calls in that mode. I bet a quick moot_estate_status at the start of your next session orients you even faster.\nModes available: Filing (50%), Recall (50%), Lenses (unused), Vault (unused)."
+}

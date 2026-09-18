@@ -25,6 +25,8 @@ use corpus_kit::{CorpusContentEngine, EmbeddingModelConfig};
 use genius_locus_kit::coordinator::EstateCoordinator;
 use genius_locus_kit::recall::{
     GLKRecallMode, GLKRecallRequest, GLKRecallScoring, RecallEvidencePath, RecallShape,
+    RecallFallbackPolicy,
+    RecallOrigin,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -33,7 +35,7 @@ use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use persistence_kit::inmemory::InMemoryStorage;
 use persistence_kit::{BackendConfiguration, EstateConfiguration, Storage};
-use vectorkit::vector_store::VectorStore;
+use synapsekit::vector_store::VectorStore;
 
 const NOW: i64 = 1_700_000_000;
 
@@ -70,6 +72,39 @@ fn make_vector_store() -> Arc<VectorStore> {
     Arc::new(VectorStore::open(storage).expect("VectorStore::open"))
 }
 
+/// Open an estate with captured drawers wired to a deterministic corpus + vector
+/// store and subject lines set per entry. Used when the test needs deterministic
+/// (score, subject) ordering — without subjects all items tie on subject ("") and
+/// their mutual order is unspecified by design (ruling 3, DECISION_SCORE_TRANSPARENT_ORDERING_2026-08-24).
+/// Returns the coordinator, handle, and drawer ids in capture order.
+fn estate_with_drawers_and_subjects(
+    contents: &[&str],
+    subjects: &[&str],
+) -> (
+    EstateCoordinator,
+    genius_locus_kit::handle::EstateHandle,
+    Vec<String>,
+) {
+    let (mut coord, h) = open_one();
+    let corpus = make_corpus();
+    let vector_store = make_vector_store();
+    let mut ids = Vec::new();
+    for (content, subject) in contents.iter().zip(subjects.iter()) {
+        let mut frame = cap_frame(content);
+        frame.subject = Some(subject.to_string());
+        let drawer = coord.capture(&h, frame, NOW).expect("capture");
+        corpus.ingest(&drawer.content, &drawer.id, NOW).expect("ingest");
+        let engram = corpus.embed(&drawer.content).expect("embed");
+        vector_store
+            .add_vector(&drawer.id, &engram, &corpus.model_id(), "1", NOW)
+            .expect("add_vector");
+        ids.push(drawer.id);
+    }
+    coord.register_corpus(&h, corpus);
+    coord.register_vector_store(&h, vector_store);
+    (coord, h, ids)
+}
+
 /// Open an estate with three captured drawers wired to a deterministic corpus +
 /// vector store, so the bm25 and hamming lanes produce real candidates. Returns
 /// the coordinator, handle, and the drawer ids in capture order.
@@ -99,11 +134,15 @@ fn estate_with_drawers(
 }
 
 fn hybrid_req(query: &str, shape: Option<RecallShape>) -> GLKRecallRequest {
-    let mut req = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::Hybrid)
-        .with_scoring(GLKRecallScoring::Rrf)
-        .with_query_text(query)
-        .with_limit(10);
+    let mut req = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::Hybrid,
+        GLKRecallScoring::Rrf,
+        10,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::Internal,
+    )
+        .with_query_text(query);
     if let Some(s) = shape {
         req = req.with_recall_shape(s);
     }
@@ -259,9 +298,16 @@ fn exclusion_and_suppression_differ() {
 
 // (d) leave-one-out: nulling one signal removes only that signal's votes, and the
 //     fusion stays deterministic.
+//
+// Each fixture drawer must have a distinct subject so that the (score DESC, subject ASC)
+// secondary sort key resolves ties deterministically. Without subjects all items have
+// subject="" and their mutual order is unspecified by design (ruling 3,
+// DECISION_SCORE_TRANSPARENT_ORDERING_2026-08-24), making the two recall_scored calls
+// produce different orderings due to HashMap iteration variation in candidate buffers.
+const LEAVE_ONE_OUT_SUBJECTS: [&str; 3] = ["subject-a", "subject-b", "subject-c"];
 #[test]
 fn leave_one_out_nulls_single_signal() {
-    let (coord, h, _) = estate_with_drawers(&CONTENTS);
+    let (coord, h, _) = estate_with_drawers_and_subjects(&CONTENTS, &LEAVE_ONE_OUT_SUBJECTS);
     let query = "mango fruit recall";
 
     let mut w = HashMap::new();

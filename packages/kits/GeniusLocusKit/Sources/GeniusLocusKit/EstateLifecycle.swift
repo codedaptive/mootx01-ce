@@ -1,4 +1,5 @@
 import Foundation
+import MootProductIdentity
 import IntellectusLib
 import OSLog
 import CorpusKit
@@ -6,7 +7,7 @@ import CorpusKitProviders
 import LocusKit
 import PersistenceKit
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // EstateLifecycle.swift — Composition-aware estate provisioning and lifecycle.
 //
@@ -37,7 +38,7 @@ import VectorKit
 public extension GeniusLocusKit {
 
     private static var lifecycleLog: Logger {
-        Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+        Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
     }
 
     // MARK: - provision
@@ -80,11 +81,10 @@ public extension GeniusLocusKit {
     ///   - owner: Credentials for the new estate's owner.
     ///   - params: Provisioning parameters (name, kind, zoom window, profile, sync mode).
     ///   - embeddingModels: The recall ensemble for the Corpus. Defaults to the
-    ///     canonical five-signal ensemble (`CorpusEnsemble.defaultEnsemble()`:
-    ///     RI / PPMI / LSA / NMF / FDC), so every provisioned estate gets the
-    ///     honest multi-signal default. The Corpus lifecycle trains and persists
-    ///     the trainable signals on first ingest / reindex. Pass an explicit
-    ///     single-element list (e.g. `[.deterministic]`) only when a caller
+    ///     canonical ensemble (`CorpusEnsemble.defaultEnsemble()`: RI and LSA,
+    ///     both always on). The Corpus lifecycle
+    ///     trains and persists the trainable signals on first ingest / reindex.
+    ///     Pass an explicit single-element list (e.g. `[.deterministic]`) only when a caller
     ///     specifically wants one signal. Ignored for `.locusOnly` kind.
     /// - Returns: An `EstateHandle` for the newly created and wired estate.
     /// - Throws:
@@ -185,7 +185,30 @@ public extension GeniusLocusKit {
         let identityKeyStore: (any EstateIdentityKeyStore)? = params.lifetime == .ephemeral
             ? InMemoryEstateIdentityKeyStore()
             : nil // nil → defaultIdentityKeyStore(for:storage) in LocusKit.Estate.open
-        let handle = try await open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
+        // A provisioned estate is one this install owns: it federates, so its
+        // identity is minted here into the caller's key store.
+        let handle = try await open(storage: storage, owner: owner,
+                                    identityKeyStore: identityKeyStore, federate: true)
+        // The one instant provision stamps with: the estate's own creation
+        // time, read back from the manifest DrawerStore wrote when the schema
+        // was created in step 1. The format stamp (2b) and the wing hints (2c)
+        // both carry it, so provision reads no clock of its own (the engine
+        // determinism rule). Rust twin: `provision` reads `manifest().created_at`.
+        let createdAt = try await estate(for: handle).manifest.createdAt
+
+        // Step 2a: a fresh estate is born with the span encoder as its default
+        // recall stage. Written BEFORE wiring so this same open activates it
+        // (wireSubstores reads the key, and activation seeds the encoder_models
+        // row so the first open finds an active row without an upgrade run).
+        // LocusOnly estates have no Corpus, so there is nothing to activate.
+        if params.kind != .locusOnly {
+            do {
+                try await provisionDefaultEncoderIfAbsent(for: handle)
+            } catch {
+                try? await close(handle)
+                throw error
+            }
+        }
 
         // Step 2b: Wire sub-stores based on kind — BEFORE seeding the wings.
         // Wiring registers the Corpus (and mounts the encode queue), so the wing
@@ -198,10 +221,10 @@ public extension GeniusLocusKit {
         do {
             // A fresh GLK provision is born at the current estate format. This
             // is the only non-migration path allowed to create the format stamp.
-            try await EstateFormatStore(storage: formatStorage).stamp(.current, now: Date())
+            try await EstateFormatStore(storage: formatStorage).stamp(.current, now: createdAt)
             // Wire via the shared seam (also called by the serve entry points so a
             // bare-opened served estate gets the same Corpus + VectorStore + encode
-            // queue — the semantic recall + distillation lanes — without re-stamping
+            // queue — the semantic recall lanes — without re-stamping
             // the manifest).
             try await wireSubstores(
                 for: handle, kind: params.kind,
@@ -217,26 +240,25 @@ public extension GeniusLocusKit {
 
         // Step 2c: Seed the seven default wings.
         // Delegates to `seedDefaultWings(for:now:)` — the single seam that owns
-        // the idempotent seeding loop. Provision passes a fresh Date() as `now`;
-        // the serve open path calls the same method unconditionally so bare estates
+        // the idempotent seeding loop. Provision passes the estate's creation
+        // instant as `now`; the serve open path calls the same method
+        // unconditionally so bare estates
         // opened via `mootx01 serve` receive the same wings without re-stamping
         // the manifest. The method skips wings whose `AI_Charter_Hint` drawer
         // already exists so calling it again on a pre-seeded estate is a safe no-op.
         //
         // The Corpus is now wired (step 2b), so each hint drawer is stamped with the
         // corpus's normal model id — NOT the old "estate-provision" sentinel — and
-        // `seedDefaultWings` enqueues each newly-seeded hint onto the Corpus encode
-        // stream (the same change-reference path a `.regular` capture rides), so
-        // the drain-stage distillation rider fires for hints exactly as it does
-        // for user content: hints are BM25/vector indexed and distilled at drain,
-        // and the "distillation" drain lane can reach zero (DISTILL_SEED_STALL).
+        // `seedDefaultWings` indexes each hint inline through the encode path
+        // (the same transform a `.regular` capture receives at drain), so hints
+        // are BM25/vector indexed and fingerprinted before provision returns.
         //
         // Failure policy: wing seeding is part of provision — if seeding fails
         // the estate is considered partially provisioned. The estate is closed
         // and an `underlyingEstateFailure` is thrown so the caller sees the error
         // rather than silently receiving an un-seeded estate.
         do {
-            try await seedDefaultWings(for: handle, now: Date())
+            try await seedDefaultWings(for: handle, now: createdAt)
         } catch {
             // Close the half-seeded estate to avoid a zombie in the registry.
             try? await close(handle)
@@ -279,16 +301,15 @@ public extension GeniusLocusKit {
     /// inserts unconditionally (not idempotent by itself). The outer check here
     /// provides the idempotency boundary.
     ///
-    /// **Encode routing (DISTILL_SEED_STALL):** when a Corpus is registered,
-    /// hint drawers are indexed and distilled INLINE through the encode path —
-    /// the same index/distill/recompose transform a queued drawer receives at
-    /// drain — so seeding returns with the estate settled and the
-    /// "distillation" drain lane able to reach zero. The predicate is
-    /// representation-eligibility (bit 19 `hasCurrentRepresentation` clear, or
-    /// a stale pipeline version) over the `AI_Charter_Hint` room only: a hint
-    /// that has already been indexed and distilled is never re-processed, so
-    /// re-opening an estate stays a no-op — no spurious encode work per open.
-    /// (The predicate deliberately does NOT key on `hintAddedBy`, which is
+    /// **Encode routing:** when a Corpus is registered, hint drawers are
+    /// indexed INLINE through the encode path — the same facts/index/
+    /// fingerprint transform a queued drawer receives at drain — so seeding
+    /// returns with the estate settled. Every hint in the `AI_Charter_Hint`
+    /// room goes through the transform on every open: the engine's
+    /// idempotence gate (content digest) turns a re-index of an unchanged
+    /// hint into one digest compare, and the facts and fingerprint writes
+    /// are upserts, so re-opening an estate does no queue work. (The room
+    /// predicate deliberately does NOT key on `hintAddedBy`, which is
     /// provenance-only.)
     ///
     /// - Parameters:
@@ -299,6 +320,10 @@ public extension GeniusLocusKit {
     /// - Throws: `GeniusLocusKitError.estateNotFound` if `handle` is stale;
     ///   substrate errors if a `seedWing` write fails.
     func seedDefaultWings(for handle: EstateHandle, now: Date) async throws {
+        // Whether to seed charters at all is the caller's decision: a served
+        // registered estate seeds them, a transient estate (benchmark corpus,
+        // scratch) does not call this, so it holds exactly what was imported
+        // (2026-08-24 ruling). No environment variable decides it.
         let locusEstate = try estate(for: handle)
 
         // Read the existing drawers once — `allDrawers()` is a full corpus scan
@@ -344,51 +369,46 @@ public extension GeniusLocusKit {
             seededCount += 1
         }
 
-        // Encode routing (DISTILL_SEED_STALL): index + distill hint drawers
-        // that still owe a representation, INLINE through the encode path —
-        // the same index/distill/recompose transform a queued drawer receives
+        // Encode routing: index hint drawers INLINE through the encode path —
+        // the same facts/index/fingerprint transform a queued drawer receives
         // at drain, without touching the queue. Inline (not enqueued) on
         // purpose: seeding returns with the estate SETTLED — hints
-        // BM25/vector indexed, distilled (bit 19 set), and the young fallback
-        // basis converged via the post-ingest settle — so nothing races the
-        // first user capture and no drain worker/lease is required at open.
-        // Runs AFTER the seeding loop so it covers both the hints seeded just
-        // now and hints seeded by an earlier open that predates this routing
-        // (their bit 19 is clear — the one-time backfill). Skipped entirely
-        // when no Corpus is registered (.locusOnly / bare open before
-        // wiring): a corpus-less estate has no semantic lane; those hints are
-        // picked up by reindex/sweep once a corpus exists.
+        // BM25/vector indexed, fingerprinted, and the young fallback basis
+        // converged via the post-ingest settle — so nothing races the first
+        // user capture and no drain worker/lease is required at open. Runs
+        // AFTER the seeding loop so it covers both the hints seeded just now
+        // and hints seeded by an earlier open; every step is idempotent (the
+        // engine's digest gate, upserting facts and lane writes), so the
+        // re-open cost is a handful of digest compares. Skipped entirely when
+        // no Corpus is registered (.locusOnly / bare open before wiring): a
+        // corpus-less estate has no semantic lane; those hints are picked up
+        // by reindex once a corpus exists.
         if let corpus = corpusKits[handle] {
             // Re-scan when the loop seeded new hints (they are not in
             // `existing`); otherwise reuse the scan from the idempotence check.
             let drawers = seededCount > 0 ? try await locusEstate.allDrawers() : existing
             let nodeIds = Array(Set(drawers.map(\.parentNodeId)))
             let nodeNames = try await locusEstate.resolveNodeNames(parentNodeIds: nodeIds)
-            let distillFn = distillFunction(for: handle)
             var settled = 0
             for hint in drawers
             where nodeNames[hint.parentNodeId]?.room == LocusKit.hintRoom
-                && !hint.content.isEmpty
-                && (!hint.hasCurrentRepresentation
-                    || hint.distilledPipelineVersion != DistillationPipelineVersion.current) {
+                && !hint.content.isEmpty {
+                // SSC facts BEFORE the index: the corpus adapter reads the
+                // column when it composes the BM25 document (contract §6).
+                await writeSSCFacts(handle: handle, drawer: hint)
                 // Index (BM25 + vector lanes) through the engine's direct
                 // path; the post-ingest settle inside indexContent keeps the
                 // young basis covering the growing corpus.
                 _ = try await corpus.indexContent(id: hint.id, now: hint.filedAt)
-                // Drain-stage transform, inline: same distill + dense
-                // recompose the queue's onEncoded rider performs, with the
-                // seeding `now` threaded for determinism.
-                let didDistill = try await distillItem(
-                    handle: handle, drawerID: hint.id, content: hint.content,
-                    distillFn: distillFn, now: now)
-                if didDistill {
-                    _ = try? await corpus.recomposeDenseVector(id: hint.id, now: now)
-                }
+                // The encode rider's lane write, inline, with the seeding
+                // `now` threaded for determinism.
+                try await writeStructuralFingerprint(
+                    handle: handle, drawerID: hint.id, content: hint.content, now: now)
                 settled += 1
             }
             if settled > 0 {
                 Self.lifecycleLog.info(
-                    "seedDefaultWings: indexed + distilled \(settled, privacy: .public) hint drawer(s) inline"
+                    "seedDefaultWings: indexed \(settled, privacy: .public) hint drawer(s) inline"
                 )
             }
         }
@@ -409,14 +429,14 @@ public extension GeniusLocusKit {
     /// Wire an open estate's semantic sub-stores (Corpus + VectorStore + encode
     /// queue) according to its composition kind.
     ///
-    /// This is the single seam that lights an estate's semantic recall and
-    /// distillation lanes. `provision` calls it after stamping the manifest and
-    /// opening the estate; the serve entry points (`mootx01 serve`, `aria-mcp`)
-    /// call it after a bare `open(storage:owner:)` so a served estate gets the
-    /// same wiring without re-stamping the manifest. `open` alone admits a BARE
+    /// This is the single seam that lights an estate's semantic recall lanes.
+    /// `provision` calls it after stamping the manifest and opening the
+    /// estate; the serve entry points (`mootx01 serve`, `aria-mcp`) call it
+    /// after a bare `open(storage:owner:)` so a served estate gets the same
+    /// wiring without re-stamping the manifest. `open` alone admits a BARE
     /// estate — LocusKit BM25/structural recall works, but `corpusKits` and
     /// `vectorStores` stay empty, so dense/vector recall is dark and the
-    /// distillation cluster lane is inert. This call closes that gap.
+    /// fingerprint lane is inert. This call closes that gap.
     ///
     /// Idempotent: `registerCorpus`/`registerVectorStore` replace any existing
     /// entry and `Corpus.mountIngestQueue` is a no-op when already mounted, so
@@ -434,7 +454,8 @@ public extension GeniusLocusKit {
         for handle: EstateHandle,
         kind: EstateKind,
         backingStorage: any Storage,
-        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble(),
+        frozen: Bool = false
     ) async throws {
         switch kind {
         case .glk:
@@ -443,7 +464,7 @@ public extension GeniusLocusKit {
             // calling this seam; an unstamped/older estate fails explicitly.
             try await EstateFormatStore(storage: backingStorage).requireCurrent()
             // Apply the GLK composite schema so all component kit tables (LocusKit,
-            // VectorKit, CorpusKit) are registered on backingStorage under the
+            // SynapseKit, CorpusKit) are registered on backingStorage under the
             // GeniusLocusKit composite kit ID. The plain `open(storage:owner:)` path
             // applies only the LocusKit component schema — it never registers the
             // composite — so opening the composite here ensures the version gate in
@@ -452,7 +473,19 @@ public extension GeniusLocusKit {
             // migration-version record for "GeniusLocusKit". This is the same
             // composite open the hydrate launch path performs in
             // open(inMemory:hydrateFrom:).
-            try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            if frozen {
+                try await backingStorage.openExisting(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            } else {
+                try await backingStorage.open(schema: GeniusLocusKitSchema.estateSchemaDeclaration)
+            }
+            // Read the provisioned embedding_provider manifest key and augment the
+            // ensemble with the matching float/dense provider. Absent key or unknown
+            // ID → caller-supplied ensemble unchanged (byte-identical to today's
+            // default). `"encoder"` leaves the ensemble unchanged and registers
+            // the span encoder on the estate instead (both ports); the Apple NL
+            // providers are Swift-only.
+            let resolvedModels = await applyProvisionedEmbeddingProvider(
+                baseModels: embeddingModels, for: handle)
             // Full composition: the attached-mode CorpusContentEngine (BM25 +
             // internal vectors, Drawer-ID keyed) + standalone VectorStore.
             // EVERY GLK Corpus is constructed attached + .wholeContent — the
@@ -464,8 +497,8 @@ public extension GeniusLocusKit {
                 configuration: CorpusContentConfiguration(
                     mode: .attached, indexUnit: .wholeContent),
                 source: LocusDrawerCorpusContentSource(estate: estateObj),
-                models: embeddingModels)
-            try await corpus.reconcileConfiguredProviders(now: Date())
+                models: resolvedModels, frozen: frozen)
+            if !frozen { try await corpus.reconcileConfiguredProviders(now: Date()) }
             registerCorpus(corpus, for: handle)
             // BORROW Corpus's single dense VectorStore for GLK's scored-recall
             // vector lane rather than constructing a second VectorStore over the
@@ -475,25 +508,55 @@ public extension GeniusLocusKit {
             // table scan AND made the on-disk sidecar churn (each store's writes
             // invalidated the other's whole-table live-count). One shared store =
             // one resident array, one sidecar kept in sync by every write
-            // (Drawer corpus vectors + distilled vectors).
+            // (Drawer corpus vectors + fingerprint lane + span rows).
             // CorpusKit owns the dense vector lane; GLK reaches it through Corpus's
             // public accessor (no reaching around the kit).
             let vectorStore = await corpus.sharedVectorStore
             registerVectorStore(vectorStore, for: handle)
+            // Span encoder activation runs AFTER the VectorStore is registered:
+            // `activateSpanEncoder` first seeds the encoder_models row when the
+            // registry is empty (ruling 2026-09-04: seeding belongs to provision
+            // and serve, not upgrade), then registers the rerank stage only when it
+            // can find the estate's store (the span rows live there). Activating
+            // inside `applyProvisionedEmbeddingProvider` above would register the
+            // duty-side encoder and silently skip the rerank stage. Rust twin:
+            // coordinator.rs wire_substores calls apply_provisioned_embedding_provider
+            // after register_vector_store, and every aria-mcp serve path reaches
+            // it through wire_glk_substores.
+            await activateSpanEncoderIfProvisioned(for: handle, frozen: frozen)
             // CorpusKit owns the encode pipeline: mount the Corpus's own ingest
             // queue + drain worker pool, and wire its onEncoded callback to roll
             // up the touched LocusKit rooms for each encoded batch. GLK's only
             // role is to coordinate the two kits — it never performs the encode.
             // The regular capture path enqueues into the Corpus queue; the
             // Corpus drain worker ingests, lighting the semantic recall lanes.
-            try await corpus.mountIngestQueue()
-            await wireCorpusRoomRollup(corpus, for: handle)
+            //
+            // Install the onEncoded encode rider (room rollup + A2 marker +
+            // structural fingerprint lane entry) BEFORE the mount below: the
+            // mount opens the persisted queue.sqlite and starts the drain
+            // worker immediately, so at serve open a resumed encode backlog can
+            // begin draining on the worker's first pass. Those resumed batches
+            // must find the rider already installed or they encode without the
+            // rider's work for exactly those rows. Rust twin:
+            // coordinator.rs wire_substores installs the rider
+            // (wire_corpus_on_encoded) before its eager mount for the same
+            // reason. Provision mounts an empty queue, so this ordering is
+            // equally correct there.
+            if !frozen {
+                await wireCorpusRoomRollup(corpus, for: handle)
+                try await corpus.mountIngestQueue()
+            }
             Self.lifecycleLog.info(
                 "wired GLK estate \(handle.estateUUID, privacy: .public) (Corpus + VectorStore + encode queue)"
             )
 
         case .corpusOnly:
             try await EstateFormatStore(storage: backingStorage).requireCurrent()
+            // Read the provisioned embedding_provider manifest key and augment the
+            // ensemble with the matching float/dense provider. Same policy as the
+            // .glk case: absent key or unknown ID → caller-supplied ensemble unchanged.
+            let resolvedModels = await applyProvisionedEmbeddingProvider(
+                baseModels: embeddingModels, for: handle)
             // LocusKit core + the attached engine. No standalone VectorStore
             // registration. Same attached + .wholeContent construction rule.
             let estateObj = try estate(for: handle)
@@ -502,13 +565,22 @@ public extension GeniusLocusKit {
                 configuration: CorpusContentConfiguration(
                     mode: .attached, indexUnit: .wholeContent),
                 source: LocusDrawerCorpusContentSource(estate: estateObj),
-                models: embeddingModels)
-            try await corpus.reconcileConfiguredProviders(now: Date())
+                models: resolvedModels, frozen: frozen)
+            if !frozen { try await corpus.reconcileConfiguredProviders(now: Date()) }
             registerCorpus(corpus, for: handle)
-            // A CorpusOnly estate also feeds its Corpus from capture: mount the
-            // Corpus-owned ingest queue + drain worker and wire the room rollup.
-            try await corpus.mountIngestQueue()
-            await wireCorpusRoomRollup(corpus, for: handle)
+            // No VectorStore on a CorpusOnly estate: activation registers the
+            // duty-side encoder only and logs that the rerank stage is absent.
+            await activateSpanEncoderIfProvisioned(for: handle, frozen: frozen)
+            // A CorpusOnly estate also feeds its Corpus from capture: wire the
+            // room rollup and mount the Corpus-owned ingest queue + drain
+            // worker. Rider BEFORE mount, same ordering rule as the .glk case
+            // above: the mount starts the drain worker on the persisted queue,
+            // and a resumed serve-open backlog must never encode ahead of the
+            // encode rider.
+            if !frozen {
+                await wireCorpusRoomRollup(corpus, for: handle)
+                try await corpus.mountIngestQueue()
+            }
             Self.lifecycleLog.info(
                 "wired CorpusOnly estate \(handle.estateUUID, privacy: .public) (Corpus + encode queue)"
             )
@@ -536,11 +608,12 @@ public extension GeniusLocusKit {
     func wireGLKSubstores(
         for handle: EstateHandle,
         backingStorage: any Storage,
-        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble()
+        embeddingModels: [EmbeddingModel] = CorpusEnsemble.defaultEnsemble(),
+        frozen: Bool = false
     ) async throws {
         try await wireSubstores(
             for: handle, kind: .glk,
-            backingStorage: backingStorage, embeddingModels: embeddingModels)
+            backingStorage: backingStorage, embeddingModels: embeddingModels, frozen: frozen)
     }
 
     // MARK: - mountState(for:)
@@ -807,5 +880,131 @@ public extension GeniusLocusKit {
         case .cloudKit:   return 1
         case .federation: return 2
         }
+    }
+
+    /// Read the provisioned `embedding_provider` manifest key and augment
+    /// `baseModels` with the matching float/dense provider.
+    ///
+    /// Called from `wireSubstores` for `.glk` and `.corpusOnly` kinds before
+    /// `CorpusContentEngine` is constructed. `.locusOnly` has no Corpus so
+    /// this helper is never called for it.
+    ///
+    /// ## Selection policy
+    ///
+    ///   - **Absent key (nil or empty string):** return `baseModels` unchanged.
+    ///     The result is byte-identical to today's default — no estate migration
+    ///     is required and no existing caller is affected.
+    ///   - **`"apple-nl-v1"`:** append `.nlEmbedding(provider: AppleNLProvider())`
+    ///     to `baseModels`. The Apple NL provider opts out gracefully (returns `[]`)
+    ///     when the OS has no sentence-embedding model for the configured language.
+    ///   - **`"neural-embed-v1"`:** append `.nlEmbedding(provider: NeuralEmbedProvider())`
+    ///     — the engine-neutral provider (Swift twin of the Rust `tools/neural-embed`
+    ///     backend). Same graceful opt-out contract.
+    ///   - **`"encoder"`:** return `baseModels` unchanged and activate the span
+    ///     encoder (`activateSpanEncoder(for:)`, EncoderActivation.swift). The
+    ///     encoder reranks the lexical head and is registered beside the
+    ///     VectorStore; it is never an ensemble member. Both ports.
+    ///   - **Unknown ID:** emit one OSLog warning on the `GeniusLocusKit` category
+    ///     (routes to stderr via `os_log` on macOS/iOS) so a silently-ignored
+    ///     selection cannot mislabel benchmark arms. Return `baseModels` unchanged.
+    ///
+    /// ## Port split
+    ///
+    /// Apple NL providers are gated `#if canImport(NaturalLanguage)` and are
+    /// Swift-only: Rust reads the same key, records provenance for those ids
+    /// and selects nothing (parity ruling, GENIUSLOCUSKIT_INTERFACE.md §1.53).
+    /// `"encoder"` is both ports: `coordinator.rs apply_provisioned_embedding_provider`
+    /// activates the candle span encoder the same way this method does.
+    ///
+    /// - Parameters:
+    ///   - baseModels: The caller-supplied ensemble (default: five-signal default).
+    ///   - handle: The open estate handle; used to read the manifest.
+    /// - Returns: The (possibly augmented) ensemble to pass to `CorpusContentEngine`.
+    /// Activate the span encoder when the manifest's `embedding_provider` is
+    /// `"encoder"`. Called from `wireSubstores` after the Corpus (and, on a
+    /// GLK estate, the VectorStore) is registered, so `activateSpanEncoder`
+    /// can seed the encoder_models row when absent and attach the rerank stage
+    /// to the store. Absent or other keys do nothing; the failure contract of
+    /// `activateSpanEncoder` applies (seed failure logged once, activation
+    /// reads the registry as it stands).
+    func activateSpanEncoderIfProvisioned(for handle: EstateHandle, frozen: Bool = false) async {
+        guard let provisionedID = try? await provisionedEmbeddingProvider(for: handle),
+              provisionedID == Self.encoderProviderID else {
+            return
+        }
+        await activateSpanEncoder(for: handle, frozen: frozen)
+    }
+
+    private func applyProvisionedEmbeddingProvider(
+        baseModels: [EmbeddingModel],
+        for handle: EstateHandle
+    ) async -> [EmbeddingModel] {
+        // Read the provisioned model ID. Absent key (nil) and empty string both
+        // mean "use the caller-supplied ensemble unchanged." try? suppresses any
+        // estate-not-found error (stale handle) — the Corpus construction that
+        // follows will also fail if the handle is stale, producing the correct error.
+        guard let provisionedID = try? await provisionedEmbeddingProvider(for: handle),
+              !provisionedID.isEmpty else {
+            // Absent key → byte-identical to the caller-supplied ensemble. No log.
+            return baseModels
+        }
+
+        if provisionedID == Self.encoderProviderID {
+            // The span encoder is a rerank stage over the BM25 head, not an
+            // ensemble member: the lexical document and the dense families stay
+            // exactly as configured. Activation happens in `wireSubstores`
+            // through `activateSpanEncoderIfProvisioned` once the estate's
+            // VectorStore is registered (the rerank stage needs it). Activation
+            // also seeds the encoder_models row when absent (ruling 2026-09-04).
+            return baseModels
+        }
+
+#if canImport(NaturalLanguage)
+        switch provisionedID {
+        #if APPLE_ENCODERS
+        // Apple encoder cases compiled only when the AppleEncoders trait is on
+        // (off by default, plan 70BC55F3, 2026-09-05). The providers
+        // (AppleNLProvider, NeuralEmbedProvider) live in CorpusKitProviders
+        // behind the same APPLE_ENCODERS guard. Held for v1.2 iOS and Apple
+        // cloud compute; see CorpusKit/Package.swift for the switch rationale.
+        case "apple-nl-v1":
+            // Apple NL unnormalized provider: adds the raw-magnitude float lane on
+            // top of the distributional ensemble. ITEM-LOCAL: the vector is a pure
+            // function of the text computed at write time; no training step is required.
+            // AppleNLProvider.embedFloat opts out gracefully (returns []) when the OS
+            // has no sentence-embedding model for the configured language (absent-lane
+            // contract), so the lane is dark rather than crashing on systems without
+            // the OS asset. The distributional providers in baseModels are always
+            // wired alongside it.
+            return baseModels + [.nlEmbedding(provider: AppleNLProvider())]
+        case "neural-embed-v1":
+            // Engine-neutral provider (RENAME-EMBED #72): NLTagger word tokens
+            // mean-pooled over NLEmbedding word vectors, UNNORMALIZED — the Swift
+            // twin of the Rust tools/neural-embed backend. Same opt-in-only policy
+            // as apple-nl-v1: NEVER part of the default ensemble; joins only when
+            // provisioned. Opts out gracefully (returns []) when the OS has no
+            // word-embedding model for the language, so the lane goes dark rather
+            // than crashing. The distributional providers in baseModels are always
+            // wired alongside it.
+            return baseModels + [.nlEmbedding(provider: NeuralEmbedProvider())]
+        #endif // APPLE_ENCODERS
+        default:
+            // Unknown provisioned ID — fall back to the caller-supplied ensemble.
+            // One warning per open so a silently-ignored selection cannot mislabel
+            // benchmark arms. The estate UUID is included for log correlation.
+            Self.lifecycleLog.warning(
+                "wireSubstores: unknown provisioned embedding_provider '\(provisionedID, privacy: .public)' falling back to default ensemble (estate: \(handle.estateUUID, privacy: .public))"
+            )
+            return baseModels
+        }
+#else
+        // NaturalLanguage is unavailable on this platform. Any provisioned model ID
+        // requiring it is treated as unknown. Emit one warning so the caller can
+        // diagnose unexpected ensemble fallbacks in logs.
+        Self.lifecycleLog.warning(
+            "wireSubstores: provisioned embedding_provider '\(provisionedID, privacy: .public)' cannot be selected (NaturalLanguage unavailable on this platform) falling back to default ensemble (estate: \(handle.estateUUID, privacy: .public))"
+        )
+        return baseModels
+#endif
     }
 }

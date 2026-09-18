@@ -1,0 +1,161 @@
+{
+  "family": "review",
+  "cases": [
+    {
+      "id": "review-dashboard-all-modes",
+      "covers": ["success"],
+      "method": "moot_community_review_dashboard",
+      "arguments": {},
+      "result": {
+        "modes": [
+          {"kind": "morning", "status": "due"},
+          {"kind": "endOfDay", "status": "inProgress", "sessionID": "40000000-0000-0000-0000-000000000001"},
+          {
+            "kind": "weekly",
+            "status": "completed",
+            "receipt": {
+              "sessionID": "40000000-0000-0000-0000-000000000002",
+              "completedAt": "2026-08-21T12:00:00Z",
+              "summary": "Weekly review completed."
+            }
+          }
+        ]
+      }
+    },
+    {
+      "id": "review-session-ordered-with-duplicate",
+      "covers": ["success", "duplicate"],
+      "method": "moot_community_review_session",
+      "arguments": {"kind": "morning"},
+      "result": {
+        "outcome": "session",
+        "session": {
+          "id": "40000000-0000-0000-0000-000000000003",
+          "kind": "morning",
+          "generatedAt": "2026-08-21T13:00:00Z",
+          "sourceEstateState": "hlc:2026-08-21T13:00:00Z/4",
+          "sections": [
+            {
+              "id": "40000000-0000-0000-0000-000000000004",
+              "title": "First priorities",
+              "items": [
+                {
+                  "id": "40000000-0000-0000-0000-000000000005",
+                  "subject": "Community release",
+                  "detail": "Confirm the daemon contract lane."
+                }
+              ]
+            }
+          ],
+          "actions": [
+            {
+              "id": "40000000-0000-0000-0000-000000000006",
+              "expectedEffect": "Marks the release checkpoint reviewed.",
+              "isReversible": true,
+              "reversalAvailable": true
+            }
+          ],
+          "duplicateGroups": [
+            {
+              "id": "40000000-0000-0000-0000-000000000007",
+              "reason": "Both records have the same canonical source fingerprint.",
+              "recordIDs": [
+                "40000000-0000-0000-0000-000000000008",
+                "40000000-0000-0000-0000-000000000009"
+              ],
+              "choices": [
+                {
+                  "id": "40000000-0000-0000-0000-00000000000a",
+                  "description": "Keep the newer record and preserve references."
+                }
+              ]
+            }
+          ],
+          "completionStatus": {"state": "inProgress"}
+        }
+      }
+    },
+    {
+      "id": "review-apply-success",
+      "covers": ["success"],
+      "method": "moot_community_review_apply",
+      "arguments": {
+        "actionID": "40000000-0000-0000-0000-000000000006",
+        "sessionID": "40000000-0000-0000-0000-000000000003"
+      },
+      "result": {"outcome": "applied"}
+    },
+    {
+      "id": "review-apply-exact-retry",
+      "covers": ["retry"],
+      "method": "moot_community_review_apply",
+      "arguments": {
+        "actionID": "40000000-0000-0000-0000-000000000006",
+        "sessionID": "40000000-0000-0000-0000-000000000003"
+      },
+      "result": {"outcome": "alreadyApplied"}
+    },
+    {
+      "id": "review-stale-session",
+      "covers": ["refusal", "stale-state"],
+      "method": "moot_community_review_apply",
+      "arguments": {
+        "actionID": "40000000-0000-0000-0000-000000000006",
+        "sessionID": "40000000-0000-0000-0000-00000000000b"
+      },
+      "result": {"outcome": "staleSession"}
+    },
+    {
+      "id": "review-action-conflict",
+      "covers": ["refusal", "conflict"],
+      "method": "moot_community_review_apply",
+      "arguments": {
+        "actionID": "40000000-0000-0000-0000-000000000006",
+        "sessionID": "40000000-0000-0000-0000-000000000003"
+      },
+      "result": {"outcome": "conflict", "reason": "action-conflict"}
+    },
+    {
+      "id": "review-reversal-success",
+      "covers": ["success"],
+      "method": "moot_community_review_reverse",
+      "arguments": {
+        "actionID": "40000000-0000-0000-0000-000000000006",
+        "sessionID": "40000000-0000-0000-0000-000000000003"
+      },
+      "result": {"outcome": "applied"}
+    },
+    {
+      "id": "review-duplicate-resolution",
+      "covers": ["success", "duplicate"],
+      "method": "moot_community_review_resolve_duplicate",
+      "arguments": {
+        "groupID": "40000000-0000-0000-0000-000000000007",
+        "choiceID": "40000000-0000-0000-0000-00000000000a",
+        "sessionID": "40000000-0000-0000-0000-000000000003"
+      },
+      "result": {"outcome": "applied"}
+    },
+    {
+      "id": "review-complete-receipt",
+      "covers": ["success"],
+      "method": "moot_community_review_complete",
+      "arguments": {"sessionID": "40000000-0000-0000-0000-000000000003"},
+      "result": {
+        "outcome": "completed",
+        "receipt": {
+          "sessionID": "40000000-0000-0000-0000-000000000003",
+          "completedAt": "2026-08-21T13:30:00Z",
+          "summary": "Morning review completed with one action and one duplicate resolution."
+        }
+      }
+    },
+    {
+      "id": "review-interrupted-session-blocked",
+      "covers": ["interruption", "refusal"],
+      "method": "moot_community_review_session",
+      "arguments": {"kind": "endOfDay"},
+      "result": {"outcome": "blocked", "reason": "daemon-blocked"}
+    }
+  ]
+}

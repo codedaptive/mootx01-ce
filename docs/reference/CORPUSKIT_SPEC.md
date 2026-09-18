@@ -1,14 +1,14 @@
 ---
 title: CorpusKit Specification
-version: 1.16.0
+version: 2.8.0
 status: accepted-1.1-target
-date: 2026-07-30
-description: "Behavioral specification for CorpusKit: invariants, conformance requirements, and the contract it guarantees. 1.16.0: MXE-BB — chunked BasisStore persistence; SQLITE_LIMIT_LENGTH defense-in-depth in PersistenceKit."
+date: 2026-09-14
+description: "Behavior and invariants for CORPUSKIT. 2.8.0: LSA retraining is document- and sweep-bounded, cooperatively cancellable, and publishes only completed replacement bases."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
   - docs/reference/CORPUSKIT_INTERFACE.md
-  - docs/reference/VECTORKIT_SPEC.md
+  - docs/reference/SYNAPSEKIT_SPEC.md
   - docs/reference/PERSISTENCEKIT_SPEC.md
   - docs/reference/CONVERGENCEKIT_SPEC.md
   - docs/reference/ENGRAMLIB_SPEC.md
@@ -21,6 +21,12 @@ relates_to:
 
 # CorpusKit Specification
 
+The default distributional provider is random indexing. References below
+to other record-vector families describe optional provider contracts.
+They do not define the current recall ensemble. See
+[the retirement ledger](../decisions/DECISION_RETIRED_TECHNIQUES_LEDGER.md).
+
+
 ## § 1 — What this package is
 
 CorpusKit is a standalone-capable retrieval-augmented-generation database and
@@ -28,7 +34,7 @@ the RAG indexing engine used by GeniusLocusKit. It builds BM25 and model-tagged
 vector retrieval state over a `CorpusContentSource`, fuses the available lanes,
 and returns the canonical identity supplied by that source. It also defines the
 `Tokenizer` protocol used by its concrete embedding providers (MiniLM, mpnet,
-EmbeddingGemma), which conform to VectorKit's `EmbeddingProvider`; the providers
+EmbeddingGemma), which conform to SynapseKit's `EmbeddingProvider`; the providers
 ship in a separate `CorpusKitProviders` target so the core kit pulls in no model
 weights.
 
@@ -43,7 +49,7 @@ CorpusKit has two operating modes over the same indexing and retrieval engine:
   optional match evidence keyed by the GLK Drawer ID.
 
 CorpusKit never imports LocusKit. The adapter lives in GeniusLocusKit, preserving
-both kits' standalone use and the bottom-up dependency graph. VectorKit remains
+both kits' standalone use and the bottom-up dependency graph. SynapseKit remains
 the owner of embeddings, ANN search, and model tagging.
 
 This 1.1 target contract supersedes the 1.0 assumption that every Corpus must
@@ -69,7 +75,7 @@ This specification defines:
   vector and keyword hits, deterministic ranking, and aggregation to canonical
   content identity.
 - The `Tokenizer` protocol, the concrete embedding providers (which
-  conform to VectorKit's `EmbeddingProvider`), and the
+  conform to SynapseKit's `EmbeddingProvider`), and the
   model-tagging discipline that forbids cross-model comparison.
 - Standalone content synchronization and composed-mode derived-index
   invalidation.
@@ -79,7 +85,7 @@ This specification does NOT define:
 
 - API signatures — those live in `CORPUSKIT_INTERFACE.md`.
 - Embedding storage, the ANN/HNSW index, or `VectorStore.findNearest`
-  ordering — those are VectorKit's (`VECTORKIT_SPEC.md`).
+  ordering — those are SynapseKit's (`SYNAPSEKIT_SPEC.md`).
 - The `Storage` row-store backend, schema declaration semantics, or
   append-only trigger mechanics — those are PersistenceKit's
   (`PERSISTENCEKIT_SPEC.md`).
@@ -97,7 +103,7 @@ SubstrateLib (HLC, FloatSimHash)   EngramLib (Engram)
         ▲                                ▲
         └───────────────┬────────────────┘
                         │
-PersistenceKit ── CorpusKit ── VectorKit ── ConvergenceKit
+PersistenceKit ── CorpusKit ── SynapseKit ── ConvergenceKit
    (Storage)        │  ▲          (VectorStore)   (SyncManifest)
                     │  └── CorpusKitProviders (MiniLM, mpnet, Gemma)
                     ▼
@@ -108,7 +114,7 @@ PersistenceKit ── CorpusKit ── VectorKit ── ConvergenceKit
 EngramLib (the `Engram` type), EideticLib (sentence segmentation via
 `EideticLib.sentences`), PersistenceKit (the `Storage`
 backend and schema declaration; the in-memory backend backs the ingest
-queue), ConvergenceKit (the `SyncManifest` type), VectorKit
+queue), ConvergenceKit (the `SyncManifest` type), SynapseKit
 (`VectorStore` for the kNN pass), and **QueueKit** (the per-corpus ingest
 queue — see § 11). The `CorpusKitProviders` target additionally depends on
 the core `CorpusKit` target. QueueKit is a low-level primitive
@@ -162,7 +168,7 @@ leads.
 
 **I-8 (provider separation):** the core `CorpusKit` target ships only
 the `Tokenizer` protocol; the `EmbeddingProvider` protocol is
-VectorKit's, consumed directly by `CorpusKitProviders`' concrete
+SynapseKit's, consumed directly by `CorpusKitProviders`' concrete
 providers. Concrete providers and
 their tokenizers live in `CorpusKitProviders`, so a consumer that
 needs only bundle storage and BM25 pulls in no CoreML model code.
@@ -224,21 +230,10 @@ analogue for the removed-sources table). Schema: kit-ID "CorpusKitRemovedSources
 v1, `removed_sources(source_id TEXT PK, removed_at TEXT ISO8601)`; no Bool
 columns, dates TEXT ISO8601.
 
-**I-14 (Apple NL providers are Swift-only, opt-in, absent-lane safe, the Apple embedding-provider contract):**
-`CorpusKitProviders` ships two Apple NaturalLanguage embedding providers —
-`NLEmbeddingProvider` (sentence-level, always-available) and
-`NLContextualEmbeddingProvider` (transformer, requires a downloadable per-language
-asset). Both are gated `#if canImport(NaturalLanguage)` and are absent from the
-Rust port (sanctioned divergence — same class as the `.nlTagger` word-class path).
-They are item-local (stateless, compute-once-on-write; no `TrainableEmbeddingBasis`
-conformance). They are OPT-IN: neither joins `CorpusEnsemble.defaultEnsemble()`.
-When the OS model or language asset is unavailable, `embedFloat` returns `[]`
-(standard absent-lane opt-out — `FloatLaneOutcome.unavailableProviderOptOut`) and
-`embed` returns `.zero`. The provider NEVER blocks on a download and NEVER throws
-for an absent asset. Projection seeds are `nlEmbeddingProjectionSeed` ("APNLEMB1",
-`0x4150_4E4C_454D_4231`) and `nlContextualEmbeddingProjectionSeed` ("APNLCTX1",
-`0x4150_4E4C_4354_5831`) — distinct from each other and from all other providers,
-so NL vectors key to their own `model_id` storage partitions (I-4).
+**I-14 (deferred provider contract):** the earlier platform embedding
+providers are outside the default build. Their disposition is recorded in
+[the retirement ledger](../decisions/DECISION_RETIRED_TECHNIQUES_LEDGER.md).
+Current span-encoder activation follows the encoder registry contract.
 
 **I-16 (canonical content identity):** every indexed record has one
 `CorpusContentID` supplied by its content source. BM25 postings, CorpusKit vector
@@ -292,7 +287,13 @@ modelVersion)` generations with a singleton durable attestation. A changed
 configuration selectively releases retired representation claims, deletes only
 their unowned vectors/basis/counts/coverage, trains and backfills added slots,
 then writes the attestation last. An equal attestation is an O(1) open path; a
-crash before the final write safely replays reconciliation.
+crash before the final write safely replays reconciliation. The lanes the
+engine claims per slot are `claimedLanes` / `CLAIMED_LANES`: lane 0 (the
+engram row) in the default build, lanes 0 and 1 (the whole-record float row)
+under `WholeRecordDense` / `whole-record-dense`; the GeniusLocusKit 1.6→1.7
+capsule releases a populated estate's lane-1 claim with its float rows
+(GENIUSLOCUSKIT_SPEC I-26), and the default build's reconcile never
+re-creates it.
 
 **I-22 (dataset handles are not prose):** a GLK Drawer whose content kind is
 `.dataset`, including the legacy `dataset-handle` sentinel, is excluded from
@@ -421,6 +422,77 @@ indexed ID resolves directly to a GLK Drawer ID and no chunk-keyed CorpusKit row
 remain. Direct Drawer-keyed vectors outside CorpusKit provider partitions are
 not deleted or recalculated.
 
+**B-22 (retrain counts path):** when a force retrain fires on an attached
+`CorpusContentEngine` slot whose provider has a persisted basis, the engine
+attempts the **counts path** before falling back to full corpus re-tokenization.
+The guard chain runs in order; the first failing guard records its reason and
+routes to the corpus path:
+
+1. *firstTrain* — no persisted basis row exists; the counts path does not apply.
+   This includes the first training of any slot, forced or not.
+2. *noCountsRow* — no persisted counts row found for the provider key; counts
+   cannot be restored.
+3. *notCountsCapable* — `finalizeFromCounts()` returned `false`; LSA and NMF
+   always fall back here because their per-document TF rows are not persisted in
+   the counts blob.
+4. *deltaNotFoldSafe* (attached mode) / *foldOrderProvenanceUnknown* (standalone
+   mode) — RandomIndexing's float context-vector accumulation is order-sensitive;
+   the counts path cannot safely reconstruct an RI basis without knowing that the
+   accumulated fold order matches the canonical training order (reviewer finding
+   F-3, see INTERFACE § 2 `TrainableEmbeddingBasis`). In **attached** mode the
+   pending-reference delta is non-empty and `countsDeltaFoldSafe` is `false`; the
+   real pending delta IS the operative reason the counts path cannot proceed, so
+   the decision is `corpus(.deltaNotFoldSafe)`. In **standalone** mode there is no
+   pending-reference tracking; the maintained accumulator folds in ingest-arrival
+   order while a from-scratch train uses active-chunk order, and the two cannot
+   be proven equal, so the decision is `corpus(.foldOrderProvenanceUnknown)`
+   (reviewer finding F-11).
+5. *populationMismatch* — `PersistedBasis.trainedChunkCount` (frozen base document
+   count written at the last corpus-path publication) plus the non-subsumed pending
+   reference count does not equal the current active-content-ID count from the
+   source. A revision or removal drives a mismatch and forces a full retrain.
+   `PersistedCounts.documentCount` is the live monotonic anchor and is NEVER used
+   for this comparison.
+6. *pendingUnresolvable* — a non-subsumed pending reference's `contentID` resolved
+   to `nil` from the source; the corpus path heals by deleting all references and
+   republishing from surviving active IDs.
+
+When all guards pass, the provider is reconstructed from the empty-basis blob and
+counts are restored. Per-provider behavior is fixed:
+
+- *PPMI:* the non-subsumed pending references are delta-folded into the restored
+  counts in `contentID` ascending order (one body paged per reference). The
+  integer count maps are commutative so fold order is irrelevant to the derived
+  basis. `finalizeFromCounts()` then derives the serving basis without touching
+  corpus text. The decision is `.countsDeltaFold(folded: N)` where N is the
+  pending count; `.countsRestore` when the pending set is empty.
+- *RandomIndexing:* restore-only — `countsDeltaFoldSafe` is `false` so any
+  non-empty pending delta (attached mode) forces the corpus path with
+  `corpus(.deltaNotFoldSafe)`. Standalone RI always takes the corpus path with
+  `corpus(.foldOrderProvenanceUnknown)` because fold-order provenance cannot be
+  proven (guard 4; reviewer finding F-11). When the pending set IS empty in
+  attached mode (counts reflect the full corpus), the guard-4 check passes and the
+  decision is `.countsRestore`. Zero bodies are paged in either case.
+- *LSA / NMF:* always take the corpus path because `finalizeFromCounts()` returns
+  `false` (guard 3).
+
+**Publication** for the counts path occurs in a single serializable transaction:
+basis row upsert (`PersistedBasis` with `trainedChunkCount` = frozen base document count +
+pending count), counts row persist via `persistCounts`, and per-reference delete
+for every folded pending row. *Per-reference delete* — not `deleteReferences` —
+is required to preserve subsumed markers written by earlier corpus-path
+publications. Those markers are consumed by delayed-admission logic that may still
+hold a training-snapshot reference; `deleteReferences` would erase them. The
+serving provider and counts accumulator are installed into the slot immediately
+after the transaction commits, without corpus re-embedding — the finalized basis
+already reflects the full corpus population.
+
+Skipped IDs during a corpus-path publication (content IDs that resolved to `nil`
+from the source) become non-subsumed sentinel reference rows. On the next
+force-retrain pass they appear in the pending delta; if they still resolve to
+`nil`, guard 6 (*pendingUnresolvable*) routes to the corpus path, which deletes
+all references and republishes from surviving active IDs.
+
 ## § 6 — Error model (conceptual)
 
 CorpusKit raises `CorpusKitError` (Swift) / `CorpusKitError` (Rust).
@@ -517,6 +589,34 @@ decreases, the frozen base blob is unchanged until provider publication, and a
 fixed governor threshold produces the same decision immediately before and
 after reopen.
 
+**C-15 (training-path decision seam):** the `TrainingPathDecision` /
+`CorpusPathReason` enums (both ports, INTERFACE § 2) and the
+`_trainingPathDecision(for:)` / `_training_path_decision` accessor on
+`CorpusContentEngine` are a **test seam** that exposes which path
+`trainTrainableSlots` took for each modelID in the most recent call. Both types
+conform to `Equatable` so suites can assert on structure directly. Conformance
+suites MUST assert the expected decision for each guard-chain scenario: counts
+restore (all guards pass, empty pending), counts delta-fold (all guards pass,
+non-empty PPMI pending), and each of the seven corpus-path reasons (B-22):
+firstTrain, noCountsRow, notCountsCapable, deltaNotFoldSafe (attached RI with
+non-empty pending delta), foldOrderProvenanceUnknown (standalone RI),
+populationMismatch, and pendingUnresolvable.
+Non-forced calls that skip already-trained slots return `nil` for those slots —
+the accessor is not populated for skipped slots.
+
+**C-15 (dense pooling):** over the shared fixture corpus
+(`Tests/SharedVectors/dense_pooling_vectors.json`, 12 documents), for each of
+random-indexing-v1, ppmi-v1, and nmf-v1: (a) the mean pairwise cosine between
+the document vectors is below 0.5 and reproduces the recorded float bits
+(measured: −0.088 / −0.089 / −0.091); (b) every document's opening sentence,
+embedded through the query path, ranks that document first; (c) the document
+path (`embedPair`) and the query path (`embedFloat`) return bit-identical
+vectors for the same text; and every document and query vector is bit-identical
+across ports (B-23, I-7). The basis/counts format-version gate is covered by a
+both-port test that rewrites a trained estate's rows under the previous
+version, reopens (untrained, opt-out), and reindexes (current rows republished,
+float lane serving) (B-24).
+
 ## § 8 — Self-report telemetry
 
 ### 8.1 Overview
@@ -579,14 +679,14 @@ Both ports produce identically-named metrics with the same value semantics
 VectorStore, and embedding providers behind one SDK surface. A standalone
 consumer creates, updates, and deletes documents through the standalone facade.
 An attached consumer advances source changes and recalls canonical content IDs.
-No VectorKit type, Engram, model ID, or internal passage identity crosses the
+No SynapseKit type, Engram, model ID, or internal passage identity crosses the
 public result boundary. This is the sealed-vector principle applied at the Kit
 level: callers know canonical content and queries, not retrieval storage units.
 
 ### 9.2 EmbeddingModel enum
 
 `EmbeddingModel` is a CorpusKit-owned enum. It lets the host select
-an embedding model without importing VectorKit or naming an
+an embedding model without importing SynapseKit or naming an
 EmbeddingProvider. Cases:
 
 - `.deterministic` / `Deterministic` — FNV-1a hash through FloatSimHash;
@@ -609,7 +709,7 @@ the projected Engram is bit-identical across ports (B-6, C-6).
 
 ### 9.3 Behavioral contracts
 
-**B-8 (sealed-vector and sealed-index-unit principle):** No VectorKit type or
+**B-8 (sealed-vector and sealed-index-unit principle):** No SynapseKit type or
 internal passage type appears in a public `CorpusHit`. VectorStore, Engram,
 EmbeddingProvider, StoredVector, VectorMatch, model ID, passage ID, and
 passage-storage details are internal implementation concerns.
@@ -634,16 +734,37 @@ performed by the owning store: `CorpusContentStore` in standalone mode or
 LocusKit through GLK in composed mode. CorpusKit never deletes GLK Drawer rows.
 
 **B-12 (mode-specific schema init):** standalone construction applies the
-standalone document schema plus CorpusKit/VectorKit derived schemas. Attached
-GLK construction applies only derived CorpusKit/VectorKit schemas; the GLK
+standalone document schema plus CorpusKit/SynapseKit derived schemas. Attached
+GLK construction applies only derived CorpusKit/SynapseKit schemas; the GLK
 composite supplies LocusKit's Drawer schema and excludes CorpusKit document and
 passage tables. Callers do not need to pre-open the selected schema set.
+Before each SynapseKit declaration is migrated, the constructor calls that
+store's ledger preparation (`VectorStore.prepareSchemaLedger(storage:)` before
+the vector store's declaration; `VectorRepresentationClaims.prepareSchemaLedger`
+before the claims ledger's, in `CorpusContentEngine`; Rust
+`prepare_schema_ledger`), so a populated estate a pre-rename runtime left
+behind (ledger rows under `VectorKit` / `VectorKitClaims`) opens without
+replaying the vector ladder (SYNAPSEKIT_SPEC I-10). A conflicted ledger (rows
+under both a former and the current id) does not fail construction: both rows
+are left in place, SynapseKit logs one warning, and the constructor migrates
+under the current id, whose row already records the ladder position, so no
+step replays (the GeniusLocusKit 1.4 → 1.5 capsule applies the same policy).
+Only a failed rename call fails construction, with
+`CorpusKitError.storeUnavailable` wrapping the SynapseKit error.
+Applies to `Corpus.init` / `Corpus::open` (and the provider test seam)
+and to `CorpusContentEngine` in both modes. Pinned regression, both ports:
+ledger row `VectorKit` v6 plus one `vectors` row at generation 3 → after a
+standalone open the row is at generation 3 and the ledger carries one row for
+the store, under `SynapseKit`. Conflict pin, both ports: the same estate plus
+`SynapseKit` v6 and `SynapseKitClaims` v1 rows → both constructors open, every
+ledger row keeps its version, and the row is still at generation 3.
 
 **B-13 (basis training lifecycle):** for a trainable distributional
 provider (RI/PPMI/LSA/NMF):
 - *Load-on-open:* `Corpus.init`/`open` reconstructs the trained provider
-  from the persisted basis (when present for the provider key), so the
-  dense lane is trained-ready immediately after restart with no retrain.
+  from the persisted basis (when present for the provider key AND current
+  under B-24), so the dense lane is trained-ready immediately after restart
+  with no retrain.
 - *First-index auto-train:* when no basis is yet persisted, indexing the first
   source batch trains a FRESH basis on the current corpus snapshot and
   persists it; subsequent changes fold new canonical documents onto the FROZEN basis
@@ -658,7 +779,7 @@ provider (RI/PPMI/LSA/NMF):
   `reindex` a vector refresh with no basis row written. (Rust retains the
   trainable capability across reopen via `reconstruct_trainable_basis`,
   since it cannot cross-cast a boxed provider the way Swift's `as?` does.)
-  The full re-embedding loop MUST hold VectorKit's deferred-index bracket and
+  The full re-embedding loop MUST hold SynapseKit's deferred-index bracket and
   publish the resident index once after the durable rewrite; rebuilding the
   resident index per content item is forbidden.
 - *Lifecycle:* `destroyRecallIndex` additionally deletes all basis rows
@@ -667,6 +788,74 @@ provider (RI/PPMI/LSA/NMF):
   Rust produce the byte-identical basis blob and embedding for a shared
   corpus (I-7): the ingest → reindex → reopen → embed path reproduces the
   canonical RI basis blob and embedding bit patterns byte-for-byte on both ports.
+
+**B-23 (bounded LSA retraining):** the public bounded reindex path admits an
+LSA attempt only when its active-document snapshot fits `maxDocuments`, caps
+Jacobi work at `maxSweeps`, and observes task cancellation or the supplied
+deadline before allocation and between tournament rounds. These values come
+from `MootProductIdentity.Settings` (`corpus.lsa_retraining`), with identical
+defaults in both ports: 2,048 documents, 30 sweeps, and 30,000 milliseconds.
+Training always targets a fresh provider. A limit, deadline, or cancellation
+outcome leaves the serving provider and persisted basis untouched; only a
+completed attempt may be installed and persisted.
+The production `CorpusContentEngine` obtains at most `maxDocuments + 1`
+identities through the source's storage-limited enumeration before it opens a
+shadow generation or reads any record body. A cap refusal therefore performs
+no training, re-embedding, basis publication, or vector-generation publish.
+All provider preparations finish before any provider is committed; one skipped
+provider aborts the whole attempt so a deadline cannot publish mixed bases.
+The deadline is a training-admission and provider-preparation budget. Once all
+providers are complete and the provider commit phase begins, re-embedding must finish the
+shadow swap; it does not convert a committed provider set into a skipped result.
+
+**B-23 (distributional pooling):** the embedding a Random Indexing, PPMI,
+or NMF provider produces for a text is ONE function applied to documents at
+index time and to queries at recall time:
+- RI and PPMI: the DISTINCT terms of the text (UTF-8 order), each weighted by
+  its smoothed IDF `max(0, ln((N+1)/(df(t)+1)))` fitted over the training
+  documents, summed over the term's context vectors, L2-normalised, the
+  component along the unit corpus-mean direction removed (`u − (u·m̂) m̂`),
+  L2-normalised. The corpus-mean direction is
+  `l2Normalize(Σ_t df(t)·idf(t)·vector(t))` — the direction of the mean raw
+  document vector under the same binary term weighting — a closed form over
+  the maintained counts, so the counts path (B-22) fits the identical bytes.
+- NMF: the term-document matrix and the text vector both carry
+  `ln(1+tf)·idf`; the fold-in through the pseudo-inverse of W is
+  L2-normalised, the unit mean of the training documents' fold-in vectors is
+  removed, and the result L2-normalised.
+- The IDF table and mean direction are FITTED STATE: they are produced by
+  `finalize()`, serialized in the basis blob, and reconstructed with it. A
+  reconstructed provider pools exactly as the trainer did (round-trip law).
+- A text whose matched terms all carry IDF 0 (every term appears in every
+  document — a one-document corpus is the degenerate case, matching LSA's
+  all-zero SVD) pools to NO SIGNAL: `embedFloat` returns `[]` and `embed`
+  returns the zero engram, an opt-out distinct from the all-OOV vocabulary
+  miss. A trained but unfinalized RI or PPMI provider reports no basis.
+- Why: the plain token sum every family used before pointed every document
+  at the corpus mean (mean pairwise cosine 0.999 RI / 0.955 PPMI / 0.990 NMF
+  on a 13,817 drawer estate; dense-only nDCG@10 at chance). IDF weighting
+  removes the shared terms' contribution; mean-direction removal removes the
+  shared component that survives it; doing both to documents and queries
+  alike is what lets a document's own opening sentence find the document.
+
+**B-24 (basis format-version gate and migration):** the shared basis format
+version (`basisFormatVersion` / `BASIS_FORMAT_VERSION`, currently 2) is the
+version byte of every basis and counts blob frame. Every reader refuses a
+blob of any other version with a structured decoding error — a v1 blob is
+never decoded as if it were v2. At open, the corpus compares each persisted
+basis frame with the frame the fresh provider writes (`BasisBlobFrame` /
+`basis_blob_frame`): a stale-version basis opens the slot UNTRAINED (its
+basis digest is the untrained sentinel; an error-level log names both
+versions) and a stale-version counts row restores as `false` (the sentinel
+contract of B-14). The estate stays openable; the stale vectors are never
+matched against queries pooled the current way, because the slot embeds
+nothing until it is retrained. The retrain is the ordinary provider
+reconcile at open (train the untrained slots from the estate's content, then
+re-cover every row under the new basis digest) and, explicitly and reported,
+the `mootx01 upgrade` dense-pooling convergence step — the only migration
+vehicle — which runs that open under the daemon quiesce for any estate whose
+`corpus_provider_basis` rows carry another version and verifies that none
+remain afterwards. Idempotent: once every row is current the step is a no-op.
 
 **B-14 (incremental maintained counts):** each trainable provider has a
 published raw-statistics base in `corpus_provider_counts`. Standalone `Corpus`
@@ -681,7 +870,7 @@ text, tokens, or passages. A new identity increments the document anchor once;
 a changed digest refreshes the existing identity reference, folds its text for
 novel vocabulary, and MUST NOT increment the document anchor; an identical
 digest is an idempotent no-op. Both anchors are nondecreasing. Open reconstructs
-the working accumulator from the frozen base plus canonical-source hydration of
+the working accumulator from the frozen base counts blob plus canonical-source hydration of
 pending references, then restores the stored anchor columns as the governor's
 durable authority. A provider retrain/publication atomically replaces its base,
 publishes matching anchors, and deletes only that provider generation's
@@ -705,6 +894,12 @@ conformance proves that the maintained vocabulary anchor and threshold decision
 are restored before serving, that same-digest replay is idempotent, that
 revision/remove/re-add paths do not double-count a canonical identity, and that
 queued and direct-feed revisions use the same admission authority.
+
+**Counts invalidation on migration.** `INVALIDATED_COUNTS_SENTINEL` / `invalidatedCountsSentinel` is a defined empty byte slice (Rust) / empty `Data` (Swift) on `CorpusProviderCountsStore` in both ports. It means "counts invalidated, rebuild from zero." The upgrade migration writes this sentinel into `corpus_provider_counts.counts` for every row. Writing the sentinel preserves the `doc_count` and `vocab_size` monotone anchors, which the migration is required to retain. `restore_counts_into` / `restoreCounts(into:)` checks for the sentinel before any provider decode, before the v4 term-row branch, so that surviving term rows from a prior schema generation cannot cause the provider decoder to receive an empty header. An empty blob causes the method to return `Ok(false)` / `false`. A non-empty but undecodable blob propagates `DecodingFailure` / throws — real corruption must fail loudly and is not silenced by this path. Both ports share the predicate through `is_invalidated_counts` / `isInvalidatedCounts(_:)` so the writer and reader cannot drift independently.
+
+**Sentinel-preserving flush.** `persist_counts_into` / `persistCounts(provider:into:)` skips writing when the provider's maintained vocabulary is empty AND the stored row for that key carries the sentinel. Without this guard, a flush on a just-migrated estate — whose live accumulator is empty — would serialise a valid empty-state blob over the sentinel, erasing the "rebuild from zero" signal. The restore path would then return `true`, the caller guard would not fire, and a zero-vocabulary basis would be published over the trained basis the migration preserved. The guard tests `counts_vocabulary_size` / `countsVocabularySize` first (in-memory, no I/O); the storage read occurs only when that size is zero.
+
+**Reindex latch.** The upgrade migration calls `CorpusReindexLatch.reindexRequired` / the Rust equivalent. That call writes the key `corpus_reindex_required` into the estate manifest and enqueues a `{"kind":"full_reindex"}` marker job on the `"reindex"` stream (`CorpusReindexLatch.swift:103`, `reindex_latch.rs:REINDEX_MANIFEST_KEY`). Neither `Corpus` nor `CorpusContentEngine` reads that manifest key directly. The rebuild occurs when `restoreCounts` / `restore_counts_into` returns false and the caller's counts-path guard routes to the full corpus retrain — the outcome the sentinel and the sentinel-preserving flush together guarantee on the first retrain cycle after migration.
 
 ### 9.4 Conformance
 
@@ -814,7 +1009,332 @@ cross-estate CPU cap is the 1.1 central drain master
 (`the deferred central-drain design`); ~70% of this (the `ingestBatch`
 concurrent compute) carries forward unchanged — only the pool's location moves.
 
+## § 12 — Encoder contract (span rerank)
+
+CorpusKit owns the contract a retrieval-trained sentence encoder is served
+through. The encoder reranks the lexical head; it is never an ensemble member
+and never writes the BM25 document.
+
+### 12.1 Registry row value type
+
+`EncoderModelSpec` mirrors one `encoder_models` row (LocusKit schema 19):
+`modelID` (`<model>-w<windowWords>`; the span unit is part of the identity and
+two window sizes are two indexes, never compared), `modelVersion` (weights
+revision), `dim`, `queryPrefix`, `docPrefix`, `pooling` (`mean` | `cls`),
+`tokenizerHash` (SHA-256 hex of the vendored `vocab.txt`), `windowWords`,
+`overlapDivisor`, `maxSpans`, `maxSequence`. Serialised field names are the
+column names. `EncoderModelSpec.floor` / `EncoderModelSpec::floor()` is
+`minilm-l6-v2-w60` (all-MiniLM-L6-v2 @ HF `1110a243`, dim 384, mean, no
+prefixes, 256 tokens, window 60, divisor 2, 32 spans) and is byte-identical
+across ports.
+
+### 12.2 `SpanEncoder`
+
+`encodeQuery(text)` applies `queryPrefix`; `encodeSpans(spans)` applies
+`docPrefix` to every span and preserves count and order. Both return
+L2-normalised vectors of `dim` floats through `FloatVecOps.l2Normalize` /
+`float_vec_ops::l2_normalize`. An empty input string yields the all-zero
+vector (no direction), never an error. The float VALUES of a real model may
+differ by port (CoreML vs candle, ruled); the shape and the normalisation are
+conformance-gated. `ProviderSpanEncoder` is the shipped conformer: a spec, a
+`SpanInference` seam (pooled vectors in input order) and a batch size
+(`encoder_batch`); a seam vector of the wrong dimension or a batch of the
+wrong count is `EncoderError.inferenceFailed`.
+
+### 12.3 Spanner rule (shared fixture)
+
+`Spanner.spans(wordCount:windowWords:overlapDivisor:maxSpans:)` /
+`spanner::spans` returns half-open word ranges in ascending start order:
+
+1. `wordCount <= windowWords` → one span `(0, wordCount)` (a zero-word record
+   yields `(0, 0)`; callers skip empty records before encoding).
+2. Otherwise `step = max(1, windowWords / overlapDivisor)`, starts
+   `0, step, 2·step, …` while `start <= wordCount - windowWords`, each span
+   `(start, start + windowWords)`. The remainder past the last full window is
+   left uncovered, exactly as the measured offline reference.
+3. If rule 2 exceeds `maxSpans`, `step' = ceil((wordCount - windowWords) /
+   (maxSpans - 1))`, starts `0, step', …` while `start < wordCount - windowWords`,
+   and the final start is pinned to `wordCount - windowWords` so the last span
+   ends at `wordCount`; the count is then `<= maxSpans`.
+
+Never longest-first. `Spanner.words` / `spanner::words` is
+`defaultKeywordTokens` / `default_keyword_tokens` (the BM25 split), so span
+bounds address the words the lexical lane matched. The fixture
+`SynapseKit/Tests/Fixtures/encoder/spanner_vectors.json` (word counts
+{0, 1, 59, 60, 61, 90, 120, 121, 900, 5000} × windows {60, 150}, divisor 2,
+32 spans) is read by both ports' tests.
+
+### 12.4 Factory and failure contract
+
+`SpanEncoderFactory.make(spec:modelDirectory:)` / `SpanEncoderFactory::make`
+(CorpusKitProviders / corpus-kit-providers) checks in order: directory and
+`vocab.txt` present (else `modelUnavailable`); `sha256(vocab.txt) ==
+spec.tokenizerHash` (else `tokenizerMismatch(expected:actual:)`); vocabulary
+parses (else `loadFailed`); runtime loads (Swift: CoreML `.mlmodelc` /
+`.mlpackage` via `CoreMLSpanInference`, WordPiece over `vocab.txt`; Rust:
+`CandleNLProvider::load_with_max_tokens` under the `candle` feature, mean
+pooling only). A build without a runtime reports `modelUnavailable` AFTER the
+hash check, so a wrong vocabulary is always named first. Both ports hash the
+same `vocab.txt`; the Rust model directory carries it beside `tokenizer.json`.
+Callers (GeniusLocusKit activation) turn any of these into: no encoder for the
+session, one log line, lexical-only recall, no error to the caller.
+
+### 12.5 Cross-encoder contract (retrieval-time pair scoring)
+
+CorpusKit also owns the contract a retrieval-time cross encoder is served
+through; the stage that consumes it lives in GeniusLocusKit and the whole
+contract is written up in `CROSSENCODER_SPEC.md`. `CrossEncoderProfile`
+names the one packaged pair classifier (`ms-marco-minilm-l6-cross-v1`,
+ms-marco-MiniLM-L-6-v2 @ HF `233902d2`, the same `vocab.txt` hash as the
+floor sentence encoder, pair limit 512, pool 50, head 30, spans 3, RRF k 60)
+and is byte-identical across ports; `artifactName` is the Pascal-cased id.
+`PairScorer.score(query, spans)` returns one finite logit per span in span
+order, empty for an empty list; `ProviderPairScorer` drives a `PairInference`
+seam (text pairs in, raw logits out) in `batchSize` chunks (default 8) and
+reports a wrong count or a non-finite logit as `inferenceFailed`. Every
+scorer names its `backend`. `RerankDirective` (`bypass` | `apply`,
+`profileID`, optional `reason`) is the request-borne decision the stage
+consumes; it lives here so GeniusLocusKit and the ARIA surfaces share one
+type. Pair tokenization is `[CLS] q [SEP] s [SEP]` with segment ids 0 / 1
+and longest-first truncation (ties trim the query): Swift
+`WordPieceTokenizer.tokenizePair`, Rust the `tokenizers` pair encode.
+`PairScorerFactory` applies the § 12.4 check order over the same model
+directory layout (Swift: `CoreMLPairInference`, the compiled classifier's
+`logits` output; Rust: `CandlePairScorer` under the `candle` feature,
+`bert.pooler.dense` + tanh + `classifier` over `[CLS]`).
+
 ## Changelog
+
+### 2.6.0 -- 2026-09-08
+
+Cross-encoder contract (§ 12.5), both ports: `CrossEncoderProfile`,
+`PairScorer` / `PairInference` / `ProviderPairScorer`, `RerankDirective`,
+pair tokenization (`tokenizePair`, the `tokenizers` pair encode) and
+`PairScorerFactory` over `CoreMLPairInference` / `CandlePairScorer`; the
+model directory resolver knows the packaged profile. Contract written up in
+`CROSSENCODER_SPEC.md`.
+
+### 2.5.0 -- 2026-09-07
+
+Transient sub-span scoring runs under a work bound, both ports. `SubSpanBudget`
+holds a per-record byte cap (16,384 bytes, cut on a scalar boundary) and an
+aggregate budget of sub-span embedding calls per scoring call (1,024; the
+query embedding is not counted). `SubSpanScoring.score` /
+`sub_span_scoring::score`, `CorpusContentEngine.scoreSubSpans` /
+`score_sub_spans` and `Corpus.scoreSubSpans(query:sourceIDs:)` /
+`Corpus::score_sub_spans` visit the candidates in the caller's order, stop
+when the aggregate budget is spent, and return a `SubSpanScoringOutcome`:
+the scores, whether the budget truncated, the candidates it left without a
+window (they keep their stored signals), and the windows embedded. A
+candidate the budget reached only partway is scored over the windows it got.
+The per-record cap alone never sets the truncation flag. Without the bound a
+call's cost was the sum of every candidate's window count, which a client
+able to file large records and issue ordinary searches could raise to
+hundreds of thousands of synchronous embedding calls per query. Pinned by
+the §7 tests of `SubSpanScoringTests.swift` and `sub_span_scoring_tests.rs`.
+
+### 2.4.0 -- 2026-09-07
+The representation claims follow the build (I-21): `claimedLanes` /
+`CLAIMED_LANES` is `[0]` in the default build and `[0, 1]` under
+`WholeRecordDense` / `whole-record-dense`; `registerClaims`,
+`reconcileConfiguredProviders`, the shared-family check and the remove and
+destroy paths iterate it. Populated estates lose their lane-1 claim and their
+float rows through the GeniusLocusKit 1.6→1.7 capsule run by `mootx01
+upgrade` (GENIUSLOCUSKIT_SPEC I-26), which supersedes the 2.3.0 note about a
+later reclaim. LSA on a switch of its own: the `LsaProvider`, its basis
+training and its tests compile only under trait `LSA` (`MOOTX01_LSA`) / cargo
+feature `lsa` (both enable `DenseFamilies` / `dense-families`); `DenseFamilies`
+no longer compiles it, so `CorpusEnsemble.defaultEnsemble()` /
+`default_ensemble()` under DenseFamilies is RI, PPMI, NMF, FDC and under LSA
+is RI, PPMI, LSA, NMF, FDC. `EmbeddingModel.lsa` / `EmbeddingModelConfig::Lsa`
+stays in every build as vocabulary, like the other family cases. The family
+is dark and unproven since 2026-09-07 (DECISION_RETIRED_TECHNIQUES_LEDGER);
+no dark-variant gate row builds it.
+
+### 2.3.0 -- 2026-09-07
+The whole-record dense float engine becomes an opt-in sidecar, both ports.
+Under the `WholeRecordDense` trait (`MOOTX01_WHOLE_RECORD_DENSE`) / the
+`whole-record-dense` cargo feature, which `DenseFamilies` / `dense-families`
+enables, ingest writes the float row (`vectorIndex` 1, kind float32) beside
+the engram row and the per-signal float query surface (`floatNearest`,
+`floatNearestPerSignal`, `floatFarthestPerSignal`,
+`floatNearestPerSignalWithDiscrimination`, `recomposeDenseVector`,
+`FloatLaneOutcome`, `FloatDiscriminationSignal`) exists in the Swift library
+target `CorpusKitWholeRecordDense` / the Rust `float_lane` modules. The default
+build writes the engram row only, holds no float query surface and answers
+the span stage alone (ruling 2026-09-07: one active dense provider per
+machine, the Arctic span shape). The representation claims still cover
+`vectorIndex` 1 so float rows already in a populated estate stay in place;
+a later `mootx01 upgrade --reclaim` may vacuum them. `embedFloat`, the
+provider protocol and transient sub-span scoring (`scoreSubSpans`) are
+unchanged. The engine members the sidecar reads are `package` visible.
+
+### 2.2.0 -- 2026-09-07
+B-12 extended: the standalone constructors (`Corpus`, `CorpusContentEngine`;
+both ports) call the SynapseKit ledger preparation for each SynapseKit
+declaration before migrating it, so a populated pre-rename estate (ledger rows
+under `VectorKit` / `VectorKitClaims`) opens without replaying the vector
+ladder; a conflicted ledger (rows under both ids) is left in place with one
+warning and construction continues under the current id, so the estate still
+opens; only a failed rename call fails construction with `storeUnavailable`
+(SYNAPSEKIT_SPEC I-10). Additive (MINOR).
+
+### 2.1.0 -- 2026-09-06
+
+Checkpoint schema v4 drops `corpus_index_state.composition_policy`, both
+ports (Bob's ruling: the dead column goes). The v2→v3 `addColumn` step stays
+so a v2 estate walks the same ladder; the v3→v4 step is a `dropColumn`,
+which PersistenceKit treats idempotently (PERSISTENCEKIT_SPEC I-7b), so a
+fresh estate (created at v4 and replayed from version 0) and a re-run both
+pass through it. A populated estate opens CorpusKit only through the
+composite estate declarations, which carry no migrations, so the column
+reaches populated estates through the GeniusLocusKit 1.5→1.6 capsule
+(GENIUSLOCUSKIT_SPEC I-25), which `mootx01 upgrade` runs. Nothing in
+CorpusKit reads or writes the column at any version.
+
+### 2.0.0 -- 2026-09-06
+
+Separated deferred provider contracts from the current default ensemble.
+Removed the live platform-encoder contract.
+
+### 1.28.0 -- 2026-09-05
+
+One index composition. Since schema 19 the adornment store and the stored
+distilled rendering are gone, so every `IndexCompositionPolicy` id composed
+the same document: the content plus its `ssc_facts` supplement. The knob
+retires in both ports. Removed: `IndexCompositionPolicy`, `LexicalIndexSource`,
+`DenseIndexSource` (Swift and Rust); `CorpusContentConfiguration.compositionPolicy`
+/ `composition_policy` and `with_composition_policy`; `CorpusContentEngine
+.compositionPolicy` / `composition_policy()`; `CorpusIndexState.compositionPolicyID`
+/ `composition_policy_id`; `CorpusIndexStateStore.mismatchedCompositionPolicy`
+/ `mismatched_composition_policy`; `CorpusKitError.compositionPolicyMismatch`
+/ `CompositionPolicyMismatch`; and the `reindexPending` / `reindex_pending`
+open parameter, which existed only to skip the policy check. The open-time
+check itself is gone: an estate opens under the one composition whatever its
+rows once recorded. The `corpus_index_state.composition_policy` column stays
+declared at checkpoint schema v3 (populated estates carry it and dropping a
+column is a schema reduction) and is neither written nor read; new rows take
+its `''` default. No migration rewrites the column or the retired estate
+setting `index_composition_policy`: an estate that stored either still opens,
+and the values are ignored.
+
+### 1.27.0 -- 2026-09-05
+Encoder Rerank Program: § 12 added — `EncoderModelSpec` (registry-row value
+type, floor `minilm-l6-v2-w60`), `SpanEncoder` / `SpanInference` /
+`ProviderSpanEncoder` (prefixes, batched seam, L2-normalised output, empty
+input → zero vector), the Spanner rule with its shared fixture, and the
+`SpanEncoderFactory` check order and failure classes. Both ports.
+
+### 1.26.0 -- 2026-09-05
+Added **B-23 (distributional pooling)**: random-indexing, PPMI, and NMF embed
+documents and queries through one function — IDF-weighted sum of the distinct
+terms' vectors (NMF: TF-IDF fold-in), L2-normalise, unit corpus-mean direction
+removed, L2-normalise — with the IDF table and mean direction fitted at
+`finalize()` and carried in the basis blob. Records the measured collapse the
+contract corrects (mean pairwise cosine 0.999 / 0.955 / 0.990 on a 13,817
+drawer estate) and the no-signal rule for IDF-0 texts. Added **B-24 (basis
+format-version gate and migration)**: format version 1 → 2, readers refuse any
+other version, the open path serves a stale-version basis untrained and
+restores a stale-version counts row as `false`, and the retrain is the
+open-time provider reconcile plus the reported `mootx01 upgrade` dense-pooling
+convergence step. Added **C-15 (dense pooling)** conformance over the shared
+`dense_pooling_vectors.json` fixture, both ports. B-13's load-on-open now reads
+"from the persisted basis when present AND current (B-24)".
+
+### 1.25.0 -- 2026-09-04
+Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
+
+### 1.24.0 -- 2026-09-03
+
+The open-time composition-policy mismatch check is a both-port contract.
+At every open, unless the caller has committed to a full rebuild before
+serving, the engine scans `corpus_index_state` once (O(rows)) and refuses
+the estate when any active row (lexically indexed, not removed; the
+feed-cursor sentinel row skipped; an empty recorded id read as `current`)
+was built under a policy other than the configured one. The error is
+`CorpusKitError.compositionPolicyMismatch` (Swift) /
+`CorpusKitError::CompositionPolicyMismatch` (Rust) with the byte-identical
+detail `recorded=<id>;configured=<id>`, where `<id>` is the first
+disagreeing effective id in the port's row order. The rebuild-committed
+skip is `reindexPending` (Swift) / `reindex_pending` (Rust); every serving
+open leaves it false, and `mootx01 db composition --set` sets it in both
+ports. Rust `CorpusIndexStateStore::mismatched_composition_policy` is the
+twin of the Swift helper. The 1.23.0 note that the Rust engine performed no
+open-time check is closed.
+
+### 1.23.0 -- 2026-09-03
+
+The policy an estate indexes under is a stored estate setting (LocusKit
+manifest key `index_composition_policy`, GeniusLocusKit spec I-23) that
+GeniusLocusKit supplies through `CorpusContentConfiguration` at every open;
+`MOOT_INDEX_COMPOSITION` is a creation-time seed, not an open-time selector,
+and `IndexCompositionPolicy.fromEnvironmentValue` / `from_environment_value`
+is the id parser every reader of that id uses. Swift `CorpusContentEngine
+.init` gains `reindexPending: Bool = false`: when true the open-time
+`compositionPolicyMismatch` check is skipped, because the caller has
+committed to `reindex(now:)` before the engine serves a query (the `mootx01
+db composition --set` path; every serving open leaves it false). Rust
+`CorpusContentConfiguration` carries `composition_policy`
+(`with_composition_policy`, `composition_policy()`), the Rust engine records
+the configured id on every `corpus_index_state` row it writes and exposes
+`composition_policy()`, and `IndexCompositionPolicy`, `LexicalIndexSource`,
+`DenseIndexSource` derive `Copy`. The Rust engine performs no open-time
+mismatch check; on that port the stored setting and the rows are kept in
+agreement by the rebuild `db composition --set` runs.
+
+### 1.20.0 -- 2026-08-15
+
+Extended the B-14 counts-invalidation sentinel contract to both ports (TASK-MXE-2026-0358). `invalidatedCountsSentinel` / `isInvalidatedCounts` are now public statics on `CorpusProviderCountsStore` in Swift, matching the Rust module-level `INVALIDATED_COUNTS_SENTINEL` / `is_invalidated_counts`. `restoreCounts(into:)` intercepts the sentinel before the v4 term-row branch and before any provider decode, returning `false` for a sentinel blob. A non-empty but undecodable blob still throws. `persistCounts` / `persist_counts_into` gain a sentinel-preserving flush guard: if the provider's maintained vocabulary is empty and the stored row carries the sentinel, the flush is skipped so the sentinel stays on disk and the caller's reindex-path guard can fire. Corrected the reindex-latch description: the latch writes `corpus_reindex_required` into the manifest and enqueues a marker job; the rebuild itself occurs when the counts path declines and the corpus path retrains.
+
+### 1.19.0 -- 2026-08-15
+
+Added the counts-invalidation sentinel contract to B-14 (MG-01). `INVALIDATED_COUNTS_SENTINEL` is a defined empty byte slice the upgrade migration writes to `corpus_provider_counts.counts` to invalidate stale provider counts. The migration preserves the `doc_count` and `vocab_size` monotone anchors. `restore_counts_into` intercepts the sentinel before any provider decode and returns `Ok(false)` ("nothing stored, start from zero"), letting the reindex latch rebuild counts. A non-empty but undecodable blob still propagates `DecodingFailure`. This contract is implemented in the Rust port only. The Swift port carries the identical gap and a follow-up mission must close it.
+
+### 1.18.2 -- 2026-08-15
+
+Vocabulary disambiguation (Nagatha step-18 finding): "frozen base" was
+naming both the persisted counts blob (pre-existing usage, §7/§B-13 area)
+and the scalar `PersistedBasis.trainedChunkCount` (new B-22 usage). Each
+site now carries its qualifier — "frozen base counts blob" vs "frozen base
+document count" — so the two persisted quantities cannot be conflated by
+name (the F-5 defect class, applied to prose).
+
+### 1.18.1 -- 2026-08-15
+
+CORPUS-INCREMENTAL-01 F-11 (corrective amendment): added `foldOrderProvenanceUnknown`
+to the `CorpusPathReason` set in **B-22** to precisely describe the standalone RI
+rejection (the maintained accumulator folds in ingest-arrival order; a from-scratch
+train uses active-chunk order; the two cannot be proven equal for a
+float-order-sensitive provider). Guard 4 and the RI per-provider behavior paragraph
+are updated to distinguish attached mode (`deltaNotFoldSafe` — a real pending delta
+is the operative reason) from standalone mode (`foldOrderProvenanceUnknown`). **C-15**
+updated from six to seven corpus-path reasons with the full list. No behavioral
+contract changed; this is a precision correction to reason naming only.
+
+### 1.18.0 -- 2026-08-15
+
+CORPUS-INCREMENTAL-01 (retrain counts path): added **B-22** specifying the
+guard chain that governs when a force retrain uses restored counts instead of
+full corpus re-tokenization. The six fallback reasons (firstTrain, noCountsRow,
+notCountsCapable, deltaNotFoldSafe, populationMismatch, pendingUnresolvable) and
+their semantics are now normative. Per-provider behavior is locked: PPMI
+delta-folds non-subsumed pending references (pages only that delta), RI is
+restore-only (pages zero when pending is empty; corpus path otherwise), LSA/NMF
+always take the corpus path. Publication side-effects (basis + counts in one
+serializable transaction, per-reference delete preserving subsumed markers,
+generation bump without corpus re-embedding) are normative. The population guard
+uses `PersistedBasis.trainedChunkCount` (the frozen base document count) + pending-reference count
+vs active-content-ID count. Added **C-15** documenting the
+`TrainingPathDecision` / `CorpusPathReason` test seam and its conformance
+obligations.
+
+### 1.17.0 -- 2026-08-13
+
+- Drain-unit identity (A2): a drain unit's queue session id is now part
+  of the post-encode coordination contract — the engine hands
+  `(encodedIDs, unitSessionID)` to the orchestrator, one callback per
+  drain unit. The session id is claim-scoped (single-pass batch claim),
+  so it brackets the unit end-to-end for audit-marker derivation.
 
 ### 1.16.0 -- 2026-07-30
 
@@ -957,7 +1477,7 @@ Added the per-signal dense float FARTHEST (anti-similarity) contract (mission
 6b-modifiers-antisim), ADDITIVE and back-compatible. `floatFarthestPerSignal` /
 `float_farthest_per_signal` runs the dense lane in the FARTHEST direction for
 every held signal — surfacing the most DISSIMILAR sources ("find things UNLIKE
-this") via VectorKit `findFarthestFloat`. The per-source aggregation inverts
+this") via SynapseKit `findFarthestFloat`. The per-source aggregation inverts
 nearest's max-cosine to MIN-cosine (a source is unlike the query only if even
 its closest chunk is far) and ranks least-similar first, sourceID ascending on
 tie. Same outcome shape, dark-lane observability, telemetry, and slot ordering
@@ -983,7 +1503,7 @@ ranked `FloatLaneOutcome` per held signal tagged by modelID, in slot order — t
 IDENTITY: with all five distributional/co-classification models over a fixed
 corpus, the per-signal ranked itemID order is identical Swift↔Rust; raw cosine
 similarity is NOT asserted bit-identical (the float lane Lane D is
-reproducible-within-config, not four-way bit-identical — arch spec §6). VectorKit
+reproducible-within-config, not four-way bit-identical — arch spec §6). SynapseKit
 Lane D became per-modelID so float rows of differing dimension across models are
 queried in isolation. The production default stays SINGLE provider; the
 default-flip to all-five is a later mission (6a-iii-wire). No existing contract
@@ -1007,4 +1527,17 @@ deterministic, byte-identical cross-port). Updated B-12 to note the third
 (BasisStore) schema applied at init. Additive; no existing contract changed.
 
 ### 1.0.0 -- 2026-06-14
-Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.- **v1.21.0 (2026-08-20)** — Trailer lexical supplement (DECISION_DENSE_LANE_ENRICHMENT Wave-2 delivery ruling): whole-content index units tokenize the verbatim canonical text PLUS the grammar-v1 enrichment-trailer tokens scanned (never regex) from the dense-composition text — the LAST well-formed `(*[ … ]*)` block. The canonical text itself is never modified and remains the payload; the supplement participates in BM25 keyword scoring only (measured basis: the anarrow oracle arm — temporal MRR 0.4154→0.4487, 3/11 never-rescued misses recovered; storage cost <1%). Supersedes the "text is always the lexical text" note. Passage-mode sub-spans remain verbatim-only.
+
+### 1.22.0 -- 2026-09-02
+CDL-03 — Index Composition Policy: added `IndexCompositionPolicy`, `LexicalIndexSource`,
+and `DenseIndexSource` types that record as a named, versioned policy what text each index
+lane consumes. The policy id (e.g. `"lex=original;dense=distilled"`) is stored in
+`corpus_index_state.composition_policy` (schema v2→v3) and validated at engine open time
+against the configured policy — a mismatch raises `CorpusKitError.compositionPolicyMismatch`.
+Named policies: `.current` (cell A, production default), `.lexicalAdornments` (B),
+`.denseAdornments` (C), `.bothAdornments` (D), `.lexicalBaseline` (E). Policy selected
+at estate open via `MOOT_INDEX_COMPOSITION` env var; absent/unrecognised → `.current`.
+`CorpusContentConfiguration` gains a `compositionPolicy` field (default `.current`).
+`CorpusContentEngine` exposes `compositionPolicy: IndexCompositionPolicy`. Swift and Rust
+twins are conformant.

@@ -10,7 +10,7 @@
 //! Twin of Swift `SubjectRegister.swift` (verdicts byte-identical on the
 //! shared vectors).
 
-use crate::drawer_store::SUBJECT_LENGTH_CONTRACT;
+use crate::drawer_store::{subject_length, SUBJECT_LENGTH_CONTRACT};
 
 /// One violated rule. A subject may violate several at once; the
 /// validator reports all of them so a producer can fix in one pass.
@@ -56,7 +56,7 @@ pub fn violations(subject: &str) -> Vec<SubjectViolation> {
     if subject.contains('\n') || subject.contains('\r') {
         out.push(SubjectViolation::Multiline);
     }
-    let n = subject.chars().count();
+    let n = subject_length(subject);
     if n > SUBJECT_LENGTH_CONTRACT {
         out.push(SubjectViolation::TooLong(n));
     }

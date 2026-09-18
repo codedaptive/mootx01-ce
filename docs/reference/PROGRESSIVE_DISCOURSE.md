@@ -1,8 +1,8 @@
 ---
 title: Progressive Discourse
-version: 0.1.0
+version: 0.4.0
 status: active
-date: 2026-08-02
+date: 2026-09-05
 description: "The journey model of the ARIA surface: travel on subjects, confirm on distilled, read full text terminal-only — with the three canonical journeys as worked examples."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -25,12 +25,16 @@ first, widened only by follow-up questions the AI chooses to ask.
 
 Three rules govern every journey:
 
-1. **Travel on subjects.** Survey and Focus replies are dense rows —
-   `uuid · subject · fdc · qid · event_time`. The subject is a
-   one-sentence assertion written for exactly this moment: an AI
-   deciding which rows are worth pursuing. Rows cost ~45–50 tokens
-   each, near-uniform, so a reply's cost is its row count, not its
-   luck.
+1. **Travel on candidate rows.** Survey and Focus replies are the
+   canonical candidate row (ARIA_MCP_SPEC 2.4.0 § 8.3) — six fixed
+   columns: `uuid · subject · bestSpan · sscFacts · event_time · score`,
+   absent optional values rendered `-`. The subject is a one-sentence
+   assertion written for exactly this moment: an AI deciding which rows
+   are worth pursuing; bestSpan (the best content span, capped at 60
+   words) and sscFacts (structured findability facts) are the
+   verification evidence beside it. Row cost is near-uniform per estate
+   (each pick field is capped), so a reply's cost is its row count, not
+   its luck.
 2. **Confirm on distilled.** When a shortlist needs judging, hydrate it
    at the distilled tier — compressed representations sized for
    comparison, not narration. `moot_memory_get ids:[...]
@@ -55,10 +59,10 @@ benchmarks exercise (JOURNEY_PROTOCOL.md in the benchmarker).
 "When did the quarterly planning meeting move?"
 
     moot_memory_search { "query": "quarterly planning meeting moved" }
-    → found 3 memory(s)
-      7C31… · Quarterly planning moved to Thursday; Sarah sends invites Monday. · fdc:005 · qid:- · 2026-07-14T09:12:00Z
-      91DA… · Planning cadence discussion: monthly review unchanged. · fdc:005 · qid:- · 2026-06-02T15:40:00Z
-      B220… · (no subject) · fdc:000 · qid:- · 2026-05-30T11:05:00Z
+    → found 3 candidate memories, one per line
+      7C31… · Quarterly planning moved to Thursday · user: The quarterly planning meeting moves to Thursday. · kind: decision, entity: Sarah · Thursday; Sarah invites Monday; quarterly planning · 2026-07-14T09:12:00Z · 0.8102
+      91DA… · Planning cadence discussion, monthly review unchanged · - · kind: note, entity: planning · monthly review unchanged; cadence · 2026-06-02T15:40:00Z · 0.4419
+      B220… · - · Deploy window notes from the standup. · - · - · 2026-05-30T11:05:00Z · 0.2210
 
 The first subject already answers the question. If the exact wording is
 needed (quoting to the user), one terminal hop:
@@ -75,15 +79,17 @@ blind widening.
 single target.
 
     moot_memory_search { "query": "deploy gate approvals staging" }
-    → found 9 memory(s)  (dense rows)
+    → found 9 candidate memories, one per line
 
 Winnow the plausible five in ONE call at the confirm tier:
 
     moot_memory_get { "ids": ["A1…","B2…","C3…","D4…","E5…"],
                       "depth": "distilled" }
+    → resolved 5 of 5 requested memories, in request order
 
-Each returns its dense row + distilled text (or the verbatim body
-behind a `source: content (not yet distilled)` marker). Judge, then
+Each returns its candidate row (no score — a get is not a ranking) plus
+the distilled text as an unlabeled indented continuation (distillation
+is computed inline at read time via ContextDistiller). Judge, then
 terminal-read the winner at depth:full — or pivot sideways from the
 best row:
 
@@ -96,19 +102,21 @@ the neighborhood of a good answer is often the rest of the answer.
 
 "How did our position on encryption evolve?"
 
-    moot_fact_timeline { "subject": "estate-encryption" }
-    → dated assertions with validity windows and fact ids
+    moot_fact_timeline { "entity": "encryption" }
+    → time-major fact rows in filing order, active and retired, with
+      lifecycle tags and fact ids (facts have no validity windows —
+      active until retired)
 
 or, memory-side:
 
     moot_memory_search { "query": "encryption position decision",
                          "ordering": "byCaptureTimeAsc" }
-    → dense rows in capture order (event_time visible per row)
+    → candidate rows in capture order (event_time visible per row)
 
 Anchor on the inflection row and read its causal neighborhood:
 
     moot_lens_precedence { "id": "D4…" }      ← what led to it
-    moot_lens_successors { "id": "D4…" }      ← what followed (dense rows)
+    moot_lens_successors { "id": "D4…" }      ← what followed (candidate rows)
 
 Terminal-read only the turning points. The thread's shape came from
 subjects and timestamps; full text paid for two rows, not twenty.
@@ -117,23 +125,50 @@ subjects and timestamps; full text paid for two rows, not twenty.
 
 The journey metric is the TOKEN·TURN RESIDENCY INTEGRAL: every token a
 reply puts in context is paid again on every later turn it survives.
-The dense row keeps residency near-uniform per hit; depth tiers keep
-text out of context until it is chosen; deviation-only narration keeps
-the envelope under 12% of a nominal reply. When a journey feels
+The candidate row keeps residency near-uniform per hit (every pick
+field is capped); depth tiers keep text out of context until it is
+chosen; deviation-only control lines keep the envelope a small fraction
+of a nominal reply. When a journey feels
 expensive, the defect is usually a tier skipped — full texts hauled at
 Survey, or a winnow done one `id` at a time instead of one `ids` batch.
 
 ## Subject debt on the journey
 
 Rows filed before subjects existed (or via bulk intake, by design)
-render as `(no subject)`. They are still addressable — judge them by
-lattice coordinates or fetch by id — and `moot_estate_status` counts
+render `-` in the subject column (fixed-column absence, ARIA_MCP_SPEC
+2.0.0 § 8). They are still addressable — judge them by the remaining
+pick fields or fetch by id — and `moot_estate_status` counts
 them (`subjects: N/M (K missing)`). The standing behavior: offer the
 user an interactive backfill and proceed only with their consent
 (`moot_memory_list filter:missing_subject` → `moot_memory_get` →
 `moot_update_memory mutation=setSubject`).
 
 ## Changelog
+
+### 0.4.0 -- 2026-09-05
+
+ENC-W6B: removed the `source: content (not yet distilled)` fallback marker from the
+journey-2 narrative. Distillation is now computed inline at read time via ContextDistiller;
+every `depth:distilled` response carries a rendered representation with no stored-distillate
+prerequisite.
+
+### 0.2.1 -- 2026-08-26
+
+Vocabulary (mission SSC-RENAME): SSC defined at first prose use —
+Semantic Search Candle. Terminology only; row grammar unchanged.
+
+
+### 0.2.0 -- 2026-08-25
+
+Realigned to the ARIA_MCP_SPEC/INTERFACE 2.0.0 retrieval contract: rule 1
+travels on the seven-column canonical candidate row (fixed columns, `-`
+absence); journey samples updated to the 2.0.0 headers and row grammar
+(`found N candidate memories, one per line`; batch get `resolved N of M
+requested memories, in request order`; unlabeled distilled
+continuations); fact_timeline example corrected to the `entity` argument
+and the no-validity-window fact model; `(no subject)` marker replaced by
+the `-` column; residency prose updated (control lines, capped pick
+fields).
 
 ### 0.1.0 -- 2026-08-02
 

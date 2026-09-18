@@ -1,9 +1,9 @@
 ---
 title: GeniusLocus Substrate Conformance Harness Reference
-version: 1.0.2
+version: 1.2.0
 description: Single-source index of the substrate's conformance-gated primitives, their Swift/Rust API surfaces, test vectors, and file locations.
 status: implementation-grade specification
-date: 2026-06-20
+date: 2026-08-20
 author: MOOTx01 maintainers
 purpose: |
   Single-source index of the substrate's conformance-gated
@@ -42,10 +42,10 @@ Rust implementations are byte-for-byte identical on their canonical
 test vector (32 cases each, CRC-pinned). Drift between the two
 languages would be caught by CI in the next harness run.
 
-The gate currently holds **29** conformance-gated primitives (the
+The gate currently holds **31** conformance-gated primitives (the
 count of record is `primitive-catalog.md`, the machine-readable
 catalog, and the Swift/Rust harness registries — all three agree at
-29). This reference details all 29 in full below. For the canonical
+31). This reference details all 31 in full below. For the canonical
 gated-primitive list and CRC source of record, treat
 `primitive-catalog.md` as authoritative.
 
@@ -87,7 +87,7 @@ candidate for promotion (see §5).
 
 ---
 
-## §2. The conformance-gated primitives (29 indexed here)
+## §2. The conformance-gated primitives (31 indexed here)
 
 Each row tells an agent four things:
 1. **Where the math lives** (cookbook §).
@@ -108,6 +108,7 @@ paths are `packages/libs/<Package>/rust/src/<module>`.
 |---|---|---|---|
 | `simhash` | SubstrateTypes | `SimHash.swift` | `simhash.rs` |
 | `hamming` | SubstrateTypes | `Hamming.swift` | `hamming.rs` |
+| `jaccard` | SubstrateTypes | `Jaccard.swift` | `jaccard.rs` |
 | `or_reduce` | SubstrateTypes | `ORReduce.swift` | `or_reduce.rs` |
 | `bitwise` | SubstrateTypes | `BitwiseArithmetic.swift` | `bitwise.rs` |
 | `fingerprint` | SubstrateTypes | `Fingerprint256.swift` | `fingerprint256.rs` |
@@ -116,6 +117,7 @@ paths are `packages/libs/<Package>/rust/src/<module>`.
 | `bit_field_masked_equals` | SubstrateKernel | `BitField.swift` | `bit_field.rs` |
 | `merkle_commitment` | SubstrateKernel | `MerkleCommitment.swift` | `merkle_commitment.rs` |
 | `lattice` | SubstrateML | `LatticeDistance.swift` | `lattice_distance.rs` |
+| `qid_adjacency` | SubstrateML | `LatticeDistance.swift` | `lattice_distance.rs` |
 | `info_theory` | SubstrateML | `InformationTheory.swift` | `info_theory.rs` |
 | `bradley_terry` | SubstrateML | `BradleyTerry.swift` | `bradley_terry.rs` |
 | `sampling` | SubstrateML | `Sampling.swift` | `sampling.rs` |
@@ -139,7 +141,7 @@ paths are `packages/libs/<Package>/rust/src/<module>`.
 (`AuditGate`, `Verbs`, and `RowStateAutomaton` are the orchestration
 layer in SubstrateLib — not gated primitives, so not in this table.)
 
-### §2.1. Tier 1 — atomic primitives (9 ops)
+### §2.1. Tier 1 — atomic primitives (10 ops)
 
 These are the substrate's irreducible bit operations. Any kit using
 these MUST call the substrate API named below — never a reimplementation
@@ -165,6 +167,21 @@ these MUST call the substrate API named below — never a reimplementation
 - **Vector:** `vectors/hamming.json`
 - **What:** Bit-count of XOR over two 256-bit fingerprints.
   Drives every nearest-neighbor query.
+
+#### `jaccard` — §8.21 — CRC `0x2fe8941e`
+- **Swift:** `Jaccard.{similarity,distance}(_:_:) -> Double`
+  in `packages/libs/SubstrateTypes/Sources/SubstrateTypes/Jaccard.swift`
+- **Rust:** `jaccard::{similarity,distance}(a:b:) -> f64`
+  in `packages/libs/SubstrateTypes/rust/src/jaccard.rs`
+- **Harness:** `JaccardPrimitive.swift` / `jaccard.rs`
+- **Vector:** `vectors/jaccard.json`
+- **What:** Jaccard set similarity over 256-bit fingerprints:
+  popcount(a AND b) / popcount(a OR b), distance = 1 − similarity.
+  Empty-union convention: both-empty → 0.0, never 1.0 (no evidence
+  must not read as a perfect match). Integer popcount operands make
+  the single f64 division bit-identical across ports. Backs the
+  SynapseKit `BinaryMetric.jaccard` retrieval lane and the shaped
+  "jaccard" preset (W2.5 Track M1 activation).
 
 #### `or_reduce` — §8.5 — CRC `0x4ee84d73`
 - **Swift:** `Fingerprint256.orReduce(_ inputs: [Fingerprint256]) -> Fingerprint256`
@@ -258,12 +275,12 @@ these MUST call the substrate API named below — never a reimplementation
 - **Vector:** `test-harness/vectors/merkle_commitment.json`
 - **What:** Domain-separated SHA-256 Merkle leaf/interior/tombstone/
   empty-root construction plus HMAC-SHA256 keyed commitments over
-  canonical drawer content and VectorKit-sidecar vector bytes. This
+  canonical drawer content and SynapseKit-sidecar vector bytes. This
   is the NT-P0 extension of the I-27 integrity surface; it reuses
   SubstrateKernel `SHA256` and the existing `GrantHKDF`/`hkdf`
   HMAC implementation rather than adding a second HMAC primitive.
 
-### §2.2. Tier 2 — algorithmic primitives (9 ops)
+### §2.2. Tier 2 — algorithmic primitives (10 ops)
 
 These compose Tier-1 primitives with substrate-state-aware
 algorithms. Higher-level than bitops but still bandwidth-bounded.
@@ -274,9 +291,25 @@ algorithms. Higher-level than bitops but still bandwidth-bounded.
 - **Harness:** `LatticePrimitive.swift` / `lattice.rs`
 - **Vector:** `vectors/lattice.json`
 - **What:** UDC code tree distance (longest-common-prefix delta,
-  normalized to [0,1]). The cheap deterministic half of lattice
-  distance; the Wikidata graph half is not currently gated (it
-  requires a remote adjacency provider).
+  normalized to [0,1]). The cheap deterministic half of §8.3 lattice
+  distance; the Wikidata graph half is gated separately as
+  `qid_adjacency` below.
+
+#### `qid_adjacency` — §8.3 — CRC `0x47efbb97`
+- **Swift:** `WikidataGraphDistance.{shortestPathLength,distance}(from:to:provider:)`
+  in `packages/libs/SubstrateML/Sources/SubstrateML/LatticeDistance.swift`
+- **Rust:** `lattice_distance::WikidataGraphDistance::{shortest_path_length,distance}`
+  in `packages/libs/SubstrateML/rust/src/lattice_distance.rs`
+- **Harness:** `QIDAdjacencyPrimitive.swift` / `qid_adjacency.rs`
+- **Vector:** `vectors/qid_adjacency.json`
+- **What:** The Q-ID (Wikidata graph) half of §8.3 lattice distance:
+  depth-4 BFS shortest path over an adjacency provider, normalized
+  1 − exp(−len/3); null Q-ID or unreachable → 1.0. Each vector case
+  carries its own adjacency graph, so the gate pins the math
+  independent of the vendored artifact. In production the provider is
+  NeuronKit's `QIDClosureAdjacency` over LatticeLib's pinned
+  `QIDClosure` P31/P279 edges (S8 wave; live on the precise/temporal
+  doors).
 
 #### `info_theory` — §8.11 — CRC `0x0cc08713`
 - **Swift:** `InfoTheory.{entropy,mutualInformation,klDivergence}(...)`
@@ -847,6 +880,25 @@ you don't have to write are 12 lines of bugs you don't have to
 fix.*
 
 ## Changelog
+
+### 1.2.0 -- 2026-08-20
+Added `qid_adjacency` as the 31st conformance-gated primitive at CRC
+`0x47efbb97` — the Q-ID (Wikidata graph) half of cookbook §8.3
+lattice distance (`WikidataGraphDistance`: depth-4 BFS,
+1 − exp(−len/3) normalization, null-Q-ID/unreachable → 1.0), ruled
+canonical 2026-08-20 with the S8 QueryLatticeAnchor wave. Cases carry
+their own adjacency graphs, so the vectors gate the math independent
+of the vendored QIDClosure artifact (which stays provenance-stamped
+in LatticeLib). Tier 2 grows to 10 ops.
+
+### 1.1.0 -- 2026-08-20
+Added `jaccard` as the 30th conformance-gated primitive at CRC
+`0x2fe8941e` (cookbook §8.21, W2.5 Track M1 activation — the
+fingerprint set-overlap metric behind SynapseKit's
+`BinaryMetric.jaccard`). Tier 1 grows to 10 ops; §0/§2 counts and
+the §2.0 package map updated. Vector file `vectors/jaccard.json`
+(34 cases: 32 seeded pairs cycling identical/complement/subset/
+independent, plus two fixed empty-union edge cases).
 
 ### 1.0.2 -- 2026-06-20
 Added `merkle_commitment` as the 29th conformance-gated primitive

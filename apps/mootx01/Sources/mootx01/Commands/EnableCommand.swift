@@ -2,7 +2,7 @@
 //
 // `mootx01 enable <feature>` / `mootx01 disable <feature>`
 //
-// Toggles optional features. Two features are currently supported:
+// Toggles optional features.
 //
 //   memory-tool      Anthropic memory_20250818 adapter — governed /memories backend.
 //                    Toggles MOOTX01_MEMORY_TOOL in the daemon launchd plist.
@@ -19,6 +19,7 @@
 
 import ArgumentParser
 import Foundation
+import GeniusLocusKit
 import MootInstallerCore
 
 struct EnableCommand: AsyncParsableCommand {
@@ -29,10 +30,11 @@ struct EnableCommand: AsyncParsableCommand {
         Available features:
           memory-tool      Anthropic memory_20250818 adapter — governed /memories backend
           harness-memory   Harness Memory Mode — routes Claude Code memories into the estate
+          codex-memory     Codex lifecycle integration (augment or moot-only)
         """
     )
 
-    @Argument(help: "Feature to enable (memory-tool or harness-memory).")
+    @Argument(help: "Feature to enable (memory-tool, harness-memory, or codex-memory).")
     var feature: String
 
     @Flag(name: .long, help: "Skip interactive consent prompts (for scripted installs).")
@@ -42,6 +44,13 @@ struct EnableCommand: AsyncParsableCommand {
           help: "Ingest ALL existing project memories without per-project prompts (harness-memory only).")
     var ingestAll: Bool = false
 
+    @Option(name: .long, help: "Codex memory mode: augment or moot-only (codex-memory only).")
+    var mode: String = "augment"
+
+    @Flag(name: .customLong("automatic-recall"),
+          help: "Opt in to bounded UserPromptSubmit recall (codex-memory only).")
+    var automaticRecall: Bool = false
+
     func run() async throws {
         switch feature {
         case "memory-tool":
@@ -50,11 +59,101 @@ struct EnableCommand: AsyncParsableCommand {
         case "harness-memory":
             try await enableHarnessMemory()
 
+        case "codex-memory":
+            try await enableCodexMemory()
+
         default:
             print("Unknown feature: \(feature)")
-            print("Available features: memory-tool, harness-memory")
+            print("Available features: memory-tool, harness-memory, codex-memory")
             throw ExitCode.failure
         }
+    }
+
+    // MARK: - codex-memory enable
+
+    private func enableCodexMemory() async throws {
+        guard let selectedMode = CodexMemoryMode(rawValue: mode) else {
+            print("Invalid --mode: \(mode). Use augment or moot-only.")
+            throw ExitCode.failure
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let env = ProcessInfo.processInfo.environment
+        let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
+        guard await LiveDaemonClient(port: port).ping() else {
+            print("  ✗ MOOTx01 daemon not reachable at port \(port); refusing to enable Codex memory.")
+            throw ExitCode.failure
+        }
+
+        let configURL = CodexMemoryPaths.codexConfig(homeDirectory: home, environment: env)
+        var codexText = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+        let previous = CodexMemoryStore.load(homeDirectory: home)
+
+        if !yes {
+            print("""
+
+            Codex Memory will enable MOOTx01 lifecycle hooks with private per-session state.
+            It never reads Codex transcripts or edits generated files under ~/.codex/memories.
+            Mode: \(selectedMode.rawValue)
+            Automatic recall: \(automaticRecall ? "enabled (bounded and visible)" : "disabled")
+            \(selectedMode == .mootOnly ? "Codex native memory generation/use will be disabled after a config backup." : "Codex native memory settings will be left unchanged.")
+
+            Proceed? [y/N]
+            """, terminator: "")
+            guard readLine()?.lowercased().hasPrefix("y") == true else {
+                print("Aborted.")
+                throw ExitCode.failure
+            }
+        }
+
+        // Restore only the keys changed by an earlier moot-only enable before
+        // switching modes. Never restore the whole file over later user edits.
+        if previous?.mode == .mootOnly,
+           let snapshot = previous?.nativeMemorySnapshot,
+           selectedMode == .augment {
+            codexText = CodexNativeMemorySettings.restore(snapshot, in: codexText)
+            try writeCodexConfig(codexText, to: configURL)
+        }
+
+        var snapshot: [String: CodexPriorSetting]?
+        var backupPath: String?
+        if selectedMode == .mootOnly {
+            snapshot = previous?.mode == .mootOnly
+                ? previous?.nativeMemorySnapshot
+                : CodexNativeMemorySettings.snapshot(in: codexText)
+            if FileManager.default.fileExists(atPath: configURL.path) {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "yyyyMMdd-HHmmss"
+                formatter.locale = Locale(identifier: "en_US_POSIX")
+                let backup = configURL.deletingLastPathComponent().appendingPathComponent(
+                    "config.toml.mootx01-memory-bak-\(formatter.string(from: Date()))")
+                if !FileManager.default.fileExists(atPath: backup.path) {
+                    try FileManager.default.copyItem(at: configURL, to: backup)
+                }
+                backupPath = backup.path
+            }
+            codexText = CodexNativeMemorySettings.disableNativeMemories(in: codexText)
+            try writeCodexConfig(codexText, to: configURL)
+        }
+
+        let configuration = CodexMemoryConfiguration(
+            mode: selectedMode,
+            automaticRecall: automaticRecall,
+            nativeMemorySnapshot: snapshot,
+            codexConfigBackupPath: backupPath ?? previous?.codexConfigBackupPath
+        )
+        try CodexMemoryStore.save(configuration, homeDirectory: home)
+        print("  ✓ Codex Memory enabled in \(selectedMode.rawValue) mode")
+        print("  ✓ automatic recall \(automaticRecall ? "enabled" : "disabled")")
+        if selectedMode == .augment {
+            print("  · Codex native memories left unchanged")
+        } else {
+            print("  ✓ Codex native memory generation/use disabled with reversible key-level snapshot")
+        }
+        print("  · Run `mootx01 install --target codex --mode plugin` to refresh plugin hooks and deduplicate MCP ownership.")
+    }
+
+    private func writeCodexConfig(_ text: String, to url: URL) throws {
+        try CodexConfigWriter.write(text, to: url)
     }
 
     // MARK: - harness-memory enable
@@ -68,11 +167,7 @@ struct EnableCommand: AsyncParsableCommand {
 
         // Daemon reachability check — Harness Memory without an estate is
         // worse than useless (writes blocked with nowhere to go).
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment,
-            homeDirectory: home
-        )
-        let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         let daemon = LiveDaemonClient(port: port)
         guard await daemon.ping() else {
             print("  ✗ MOOTx01 daemon not reachable at port \(port).")
@@ -145,12 +240,11 @@ struct EnableCommand: AsyncParsableCommand {
         print("old secrets should be withdrawn or re-filed restricted after ingest.")
         print()
 
-        // Check whether this is a re-enable (any files already ingested before).
-        let isReEnable = false // First enable: not a re-enable sweep.
-
-        var totalFiled = 0
-        var totalSkipped = 0
-        var totalFailed = 0
+        // Every result feeds the summary line; the words and order match the
+        // Rust port's per-project line (filed, matched, discarded indexes,
+        // removed, skipped), so a matched file is never reported as filed.
+        var allResults: [IngestResult] = []
+        var declinedFiles = 0
 
         for (slug, files) in projectMemories.sorted(by: { $0.key < $1.key }) {
             let shouldIngest: Bool
@@ -163,30 +257,32 @@ struct EnableCommand: AsyncParsableCommand {
             }
             guard shouldIngest else {
                 print("  Skipped '\(slug)'")
-                totalSkipped += files.count
+                declinedFiles += files.count
                 continue
             }
 
+            var slugResults: [IngestResult] = []
             for fileURL in files {
                 let result = await HarnessMemoryIngest.ingestFile(
-                    fileURL, projectSlug: slug, isReEnable: isReEnable, daemon: daemon
+                    fileURL, projectSlug: slug, daemon: daemon
                 )
                 switch result.outcome {
-                case .filed, .revived:
-                    totalFiled += 1
+                case .filed, .matched, .discardedIndex:
+                    break
                 case .skipped(let reason):
                     print("  skip \(result.fileName): \(reason)")
-                    totalSkipped += 1
                 case .failed(let reason):
                     print("  fail \(result.fileName): \(reason)")
-                    totalFailed += 1
                 }
+                slugResults.append(result)
             }
+            print("  \(slug): \(HarnessMemoryIngest.summaryLine(slugResults))")
+            allResults.append(contentsOf: slugResults)
             HarnessMemoryIngest.removeEmptyMemoryDir(projectSlug: slug, homeDirectory: homeDirectory)
         }
 
         print()
-        print("Ingest complete: filed \(totalFiled), skipped \(totalSkipped), failed \(totalFailed)")
+        print("Ingest complete: \(HarnessMemoryIngest.summaryLine(allResults)); declined \(declinedFiles)")
     }
 }
 
@@ -198,10 +294,11 @@ struct DisableCommand: AsyncParsableCommand {
         Available features:
           memory-tool      Anthropic memory_20250818 adapter — governed /memories backend
           harness-memory   Harness Memory Mode — routes Claude Code memories into the estate
+          codex-memory     Codex lifecycle integration and native-memory posture
         """
     )
 
-    @Argument(help: "Feature to disable (memory-tool or harness-memory).")
+    @Argument(help: "Feature to disable (memory-tool, harness-memory, or codex-memory).")
     var feature: String
 
     @Flag(name: .long, help: "Skip interactive prompts.")
@@ -223,11 +320,35 @@ struct DisableCommand: AsyncParsableCommand {
         case "harness-memory":
             try await disableHarnessMemory()
 
+        case "codex-memory":
+            try disableCodexMemory()
+
         default:
             print("Unknown feature: \(feature)")
-            print("Available features: memory-tool, harness-memory")
+            print("Available features: memory-tool, harness-memory, codex-memory")
             throw ExitCode.failure
         }
+    }
+
+    private func disableCodexMemory() throws {
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let env = ProcessInfo.processInfo.environment
+        guard var feature = CodexMemoryStore.load(homeDirectory: home), feature.enabled else {
+            print("  · Codex Memory is already disabled")
+            return
+        }
+        if feature.mode == .mootOnly, let snapshot = feature.nativeMemorySnapshot {
+            let configURL = CodexMemoryPaths.codexConfig(homeDirectory: home, environment: env)
+            let current = (try? String(contentsOf: configURL, encoding: .utf8)) ?? ""
+            let restored = CodexNativeMemorySettings.restore(snapshot, in: current)
+            try CodexConfigWriter.write(restored, to: configURL)
+            print("  ✓ restored only the Codex native-memory keys changed by moot-only mode")
+        }
+        feature.enabled = false
+        feature.automaticRecall = false
+        feature.nativeMemorySnapshot = nil
+        try CodexMemoryStore.save(feature, homeDirectory: home)
+        print("  ✓ Codex Memory disabled; generated Codex memory files were not modified")
     }
 
     // MARK: - harness-memory disable
@@ -257,11 +378,7 @@ struct DisableCommand: AsyncParsableCommand {
         // Restore offer.
         guard !noRestore else { return }
 
-        let dataDir = MootPaths.resolveDataDirectory(
-            environment: ProcessInfo.processInfo.environment,
-            homeDirectory: home
-        )
-        let port = MootPaths.resolvedResidentPort(dataDir: dataDir)
+        let port = MootPaths.resolvedResidentPort(dataDir: EstateCatalog.configurationDirectory)
         let daemon = LiveDaemonClient(port: port)
 
         guard await daemon.ping() else {
@@ -276,25 +393,19 @@ struct DisableCommand: AsyncParsableCommand {
     }
 
     private func runRestoreOffer(homeDirectory: URL, daemon: some DaemonClient) async {
-        // Discover which project slugs have estate memories to restore.
-        // Query both harness-import/* and harness/* location prefixes.
+        // Restore discovers every harness-import/* and harness/* row itself.
         print("Checking estate for memories to restore...")
         guard !restoreAll && !yes else {
             // Non-interactive: restore everything found.
             let results = await HarnessMemoryRestore.restore(
-                projectSlugs: ["*"],  // wildcard: restore will query all slugs
                 homeDirectory: homeDirectory,
-                daemon: daemon,
-                now: Date()
+                daemon: daemon
             )
             summarizeRestore(results)
             return
         }
 
-        // Interactive: ask per project.
-        // For simplicity in the interactive path, restore all slugs the user
-        // confirms. A full slug-discovery pass (querying the estate for known
-        // slugs) is out of scope; offer a catch-all prompt instead.
+        // Interactive: one prompt covers every project the estate holds.
         print("Restore estate memories back to disk? [y/N] ", terminator: "")
         let answer = readLine() ?? ""
         guard answer.lowercased().hasPrefix("y") else {
@@ -303,10 +414,8 @@ struct DisableCommand: AsyncParsableCommand {
         }
 
         let results = await HarnessMemoryRestore.restore(
-            projectSlugs: ["*"],
             homeDirectory: homeDirectory,
-            daemon: daemon,
-            now: Date()
+            daemon: daemon
         )
         summarizeRestore(results)
     }

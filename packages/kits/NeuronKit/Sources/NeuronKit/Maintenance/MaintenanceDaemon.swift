@@ -13,15 +13,17 @@
 //   0. Audit-chain monitor: re-verify the unified audit log on its own
 //      cadence via the live `AuditChainVerifier`; on a break, propose an
 //      audit-integrity remediation.
-//   1. Forbidden-combination scan (invariant I-3).
-//   2. Decay-candidate scan.
-//   3. Tombstone/expunge-candidate scan.
-//   4. Fingerprint-drift scan.
-//   5. byReference-validity scan.
-//   6. Write exactly one cycle diary entry.
+//   1. Decay-candidate scan.
+//   2. Tombstone/expunge-candidate scan.
+//   3. byReference-validity scan.
+//   4. Write exactly one cycle diary entry.
+//
+// The secret+public forbidden combination is refused at the write gate,
+// and fingerprint drift is covered by the startup integrity sweep, so
+// neither is re-scanned here.
 //
 // ── Why this daemon talks to seams, not to GLK verbs ─────────────────
-// B-1: NeuronKit never executes SQL and never calls LocusKit / VectorKit
+// B-1: NeuronKit never executes SQL and never calls LocusKit / SynapseKit
 // / CorpusKit directly. Even with `propose` now live (Brain layer landed
 // in GLK-02), no estate verb reads drawers, reads a `UnifiedAuditLog`,
 // or writes a `DiaryEntry`. So the daemon depends on the NeuronKit-owned
@@ -53,6 +55,12 @@ public actor MaintenanceDaemon {
     private let reader: MaintenanceSubstrateReader
     private let sink: MaintenanceProposalSink
     private let policyStore: MaintenancePolicyStore
+    /// Optional hook for the daily timing-derivation performance-health duty (A7).
+    /// When non-nil, the daemon calls `PerformanceHealthDuty.runHealthDuty(watermarkMs:now:)`
+    /// once per 24 h so INGEST/CYCLE latency trends are captured in the stats store.
+    /// Nil safely disables the duty (test daemons, LocusOnly estates without timing markers).
+    /// Failures are caught and logged — they do not abort the maintenance cycle.
+    private let performanceHealthDuty: (any PerformanceHealthDuty)?
 
     // MARK: - Mutable state (actor-isolated)
 
@@ -74,6 +82,24 @@ public actor MaintenanceDaemon {
     /// Number of cycles run. Recorded in the cycle diary entry.
     private var cycleCount: Int = 0
 
+    /// When the daily timing-derivation health duty last ran. Nil = never run.
+    /// Gating field for the 24 h cadence in `runCycle` (A7). Persisted in
+    /// `MaintenanceDaemonState.lastPerformanceHealthAt` via the manifest-backed
+    /// state path so the cadence survives daemon restarts.
+    private var lastPerformanceHealthAt: Date? = nil
+
+    /// HLC physical-time watermark (epoch ms) for the audit-log page cursor.
+    /// 0 = start from the beginning (first run or reset). Advances to the last
+    /// event's physical time after each successful health duty run. Persisted in
+    /// `MaintenanceDaemonState.performanceHealthWatermarkMs`.
+    private var performanceHealthWatermarkMs: Int64 = 0
+
+    // MARK: - Constants
+
+    /// 24 h cadence for the daily timing-derivation health duty, matching the
+    /// DreamingDaemon's THETA cadence constant (D5a, `thetaCadenceSecs = 86400`).
+    private static let healthDutyCadenceSecs: Double = 86_400
+
     // MARK: - Init
 
     /// Construct a daemon over the injected seams.
@@ -84,16 +110,23 @@ public actor MaintenanceDaemon {
     ///   - policyStore: manifest-resident policy persistence seam.
     ///   - policy: initial in-memory policy. Defaults to the spec
     ///     defaults; `loadPersistedPolicy()` overrides it from the store.
+    ///   - performanceHealthDuty: optional hook for the daily timing-derivation
+    ///     health duty. When non-nil, fires once per 24 h to derive INGEST/CYCLE
+    ///     samples and write them to the stats store. Pass
+    ///     `EstatePerformanceHealthDuty(handle:kit:)` in production;
+    ///     nil (default) disables the duty.
     public init(
         reader: MaintenanceSubstrateReader,
         sink: MaintenanceProposalSink,
         policyStore: MaintenancePolicyStore,
-        policy: MaintenancePolicy = .default
+        policy: MaintenancePolicy = .default,
+        performanceHealthDuty: (any PerformanceHealthDuty)? = nil
     ) {
         self.reader = reader
         self.sink = sink
         self.policyStore = policyStore
         self.policy = policy
+        self.performanceHealthDuty = performanceHealthDuty
     }
 
     // MARK: - Policy registration (§ 3.2 registration API)
@@ -105,7 +138,6 @@ public actor MaintenanceDaemon {
         auditCheckIntervalMs: Int = 300_000,
         decayWindowSeconds: Double = 2_592_000,
         tombstoneGraceSeconds: Double = 604_800,
-        fingerprintDriftThreshold: Float = 0.25,
         byReferenceDriftThreshold: Float = 0.25
     ) async throws {
         let next = MaintenancePolicy(
@@ -113,7 +145,6 @@ public actor MaintenanceDaemon {
             auditCheckIntervalMs: auditCheckIntervalMs,
             decayWindowSeconds: decayWindowSeconds,
             tombstoneGraceSeconds: tombstoneGraceSeconds,
-            fingerprintDriftThreshold: fingerprintDriftThreshold,
             byReferenceDriftThreshold: byReferenceDriftThreshold
         )
         policy = next
@@ -127,14 +158,18 @@ public actor MaintenanceDaemon {
         if let stored = try await policyStore.loadPolicy() {
             policy = stored
         }
-        //  / manifest-backed daemon state: restore the daemon's idempotency/cycle memory so a restart
-        // does not repeat suppressed proposals or reset its counters. Absent state
-        // leaves the in-memory defaults in place.
+        // Manifest-backed daemon state: restore the daemon's idempotency/cycle
+        // memory so a restart does not repeat suppressed proposals, reset its
+        // counters, or re-measure audit events the health duty already consumed
+        // (the watermark survives restarts so each event is measured exactly once).
+        // Absent state leaves the in-memory defaults in place.
         if let state = try await policyStore.loadDaemonState() {
             lastTickAt = state.lastTickAt
             lastAuditCheckAt = state.lastAuditCheckAt
             proposedKeys = Set(state.proposedKeys)
             cycleCount = state.cycleCount
+            lastPerformanceHealthAt = state.lastPerformanceHealthAt
+            performanceHealthWatermarkMs = state.performanceHealthWatermarkMs
         }
     }
 
@@ -145,7 +180,9 @@ public actor MaintenanceDaemon {
             lastTickAt: lastTickAt,
             lastAuditCheckAt: lastAuditCheckAt,
             proposedKeys: proposedKeys.sorted(),
-            cycleCount: cycleCount
+            cycleCount: cycleCount,
+            lastPerformanceHealthAt: lastPerformanceHealthAt,
+            performanceHealthWatermarkMs: performanceHealthWatermarkMs
         )
     }
 
@@ -174,7 +211,7 @@ public actor MaintenanceDaemon {
             let elapsedMs = now.timeIntervalSince(last) * 1000.0
             guard elapsedMs >= Double(policy.tickIntervalMs) else { return nil }
         }
-        return try await runCycle(now: now)
+        return try await runCycle(now: now, categories: .all)
     }
 
     /// Run one maintenance cycle on demand, regardless of the timer
@@ -183,12 +220,29 @@ public actor MaintenanceDaemon {
     /// satisfy the rule against reading the system clock inside an engine.
     @discardableResult
     public func triggerMaintenanceCycle(now: Date) async throws -> MaintenanceCycleReport {
-        try await runCycle(now: now)
+        try await triggerMaintenanceCycle(now: now, categories: .all)
+    }
+
+    /// Run one maintenance cycle on demand over the selected scan
+    /// categories only. The standing signals call this with one category
+    /// each (`maintenance-daemon` → `.tombstone`, `decay-sweep` → `.decay`,
+    /// `by-reference-validity` → `.byReference`) so every category runs on
+    /// its own signal cadence. An unselected category reads no seam and
+    /// contributes no candidates; the audit-chain monitor, the QID-pending
+    /// retry and the diary entry run on every call. Rust twin:
+    /// `MaintenanceDaemon::run_cycle_scoped`.
+    @discardableResult
+    public func triggerMaintenanceCycle(
+        now: Date, categories: MaintenanceCategories
+    ) async throws -> MaintenanceCycleReport {
+        try await runCycle(now: now, categories: categories)
     }
 
     // MARK: - The cycle (§ 3.2 + § 3.5)
 
-    private func runCycle(now: Date) async throws -> MaintenanceCycleReport {
+    private func runCycle(
+        now: Date, categories: MaintenanceCategories
+    ) async throws -> MaintenanceCycleReport {
         // ── Step 0: audit-chain integrity monitor (§ 3.5) ──────────────
         // Verify on the audit-check cadence, tracked independently of the
         // scan tick so a slow full-chain verification need not run every
@@ -221,45 +275,54 @@ public actor MaintenanceDaemon {
                 rejectedEntryCount: log.rejectedEntryCount)
         }
 
-        // ── Steps 1–5 input gathering: read the seams and project each
+        // ── Steps 1–3 input gathering: read the seams and project each
         // scan into the pure core's identity-free shape. The `now`-relative
-        // age subtractions and the I-3 secret-AND-public bitmap read (on
-        // the substrate `Drawer` type) stay here; the THRESHOLDS, KEY
-        // FORMATS, SCAN ORDER, and B-4 dedup all live in the core.
-        let active = try await reader.activeDrawers()
-        let forbiddenDrawerIDs = active.filter(Self.isForbiddenCombination).map(\.id)
-        let agedActive = active.map {
-            MaintenanceDecision.AgedRow(id: $0.id, ageSeconds: now.timeIntervalSince($0.filedAt))
+        // age subtractions stay here; the THRESHOLDS, KEY FORMATS, SCAN
+        // ORDER, and B-4 dedup all live in the core.
+        // Only the selected categories read their seam; an unselected
+        // category hands the core an empty input so it neither scans nor
+        // emits (each maintenance-family standing signal selects exactly one).
+        let agedActive: [MaintenanceDecision.AgedRow]
+        if categories.contains(.decay) {
+            let active = try await reader.activeDrawers()
+            agedActive = active.map {
+                MaintenanceDecision.AgedRow(id: $0.id, ageSeconds: now.timeIntervalSince($0.filedAt))
+            }
+        } else {
+            agedActive = []
         }
-        let tombstoned = try await reader.tombstonedDrawers()
-        // `tombstonedAt` is always set on a tombstoned row, but guard nil
-        // defensively (a malformed row is simply skipped, not crashed).
-        let agedTombstoned = tombstoned.compactMap { drawer -> MaintenanceDecision.AgedRow? in
-            guard let tombstonedAt = drawer.tombstonedAt else { return nil }
-            return MaintenanceDecision.AgedRow(
-                id: drawer.id, ageSeconds: now.timeIntervalSince(tombstonedAt))
+        let agedTombstoned: [MaintenanceDecision.AgedRow]
+        if categories.contains(.tombstone) {
+            let tombstoned = try await reader.tombstonedDrawers()
+            // `tombstonedAt` is always set on a tombstoned row, but guard nil
+            // defensively (a malformed row is simply skipped, not crashed).
+            agedTombstoned = tombstoned.compactMap { drawer -> MaintenanceDecision.AgedRow? in
+                guard let tombstonedAt = drawer.tombstonedAt else { return nil }
+                return MaintenanceDecision.AgedRow(
+                    id: drawer.id, ageSeconds: now.timeIntervalSince(tombstonedAt))
+            }
+        } else {
+            agedTombstoned = []
         }
-        let fingerprintObs = try await reader.fingerprintBaselines()
-        let fingerprintDrift = fingerprintObs.map {
-            MaintenanceDecision.DriftRow(key: $0.scopeKey, driftFraction: $0.driftFraction)
-        }
-        let references = try await reader.learnedReferences()
-        let referenceDrift = references.map {
-            MaintenanceDecision.DriftRow(key: $0.referenceRowID, driftFraction: $0.sourceDriftFraction)
+        let referenceDrift: [MaintenanceDecision.DriftRow]
+        if categories.contains(.byReference) {
+            let references = try await reader.learnedReferences()
+            referenceDrift = references.map {
+                MaintenanceDecision.DriftRow(key: $0.referenceRowID, driftFraction: $0.sourceDriftFraction)
+            }
+        } else {
+            referenceDrift = []
         }
 
-        // ── Delegate every DECISION to the pure core (steps 0–5) ───────
+        // ── Delegate every DECISION to the pure core (steps 0–3) ───────
         // Conformance-gated against the Rust version
         // (NeuronKit/rust/src/maintenance_decision.rs). See MaintenanceDecision.swift.
         let outcome = MaintenanceDecision.decide(
             audit: auditVerdict,
-            forbiddenDrawerIDs: forbiddenDrawerIDs,
             agedActive: agedActive,
             decayWindowSeconds: policy.decayWindowSeconds,
             agedTombstoned: agedTombstoned,
             tombstoneGraceSeconds: policy.tombstoneGraceSeconds,
-            fingerprintDrift: fingerprintDrift,
-            fingerprintDriftThreshold: policy.fingerprintDriftThreshold,
             referenceDrift: referenceDrift,
             byReferenceDriftThreshold: policy.byReferenceDriftThreshold,
             alreadyProposedKeys: proposedKeys
@@ -286,13 +349,11 @@ public actor MaintenanceDaemon {
             emitted.append(frame)
         }
         let suppressed = outcome.suppressedDuplicates
-        let forbiddenCombinations = outcome.forbiddenCombinations
         let decayCandidates = outcome.decayCandidates
         let tombstoneCandidates = outcome.tombstoneCandidates
-        let fingerprintDrifts = outcome.fingerprintDrifts
         let byReferenceDrifts = outcome.byReferenceDrifts
 
-        // ── Step 5.5: QID-pending enrichment retry + completion (Board item
+        // ── Step 3.5: QID-pending enrichment retry + completion (Board item
         // 14 + Q-ID-completion terminal workflow) ─────────────────────────
         // Pick up drawers with enrichment-status `qid_pending` (provenance
         // bits 36-41 == 1, cookbook §2.5) and re-run lattice-anchor inference
@@ -435,14 +496,16 @@ public actor MaintenanceDaemon {
         ))
 
         // ── Step 5.9: node-tree invariant verification ────────────────
-        // Verify a subset of node-tree containment invariants from
-        // the drawer corpus already fetched. Full invariant verification
+        // Verify a subset of node-tree containment invariants over
+        // the active drawer corpus. Full invariant verification
         // (I-NT-1 through I-NT-6) requires node-table access not yet
         // exposed through the GLK public surface; the subset below uses
         // only drawer-level data.
         //
         //   I-NT-3 (partial): every drawer must have a non-empty parentNodeId.
         var nodeInvariantViolations = 0
+        // Step 5.9 reads the active corpus for the parent-node check.
+        let active = try await reader.activeDrawers()
         for drawer in active {
             if drawer.parentNodeId.isEmpty {
                 nodeInvariantViolations += 1
@@ -461,14 +524,13 @@ public actor MaintenanceDaemon {
             ts: cycleTs
         ))
 
-        // ── Step 6: write exactly one diary entry recording the cycle ──
+        // ── Step 4: write exactly one diary entry recording the cycle ──
         cycleCount += 1
         let entry = DiaryEntry(
             agentName: Self.agentName,
             entry: "maintenance cycle \(cycleCount): "
                 + "audit-checked \(auditChecked), "
-                + "forbidden \(forbiddenCombinations), decay \(decayCandidates), "
-                + "tombstone \(tombstoneCandidates), fingerprint-drift \(fingerprintDrifts), "
+                + "decay \(decayCandidates), tombstone \(tombstoneCandidates), "
                 + "byReference-drift \(byReferenceDrifts), "
                 + "proposed \(emitted.count), suppressed \(suppressed), "
                 + "qid-retried \(qidRetried), qid-resolved \(qidResolved), "
@@ -483,9 +545,50 @@ public actor MaintenanceDaemon {
         try await sink.recordCycleDiary(entry)
 
         lastTickAt = now
-        //  / manifest-backed daemon state: persist the daemon's idempotency/cycle memory after every
-        // cycle so a restart resumes from here. All cycle mutations — cycleCount,
-        // proposedKeys, lastAuditCheckAt, lastTickAt — are complete by this point.
+
+        // ── Step 6.5: daily timing-derivation health duty (A7) ───────────
+        // Fires once per 24 h on the same cadence family as the DreamingDaemon's
+        // THETA gate (`healthDutyCadenceSecs = 86_400`). The duty pages audit
+        // events from the persisted watermark, derives INGEST and CYCLE timing
+        // samples via `NeuronKit.deriveTimings`, and emits them via Intellectus
+        // into the existing PersistenceStatsSink write path. Best-effort: a
+        // failure is logged and swallowed — the proposal + diary functions have
+        // already succeeded by this point.
+        //
+        // The gate mirrors THETA's pattern (D5a): `now >= lastPerformanceHealthAt + 24h`,
+        // OR never run (nil). Nil hook safely disables the duty in test daemons.
+        if let duty = performanceHealthDuty {
+            let healthDue: Bool = {
+                guard let last = lastPerformanceHealthAt else { return true }
+                return now.timeIntervalSince(last) >= Self.healthDutyCadenceSecs
+            }()
+            if healthDue {
+                do {
+                    let newWatermark = try await duty.runHealthDuty(
+                        watermarkMs: performanceHealthWatermarkMs,
+                        now: now
+                    )
+                    performanceHealthWatermarkMs = newWatermark
+                    lastPerformanceHealthAt = now
+                } catch {
+                    // Best-effort: a derivation failure never breaks the daemon cycle.
+                    // The watermark and last-run timestamp are NOT advanced on failure
+                    // so the next due cycle retries the same window.
+                    // Log at error level so the operator can diagnose store/GLK issues.
+                    Intellectus.report(.metric(
+                        name: "neuronkit.perf_health.duty_error",
+                        value: 1.0,
+                        tags: ["cycle": "\(cycleCount)"],
+                        ts: cycleTs
+                    ))
+                }
+            }
+        }
+
+        // Manifest-backed daemon state: persist after every cycle so a restart
+        // resumes from here. All cycle mutations — cycleCount, proposedKeys,
+        // lastAuditCheckAt, lastTickAt, lastPerformanceHealthAt, and
+        // performanceHealthWatermarkMs — are complete by this point.
         // Default store impl is a no-op, so in-memory/test daemons are unaffected.
         try await policyStore.saveDaemonState(currentDaemonState())
         return MaintenanceCycleReport(
@@ -495,8 +598,6 @@ public actor MaintenanceDaemon {
             proposalsEmitted: emitted,
             decayCandidates: decayCandidates,
             tombstoneCandidates: tombstoneCandidates,
-            forbiddenCombinations: forbiddenCombinations,
-            fingerprintDrifts: fingerprintDrifts,
             byReferenceDrifts: byReferenceDrifts,
             suppressedDuplicates: suppressed,
             diaryEntry: entry,
@@ -561,12 +662,6 @@ public actor MaintenanceDaemon {
                     "maintenance: audit chain integrity violation; "
                     + "first broken entry at \(tag) "
                     + "(entries \(auditReport?.entryCount ?? 0))")
-        case .disciplineViolation:
-            return ProposeFrame(
-                target: decision.target,
-                kind: .disciplineViolation,
-                justification:
-                    "maintenance: forbidden combination (secret AND public) on drawer \(decision.target)")
         case .decay:
             return ProposeFrame(
                 target: decision.target,
@@ -579,12 +674,6 @@ public actor MaintenanceDaemon {
                 kind: .mutateCandidate,
                 justification:
                     "maintenance: expunge candidate; drawer \(decision.target) tombstoned past grace window")
-        case .fingerprintDrift:
-            return ProposeFrame(
-                target: decision.target,
-                kind: .other("fingerprint_drift"),
-                justification:
-                    "maintenance: fingerprint drift \(decision.detailValue ?? 0) on scope \(decision.target)")
         case .byReferenceDrift:
             return ProposeFrame(
                 target: decision.target,
@@ -603,12 +692,4 @@ public actor MaintenanceDaemon {
     /// The wing the cycle diary entries are filed under, following the
     /// `wing_<agentName>` convention DiaryEntry documents.
     static let diaryWing = "wing_maintenance-daemon"
-
-    /// Invariant I-3: a drawer may not be both secret and publicly
-    /// exportable. Reads the two adjective-bitmap accessors (computed,
-    /// no Bool stored property); a row failing I-3 is a discipline
-    /// violation the daemon proposes for remediation.
-    static func isForbiddenCombination(_ drawer: Drawer) -> Bool {
-        drawer.adjectiveSensitivity == .secret && drawer.exportability == .public_
-    }
 }

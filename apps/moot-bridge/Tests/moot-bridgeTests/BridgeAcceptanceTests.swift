@@ -12,8 +12,9 @@ import Testing
 //   (primary's answer) → bridge_set_primary to the other backend → read again (now
 //   the other backend answers) → bridge_status shows the swap.
 //
-// SAFETY: scratch backends only — temp palace + temp MOOTX01_DATA_DIR under
-// /tmp, torn down per run. Never the real palace or real mootx01 data dir.
+// SAFETY: scratch backends only — temp palace + a temp transient estate
+// (`mootx01 serve --db <tmp>/bridge`) under /tmp, torn down per run. Never the
+// real palace or a registered mootx01 estate.
 //
 // This suite is SKIPPED (via the `.enabled(if:)` trait — Swift Testing has no
 // runtime skip, so a thrown "skip" error records as a FAILURE; that broke the
@@ -24,8 +25,19 @@ import Testing
 
 /// Absolute path to the mempalace-mcp binary, or nil when unavailable.
 private let mempalaceMCPPath: String? = whichBinary("mempalace-mcp")
-/// Absolute path to the mootx01 binary, or nil when unavailable.
-private let mootx01BinPath: String? = whichBinary("mootx01")
+/// Absolute path to a mootx01 that can serve the estate this suite names, or
+/// nil when every candidate on the search path is too old.
+///
+/// Presence is not the question. The acceptance config launches
+/// `mootx01 serve --db <tmp>/moot/bridge`, the catalog-era transient-estate
+/// selector; a `mootx01` predating the estate catalog reads that value as a
+/// bare estate NAME, serves something else, and the post-swap read returns no
+/// content — a red suite on any machine carrying an older install, where the
+/// right outcome is a skip. So each candidate is asked what it can do.
+private let mootx01BinPath: String? = whichCapableBinary("mootx01", capability: serveAcceptsDirectoryAndName)
+/// The version string of the newest-listed mootx01 that failed the capability
+/// probe, for the skip message. Nil when none was found at all.
+private let staleMootx01: (path: String, version: String)? = firstIncapableMootx01()
 /// Absolute path to the moot-bridge binary built in this SPM package, or nil
 /// when not yet built.  The test runner and the binary land in the same
 /// .build/<config>/ directory under SPM, so a bundle-sibling lookup is the
@@ -39,7 +51,9 @@ private let mootBridgeBinPath: String? = bridgeBinaryPath()
     // missing — a combined condition hides the failing probe and turns
     // every unexpected skip into a debugging session.
     .enabled(if: mempalaceMCPPath != nil, "mempalace-mcp not on PATH — live acceptance needs it; pure-logic suites still run"),
-    .enabled(if: mootx01BinPath != nil, "mootx01 not on PATH — live acceptance needs it; pure-logic suites still run"),
+    .enabled(if: mootx01BinPath != nil, Comment(rawValue: staleMootx01.map {
+        "mootx01 at \($0.path) is \($0.version), which predates `--db <dir>/<name>` — live acceptance needs a catalog-era build ahead of it on PATH; pure-logic suites still run"
+    } ?? "mootx01 not on PATH — live acceptance needs it; pure-logic suites still run")),
     .enabled(if: mootBridgeBinPath != nil, "moot-bridge binary not found in the package .build products dir — build it (swift build) before the live acceptance"))
 struct BridgeAcceptanceTests {
 
@@ -106,9 +120,9 @@ struct BridgeAcceptanceTests {
         // --- id6: read AFTER swap is answered by mootx01 -------------------
         let secondaryReadText = try resultText(byID[6])
         #expect(secondaryReadText.contains(token))
-        // mootText shape proves mootx01 answered (not MemPalace JSON).
-        #expect(secondaryReadText.contains("found"))
-        #expect(secondaryReadText.contains("[scratch/notes]"))
+        // mootText shape proves mootx01 answered (not MemPalace JSON): the
+        // "found N candidate ..." header and the one-line-per-hit rows.
+        #expect(secondaryReadText.contains("found 1 candidate memory"))
 
         // --- id7: bridge_status reflects the swap ----------------------------
         let statusText = try resultText(byID[7])
@@ -120,6 +134,23 @@ struct BridgeAcceptanceTests {
         #expect(inMemPalace, "write must have landed in MemPalace")
         let inMootx01 = try directMootx01HasToken(token, dataDir: mootDir)
         #expect(inMootx01, "write must have fanned out to mootx01")
+
+        // ...and landed at the location the secondary's `constantArgs` names.
+        // The estate map is what proves it. The S1 search row is `uuid ·
+        // subject · bestSpan · sscFacts · eventTime · score`
+        // (ARIA_MCP_SPEC §8.3) and carries no location at all, so a
+        // `[scratch/notes]` substring of the search reply asserts nothing;
+        // the map lists the room and its memory count.
+        let map = try directMootx01EstateMap(dataDir: mootDir)
+        // After the M5-2 fix, constantArgs sends wing="scratch" + location="notes"
+        // (room "notes" inside wing "scratch"). The estate map renders this as
+        // "scratch/" (wing header) + "    notes: 1" (room count line).
+        // A bare location: "scratch/notes" produces room "scratch/notes" under
+        // the default "Agentic Memory" wing — the bug this assertion detects.
+        #expect(map.contains("scratch/"),
+                "mirrored write must land in wing 'scratch': \(map)")
+        #expect(map.contains("notes: 1"),
+                "mirrored write must land in room 'notes': \(map)")
 
         // --- The stats store contains BOTH backends' series ----------------
         let series = try statsStoreSeries(at: statsPath)
@@ -137,7 +168,7 @@ struct BridgeAcceptanceTests {
         {
           "backendA": {
             "name": "mempalace",
-            "command": "mempalace-mcp --palace \(mpDir)",
+            "command": "\(mempalaceMCPPath!) --palace \(mpDir)",
             "verbMap": {
               "write": "mempalace_add_drawer",
               "query": "mempalace_search",
@@ -147,11 +178,12 @@ struct BridgeAcceptanceTests {
           },
           "backendB": {
             "name": "mootx01",
-            "command": "MOOTX01_DATA_DIR=\(mootDir) mootx01 serve",
+            "command": "\(mootx01BinPath!) serve --db \(mootDir)/bridge",
             "verbMap": {
               "write": "moot_file_memory",
               "query": "moot_memory_search",
-              "constantArgs": { "location": "scratch/notes" },
+              "subjectArg": "subject",
+              "constantArgs": { "wing": "scratch", "location": "notes" },
               "resultFormat": { "kind": "mootText" }
             }
           },
@@ -169,12 +201,12 @@ struct BridgeAcceptanceTests {
         proc.executableURL = URL(fileURLWithPath: bin)
         proc.arguments = ["--config", configPath, "--stats-store", statsPath]
         // Ensure the backend launch commands resolve mempalace-mcp / mootx01.
-        // Prepend the user's local bin dir (derived from HOME, not hard-wired)
-        // so binaries installed via standard packaging helpers are found without
-        // a machine-specific absolute path.
+        // The user's local bin dir (derived from HOME, not hard-wired) is a
+        // FALLBACK after PATH, so a freshly built mootx01 placed ahead on PATH
+        // is the one exercised rather than whatever older binary is installed.
         var env = ProcessInfo.processInfo.environment
         let localBin = (env["HOME"] ?? "") + "/.local/bin"
-        env["PATH"] = localBin + ":" + (env["PATH"] ?? "")
+        env["PATH"] = (env["PATH"] ?? "") + ":" + localBin
         proc.environment = env
 
         let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
@@ -232,12 +264,24 @@ struct BridgeAcceptanceTests {
         return out.contains(token)
     }
 
+    /// Reads the scratch mootx01 estate's map directly (not through the
+    /// bridge). Used to prove WHERE the mirrored write landed, which the
+    /// ranked search surface does not report.
+    private func directMootx01EstateMap(dataDir: String) throws -> String {
+        try driveBackend(
+            command: mootx01BinPath!,
+            args: ["serve", "--db", "\(dataDir)/bridge"],
+            env: nil,
+            queryTool: "moot_estate_map",
+            args2: [:])
+    }
+
     /// Queries mootx01 directly (not through the bridge) for the token.
     private func directMootx01HasToken(_ token: String, dataDir: String) throws -> Bool {
         let out = try driveBackend(
             command: mootx01BinPath!,
-            args: ["serve"],
-            env: ["MOOTX01_DATA_DIR": dataDir],
+            args: ["serve", "--db", "\(dataDir)/bridge"],
+            env: nil,
             queryTool: "moot_memory_search",
             args2: ["query": token])
         return out.contains(token)
@@ -339,19 +383,76 @@ private func bridgeBinaryPath() -> String? {
     return nil
 }
 
-/// Resolves a binary on PATH (plus the standard local bin dir derived from
-/// HOME), or nil.  HOME-relative expansion avoids machine-specific absolute
-/// paths while still finding binaries installed by standard packaging helpers
-/// (brew install --user, pip install --user, etc.). File-scope so the
+/// Every place a backend binary is looked for, in the order the bridge child
+/// searches: PATH first, then the standard local bin dir derived from HOME.
+/// HOME-relative expansion avoids machine-specific absolute paths while still
+/// finding binaries installed by standard packaging helpers (brew install
+/// --user, pip install --user, etc.).
+private func binarySearchPath() -> [String] {
+    let env = ProcessInfo.processInfo.environment
+    let localBin = (env["HOME"] ?? "") + "/.local/bin"
+    return (env["PATH"]?.split(separator: ":").map(String.init) ?? []) + [localBin]
+}
+
+/// Resolves a binary on the search path, or nil. File-scope so the
 /// suite-availability globals above can evaluate it for the `.enabled(if:)`
 /// trait.
 private func whichBinary(_ name: String) -> String? {
-    let env = ProcessInfo.processInfo.environment
-    let localBin = (env["HOME"] ?? "") + "/.local/bin"
-    let dirs = ([localBin] + (env["PATH"]?.split(separator: ":").map(String.init) ?? []))
-    for d in dirs {
+    for d in binarySearchPath() {
         let p = d + "/" + name
         if FileManager.default.isExecutableFile(atPath: p) { return p }
+    }
+    return nil
+}
+
+// MARK: - Capability probing
+
+/// Runs `<binary> <arguments>` with a short deadline and returns its combined
+/// stdout + stderr, or nil when it could not be run. Used only to interrogate
+/// a candidate binary about itself: no estate is opened and nothing is written.
+private func probeOutput(_ binary: String, _ arguments: [String]) -> String? {
+    let proc = Process()
+    proc.executableURL = URL(fileURLWithPath: binary)
+    proc.arguments = arguments
+    let pipe = Pipe()
+    proc.standardOutput = pipe
+    proc.standardError = pipe
+    do { try proc.run() } catch { return nil }
+    let data = pipe.fileHandleForReading.readDataToEndOfFile()
+    proc.waitUntilExit()
+    return String(data: data, encoding: .utf8)
+}
+
+/// True when this `mootx01` documents the catalog-era transient selector in
+/// `serve --help`, which is the flag shape the acceptance config uses. A
+/// pre-catalog build documents `--db <db>` as "Named estate to serve" and has
+/// no way to attach `<dir>/<name>`.
+private func serveAcceptsDirectoryAndName(_ binary: String) -> Bool {
+    guard let help = probeOutput(binary, ["serve", "--help"]) else { return false }
+    return help.contains("<dir>/<name>")
+}
+
+/// The first binary on the search path that satisfies `capability`, so a
+/// freshly built mootx01 placed ahead on PATH wins over an older install
+/// behind it — and an older install alone yields nil rather than a red suite.
+private func whichCapableBinary(_ name: String, capability: (String) -> Bool) -> String? {
+    for d in binarySearchPath() {
+        let p = d + "/" + name
+        if FileManager.default.isExecutableFile(atPath: p), capability(p) { return p }
+    }
+    return nil
+}
+
+/// The first mootx01 on the search path that is NOT catalog-era, with its
+/// version, so the skip message names the binary the operator has to replace.
+private func firstIncapableMootx01() -> (path: String, version: String)? {
+    for d in binarySearchPath() {
+        let p = d + "/mootx01"
+        guard FileManager.default.isExecutableFile(atPath: p) else { continue }
+        if serveAcceptsDirectoryAndName(p) { return nil }
+        let version = (probeOutput(p, ["--version"]) ?? "version unknown")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return (p, version.isEmpty ? "version unknown" : version)
     }
     return nil
 }

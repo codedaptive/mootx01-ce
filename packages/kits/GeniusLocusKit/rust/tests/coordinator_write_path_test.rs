@@ -126,7 +126,7 @@ fn withdraw_kg_fact_excluded_from_active_recall() {
     let fact = coord
         .add_kg_fact(&handle, "A", "p", "B", &src, NOW)
         .expect("add");
-    coord.withdraw_kg_fact(&handle, &fact.id, NOW).expect("withdraw");
+    coord.withdraw_kg_fact(&handle, &fact.id, "test-actor", None, NOW).expect("withdraw");
 
     let facts = coord.recall_kg_facts(&handle).expect("recall");
     assert!(
@@ -188,7 +188,7 @@ fn mutate_revive_from_withdrawn_round_trip() {
 fn withdraw_kg_fact_unknown_id_returns_error() {
     let (coord, handle) = open_one();
     let err = coord
-        .withdraw_kg_fact(&handle, "no-such-id", NOW)
+        .withdraw_kg_fact(&handle, "no-such-id", "test-actor", None, NOW)
         .unwrap_err();
     assert!(
         matches!(
@@ -205,7 +205,7 @@ fn withdraw_kg_fact_unknown_handle_returns_estate_not_open() {
     let coord = EstateCoordinator::new();
     let bad_handle = unregistered_handle();
     let err = coord
-        .withdraw_kg_fact(&bad_handle, "id", NOW)
+        .withdraw_kg_fact(&bad_handle, "id", "test-actor", None, NOW)
         .unwrap_err();
     assert!(
         matches!(err, VerbDispatchError::EstateNotOpen { .. }),
@@ -360,7 +360,7 @@ fn write_path_full_round_trip() {
     assert_eq!(active.len(), 2);
 
     // Withdraw f1; only f2 remains.
-    coord.withdraw_kg_fact(&handle, &f1.id, NOW).expect("withdraw");
+    coord.withdraw_kg_fact(&handle, &f1.id, "test-actor", None, NOW).expect("withdraw");
     let active = coord.recall_kg_facts(&handle).expect("recall after withdraw");
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id, f2.id);

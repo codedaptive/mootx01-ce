@@ -33,11 +33,12 @@
 // `toRowAuditEntry(_:)` helper shared with EstateAssociationRuleMining.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import SubstrateML
 import SubstrateTypes
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
 // MARK: - Public FCA surface
 

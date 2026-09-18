@@ -1,6 +1,5 @@
 //! Named text embedding providers — Rust port of Swift's
-//! `CorpusKitProviders` `MiniLMTextProvider`, `MPNetTextProvider`,
-//! and `EmbeddingGemmaProvider`.
+//! `CorpusKitProviders` `MiniLMTextProvider`.
 //!
 //! # The seam, and what each port actually owns
 //!
@@ -12,7 +11,7 @@
 //!    every stored vector per spec I-4.
 //! 2. **A tokenizer** — held internally as an impl detail (the
 //!    `EmbeddingProvider` trait carries no tokenizer; tokenization
-//!    stays out of vectorkit's contract). At v1.0 every named
+//!    stays out of synapsekit's contract). At v1.0 every named
 //!    provider holds a `DeterministicTokenizer`; see the tokenizer
 //!    note below for why that is the truthful state and not a gap
 //!    this port introduced.
@@ -53,11 +52,11 @@
 //!
 //! # Tokenizer note (the honest fallback)
 //!
-//! The real model tokenizers (BERT WordPiece for MiniLM/mpnet,
-//! SentencePiece for EmbeddingGemma) are NOT implemented in EITHER
-//! port, because neither port owns them: Swift's named providers
-//! default to `DeterministicTokenizer` exactly as these do, and the
-//! real tokenizers "land when the model assets ship in the host
+//! The real model tokenizer (BERT WordPiece for MiniLM) is NOT
+//! implemented in EITHER port for this provider, because neither port
+//! owns it: Swift's `MiniLMTextProvider` defaults to
+//! `DeterministicTokenizer` exactly as this one does, and the
+//! real tokenizer "lands when the model assets ship in the host
 //! bundle" (Swift provider doc comments). When the host bundle
 //! carries the real vocab, the host constructs the provider with a
 //! tokenizer it supplies — the `tokenizer` field is injectable for
@@ -70,7 +69,7 @@
 use corpus_kit::Tokenizer;
 use engram_lib::Engram;
 use substrate_ml::float_simhash;
-use vectorkit::{EmbeddingProvider, VectorKitError};
+use synapsekit::{EmbeddingProvider, SynapseKitError};
 
 use crate::DeterministicTokenizer;
 
@@ -88,7 +87,7 @@ use crate::DeterministicTokenizer;
 /// out. Mirrors the Swift providers' `([Int32]) async throws ->
 /// [Float]` closure. Synchronous to match the Rust
 /// `EmbeddingProvider` trait and the sibling
-/// `vectorkit::FloatSimHashEmbeddingProvider`, which the Rust port
+/// `synapsekit::FloatSimHashEmbeddingProvider`, which the Rust port
 /// keeps synchronous; the host adapts any async model pass behind
 /// this boundary.
 pub type InferenceFn = Box<dyn Fn(&[i32]) -> Result<Vec<f32>, String> + Send + Sync + 'static>;
@@ -105,19 +104,11 @@ pub type InferenceFn = Box<dyn Fn(&[i32]) -> Result<Vec<f32>, String> + Send + S
 /// (`0x4D49_4E4C_4D_5F76_31`); regrouped here into even nibble groups,
 /// same numeric value.
 const MINILM_PROJECTION_SEED: u64 = 0x4D49_4E4C_4D5F_7631;
-/// "MPNET_v1" — equals Swift `MPNetTextProvider.projectionSeed`
-/// (`0x4D50_4E45_54_5F76_31`); same numeric value, even nibble groups.
-const MPNET_PROJECTION_SEED: u64 = 0x4D50_4E45_545F_7631;
-/// "EMBGM_v1" — equals Swift `EmbeddingGemmaProvider.projectionSeed`
-/// (`0x454D_4247_4D_5F76_31`); same numeric value, even nibble groups.
-const EMBEDDING_GEMMA_PROJECTION_SEED: u64 = 0x454D_4247_4D5F_7631;
 
 // MARK: - Shared pipeline
 //
-// The three providers differ only in identity, default tokenizer,
-// and projection seed; the embed / embed_float bodies are
-// identical. Factoring the pipeline here keeps the three impls from
-// drifting and matches the single shared shape in the Swift trio.
+// The embed / embed_float / embed_pair bodies are factored here.
+// The shared shape matches the Swift implementation.
 
 /// Tokenize, run the host inference seam, and project the pooled
 /// vector to a 256-bit engram. Returns `Engram::ZERO` for empty
@@ -128,7 +119,7 @@ fn embed_via_seam(
     tokenizer: &dyn Tokenizer,
     inference: &InferenceFn,
     seed: u64,
-) -> Result<Engram, VectorKitError> {
+) -> Result<Engram, SynapseKitError> {
     // EmbeddingProvider contract: empty input MUST return
     // Engram::ZERO. Short-circuit before the seam so the contract
     // holds even when the host closure would hash empty input to a
@@ -137,7 +128,7 @@ fn embed_via_seam(
         return Ok(Engram::ZERO);
     }
     let tokens = tokenizer.tokenize(text);
-    let pooled = inference(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+    let pooled = inference(&tokens).map_err(SynapseKitError::EmbeddingFailed)?;
     // float_simhash::project returns a Fingerprint256; Engram is a
     // type alias for Fingerprint256. The canonical projection IS the
     // engram — no reconstruction step.
@@ -152,12 +143,12 @@ fn embed_float_via_seam(
     text: &str,
     tokenizer: &dyn Tokenizer,
     inference: &InferenceFn,
-) -> Result<Vec<f32>, VectorKitError> {
+) -> Result<Vec<f32>, SynapseKitError> {
     if text.is_empty() {
         return Ok(Vec::new());
     }
     let tokens = tokenizer.tokenize(text);
-    inference(&tokens).map_err(VectorKitError::EmbeddingFailed)
+    inference(&tokens).map_err(SynapseKitError::EmbeddingFailed)
 }
 
 /// Single-pass override: run the host inference seam ONCE, then derive
@@ -174,12 +165,12 @@ fn embed_pair_via_seam(
     tokenizer: &dyn Tokenizer,
     inference: &InferenceFn,
     seed: u64,
-) -> Result<(Engram, Vec<f32>), VectorKitError> {
+) -> Result<(Engram, Vec<f32>), SynapseKitError> {
     if text.is_empty() {
         return Ok((Engram::ZERO, Vec::new()));
     }
     let tokens = tokenizer.tokenize(text);
-    let pooled = inference(&tokens).map_err(VectorKitError::EmbeddingFailed)?;
+    let pooled = inference(&tokens).map_err(SynapseKitError::EmbeddingFailed)?;
     Ok((float_simhash::project(&pooled, seed), pooled))
 }
 
@@ -245,164 +236,17 @@ impl EmbeddingProvider for MiniLMTextProvider {
     fn model_version(&self) -> &str {
         &self.model_version
     }
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
+    fn embed(&self, text: &str) -> Result<Engram, SynapseKitError> {
         embed_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
+    fn embed_float(&self, text: &str) -> Result<Vec<f32>, SynapseKitError> {
         embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
     }
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
+    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), SynapseKitError> {
         embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
     }
 }
 
-// (MPNet and EmbeddingGemma providers follow; tests for all three live
-// at the end of the module.)
-
-// MARK: - MPNetTextProvider
-
-/// mpnet (all-mpnet-base-v2 style) embedding provider. 768-dimensional
-/// pooled vector. Rust mirror of Swift `MPNetTextProvider`.
-pub struct MPNetTextProvider {
-    model_id: String,
-    model_version: String,
-    tokenizer: Box<dyn Tokenizer>,
-    projection_seed: u64,
-    inference: InferenceFn,
-}
-
-impl MPNetTextProvider {
-    /// Build with the Swift defaults (`model_id = "mpnet-base-v2"`,
-    /// `model_version = "1.0.0"`, `DeterministicTokenizer` with the
-    /// mpnet vocab id, the "MPNET_v1" projection seed) and a
-    /// host-supplied inference seam.
-    pub fn new(
-        inference: impl Fn(&[i32]) -> Result<Vec<f32>, String> + Send + Sync + 'static,
-    ) -> Self {
-        Self::with_parameters(
-            "mpnet-base-v2",
-            "1.0.0",
-            Box::new(DeterministicTokenizer::with_parameters(
-                "mpnet-base",
-                30_522,
-                128,
-            )),
-            MPNET_PROJECTION_SEED,
-            inference,
-        )
-    }
-
-    /// Build with explicit identity, tokenizer, and seed. See
-    /// [`MiniLMTextProvider::with_parameters`] for the seed caveat.
-    pub fn with_parameters(
-        model_id: impl Into<String>,
-        model_version: impl Into<String>,
-        tokenizer: Box<dyn Tokenizer>,
-        projection_seed: u64,
-        inference: impl Fn(&[i32]) -> Result<Vec<f32>, String> + Send + Sync + 'static,
-    ) -> Self {
-        MPNetTextProvider {
-            model_id: model_id.into(),
-            model_version: model_version.into(),
-            tokenizer,
-            projection_seed,
-            inference: Box::new(inference),
-        }
-    }
-}
-
-impl EmbeddingProvider for MPNetTextProvider {
-    fn model_id(&self) -> &str {
-        &self.model_id
-    }
-    fn model_version(&self) -> &str {
-        &self.model_version
-    }
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
-        embed_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
-    }
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
-        embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
-    }
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
-        embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
-    }
-}
-
-// MARK: - EmbeddingGemmaProvider
-
-/// EmbeddingGemma 300M provider. 768-dimensional pooled vector.
-/// Rust mirror of Swift `EmbeddingGemmaProvider`. The upstream model
-/// uses SentencePiece tokenization (different vocabulary structure
-/// from BERT WordPiece); the default `DeterministicTokenizer` here
-/// carries the EmbeddingGemma vocab cardinality (256k) and sequence
-/// length (2048) as the no-host stand-in, matching the Swift default.
-pub struct EmbeddingGemmaProvider {
-    model_id: String,
-    model_version: String,
-    tokenizer: Box<dyn Tokenizer>,
-    projection_seed: u64,
-    inference: InferenceFn,
-}
-
-impl EmbeddingGemmaProvider {
-    /// Build with the Swift defaults (`model_id =
-    /// "embedding-gemma-300m"`, `model_version = "1.0.0"`,
-    /// `DeterministicTokenizer` with the EmbeddingGemma vocab id,
-    /// vocab size 256_000, max_tokens 2048, the "EMBGM_v1"
-    /// projection seed) and a host-supplied inference seam.
-    pub fn new(
-        inference: impl Fn(&[i32]) -> Result<Vec<f32>, String> + Send + Sync + 'static,
-    ) -> Self {
-        Self::with_parameters(
-            "embedding-gemma-300m",
-            "1.0.0",
-            Box::new(DeterministicTokenizer::with_parameters(
-                "embedding-gemma-300m",
-                256_000,
-                2048,
-            )),
-            EMBEDDING_GEMMA_PROJECTION_SEED,
-            inference,
-        )
-    }
-
-    /// Build with explicit identity, tokenizer, and seed. See
-    /// [`MiniLMTextProvider::with_parameters`] for the seed caveat.
-    pub fn with_parameters(
-        model_id: impl Into<String>,
-        model_version: impl Into<String>,
-        tokenizer: Box<dyn Tokenizer>,
-        projection_seed: u64,
-        inference: impl Fn(&[i32]) -> Result<Vec<f32>, String> + Send + Sync + 'static,
-    ) -> Self {
-        EmbeddingGemmaProvider {
-            model_id: model_id.into(),
-            model_version: model_version.into(),
-            tokenizer,
-            projection_seed,
-            inference: Box::new(inference),
-        }
-    }
-}
-
-impl EmbeddingProvider for EmbeddingGemmaProvider {
-    fn model_id(&self) -> &str {
-        &self.model_id
-    }
-    fn model_version(&self) -> &str {
-        &self.model_version
-    }
-    fn embed(&self, text: &str) -> Result<Engram, VectorKitError> {
-        embed_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
-    }
-    fn embed_float(&self, text: &str) -> Result<Vec<f32>, VectorKitError> {
-        embed_float_via_seam(text, self.tokenizer.as_ref(), &self.inference)
-    }
-    fn embed_pair(&self, text: &str) -> Result<(Engram, Vec<f32>), VectorKitError> {
-        embed_pair_via_seam(text, self.tokenizer.as_ref(), &self.inference, self.projection_seed)
-    }
-}
 
 // MARK: - Tests
 //
@@ -424,35 +268,14 @@ mod tests {
     }
 
     #[test]
-    fn distinct_providers_have_distinct_seeds() {
-        // Same pooled vector through MiniLM vs mpnet seeds must differ.
-        let mini = MiniLMTextProvider::new(|_| Ok(vec![0.5f32; 384]));
-        let mpnet = MPNetTextProvider::new(|_| Ok(vec![0.5f32; 768]));
-        assert_ne!(
-            mini.embed("test").unwrap(),
-            mpnet.embed("test").unwrap(),
-            "different projection seeds must yield different engrams"
-        );
-    }
-
-    #[test]
     fn empty_input_short_circuits_before_the_seam() {
-        // A host closure that errors unconditionally must never be
-        // reached on empty input: the providers return Engram::ZERO
-        // without tokenizing or inferring. Covers all three providers.
+        // MiniLM (always compiled) must not reach the host closure on empty input.
         let bomb = |_: &[i32]| -> Result<Vec<f32>, String> {
             Err("inference must not be called on empty input".to_string())
         };
         let mini = MiniLMTextProvider::new(bomb);
-        let mpnet = MPNetTextProvider::new(bomb);
-        let gemma = EmbeddingGemmaProvider::new(bomb);
         assert_eq!(mini.embed("").unwrap(), Engram::ZERO);
-        assert_eq!(mpnet.embed("").unwrap(), Engram::ZERO);
-        assert_eq!(gemma.embed("").unwrap(), Engram::ZERO);
-        // Float lane: empty input is the empty vector, also without the seam.
         assert!(mini.embed_float("").unwrap().is_empty());
-        assert!(mpnet.embed_float("").unwrap().is_empty());
-        assert!(gemma.embed_float("").unwrap().is_empty());
     }
 
     #[test]
@@ -467,7 +290,7 @@ mod tests {
     fn host_inference_error_surfaces_as_embedding_failed() {
         let p = MiniLMTextProvider::new(|_| Err("model not loaded".to_string()));
         match p.embed("text") {
-            Err(VectorKitError::EmbeddingFailed(msg)) => assert!(msg.contains("model not loaded")),
+            Err(SynapseKitError::EmbeddingFailed(msg)) => assert!(msg.contains("model not loaded")),
             other => panic!("expected EmbeddingFailed, got {other:?}"),
         }
     }

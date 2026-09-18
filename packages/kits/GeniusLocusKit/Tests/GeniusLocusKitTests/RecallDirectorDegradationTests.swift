@@ -39,7 +39,7 @@ import LocusKit
 @testable import LocusKit
 import CorpusKit
 @testable import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 import IntellectusLib
@@ -93,14 +93,11 @@ private func openFullyWiredEstate(
 
     let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
         estateID: UUID(), backend: .inMemory))
-    // Use a deterministic inference function so tests are bit-identical
-    // across runs and do not depend on a CoreML model.
+    // Use a deterministic provider so tests are bit-identical across runs and
+    // do not depend on a CoreML model.
     let corpus = try await CorpusContentEngine(
         standaloneOn: corpusStorage,
-        models: [.miniLM(inference: { tokens in
-            let v = Float((tokens.first ?? 0) % 4 + 1) / 4.0
-            return Array(repeating: v, count: 384)
-        })]
+        models: [.lsa(provider: HashFloatProvider(modelID: "test-miniLM-v1"))]
     )
     try await corpus.ingest(content, contentID: drawer.id, now: t0)
     await kit.registerCorpus(corpus, for: handle)
@@ -147,6 +144,7 @@ private func unionBestRequest(
         mode: .unionBest,
         scoring: scoring,
         limit: 5,
+        fallback: .failClosed,
         queryText: queryText,
         origin: .internal
     )
@@ -165,6 +163,7 @@ private func hybridRequest(
         mode: .hybrid,
         scoring: .rrf,
         limit: 5,
+        fallback: .failClosed,
         queryText: queryText,
         origin: .internal
     )
@@ -393,6 +392,7 @@ struct PoolGetDrawersDegradationTests {
                 mode: .unionBest,
                 scoring: .matrixAware,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "cosmos galaxy recall probe",
                 origin: .internal
             )
@@ -444,6 +444,7 @@ struct PoolGetDrawersDegradationTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 5,
+            fallback: .failClosed,
             queryText: "cosmos galaxy recall probe",
             origin: .internal
         )
@@ -482,6 +483,7 @@ struct MMRHydrationDegradationTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "cosmos galaxy recall probe",
                 origin: .internal
             )
@@ -532,6 +534,7 @@ struct ReturnHydrationDegradationTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "cosmos galaxy recall probe",
                 origin: .internal
             )
@@ -669,6 +672,7 @@ struct DegradedStagesHappyPathTests {
             mode: .locusOnly,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: nil,
             origin: .internal
         )
@@ -735,6 +739,7 @@ struct ScoringFallbackDispositionTests {
             mode: .locusOnly,
             scoring: .matrixAware,
             limit: 5,
+            fallback: .failClosed,
             queryText: nil,
             origin: .internal
         )
@@ -772,6 +777,7 @@ struct ScoringFallbackDispositionTests {
             mode: .hybrid,
             scoring: .matrixAware,
             limit: 5,
+            fallback: .failClosed,
             queryText: "cosmos galaxy recall probe",
             origin: .internal
         )
@@ -808,6 +814,76 @@ struct ScoringFallbackDispositionTests {
         let result = try await kit.recall(handle, hybridRequest())
         #expect(!result.degradedStages.contains("hybrid.matrixAware"),
             "rrf on hybrid is real fusion, not a fallback; got \(result.degradedStages)")
+    }
+
+    // MARK: - M3 discriminative fallback disposition
+
+    /// locusOnly + discriminative → raw ordering; surfaces `locusOnly.discriminative`.
+    @Test("locusOnly + discriminative surfaces locusOnly.discriminative degraded stage")
+    func locusOnlyDiscriminativeSurfaces() async throws {
+        let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "sf-lo-disc")
+        let request = GLKRecallRequest(
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+                               ordering: .byCaptureTimeDesc),
+            mode: .locusOnly,
+            scoring: .discriminative,
+            limit: 5,
+            fallback: .failClosed,
+            queryText: nil,
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(result.degradedStages.contains("locusOnly.discriminative"),
+            "discriminative on locusOnly must record locusOnly.discriminative; got \(result.degradedStages)")
+    }
+
+    /// corpusOnly + discriminative → rrf; surfaces `corpusOnly.discriminative`.
+    @Test("corpusOnly + discriminative surfaces corpusOnly.discriminative degraded stage")
+    func corpusOnlyDiscriminativeSurfaces() async throws {
+        let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "sf-co-disc")
+        let request = GLKRecallRequest(
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+                               ordering: .byCaptureTimeDesc),
+            mode: .corpusOnly,
+            scoring: .discriminative,
+            limit: 5,
+            fallback: .failClosed,
+            queryText: "cosmos galaxy recall probe",
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(result.degradedStages.contains("corpusOnly.discriminative"),
+            "discriminative on corpusOnly must record corpusOnly.discriminative; got \(result.degradedStages)")
+    }
+
+    /// hybrid + discriminative → rrf; surfaces `hybrid.discriminative`.
+    @Test("hybrid + discriminative surfaces hybrid.discriminative degraded stage")
+    func hybridDiscriminativeSurfaces() async throws {
+        let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "sf-hy-disc")
+        let request = GLKRecallRequest(
+            frame: RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured,
+                               ordering: .byCaptureTimeDesc),
+            mode: .hybrid,
+            scoring: .discriminative,
+            limit: 5,
+            fallback: .failClosed,
+            queryText: "cosmos galaxy recall probe",
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(result.degradedStages.contains("hybrid.discriminative"),
+            "discriminative on hybrid must record hybrid.discriminative; got \(result.degradedStages)")
+    }
+
+    /// SUBTLETY GUARD: unionBest + discriminative is genuinely implemented — NO fallback.
+    @Test("unionBest + discriminative records NO scoring fallback (real impl)")
+    func unionBestDiscriminativeNoFallback() async throws {
+        let (kit, handle, _) = try await openFullyWiredEstate(ownerSuffix: "sf-ub-disc")
+        let result = try await kit.recall(handle, unionBestRequest(scoring: .discriminative))
+        #expect(!result.degradedStages.contains("unionBest.discriminative"),
+            "discriminative on unionBest is a real implementation, not a fallback; got \(result.degradedStages)")
+        #expect(!result.degradedStages.contains("unionBest.rrf"),
+            "discriminative must not emit unionBest.rrf; got \(result.degradedStages)")
     }
 }
 

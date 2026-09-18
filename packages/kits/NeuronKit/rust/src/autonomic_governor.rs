@@ -27,9 +27,11 @@
 //!      lock can be released immediately after both readers are built.
 //!   2. Construct sinks over the live `Arc<dyn DrawerStore>` (same store the
 //!      coordinator was opened with — held as `registry.default.store`).
-//!   3. Run `dreaming.pump(now, &reader, &reward, &mut sink)` and
-//!      `maintenance.pump(now, &reader, &mut sink)` with the lock released,
-//!      so the coordinator is available for HTTP tool-calls during the cycle.
+//!   3. Run `dreaming.pump(now, &reader, &reward, &mut sink)`. The
+//!      maintenance engine is not pumped by the tick: the three
+//!      maintenance-family standing signals (maintenance-daemon, decay-sweep,
+//!      by-reference-validity) each run one category of it through
+//!      `MaintenanceDaemon::run_cycle_scoped` when the scheduler fires them.
 //!
 //! # Lock contention note
 //!
@@ -112,8 +114,8 @@
 //!   2. the inputs dirty token — an unchanged estate skips the math, encode,
 //!      and write, so `generatedTs` means "when the content last changed".
 //!
-//! `stats_store` is wired at construction from `main.rs` when
-//! `ARIA_MCP_STATS_STORE` is set. Tests pass `None` (no store needed).
+//! `stats_store` is wired at construction from `runtime.rs` in resident HTTP
+//! mode. Tests pass `None` (no store needed).
 //!
 //! # Pool reducer (novel-token merge-back) + live tagger swap
 //!
@@ -158,6 +160,7 @@ use crate::{
     EstateDreamingSink, EstateMaintenanceReader, EstateMaintenanceSink, MaintenanceDaemon,
     MaintenancePolicyStore, RecallTraceRewardSource,
 };
+use crate::maintenance_cycle::{MaintenanceCategories, MaintenanceCycleReport};
 use crate::estate_manifest_policy_store::{
     EstateManifestDreamingPolicyStore, EstateManifestMaintenancePolicyStore,
 };
@@ -235,6 +238,19 @@ pub const GRAPH_CENTRALITY_SCAN_NODE_CAP: usize = 10_000;
 /// grew without bound. Parity: matches `poolReduceFileCap` in
 /// AutonomicGovernor.swift.
 pub const POOL_REDUCE_FILE_CAP: usize = 500;
+
+/// Maximum recall traces consumed per preference cadence tick. Bounded to
+/// prevent full-history loads on large estates. The most-recent
+/// `PREFERENCE_TRACES_WINDOW_LIMIT` traces (by ascending `recalled_at`)
+/// represent the strongest signal for Bradley-Terry fitting; older traces
+/// have decayed relevance and are excluded on each cadence tick.
+///
+/// A full refit over all traces is triggered only on an explicit `reindex`
+/// or `dream` call — not on the governor cadence. The maintenance prune
+/// cycle bounds total trace retention independently.
+///
+/// Parity: mirrors `preferenceTracesWindowLimit` in AutonomicGovernor.swift.
+pub const PREFERENCE_TRACES_WINDOW_LIMIT: usize = 1_000;
 
 // ── ISO8601 helpers ───────────────────────────────────────────────────────────
 
@@ -391,7 +407,6 @@ fn build_inmemory_signals_queue() -> (QueueKit<Box<dyn QueueBackend>>, Option<Dr
 #[derive(Debug, Clone, PartialEq)]
 pub struct GovernorReport {
     pub dreaming_fired: bool,
-    pub maintenance_fired: bool,
     /// Standing-signal scheduler ticked this tick. Mirrors Swift
     /// `GovernorReport.signalsTicked`. True when a scheduler is registered and
     /// its `tick` ran; false on the benign no-scheduler skip (no standing
@@ -441,6 +456,16 @@ pub struct GovernorReport {
     /// when the cadence has not yet elapsed (30 s default). Mirrors Swift
     /// `GovernorReport.gcSweepFired`.
     pub gc_sweep_fired: bool,
+    /// True when REM-BETA fired this tick AND an HNSW maintenance handle was
+    /// installed at tick time (VEC-SHADOWSWAP-01, finding 13b8e1a). When true,
+    /// both `compact_float_index_tombstones` and `reclaim_superseded_generations`
+    /// were dispatched to the handle. False when BETA did not fire this tick OR
+    /// when `hnsw_maintenance` was `None` (handle not yet injected).
+    ///
+    /// Discriminating field for the production-wiring test: allows tests to
+    /// assert that the governor as PRODUCTION CONSTRUCTS IT (via runtime.rs) has
+    /// the handle installed before the first BETA tick fires.
+    pub hnsw_reclaim_fired: bool,
 }
 
 /// The resident Autonomic Governor.
@@ -458,7 +483,10 @@ pub struct GovernorReport {
 /// set. `tick(now)` exposes one iteration for deterministic tests.
 pub struct AutonomicGovernor {
     dreaming: DreamingDaemon,
-    maintenance: MaintenanceDaemon,
+    /// The estate's maintenance engine. Shared with the maintenance-family
+    /// standing-signal cycles (`maintenance_tombstone_cycle` and siblings),
+    /// which are the engine's only drive; the tick itself never pumps it.
+    maintenance: Arc<Mutex<MaintenanceDaemon>>,
     /// Manifest-backed policy stores. The governor saves each
     /// daemon's cycle state through these after every fired cycle so a restart
     /// resumes the prior run's idempotency/cycle memory. Held as boxed trait
@@ -483,7 +511,7 @@ pub struct AutonomicGovernor {
     stop_flag: Arc<AtomicBool>,
     /// Host-injected topology snapshot sink. None = no write (telemetry
     /// disabled). The AriaMcpKit host provides an implementation backed by
-    /// `observer_sink::StatsStore` when `ARIA_MCP_STATS_STORE` is configured.
+    /// `observer_sink::StatsStore` in resident HTTP mode.
     /// The cadence gate fires regardless of whether the sink is present —
     /// topology_snapshot_fired reflects cadence only, not sink presence.
     topology_sink: Option<Box<dyn GovernorTopologySink>>,
@@ -585,6 +613,16 @@ pub struct AutonomicGovernor {
     /// and write their outputs to GLK `recall::{GraphCache, PreferenceStore}`
     /// (already ported). Track 1 builds the seam only — no producer logic.
     scheduler: Option<SerialLaneScheduler<SchedulerCoordinatorDispatcher>>,
+    /// Host-injected HNSW maintenance handle used by the REM-BETA duty to
+    /// compact HNSW tombstones and reclaim superseded vector generations
+    /// (VEC-SHADOWSWAP-01, finding 13b8e1a). `None` until the host calls
+    /// `set_hnsw_maintenance`; when `None`, the BETA duty runs the base
+    /// EWC prune only and skips reclamation.
+    ///
+    /// The production adapter (`VectorStoreHNSWAdapter` in AriaMcpKit) wraps the
+    /// estate's live `Arc<VectorStore>`. Tests supply `InMemoryHNSWGraphMaintenance`.
+    /// Mirrors the `topology_sink` host-injection pattern.
+    hnsw_maintenance: Option<Box<dyn crate::hnsw_graph_maintenance::HNSWGraphMaintenance + Send>>,
 }
 
 impl AutonomicGovernor {
@@ -613,7 +651,7 @@ impl AutonomicGovernor {
     /// `StatsStoreTopologySink` wrapping `Arc<observer_sink::StatsStore>`.
     /// NeuronKit never imports observer-sink directly; the sink is the injection
     /// seam that keeps NeuronKit free of host-layer telemetry. Called from
-    /// `runtime.rs` when `ARIA_MCP_STATS_STORE` is configured.
+    /// `runtime.rs` in resident HTTP mode.
     pub fn new_with_topology_sink(
         coord: Arc<Mutex<EstateCoordinator>>,
         handle: EstateHandle,
@@ -786,7 +824,7 @@ impl AutonomicGovernor {
         }
         AutonomicGovernor {
             dreaming,
-            maintenance,
+            maintenance: Arc::new(Mutex::new(maintenance)),
             dreaming_policy_store: Box::new(dreaming_policy_store),
             maintenance_policy_store: Box::new(maintenance_policy_store),
             dreaming_policy,
@@ -828,12 +866,35 @@ impl AutonomicGovernor {
             // `register_default_standing_signals` after construction; tests
             // call `register_standing_signal`. Until then the tick benign-skips.
             scheduler: None,
+            // No HNSW maintenance handle until the host injects one via
+            // `set_hnsw_maintenance`. The AriaMcpKit runtime injects a
+            // VectorStoreHNSWAdapter after construction; tests inject
+            // InMemoryHNSWGraphMaintenance. Until injected, BETA runs the
+            // base EWC prune only and reclamation is deferred to the next
+            // injection cycle.
+            hnsw_maintenance: None,
         }
     }
 
     /// Stop the loop. Safe to call from any thread; idempotent.
     pub fn stop(&self) {
         self.stop_flag.store(true, Ordering::Relaxed);
+    }
+
+    /// Inject the HNSW graph maintenance handle used by the REM-BETA duty to
+    /// compact HNSW tombstones and reclaim superseded vector generations.
+    ///
+    /// Must be called BEFORE the first `tick` that fires REM-BETA (cadence 7 d).
+    /// The AriaMcpKit runtime calls this after construction, passing a
+    /// `VectorStoreHNSWAdapter` wrapping the estate's live `Arc<VectorStore>`.
+    /// Tests pass `InMemoryHNSWGraphMaintenance` to record call timestamps.
+    ///
+    /// Mirrors the `topology_sink` host-injection pattern.
+    pub fn set_hnsw_maintenance(
+        &mut self,
+        handle: Box<dyn crate::hnsw_graph_maintenance::HNSWGraphMaintenance + Send>,
+    ) {
+        self.hnsw_maintenance = Some(handle);
     }
 
     /// Override the GC sweep cadence (milliseconds). Mirrors Swift `gcSweepIntervalMs`
@@ -949,22 +1010,66 @@ impl AutonomicGovernor {
         self.ensure_scheduler().register(spec, now_nanos)
     }
 
-    /// Register the six v1 standing signals (architecture spec §11.2) against
-    /// this estate's scheduler. Mirrors Swift
-    /// `GeniusLocusKit.registerDefaultStandingSignals(in:vectorStore:now:)` and
-    /// the resident-daemon bootstrap that calls it.
+    /// Remove a standing signal without creating a scheduler when none exists.
+    pub fn unregister_standing_signal(&mut self, id: &SchedulerSignalID) -> bool {
+        self.scheduler.as_mut().is_some_and(|scheduler| scheduler.unregister(id))
+    }
+
+    /// Register the standing signals (architecture spec §11.2 + SPEC_ADORNMENT §4)
+    /// against this estate's scheduler: the seven always-on signals plus the
+    /// seven preference-gated ones for which a live cycle is passed. Mirrors Swift
+    /// `GeniusLocusKit.registerDefaultStandingSignals(in:vectorStore:huntCycle:anomalyCycle:now:)`
+    /// and the resident-daemon bootstrap that calls it.
     ///
     /// Requires a `VectorStore` registered for this estate (the
     /// `VectorSimilaritySignal` queries real row embeddings on each fire). Reads
     /// it from the live coordinator via `EstateCoordinator::vector_store_for`,
     /// the same accessor the Swift resident uses
     /// (`kit.registeredVectorStore(for:)`). When no store is registered, returns
-    /// `SchedulerError::SignalNotRegistered`-free `Ok(vec![])` is NOT used —
-    /// instead the bootstrap caller (runtime.rs) checks store presence first and
-    /// skips, exactly as the Swift resident does ("no VectorStore → governor
-    /// benign-skips signalTick"). This method therefore returns an error only if
-    /// no store is present, so the caller can log-and-skip without fabricating a
-    /// throwaway store.
+    /// an error so the caller can log-and-skip without fabricating a throwaway
+    /// store — exactly as the Swift resident does ("no VectorStore → governor
+    /// benign-skips signalTick").
+    ///
+    /// `hunt_cycle` and `anomaly_cycle` mirror the Swift `huntCycle:` and
+    /// `anomalyCycle:` parameters:
+    ///
+    /// - `Some(f)` → the live spec factory is used (`ContradictionScoutSignal::spec`
+    ///   or `AnomalySweepSignal::spec`), so real estate-coordinator work runs on
+    ///   each hourly fire. Pass the coordinator-backed closure from the resident
+    ///   thread (runtime.rs) here.
+    /// - `None` → the no-op `default_spec()` is used, matching the Swift parameter
+    ///   defaults `{ _ in (0, 0) }` and `{ _ in 0 }`. Correct for test
+    ///   registration contexts and non-resident callers.
+    ///
+    /// `span_encode_cycle` mirrors the Swift `spanEncodeCycle:` parameter: the
+    /// live closure runs one `spanEncode` batch per fire (contract sheet §10);
+    /// `None` registers the no-op default spec.
+    ///
+    /// `fact_extraction_cycle` is the matching injection seam for one bounded
+    /// distilled-fact batch. Product callers pass `None` until the harness arm
+    /// is qualified and an extractor recipe has been activated.
+    ///
+    /// `consolidation_cycle` and `contradiction_sweep_cycle` are two of the
+    /// preference-gated seams: `Some(f)` registers the live
+    /// `ConsolidationSignal::spec` / `ContradictionSweepSignal::spec`; `None`
+    /// registers nothing for that signal. The resident passes `None` when
+    /// the estate's `consolidation` / `contradiction_sweep` preference is
+    /// `Off`, so an opted-out estate carries no such signal.
+    ///
+    /// `maintenance_cycle`, `decay_cycle` and `by_reference_cycle` are the
+    /// maintenance-family seams, gated together on the `maintenance`
+    /// preference. The resident builds them from
+    /// `maintenance_tombstone_cycle` / `maintenance_decay_cycle` /
+    /// `maintenance_by_reference_cycle` on this governor, so each signal
+    /// runs one category of this governor's own maintenance engine.
+    ///
+    /// `fold_cycle`, `training_cycle` and `tournament_cycle` are the
+    /// adaptive-recall seams (temporal-causality-fold, training-daemon,
+    /// end-of-day-tournament), gated together on the `adaptive_recall`
+    /// preference. The resident builds them over
+    /// `EstateCoordinator::run_temporal_causality_fold`,
+    /// `EstateCoordinator::run_training_tick` and
+    /// `EstateCoordinator::end_of_day_tournament`; `None` registers nothing.
     ///
     /// Returns the registered `(name, SignalID)` pairs in registration order.
     /// `model_id` defaults to the Swift default `"minilm-v6"` at the call site.
@@ -972,6 +1077,42 @@ impl AutonomicGovernor {
         &mut self,
         model_id: impl Into<String>,
         now: SystemTime,
+        hunt_cycle: Option<Arc<dyn Fn() -> Result<(usize, usize), String> + Send + Sync>>,
+        anomaly_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+        span_encode_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+        fact_extraction_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+        consolidation_cycle: Option<
+            Arc<
+                dyn Fn() -> Result<
+                        genius_locus_kit::brain::consolidation_cycle::ConsolidationSweepReport,
+                        String,
+                    > + Send
+                    + Sync,
+            >,
+        >,
+        contradiction_sweep_cycle: Option<
+            Arc<
+                dyn Fn() -> Result<
+                        genius_locus_kit::brain::conflict_projection_sweep::ConflictTunnelProposalReport,
+                        String,
+                    > + Send
+                    + Sync,
+            >,
+        >,
+        maintenance_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+        decay_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+        by_reference_cycle: Option<Arc<dyn Fn() -> Result<i64, String> + Send + Sync>>,
+        fold_cycle: Option<Arc<dyn Fn() -> Result<(), String> + Send + Sync>>,
+        training_cycle: Option<Arc<dyn Fn() -> Result<String, String> + Send + Sync>>,
+        tournament_cycle: Option<
+            Arc<
+                dyn Fn() -> Result<
+                        genius_locus_kit::brain::end_of_day_tournament::TournamentReport,
+                        String,
+                    > + Send
+                    + Sync,
+            >,
+        >,
     ) -> Result<Vec<(String, SchedulerSignalID)>, String> {
         // Read the live VectorStore the same way the Swift resident does. No
         // fabricated fallback store — a missing store means "skip registration",
@@ -994,7 +1135,11 @@ impl AutonomicGovernor {
         };
 
         let model_id = model_id.into();
-        let specs = default_standing_signal_specs(vector_store, model_id, corpus);
+        let specs = default_standing_signal_specs(
+            vector_store, model_id, corpus, hunt_cycle, anomaly_cycle,
+            span_encode_cycle, fact_extraction_cycle, consolidation_cycle,
+            contradiction_sweep_cycle, maintenance_cycle, decay_cycle,
+            by_reference_cycle, fold_cycle, training_cycle, tournament_cycle);
         let now_nanos = system_time_to_nanos(now);
         let scheduler = self.ensure_scheduler();
         let mut registered = Vec::with_capacity(specs.len());
@@ -1004,6 +1149,74 @@ impl AutonomicGovernor {
             registered.push((name, id));
         }
         Ok(registered)
+    }
+
+    /// Build a standing-signal cycle that runs one category of this
+    /// governor's maintenance engine and returns that category's candidate
+    /// count. Each fire locks the coordinator to build the reader snapshot,
+    /// then the engine, writes proposals and the diary entry through
+    /// `EstateMaintenanceSink` on the live store, and reads the wall clock
+    /// once — the same clock posture as the other resident-built cycles
+    /// (the scheduler fire is the clock owner on this path). Sink write
+    /// errors surface as the cycle's `Err`, which the signal reports as a
+    /// diagnostic.
+    fn maintenance_category_cycle(
+        &self,
+        categories: MaintenanceCategories,
+        count: fn(&MaintenanceCycleReport) -> usize,
+    ) -> Arc<dyn Fn() -> Result<i64, String> + Send + Sync> {
+        let maintenance = Arc::clone(&self.maintenance);
+        let coord = Arc::clone(&self.coord);
+        let store = Arc::clone(&self.store);
+        let handle = self.handle;
+        Arc::new(move || {
+            let now_epoch_secs = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_secs_f64();
+            let now_i64 = now_epoch_secs as i64;
+            let coord = coord
+                .lock()
+                .map_err(|e| format!("coordinator lock poisoned: {e}"))?;
+            let mut daemon = maintenance
+                .lock()
+                .map_err(|e| format!("maintenance lock poisoned: {e}"))?;
+            let reader = EstateMaintenanceReader::new(&coord, &handle, now_i64);
+            let mut sink = EstateMaintenanceSink::new(Arc::clone(&store), now_i64);
+            let report = daemon.run_cycle_scoped(now_epoch_secs, &reader, &mut sink, categories);
+            if !sink.write_errors.is_empty() {
+                return Err(format!(
+                    "maintenance sink write errors: {:?}",
+                    sink.write_errors
+                ));
+            }
+            Ok(count(&report) as i64)
+        })
+    }
+
+    /// Tombstone-category cycle for the `maintenance-daemon` signal; returns
+    /// the tombstone-candidate count. Swift twin: the resident's
+    /// `maintenanceCycle` closure over `triggerMaintenanceCycle(now:categories: [.tombstone])`.
+    pub fn maintenance_tombstone_cycle(
+        &self,
+    ) -> Arc<dyn Fn() -> Result<i64, String> + Send + Sync> {
+        self.maintenance_category_cycle(MaintenanceCategories::TOMBSTONE, |r| r.tombstone_candidates)
+    }
+
+    /// Decay-category cycle for the `decay-sweep` signal; returns the
+    /// decay-candidate count. Swift twin: the resident's `decayCycle` closure.
+    pub fn maintenance_decay_cycle(
+        &self,
+    ) -> Arc<dyn Fn() -> Result<i64, String> + Send + Sync> {
+        self.maintenance_category_cycle(MaintenanceCategories::DECAY, |r| r.decay_candidates)
+    }
+
+    /// By-reference-category cycle for the `by-reference-validity` signal;
+    /// returns the drift count. Swift twin: the resident's `byReferenceCycle` closure.
+    pub fn maintenance_by_reference_cycle(
+        &self,
+    ) -> Arc<dyn Fn() -> Result<i64, String> + Send + Sync> {
+        self.maintenance_category_cycle(MaintenanceCategories::BY_REFERENCE, |r| r.by_reference_drifts)
     }
 
     /// Snapshot of every registered signal's status. Mirrors Swift
@@ -1049,13 +1262,26 @@ impl AutonomicGovernor {
     ///
     /// Logs start/stop to stderr, consistent with the Swift governor.
     pub fn run_loop(&mut self) {
+        self.run_loop_with_before_tick(|_, _| Ok(()));
+    }
+
+    /// Run with a host-owned preference reconciliation step before each tick.
+    /// The hook shares the injected tick time and may register/unregister signals.
+    /// A failed reconciliation skips the tick, so stale authorization cannot fire.
+    pub fn run_loop_with_before_tick(
+        &mut self,
+        mut before_tick: impl FnMut(&mut Self, SystemTime) -> Result<(), String>,
+    ) {
         eprintln!("AutonomicGovernor started (base tick {}ms)", self.base_tick_ms);
         while !self.stop_flag.load(Ordering::Relaxed) {
             // Read the clock once per iteration and inject into all daemons.
             // This is the ONLY place SystemTime::now() is called in the governor
             // path — all daemons in a single tick share the same `now`.
             let now = SystemTime::now();
-            self.tick(now);
+            match before_tick(self, now) {
+                Ok(()) => { self.tick(now); }
+                Err(error) => eprintln!("AutonomicGovernor: preference reconciliation failed: {error}"),
+            }
             std::thread::sleep(Duration::from_millis(self.base_tick_ms));
         }
         eprintln!("AutonomicGovernor stopped");
@@ -1079,10 +1305,11 @@ impl AutonomicGovernor {
 
     ///
     /// Per-tick flow:
-    ///   1. Lock coordinator; snapshot dreaming + maintenance readers.
-    ///   2. Release lock — coordinator is available for HTTP tool-calls.
-    ///   3. Construct sinks over the live store.
-    ///   4. Run dreaming pump, then maintenance pump, with error isolation.
+    ///   1. Lock coordinator; snapshot the dreaming readers.
+    ///   2. Run the dreaming pumps with error isolation; release the lock.
+    ///   3. Drive the standing-signal scheduler (the maintenance engine runs
+    ///      there, one category per maintenance-family signal).
+    ///   4. Run the cadence-gated duties (topology, centrality, pool, GC).
     pub fn tick(&mut self, now: SystemTime) -> GovernorReport {
         let now_epoch_secs = now
             .duration_since(UNIX_EPOCH)
@@ -1112,7 +1339,22 @@ impl AutonomicGovernor {
         // was to release the lock before pumping, but the readers are demand-read
         // adapters (they borrow the coordinator, not an owned snapshot), so the
         // lock must be held until the readers are no longer in scope.
-        let (dreaming_fired, maintenance_fired) = {
+        // theta_retrain_pending carries the corpus Arc and vocab snapshot decided
+        // inside the lock; the actual reindex runs after the lock block closes.
+        let mut theta_retrain_pending = None;
+        // Declared outside the coordinator lock block so it survives into the
+        // GovernorReport construction below. Set to true inside the BETA arm
+        // when a maintenance handle is present and BETA fires this tick.
+        let mut hnsw_reclaim_fired = false;
+        // Cycle count before the standing-signal drive: a maintenance-family
+        // signal firing this tick advances it, which is the persist trigger
+        // for the engine's idempotency/cycle memory below.
+        let maintenance_cycles_before = self
+            .maintenance
+            .lock()
+            .map(|d| d.daemon_state().cycle_count)
+            .unwrap_or_default();
+        let dreaming_fired = {
             let coord = self.coord.lock().expect("AutonomicGovernor: coordinator lock poisoned");
 
             // ── Dreaming — REM dispatch table ──────────
@@ -1249,6 +1491,27 @@ impl AutonomicGovernor {
                                 if !sink.write_errors.is_empty() {
                                     eprintln!("AutonomicGovernor: REM-THETA sink errors: {:?}", sink.write_errors);
                                 }
+                                // THETA-RETRAIN capture: decide while the coordinator guard is held.
+                                //
+                                // THETA-RETRAIN: drift-gated corpus basis retrain, best-effort (non-fatal).
+                                // Consults the same vocabulary-growth gate the ALPHA corpus-growth probe uses.
+                                // If ALPHA has been running correctly the drift delta is below the threshold
+                                // and THETA skips the retrain. If ALPHA has been failing or the estate is
+                                // quiescent, THETA acts as the backstop and fires.
+                                //
+                                // `corpus_for()` is a read-only HashMap lookup; cloning the Arc does
+                                // not re-acquire any lock. A LocusOnly estate has no corpus registered;
+                                // the if-let skips cleanly. The actual reindex runs after the lock block
+                                // closes — see the THETA-RETRAIN execution block below.
+                                if let Some(corpus) = coord.corpus_for(&self.handle) {
+                                    // `maintained_vocab_anchor` returns `usize` directly (no Result).
+                                    let live_vocab = corpus.maintained_vocab_anchor() as i64;
+                                    if self.dreaming.theta_retrain_warranted(live_vocab) {
+                                        theta_retrain_pending = Some((Arc::clone(&corpus), live_vocab));
+                                    }
+                                    // Drift below threshold: ALPHA is keeping the basis current;
+                                    // THETA defers this cycle (no log — not an error).
+                                }
                             }
                             Err(e) => {
                                 eprintln!("AutonomicGovernor: REM-THETA cycle panic: {:?}", e);
@@ -1258,9 +1521,32 @@ impl AutonomicGovernor {
                 }
             }
 
-            // REM-BETA: weekly prune/GC — T12 seam (inert; no reader needed).
+            // REM-BETA: weekly prune/GC — EWC prune + HNSW compaction +
+            // vector-generation reclamation (VEC-SHADOWSWAP-01, finding 13b8e1a).
+            //
+            // `run_beta_cycle_with_hnsw` extends the base EWC prune (which runs
+            // regardless of the handle) with two weekly storage-GC duties when a
+            // maintenance handle is present:
+            //   1. compact_float_index_tombstones — HNSW cache locality GC.
+            //   2. reclaim_superseded_generations — delete vector rows that were
+            //      left 'pending-reclaim' after a shadow-swap publish.
+            //
+            // Both are non-fatal on failure — the base prune still completes.
+            //
+            // The handle is temporarily taken from `self.hnsw_maintenance` to avoid
+            // a double-borrow of `self` (the BETA cycle call needs &mut self.dreaming
+            // while the handle lives in self.hnsw_maintenance). `take()` leaves the
+            // field `None` for the duration and it is restored immediately after.
+            //
+            // `hnsw_reclaim_fired` is set to true when BETA fires AND a maintenance
+            // handle is installed — the discriminating flag the production-wiring
+            // test (shadow_reclaim_duty_tests.rs) uses to verify the full duty path.
+            // Declared above the lock block so it survives into GovernorReport.
             if self.dreaming.beta_due(now_epoch_secs) {
-                self.dreaming.run_beta_cycle(now_epoch_secs);
+                let mut taken = self.hnsw_maintenance.take();
+                hnsw_reclaim_fired = taken.is_some();
+                self.dreaming.run_beta_cycle_with_hnsw(now_epoch_secs, taken.as_mut());
+                self.hnsw_maintenance = taken;
             }
 
             // REM-OMEGA: biweekly retire —  / recall-driven dreaming
@@ -1317,49 +1603,68 @@ impl AutonomicGovernor {
                 }
             }
 
-            // ── Maintenance ────────────────────────────────────────────────────
-            // EstateMaintenanceReader::new returns Self directly (not Result) —
-            // snapshot construction is infallible; all reads happen in scan().
-            // Built ONLY when its interval is due (same per-tick-snapshot waste as
-            // dreaming; maintenance fires every 5 min while the governor ticks
-            // sub-second).
-            let maintenance_fired;
-            if !self.maintenance.due(now_epoch_secs) {
-                maintenance_fired = false;
-            } else {
-                let reader = EstateMaintenanceReader::new(&coord, &self.handle, now_i64);
-                let mut sink =
-                    EstateMaintenanceSink::new(Arc::clone(&self.store), now_i64);
-                match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    self.maintenance.pump(now_epoch_secs, &reader, &mut sink)
-                })) {
-                    Ok(result) => {
-                        maintenance_fired = result.is_some();
-                        if !sink.write_errors.is_empty() {
-                            eprintln!(
-                                "AutonomicGovernor: maintenance sink write errors: {:?}",
-                                sink.write_errors
-                            );
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("AutonomicGovernor: maintenance pump panic: {:?}", e);
-                        maintenance_fired = false;
-                    }
-                }
-            }
-
             // The encode queue is drained by the Corpus's OWN background worker
             // now (CorpusKit owns the ingest pipeline — corpus_ingest_queue.rs
             // spawns a foreground poll worker at mount_ingest_queue). The governor
             // no longer pumps the encode drain: it is autonomous and runs in
             // near-realtime independent of this tick. This also restores parity
-            // with the Swift governor, whose tick reports only dreaming +
-            // maintenance (the Swift Corpus drain worker likewise runs on its own).
+            // with the Swift governor, whose tick reports only dreaming (the
+            // Swift Corpus drain worker likewise runs on its own).
             //
             // Coordinator lock released here (end of block).
-            (dreaming_fired, maintenance_fired)
+            dreaming_fired
         };
+
+        // THETA-RETRAIN execution: run the basis retrain outside the coordinator
+        // lock. A full retrain can take minutes at estate scale and must not block
+        // every GLK verb behind the coordinator mutex while it runs — the same rule
+        // the ALPHA growth-probe below already obeys.
+        //
+        // THETA runs BEFORE check_corpus_growth below so that ALPHA sees a
+        // post-THETA live_vocab delta of zero and does not double-reindex.
+        //
+        // advance_reindex_vocab runs here — post-retrain, pre-save_daemon_state —
+        // so the advanced baseline is captured by the save_daemon_state call below.
+        // Errors are logged but non-fatal (a stale basis degrades dense recall;
+        // it does not break proposal/diary functions).
+        if let Some((corpus, live_vocab)) = theta_retrain_pending {
+            let now_millis = (now_epoch_secs * 1000.0) as i64;
+            // The retrain is a claimed QueueKit job (duty_queue `RetrainBasis`):
+            // claim under a short coordinator lock, run the body outside it as
+            // before, complete under another short lock. A governor that dies
+            // mid-retrain leaves a reclaimable job, not a silently skipped day.
+            let claimed = match self.coord.lock() {
+                Ok(coord) => {
+                    use genius_locus_kit::brain::duty_queue::DutyKind;
+                    let _ = coord.enqueue_duty(&self.handle, DutyKind::RetrainBasis, now_millis);
+                    coord.claim_duty_jobs(&self.handle, DutyKind::RetrainBasis, now_millis).unwrap_or_default()
+                }
+                Err(_) => Vec::new(),
+            };
+            let outcome = genius_locus_kit::brain::bounded_retraining::reindex_with_settings(&corpus, now_millis);
+            if let Ok(coord) = self.coord.lock() {
+                for id in &claimed {
+                    coord.complete_duty_job(&self.handle, id, outcome.is_ok());
+                }
+            }
+            // F11: `Ok(false)` is a DEGRADED retrain (a backstop was reached,
+            // the serving basis was kept) — must not advance the shared
+            // baseline, or the vocabulary drift that hit the backstop is
+            // never revisited by a later THETA/ALPHA cycle. Before this fix
+            // `Ok(())` covered both outcomes, so a degraded retrain advanced
+            // the baseline exactly like a full one.
+            match outcome {
+                Err(e) => eprintln!("AutonomicGovernor: REM-THETA basis-retrain error: {:?}", e),
+                Ok(false) => eprintln!(
+                    "AutonomicGovernor: REM-THETA basis-retrain DEGRADED (backstop reached); baseline not advanced"
+                ),
+                Ok(true) => {
+                    // Advance the shared baseline so ALPHA's delta window starts
+                    // from this retrain point. Persisted by save_daemon_state below.
+                    self.dreaming.advance_reindex_vocab(live_vocab);
+                }
+            }
+        }
 
         // AUTO-REINDEX: bind the generic NeuronKit growth gate to the live
         // attached Corpus engine after releasing the coordinator lock. A full
@@ -1374,13 +1679,38 @@ impl AutonomicGovernor {
             if let Some(corpus) = corpus {
                 let vocab_corpus = Arc::clone(&corpus);
                 let reindex_corpus = Arc::clone(&corpus);
+                let duty_coord = Arc::clone(&self.coord);
+                let duty_handle = self.handle.clone();
                 let mut probe = EstateCorpusGrowthProbe {
                     vocab_anchor: Box::new(move || {
                         vocab_corpus.maintained_vocab_anchor() as i64
                     }),
                     reindex: Box::new(move |now_secs| {
-                        match reindex_corpus.reindex((now_secs * 1_000.0).round() as i64) {
-                            Ok(()) => true,
+                        // Same claim / run outside the lock / complete shape as
+                        // the THETA retrain above.
+                        let now_millis = (now_secs * 1_000.0).round() as i64;
+                        let claimed = match duty_coord.lock() {
+                            Ok(coord) => {
+                                use genius_locus_kit::brain::duty_queue::DutyKind;
+                                let _ = coord.enqueue_duty(&duty_handle, DutyKind::RetrainBasis, now_millis);
+                                coord.claim_duty_jobs(&duty_handle, DutyKind::RetrainBasis, now_millis).unwrap_or_default()
+                            }
+                            Err(_) => Vec::new(),
+                        };
+                        let outcome = genius_locus_kit::brain::bounded_retraining::reindex_with_settings(&reindex_corpus, now_millis);
+                        if let Ok(coord) = duty_coord.lock() {
+                            for id in &claimed {
+                                coord.complete_duty_job(&duty_handle, id, outcome.is_ok());
+                            }
+                        }
+                        // F11: `Ok(false)` is a DEGRADED retrain (a backstop was
+                        // reached, the serving basis was kept) — treated the same
+                        // as an error for the vocabulary-baseline gate above
+                        // (`check_corpus_growth` only advances on `true`), so a
+                        // degraded retrain re-fires next cycle instead of the
+                        // drift it hit the backstop under being silently accepted.
+                        match outcome {
+                            Ok(completed) => completed,
                             Err(error) => {
                                 eprintln!(
                                     "AutonomicGovernor: corpus growth retrain failed: {error:?}"
@@ -1421,10 +1751,6 @@ impl AutonomicGovernor {
             self.dreaming_policy_store
                 .save_daemon_state(self.dreaming.daemon_state());
         }
-        if maintenance_fired {
-            self.maintenance_policy_store
-                .save_daemon_state(self.maintenance.daemon_state());
-        }
 
         // ── Standing signals ───────────────────────────────────────────────
         //
@@ -1454,6 +1780,15 @@ impl AutonomicGovernor {
             }
             None => false,
         };
+        // The maintenance engine runs inside the signal drive above (one
+        // category per maintenance-family signal). Persist its idempotency/
+        // cycle memory when a fire advanced it this tick.
+        if let Ok(daemon) = self.maintenance.lock() {
+            let state = daemon.daemon_state();
+            if state.cycle_count != maintenance_cycles_before {
+                self.maintenance_policy_store.save_daemon_state(state);
+            }
+        }
 
         // ── Topology snapshot ──────────────────────────────────────────────
         //
@@ -1730,7 +2065,6 @@ impl AutonomicGovernor {
 
         GovernorReport {
             dreaming_fired,
-            maintenance_fired,
             signals_ticked,
             graph_centrality_fired,
             preference_fired,
@@ -1739,6 +2073,7 @@ impl AutonomicGovernor {
             table_swapped,
             table_version: lattice_lib::table_version(),
             gc_sweep_fired,
+            hnsw_reclaim_fired,
         }
     }
 }
@@ -1867,10 +2202,14 @@ fn graph_centrality_duty(
 /// duty only shapes the outcomes and caches the strengths. A faithful cadence
 /// wrapper of a direct `learned_preference` call on the same records.
 ///
-/// Window: all retained recall traces up to `now` (`since` = the epoch-floor
-/// ISO8601 string, mirroring Swift `Date.distantPast`). Retention is bounded by
-/// the maintenance prune cycle. `now_i64` is the injected tick clock — no clock
-/// read here. Deterministic: a pure function of the recorded rows and `now`.
+/// Window: the most-recent `PREFERENCE_TRACES_WINDOW_LIMIT` (1,000) recall
+/// traces by ascending `recalled_at`, fetched since the epoch floor and
+/// suffix-capped before fitting. Bounded to prevent full-history loads on
+/// large estates; the most-recent traces carry the strongest Bradley-Terry
+/// signal, older traces have decayed relevance and are excluded on each
+/// cadence tick. Parity: mirrors `AutonomicGovernor.preferenceTracesWindowLimit`
+/// in Swift. `now_i64` is the injected tick clock — no clock read here.
+/// Deterministic: a pure function of the recorded rows and `now`.
 ///
 /// The only side effect is the store registration (idempotent re-registration
 /// replaces the prior snapshot). An estate with no traces yields no records ⇒
@@ -1901,11 +2240,16 @@ fn preference_duty(
 
     // Reads through the coordinator verb surface (B-1) — the same recall-trace
     // window read the dreaming reader uses.
-    let traces = coord
+    let all_traces = coord
         .recent_recall_traces(handle, since, &now_str)
         .map_err(|e| format!("recent_recall_traces failed: {e:?}"))?;
 
-    let records = preference_outcomes(&traces);
+    // Cap to the most-recent `PREFERENCE_TRACES_WINDOW_LIMIT` traces (suffix of
+    // the ascending-recalled_at result). Mirrors Swift `.suffix(preferenceTracesWindowLimit)`.
+    let start = all_traces.len().saturating_sub(PREFERENCE_TRACES_WINDOW_LIMIT);
+    let traces = &all_traces[start..];
+
+    let records = preference_outcomes(traces);
     let scores =
         compute_preference_scores(&records).map_err(|e| format!("learned_preference failed: {e:?}"))?;
 

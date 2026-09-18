@@ -1,10 +1,10 @@
 ---
 title: VaultKit Interface
-version: 1.16.0
+version: 1.20.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-08-03
+date: 2026-08-15
 description: Public interface contract for VaultKit — bidirectional bridge between a MOOTx01 estate and human-readable Markdown vaults, programmatic exchange formats, and MemPalace.
 relates_to:
   - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#62-note-identity-and-import-semantics
@@ -172,6 +172,11 @@ pub type VaultProgress<'a> = dyn Fn(usize, usize) + Send + Sync + 'a;
 ```swift
 public protocol VaultAdapter: Sendable {
     func toIR(vaultURL: URL) throws -> [NoteIR]
+    /// Read restricted to selected vault-relative paths. Default extension
+    /// reads everything and filters; adapters that can narrow the read itself
+    /// override it so an unselected note is never read or parsed. `nil` reads
+    /// the whole vault.
+    func toIR(vaultURL: URL, includingPaths: Set<String>?) throws -> [NoteIR]
     func fromIR(_ notes: [NoteIR], to vaultURL: URL) throws
     /// Write with optional per-item progress. Default extension delegates to
     /// `fromIR(_:to:)` and ignores the closure; adapters that support real
@@ -561,8 +566,8 @@ public struct VaultBridge: Sendable {
                             mode: EncodeSpeed = .foreground) async throws -> ImportReport
     /// Path-scoped import: identical to importVault but restricts the
     /// import to notes whose vault-relative path is in `includingPaths`.
-    /// Used by moot_vault_reconcile apply mode so only the M candidates
-    /// (added + modified) are actioned, not the full N-note vault.
+    /// The selection is pushed into the adapter, so an unselected note is
+    /// never read from disk and never parsed.
     /// Rust: import_vault_filtered(vault_path, &candidate_paths, handle, now, progress, mode).
     public func importVault(at vaultURL: URL,
                             includingPaths: Set<String>,
@@ -570,6 +575,33 @@ public struct VaultBridge: Sendable {
                             now: Date,
                             progress: VaultProgress? = nil,
                             mode: EncodeSpeed = .foreground) async throws -> ImportReport
+    /// Reconcile import: actions `candidatePaths` union the notes the estate
+    /// does not hold. The manifest diff answers what CHANGED and structurally
+    /// cannot answer what the estate LACKS, so the missing set is computed
+    /// from `allPaths` against the estate snapshot the import needs anyway —
+    /// a vault path is missing when no drawer answers to it under either the
+    /// path's lineage (foreign notes) or the export path (round-tripped
+    /// notes). Never a rescan. Returns the selected set alongside the report
+    /// (the review gate's audit surface, VR-01 Finding B): the same code
+    /// computes `reconcileSelection`, so apply can never import a note the
+    /// dry-run would not have listed.
+    /// Rust: import_vault_reconciling(vault_path, &all_paths, &candidate_paths, handle, now, progress, mode) -> (ImportReport, HashSet<String>).
+    public func importVaultReconciling(at vaultURL: URL,
+                                       allPaths: Set<String>,
+                                       candidatePaths: Set<String>,
+                                       into handle: EstateHandle,
+                                       now: Date,
+                                       progress: VaultProgress? = nil,
+                                       mode: EncodeSpeed = .foreground) async throws -> (report: ImportReport, selectedPaths: Set<String>)
+    /// The full set a reconcile apply would import (`candidatePaths` ∪ the
+    /// missing set), computed against one estate snapshot WITHOUT importing.
+    /// The dry-run half of the review gate (VR-01 Finding B) — shares its
+    /// missing-set computation with importVaultReconciling so the surfaced
+    /// set and the imported set cannot diverge.
+    /// Rust: reconcile_selection(&all_paths, &candidate_paths, handle, now) -> HashSet<String>.
+    public func reconcileSelection(allPaths: Set<String>,
+                                   candidatePaths: Set<String>,
+                                   into handle: EstateHandle) async throws -> Set<String>
     /// Direct MemPalace import: all three palace stores read by
     /// MemPalaceChromaAdapter, then the same idempotent capture path
     /// as importVault (stable keys, tunnel dedup, audit receipt).
@@ -620,6 +652,12 @@ public struct ExportReport: Sendable, Equatable {
     public var excludedSecretTier: Int   // secret never rides bulk export
     public var excludedPrivateTier: Int  // restricted, absent the explicit opt-in scope
     public var scope: VaultExportScope
+    /// Vault-relative paths this export wrote (`stableSourceKey + ".md"` —
+    /// the exact `fromIR` write path). The export's certification receipt:
+    /// the only notes whose disk content is known to agree with the estate's
+    /// record at export time. The tool layer stamps its drift manifest from
+    /// this list, never from a whole-disk enumeration (VR-01 Finding A).
+    public var notePaths: [String]
 }
 
 public struct ImportReport: Sendable, Equatable {
@@ -720,10 +758,10 @@ tool-surface change).
 
 | Tool | Args | Effect |
 |---|---|---|
-| `moot_vault_export` | `vaultPath`, `estateID?`, `scope?` | `VaultBridge.export(scope:)`, then stamp the drift manifest. Result: note count + path + scope used. `scope` defaults to `"exportable"` (CAND-032). |
+| `moot_vault_export` | `vaultPath`, `estateID?`, `scope?` | `VaultBridge.export(scope:)`, then stamp the drift manifest from the export's written-paths receipt (`ExportReport.notePaths`, manifest schema v2). Result: note count + path + scope used. `scope` defaults to `"exportable"` (CAND-032). |
 | `moot_vault_import` | `vaultPath`, `estateID?` | `VaultBridge.importVault`. Result: `ImportReport` counts. |
 | `moot_vault_status` | `vaultPath` | Report manifest presence + note count + last-export time. Pure filesystem read. |
-| `moot_vault_reconcile` | `vaultPath` | Re-hash notes, diff vs the manifest, return the drift set + candidates. |
+| `moot_vault_reconcile` | `vaultPath`, `apply?` | Re-hash notes, diff vs the manifest, and surface the FULL import set — candidates union the notes the estate does not hold (`VaultBridge.reconcileSelection` in dry-run, `importVaultReconciling` in apply; one shared computation, so apply never imports a note the dry-run would not list — VR-01 Finding B). With `apply`, imports exactly the surfaced set and re-stamps the manifest for imported paths (schema v2 convergence); deletions are reported, never actioned. |
 
 ### Drift manifest (tool-layer owned)
 
@@ -731,18 +769,33 @@ VaultKit's export stamps no per-note hash, so the tool layer owns it.
 `moot_vault_export` writes a sidecar manifest at `.moot/export-manifest.json`
 inside the vault (a hidden dir → invisible to `ObsidianAdapter.toIR`'s
 `.skipsHiddenFiles` enumerator), mapping each note's vault-relative path →
-**SHA-256** (CryptoKit, a system framework). `reconcile` recomputes each
-current `.md` file's SHA-256 and classifies: **added** (not in manifest),
+**SHA-256** (CryptoKit, a system framework).
+
+A manifest entry is a **certification** that the note's disk content agreed
+with the estate's record at stamp time. Schema `version: 2` manifests
+therefore stamp **only** the paths the export wrote
+(`ExportReport.notePaths`) — never a whole-disk enumeration, which would
+certify foreign, scope-excluded, or user-edited-but-unexported notes that
+nobody verified. `reconcile` recomputes each current `.md` file's SHA-256
+and classifies: **added** (not in manifest → changed / needs review),
 **modified** (hash differs), **deleted** (in manifest, gone from disk).
+A **legacy manifest** (no `version` key) carries no trustworthy prior
+hashes: every current note is classified changed / needs review — fail
+toward surfacing, never silence.
 
 ### Candidate seam (return-only)
 
-`reconcile` surfaces each added/modified file as a candidate
+`reconcile` surfaces each changed/needs-review file as a candidate
 (`stableSourceKey`, vault path, new content hash) for the downstream
-dreaming/Proposal loop. It is **return-only** — no QueueKit instance is
-mounted in the MCP dispatch context (the Vault MCP contract decision d). The
-tool layer produces candidates only: it writes no Proposal noun, and deletions are
-reported, never actioned (no drawer is expunged).
+dreaming/Proposal loop, and lists the missing set (estate-lacks) alongside —
+the full import set an apply would action (the review gate, VR-01
+Finding B). It is **return-only** — no QueueKit instance is mounted in the
+MCP dispatch context (the Vault MCP contract decision d). The tool layer
+produces candidates only: it writes no Proposal noun, and deletions are
+reported, never actioned (no drawer is expunged). Apply mode's only
+side-channel write is the manifest re-stamp for imported paths — the
+tool-layer-owned sidecar (B-7), not a substrate noun; the dry-run writes
+nothing.
 
 ## Invariants honoured
 
@@ -769,7 +822,7 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 | `FactIR` | `FactIR` | `vault_kit::note_ir` | `validFrom`/`validTo`/`confidence` -> `valid_from`/`valid_to`/`confidence` (serde-renamed to the Swift keys). `FactIR::new(s, p, o)` = bare triple convenience. |
 | `CorpusDocument` | `CorpusDocument` | `vault_kit::corpus_document` | `currentFormatVersion` -> `CURRENT_FORMAT_VERSION` (`i64`). `canonicalJSON()` -> `canonical_json() -> Result<String, VaultKitError>`. `decode(_:)` -> `CorpusDocument::decode(&str)`. Same strict version gate; same golden fixture byte-for-byte. |
 | `VaultExportScope` | `VaultExportScope` | `vault_kit::vault_export_scope` | Same 5 cases (incl. `believedIncludingPrivate` -> `BelievedIncludingPrivate`). `filterChain: [Filter]` -> `filter_chain() -> Vec<Filter>`. `includesPrivateTier` -> `includes_private_tier()`. `rawValue` -> `as_str()`; `allCases` -> `all_cases()`. Rust `Default` = `Exportable` (mirrors Swift default). Rust uses `Filter::AutomatedConfirmedOnly` (mirrors Swift `automatedConfirmedOnly`). |
-| `VaultAdapter` (protocol) | `VaultAdapter` (trait) | `vault_kit::vault_adapter` | `toIR(vaultURL:)` -> `to_ir(&Path)`. `fromIR(_:to:)` -> `from_ir(&[NoteIR], &Path)`. `fromIR(_:to:progress:)` -> `from_ir_with_progress(&[NoteIR], &Path, Option<&VaultProgress>)`. |
+| `VaultAdapter` (protocol) | `VaultAdapter` (trait) | `vault_kit::vault_adapter` | `toIR(vaultURL:)` -> `to_ir(&Path)`. `toIR(vaultURL:includingPaths:)` -> `to_ir_filtered(&Path, Option<&HashSet<String>>)` (both defaulted: read all, then filter). `fromIR(_:to:)` -> `from_ir(&[NoteIR], &Path)`. `fromIR(_:to:progress:)` -> `from_ir_with_progress(&[NoteIR], &Path, Option<&VaultProgress>)`. |
 | `ObsidianAdapter` | `ObsidianAdapter` | `vault_kit::obsidian_adapter` | OKF v0.1 superset in default mode. `pureObsidianLinks: Bool` (Swift) / `pure_obsidian_links: bool` (Rust), default `false`. `init(pureObsidianLinks:)` (Swift) / `with_options(pure_obsidian_links)` (Rust). Default `init()`/`new()` unchanged (source-compatible). Emits `type:` frontmatter key, frontmatter `tags:` array, standard-md links (default) or wikilinks (pure mode), `index.md` per folder. Skips `index.md`/`log.md` on read. Both ports parse wikilinks AND standard-md links on read (`parseAllLinks`/`parse_all_links`). Hidden files skipped. Parses `moot_id` frontmatter key into `NoteIR.moot_id`. |
 | `ExchangeAdapter` | `ExchangeAdapter` | `vault_kit::exchange_adapter` | `decode(_:)` -> `decode(&[u8])`; `encode(_:) -> Data` -> `encode(&ExchangeExport) -> Result<String, VaultKitError>`. Identical field mapping, stable-source-key sort, canonical write form, and filename-derived corpus name in `fromIR`/`from_ir`. Decode failure: Foundation `DecodingError` (Swift) / `VaultKitError::Serialization` (Rust); encode failure: Foundation `EncodingError` (Swift) / `VaultKitError::Serialization` (Rust). Shared decode and canonical-encode fixtures (the latter byte-for-byte) exercised by both suites. |
 | `ExchangeExport` | `ExchangeExport` | `vault_kit::exchange_adapter` | `name` + `notes`, identical. |
@@ -793,9 +846,9 @@ The Rust crate lives at `packages/kits/VaultKit/rust/` (crate name
 | `DrawerMapping.importNote(…existingSensitivityByLineage:…)` | `import_note(…existing_sensitivity_by_lineage…)` | `vault_kit::drawer_mapping` | Both take a `[UUID:AdjectiveSensitivity]` / `HashMap<Uuid,AdjectiveSensitivity>` map and enforce the no-downgrade sensitivity floor (`max(incoming, existing)`). |
 | `DrawerMapping.lineageID(forStableSourceKey:)` | `DrawerMapping::lineage_id(key)` | `vault_kit::drawer_mapping` | FNV-1a 128-bit. Produces byte-identical `UUID`/`Uuid` for all inputs, verified by a shared conformance vector. |
 | `ImportReport` | `ImportReport` | `vault_kit::vault_bridge` | `drawersWritten` -> `drawers_written`, etc. `Int` -> `usize`. `fieldsDropped: [String: Int]` -> `fields_dropped: BTreeMap<String, usize>` (BTree for deterministic iteration). `drawersSkippedUnchanged` -> `drawers_skipped_unchanged`, `drawersSkippedTombstoned` -> `drawers_skipped_tombstoned`, `drawersSkippedPartialWrite` -> `drawers_skipped_partial_write`, `enqueuedForEncode` -> `enqueued_for_encode`. All fields present in both ports. |
-| `VaultBridge` | `VaultBridge<'a>` | `vault_kit::vault_bridge` | Rust is synchronous (no `async`); `now: i64` (ms-since-epoch) passed by caller (Swift: `now: Date`). `export(estate:to:scope:now:progress:)` -> `export(handle, vault_path, now, scope, progress)` — both return `ExportReport`. `receiptAgentName` -> `RECEIPT_AGENT_NAME`. `importMemPalace(at:into:now:adapter:progress:mode:)` -> `import_mem_palace(palace_root, handle, now, &adapter, progress, mode)` (Rust takes the adapter explicitly; Swift defaults it). Path-scoped import: `importVault(at:includingPaths:into:now:progress:mode:)` -> `import_vault_filtered(vault_path, &candidate_paths, handle, now, progress, mode)` — used by reconcile apply mode to action only the M candidates, not the full vault. Both share one private import core (`importNotes` / `import_notes`) with `importVault`. Both write the same diary receipts (see Audit receipts above). |
+| `VaultBridge` | `VaultBridge<'a>` | `vault_kit::vault_bridge` | Rust is synchronous (no `async`); `now: i64` (ms-since-epoch) passed by caller (Swift: `now: Date`). `export(estate:to:scope:now:progress:)` -> `export(handle, vault_path, now, scope, progress)` — both return `ExportReport`. `receiptAgentName` -> `RECEIPT_AGENT_NAME`. `importMemPalace(at:into:now:adapter:progress:mode:)` -> `import_mem_palace(palace_root, handle, now, &adapter, progress, mode)` (Rust takes the adapter explicitly; Swift defaults it). Path-scoped import: `importVault(at:includingPaths:into:now:progress:mode:)` -> `import_vault_filtered(vault_path, &candidate_paths, handle, now, progress, mode)` — the selection is pushed into the adapter, so unselected notes are never read. Reconcile import: `importVaultReconciling(at:allPaths:candidatePaths:into:now:progress:mode:)` -> `import_vault_reconciling(vault_path, &all_paths, &candidate_paths, handle, now, progress, mode)` — candidates union the notes the estate lacks, computed against the import's own estate snapshot; both ports return the report PLUS the selected set (Swift labeled tuple / Rust `(ImportReport, HashSet<String>)`). Dry-run twin: `reconcileSelection(allPaths:candidatePaths:into:)` -> `reconcile_selection(&all_paths, &candidate_paths, handle, now)` — same selection, no import (Rust takes `now` because `existing_drawer_state` stamps its scan; Swift's snapshot does not). Both share one private import core (`importNotes` / `import_notes`) with `importVault` and one missing-set helper (`missingPaths` / `missing_paths`). Both write the same diary receipts (see Audit receipts above). |
 | `PalaceBridge` | `PalaceBridge<'a>` | `vault_kit::palace_bridge` | Direct MemPalace → substrate import that bypasses NoteIR entirely. Reads all three palace stores (chroma.sqlite3 with collections `mempalace_drawers` / `mempalace_closets`, tunnels.json, knowledge_graph.sqlite3) and constructs native `CaptureFrame`/`TunnelCaptureFrame` calls. Swift: `init(kit: GeniusLocusKit, limits: MemPalaceImportLimits = .default)`; Rust: `new(&mut EstateCoordinator)` at the shipping limits, or `with_limits(&mut EstateCoordinator, MemPalaceImportLimits)`. Both carry `limits` (Swift `public var limits: MemPalaceImportLimits`; Rust a private field set by the constructor) and enforce the same four import ceilings as `MemPalaceChromaAdapter` — the palace root is untrusted input on this path too, and it is the one behind `moot_palace_import`. Applies four import guards (both ports): tombstone protection (withdrawn lineages not resurrected), content-idempotent dedup (unchanged active drawers skipped), sensitivity floor (re-import never downgrades tier), tunnel signature dedup (endpoint+kind signature prevents duplicates on re-import). KG entity and triple import also applies tombstone and content-idempotent guards. Files a diary receipt under `VaultBridge.receiptAgentName` (`"vaultkit"`) after each run. Swift: `async throws`; Rust: synchronous. `importPalace(at:into:now:progress:mode:)` -> `import_palace(palace_root, handle, now, progress, mode)` — both return `ImportReport`. Exposed as `moot_palace_import` MCP tool (PAR-PB-1). Rust `ImportReport` fields: `drawers_written`, `drawers_updated`, `drawers_skipped_unchanged`, `drawers_skipped_tombstoned`, `drawers_skipped_partial_write`, `enqueued_for_encode`, `tunnels_created`, `items_skipped`. |
-| `ExportReport` | `ExportReport` | `vault_kit::vault_bridge` | `notesExported` -> `notes_exported`, `excludedSecretTier` -> `excluded_secret_tier`, `excludedPrivateTier` -> `excluded_private_tier`, `scope` -> `scope`. |
+| `ExportReport` | `ExportReport` | `vault_kit::vault_bridge` | `notesExported` -> `notes_exported`, `excludedSecretTier` -> `excluded_secret_tier`, `excludedPrivateTier` -> `excluded_private_tier`, `scope` -> `scope`, `notePaths` -> `note_paths` (written-paths certification receipt, VR-01). |
 | `VaultKitError` | `VaultKitError` | `vault_kit::error` | Rust: `Io`, `AdapterError`, `I5Violation`, `VerbError`, `UnsupportedFormatVersion`, `Serialization` cases. Swift: `unsupportedFormatVersion(Int)` + `adapterError(String)` (mirrors Rust `AdapterError`; used by `MemPalaceChromaAdapter`) — other adapter/bridge paths rethrow GLK and Foundation errors, and malformed corpus JSON surfaces as Foundation `DecodingError` (Rust's `Serialization` analogue). |
 | `MCPClientError` | `McpClientError` | `vault_kit::mcp_stdio_client` | Swift: `public struct MCPClientError: Error` (a plain-struct error with a `message: String` field, wraps any JSON-RPC protocol failure as a single string). Rust: `pub enum McpClientError` with two cases: `Io(std::io::Error)` (wraps OS-level I/O) and `Protocol(String)` (any JSON-RPC protocol failure). Conceptually paired: both represent `MCPStdioClient`/`McpStdioClient` call failures. Names differ (`MCPClientError` / `McpClientError`) and shapes differ (Swift single-case struct / Rust two-case enum) — the Rust enum is more specific about the failure cause. | 
 | `PalacePayloadEnvelope.Decoded` | `Decoded` | `vault_kit::palace_payload_envelope` | Swift: `public struct Decoded` nested inside `PalacePayloadEnvelope`; carries a typed-payload `decode(content:)` result with `body: String` and `payload: PalaceEnvelopePayload`. Rust: top-level `pub struct Decoded` — same fields, flat not nested. Shape difference: Swift nested / Rust flat — sanctioned Swift-nested / Rust-flat idiom. |
@@ -829,10 +882,14 @@ requirements.
 
 | Version | Date | Change |
 |---|---|---|
+| 1.20.0 | 2026-08-15 | Review gate (VR-01 Part 3, Codex Finding B — apply imported notes never surfaced for review). `VaultBridge.importVaultReconciling` / `import_vault_reconciling` now returns `(report, selectedPaths)`; new `VaultBridge.reconcileSelection` / `reconcile_selection` computes the identical selection (candidates ∪ missing) without importing, via a shared private `missingPaths` / `missing_paths` helper — one body of code, so the dry-run's surfaced set and apply's imported set cannot diverge. `moot_vault_reconcile` lists the missing set and the import-set total in BOTH modes; apply imports exactly the surfaced set and re-stamps the manifest for imported paths (hashes captured at reconcile start; legacy manifests converge to schema v2 after one apply, so surfaced notes do not re-surface forever). Both ports. |
+| 1.19.0 | 2026-08-15 | Manifest certification (VR-01 Part 2, Codex Finding A — reconcile skipped changed notes after a manifest reset). `ExportReport` gains `notePaths` / `note_paths`: the vault-relative paths the export wrote (`stableSourceKey + ".md"`), i.e. the only notes whose disk content is known to agree with the estate's record at export time. The tool-layer drift manifest now carries `version: 2` and stamps ONLY that written-paths receipt — a whole-disk enumeration certified foreign / scope-excluded / user-edited-but-unexported notes nobody verified, and a note so mis-certified matched the manifest on the next reconcile and was never surfaced again. Un-stamped notes classify as **added** (changed / needs review); a legacy manifest (no `version` key) has no trustworthy prior hashes, so every current note classifies changed / needs review — fail toward surfacing, never silence. Both ports. |
+| 1.17.0 | 2026-08-12 | `JsonImportReport` gains `drawerIDByRecordID: [String: String]` (Swift) / `drawer_id_by_record_id: BTreeMap<String, String>` (Rust): seed `record.id` → the drawer id capture minted for it, one entry per record. The import pipeline already built this map to resolve fact and tunnel endpoints and then discarded it, so carrying it out is a projection, not new work. It closes a real gap: a record's lineage is deterministic (FNV-1a-128 of the record id) but the drawer id is minted at insert and no recall surface addresses a drawer by lineage, so a caller could not identify what it had just imported except by searching for its own content — which cannot be made exact, because ranking decides what comes back. Additive; every existing caller is source-compatible. Surfaced on the ARIA lane by `moot_json_import`'s new `return_id_map` argument (see ARIA_MCP_INTERFACE 1.41.0). Both ports. |
 | 1.16.0 | 2026-08-03 | Receipt `filedAt` unit contract corrected. The row documented the Rust bridge as filing `now / 1000` in "the diary's epoch-seconds convention". That conversion was removed by the seconds→milliseconds caller migration (MXE-TU, landed by MXE-TV): `VaultBridge::write_receipt` now passes the caller's `now` unconverted, because epoch milliseconds is the unit `TypedValue::Timestamp` codes and `HLCGenerator::send` consumes. The old text described a conversion that no longer exists and named a diary convention that does not — a caller following it would have filed every receipt as a 1970 record. No port divergence: Swift's `writeReceipt` takes a `Date` and always did, so only the Rust half was ever unit-bearing. Doc-only; the corresponding code change and its `import_filed_at_is_epoch_millis` guard are in VaultKit. |
 | 1.15.0 | 2026-08-03 | Bounded the MemPalace importer's reads (Codex finding `7398704cea488191a2ce153ad1d5b016`, availability). New public `MemPalaceImportLimits` (Swift) / `MemPalaceImportLimits` + `MAX_*` constants (Rust) and `MemPalaceImportBudget`; new `limits` property on `MemPalaceChromaAdapter` and `PalaceBridge` (both defaulted, so every existing call site stays source-compatible). Four ceilings — `tunnels.json` max bytes checked before the file is opened, max SQLite rows, max materialized bytes, and a SQLite progress-handler step budget — accounted against one budget per import so rows and bytes are real totals. Every breach names the limit AND the observed value via `adapterError`. Defaults sized against the measured real palace with the headroom factors documented in the table above; identical values in both ports, asserted literally in both suites. Swift `metadataRows` no longer materializes the largest scan twice (new internal `forEachRow`), matching the Rust cursor. rusqlite gains the `hooks` feature for `progress_handler`. Front-matter version corrected from a stale 1.13.0 (a 1.14.0 entry already existed below). |
 | 1.14.0 | 2026-07-23 | Clarified that the watched-source scheduler is a planned 1.1 resident control-layer mission, not a `VaultBridge` responsibility; linked the lifecycle and automated sensitivity requirements in `VAULTKIT_SPEC.md`. |
 | 1.13.0 | 2026-07-16 | Concordance table: added two missing public Rust types re-exported at the `vault_kit` crate root. (1) `PalaceItemJobPayload` — the four-noun checkpoint-job payload struct (fields: `noun`, `source_id`, `body`, `call`); Swift-internal counterpart also documented. (2) `CheckpointQueue` — Rust-only dependency-free maildir-style filesystem queue that stands in for QueueKit on the Rust leg; public methods `mount`/`send`/`send_item`/`pending_jobs`/`read_job`/`read_item_job`/`complete` documented. Both types live in `vault_kit::palace_pump` and were re-exported via `lib.rs` but had no concordance rows. |
+| 1.18.0 | 2026-08-13 | Reconcile narrowing (VAULT-FIX-02): (1) `VaultAdapter` gains `toIR(vaultURL:includingPaths:)` / `to_ir_filtered` — a defaulted read-then-filter, overridden by `ObsidianAdapter` so an unselected note is never read from disk or parsed. (2) `VaultBridge.importVault(includingPaths:)` / `import_vault_filtered` now push the selection into the adapter instead of filtering after a full read. (3) New `VaultBridge.importVaultReconciling` / `import_vault_reconciling`: reconcile apply mode imports its candidate set union the notes the estate does not hold, where the missing set is COMPUTED from the caller's vault paths against the estate snapshot the import already needs — a vault path is missing when no drawer answers to it under either the path's lineage or the export path. Replaces the whole-vault import VAULT-FIX-01 used to close the data-loss hole. Both ports. |
 | 1.12.0 | 2026-07-16 | Audit corrections: (1) `VaultExportScope` default corrected from `.believed` to `.exportable` (CAND-032 shipped before the doc was updated) — fixed in prose, enum annotation, MCP tool table, and both concordance rows (`VaultExportScope` Rust Default, `moot_vault_export` scope). (2) `VaultProgress` typealias added (Swift + Rust). (3) `VaultAdapter` protocol extended with `fromIR(_:to:progress:)` / `from_ir_with_progress` overload. (4) `VaultBridge.export` scope default and all bridge method signatures updated to include `progress: VaultProgress?` parameter (present in source since T7; missing from doc). (5) `VaultBridge.importVault(includingPaths:)` and `importMemPalace` updated with `mode` and `progress` params. (6) `PalaceBridge.importPalace` updated with `progress` param. (7) `ImportReport` four missing fields added: `drawersSkippedUnchanged`, `drawersSkippedTombstoned`, `drawersSkippedPartialWrite`, `enqueuedForEncode` (FINDING-1a, FINDING-1b). (8) Import receipt JSON updated to include `drawersSkippedPartialWrite`. (9) Concordance table rows corrected for `VaultAdapter`, `ImportReport`, `VaultBridge`, and `PalaceBridge`. |
 | 1.11.0 | 2026-06-28 | Path-traversal hardening (planned lockdown). `ObsidianAdapter.fromIR(_:to:)` and `ExchangeAdapter.decode(_:)` now enforce vault containment as a security boundary. A shared `containedVaultURL(forRelativePath:under:)` helper (Swift) / `contained_vault_path` free function (Rust) validates every vault-relative path before any filesystem access: rejects `..`, absolute prefixes, backslash separators, empty and `.` components (lexical phase). A second pass via `ensureContainedInVault(_:under:)` (Swift) / `write_contained_file` (Rust) re-checks the fully-resolved path with symlink expansion (`resolvingSymlinksInPath` / `canonicalize`) and rejects pre-existing symlinks at the destination. `ExchangeAdapter.decode` validates `pathComponents` entries with the same lexical rules before projecting them to `NoteIR`. Both phases share identical rejection vocabulary across Swift and Rust. Errors surface as `VaultKitError.adapterError` (Swift) / `VaultKitError::AdapterError` (Rust) — fail-closed, never silent. Both ports. |
 | 1.10.0 | 2026-06-25 | T7 (one engine, many gates): `importVault` / `importVault(includingPaths:)` / `importMemPalace` and the shared `importNotes` core replace `batch: bool` with `mode: EncodeSpeed` — matching `importPalace` (T1). All source gates (MemPalace, Obsidian, OKF, Markdown vaults) now run the SAME ingest policy: encode SPEED is caller-declared, the bulk-vs-stream WRITE strategy is size-gated automatically via the new single-source `ImportPolicy` (`streamThreshold` = 250k; Rust `import_policy`). Each importer calls `setEncodeSpeed(mode)` then size-gates by item count, so adding a gate never re-invents the write strategy. Both ports. |

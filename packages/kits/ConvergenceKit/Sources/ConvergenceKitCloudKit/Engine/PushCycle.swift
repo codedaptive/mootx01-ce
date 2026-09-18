@@ -5,6 +5,9 @@
 // CloudKit database via the injectable CloudKitDatabaseProtocol seam.
 //
 // PUSH LIFECYCLE:
+// 0. pull(): every push starts with a pull, so the outbox is judged against
+//    what the cloud holds before anything is sent (last-changed-wins by the
+//    clock, both directions). The pull cancels outbox entries it beat.
 // 1. EpochFence.heartbeat() verifies (slot, epoch) is still current and
 //    updates last_active_hlc. MUST run BEFORE reading the outbox so that
 //    a reenrollRequired event (slot was evicted while we were away) can
@@ -23,13 +26,14 @@
 //    parked. Only truly-accepted records count in the SyncReceipt (B-2).
 
 import Foundation
+import MootProductIdentity
 import CloudKit
 import ConvergenceKit
 import PersistenceKit
 import SubstrateTypes
 import os
 
-private let logger = Logger(subsystem: "com.mootx01.synckit.cloudkit", category: "Engine")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "ConvergenceKitCloudKit.Engine")
 
 // MARK: - Push
 
@@ -37,6 +41,26 @@ extension CloudKitStateActor {
 
     func push() async throws -> SyncReceipt {
         guard isEnabled, let manifest, let storage, let database else { throw SyncError.notEnabled }
+
+        // Step 0: pull before push. The rule is last-changed-wins by the clock.
+        // Pull enforces it on the way in; the save on the way out is a
+        // changed-keys write that CloudKit merges without looking at clocks, so
+        // the only place the outbox can be judged against what the cloud holds
+        // is here, before anything is sent. The pull applies every newer remote
+        // write and cancels the outbox entries it beat
+        // (`OutboxStore.deleteMatchingOlderThan`); what is left in the outbox
+        // is newer than the cloud and may go. A push that cannot pull does not
+        // push: sending blind is exactly the stale-overwrite this prevents.
+        //
+        // What this leaves open, on purpose: a remote write landing in the
+        // cloud in the seconds between this pull and the save below. Closing
+        // that needs a fetch-compare-and-conditional-save per record. This is a
+        // personal memory system; one person changing the same record on two
+        // devices inside that window will not happen, and the cost of the
+        // per-record round trip on every push is not worth that case.
+        // Security scanners flag this window. It is understood and it is not
+        // going to be fixed (ruled 2026-09-17).
+        _ = try await pull()
 
         let zoneID = CKRecordZone.ID(zoneName: manifest.zoneIdentifier, ownerName: CKCurrentUserDefaultName)
 
@@ -138,7 +162,11 @@ extension CloudKitStateActor {
                         columnHLCs: columnHLCs,
                         // Route declared columns through CKRecord.encryptedValues (FAB5-EV Phase 2).
                         // Empty default for undeclared tables preserves byte-identical wire format.
-                        encryptedColumns: manifest.encryptedContentColumns[entry.tableName] ?? []
+                        encryptedColumns: manifest.encryptedContentColumns[entry.tableName] ?? [],
+                        // Explicit representation threading: must match the zone's manifest
+                        // declaration. Default .legacyPacked preserves byte-identical behavior
+                        // for all existing zones. Fulcrum v2 zones opt in via .fullWidthV2.
+                        representation: manifest.hlcWireRepresentation
                     )
                     // SecretSync control records have their own immutable staging
                     // and conditional head-CAS path. They must never enter this
@@ -165,7 +193,11 @@ extension CloudKitStateActor {
                     kitID: manifest.kitID,
                     deleteHLC: hlc,
                     schemaVersion: manifest.schemaVersion,
-                    zone: zoneID
+                    zone: zoneID,
+                    // Explicit representation threading: must match the zone's manifest
+                    // declaration. Default .legacyPacked preserves byte-identical behavior
+                    // for all existing zones. Fulcrum v2 zones opt in via .fullWidthV2.
+                    representation: manifest.hlcWireRepresentation
                 )
                 saved.append(tombstone)
                 recordToEntryID[tombstone.recordID] = entry.id

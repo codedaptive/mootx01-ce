@@ -2,7 +2,7 @@
 title: The Road Ahead for MOOTx01
 status: active-roadmap
 audience: public
-updated: 2026-07-24
+updated: 2026-09-15
 ---
 
 # The Road Ahead for MOOTx01
@@ -67,6 +67,33 @@ reported and never automatically erase estate memories.
 The next chapter is MOOTx01-App: one native product across iOS, iPadOS, and
 macOS.
 
+1.1 ships through release candidates. The benchmarks run against the first
+candidate so their numbers describe the release you install, and the app,
+`moot-mgr`, and installers finish in later candidates while those benchmarks
+run. Anything below is direction, and it is renegotiated against what the
+candidates show.
+
+### One Mac, one resident estate
+
+Version 1.1 also makes the command-line distribution and signed native
+MOOTx01 editions safe to install on the same Mac.
+
+When the command-line tools are installed alone, their resident provider owns
+the estate. When an approved, compatible native-app provider is available, the
+Mac can hand ownership to it without creating another estate. Installing the
+CLI afterward adds commands and client wiring without starting a competing
+daemon. Both paths continue to use the same logical service and memory.
+
+Provider versions are checked before any swap. A newer compatible provider can
+take over through a cooperative, crash-recoverable handoff; an older provider
+cannot replace a newer one. If the versions, estate schema, or required service
+contract do not overlap safely, MOOTx01 leaves the working provider in place
+and tells you which component to update. It never resolves a mismatch by
+opening an empty estate or running two writers.
+
+The public cross-edition contract is recorded in
+[`DECISION_MACOS_PROVIDER_COEXISTENCE_V1_1.md`](docs/decisions/DECISION_MACOS_PROVIDER_COEXISTENCE_V1_1.md).
+
 ### Ask what MOOT remembers
 
 The new Review Center will turn a growing memory estate into something you can
@@ -103,6 +130,11 @@ Apple Intelligence availability depends on supported hardware, software,
 language, region, and user settings. MOOTx01 will provide a useful fallback
 when the on-device model is unavailable.
 
+Two local-model workers run on every platform, in both the Swift and Rust
+editions: a cross-encoder reranker that orders recall evidence, and NuExtract,
+a small on-device model that extracts facts from what you capture. Neither
+sends your memories anywhere.
+
 ### Make Obsidian continuous
 
 Version 1.1 will build on the shipped, on-demand vault workflow with an
@@ -113,26 +145,6 @@ It will watch both sides, resynchronize after missed changes, surface conflicts
 and blocked items, and keep the estate—not the vault—as the authority. Private,
 restricted, secret, and non-exportable material will remain outside automatic
 exchange.
-
-### One memory, many models
-
-We are building a vendor-neutral Work Packet: a durable record of an objective,
-the sources used, the claims produced, what remains uncertain, and what should
-happen next.
-
-That unlocks our flagship demonstration:
-
-1. Claude researches a topic and files its findings in MOOTx01.
-2. ChatGPT or Codex researches independently and files another result.
-3. Apple Intelligence or another local model finds both.
-4. It compares the evidence, preserves the disagreements, and writes a linked
-   synthesis.
-5. Either frontier model can return later and continue from that work.
-
-No copied chat transcript. No vendor-owned memory silo. No pretending that two
-models agreed when they did not.
-
-We call it **Three Minds, One Memory**.
 
 ### Take your estate with you
 
@@ -148,17 +160,23 @@ You choose when continuity is worth crossing the device boundary.
 Windows and Linux users will not be left watching through an Apple-shaped
 window.
 
-The `moot-mgr` web app will provide the Review Center, Work Packet lineage,
-estate health, and approved memory-management actions through the local
-resident host. The native MOOTx01-App is the Apple experience. The `moot-mgr`
-web app is the cross-platform experience. Both speak the same memory language.
+The `moot-mgr` web app will provide the Review Center, estate health, and
+approved memory-management actions through the local resident host. The native
+MOOTx01-App is the Apple experience. The `moot-mgr` web app is the
+cross-platform experience. Both speak the same memory language.
+
+Through either one, 1.1 gives you:
+
+- scheduled memory reviews and housekeeping;
+- private comparison of bounded research results;
+- no automatic destructive memory cleanup: retirement waits for you.
 
 ## Version 1.2 — your MOOT can meet another MOOT
 
 Personal memory is only the beginning.
 
-Federation will let explicitly paired estates exchange eligible memories and
-Work Packets during bounded, time-limited sessions.
+Federation will let explicitly paired estates exchange eligible memories during
+bounded, time-limited sessions.
 
 You will be able to see:
 
@@ -173,10 +191,18 @@ meeting between estates that remain independently owned.
 
 Version 1.2 also extends the local-agent idea beyond supported Apple devices:
 
-- local-model workers for Windows, Linux, Mac, and servers;
-- scheduled memory reviews and housekeeping;
-- private research-result comparison;
-- no automatic destructive memory cleanup.
+- a native Windows app carrying scheduled reviews, housekeeping, and research
+  comparison outside the browser;
+- a learned distiller, adopted only if it measures better than the exact one
+  that ships today.
+
+Version 1.2 also plans an optional embedded question answering capability.
+Ask a question, and MOOTx01 retrieves the relevant memories, hands their text
+to a small model installed on your machine, and returns a concise answer with
+references to the memories it used, so the calling AI reads less source
+material. It ships only when a model answers above our accuracy bar and
+abstains when the evidence is thin or contradictory; until then, and whenever
+an answer cannot be trusted, you get the retrieved memories themselves.
 
 ## Version 1.3 — PGlite, pgMOOT, and Postgres anywhere
 
@@ -185,7 +211,7 @@ Postgres environments.
 
 **PGlite** will explore a portable Postgres runtime in WebAssembly: a path to
 zero-install MOOTx01 demonstrations, richer offline web experiences, and
-private Work Packet exploration directly in the browser.
+private estate exploration directly in the browser.
 
 **pgMOOT** is our working name for an optional PostgreSQL deployment and
 computation layer for larger estates, teams, resident jobs, backup and
@@ -204,8 +230,8 @@ The contract remains the same:
 | Release | What changes for you |
 |---|---|
 | **1.0.x today** | Your AI can remember beyond one conversation and move eligible knowledge through Obsidian, Markdown, and OKF-compatible vaults |
-| **1.1** | MOOTx01-App brings native agentic memory to iPhone, iPad, and Mac; `moot-mgr` carries it to other platforms; optional automatic Obsidian synchronization builds on the shipped vault workflow |
-| **1.2** | Local agents and explicitly paired estates can collaborate safely |
+| **1.1** | MOOTx01-App brings native agentic memory to iPhone, iPad, and Mac; `moot-mgr` carries it to other platforms with scheduled reviews and research comparison; local-model fact extraction and reranking on every platform; optional automatic Obsidian synchronization builds on the shipped vault workflow |
+| **1.2** | Explicitly paired estates collaborate safely; a native Windows app; optional embedded question answering |
 | **1.3** | PGlite brings portable Postgres to the web; pgMOOT adds optional PostgreSQL server scale |
 
 ## Follow the build

@@ -54,7 +54,78 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
     private var tmpDir: URL { root.appendingPathComponent("tmp") }
     private var newDir: URL { root.appendingPathComponent("new") }
     private var curDir: URL { root.appendingPathComponent("cur") }
+    private var claimDir: URL { root.appendingPathComponent("claim") }
     private var doneDir: URL { root.appendingPathComponent("done") }
+
+    /// Length of the claim-name prefix: 32 lowercase hex chars (a hyphenless
+    /// UUIDv4) plus one `-` separator. A claim-in-progress file is named
+    /// `claim/<32hex>-<original filename>`; stripping exactly this many
+    /// characters recovers the original name. Cross-port protocol constant
+    /// (a Swift producer and a Rust drainer may share one maildir), mirrored
+    /// by Rust `CLAIM_PREFIX_LEN`. See QUEUEKIT_SPEC I-3.
+    static let claimPrefixLength = 33
+
+    /// Atomically claim `new/<entry>`, returning true if THIS caller won.
+    ///
+    /// A direct `rename(new/X → cur/X)` is NOT a safe claim: POSIX mandates
+    /// that when `old` and `new` resolve to the same existing file, rename
+    /// returns success and performs no action. In the concurrent-drain race a
+    /// losing drainer can resolve `src` before the winner's rename commits and
+    /// `dst` after it — both then reference the same inode and the loser gets
+    /// a success no-op, i.e. a duplicate claim (observed deterministically on
+    /// external APFS volumes; QUEUEKIT-CONCURRENT-CLAIM).
+    ///
+    /// So the claim is two renames:
+    ///   1. `new/<entry>` → `claim/<32hex>-<entry>` — the destination is
+    ///      unique to this claim attempt and does not pre-exist, so the
+    ///      same-file rule can never manufacture a second success; exactly one
+    ///      caller wins, every loser gets ENOENT.
+    ///   2. `claim/<32hex>-<entry>` → `cur/<entry>` — uncontended (the winner
+    ///      exclusively owns the claim file); keeps `cur/` names unchanged for
+    ///      `complete`/`inFlight`/`reclaimInFlight`.
+    ///
+    /// A crash between the two renames strands the file in `claim/`; the
+    /// mount-time `reclaimInFlight` sweeps it back to `new/`. Rust twin:
+    /// `FilesystemBackend::claim_entry`.
+    private func claimEntry(_ entry: String) throws -> Bool {
+        let src = newDir.appendingPathComponent(entry).path
+        let token = UUID().uuidString
+            .replacingOccurrences(of: "-", with: "").lowercased()
+        let claimPath = claimDir.appendingPathComponent("\(token)-\(entry)").path
+        var err: Int32 = 0
+        var rc = src.withCString { s in
+            claimPath.withCString { d -> Int32 in
+                let r = rename(s, d)
+                if r != 0 { err = errno }
+                return r
+            }
+        }
+        if rc != 0 {
+            // A concurrent drainer moved it out of new/ first — it won.
+            if err == ENOENT { return false }
+            throw QueueError.renameFailed(
+                from: src, to: claimPath,
+                underlying: NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(err), userInfo: nil))
+        }
+        let dst = curDir.appendingPathComponent(entry).path
+        // Fail-closed (SPEC §5 B-3): if the publish rename fails, the job is
+        // safe in claim/ and the next mount's reclaim recovers it.
+        rc = claimPath.withCString { s in
+            dst.withCString { d -> Int32 in
+                let r = rename(s, d)
+                if r != 0 { err = errno }
+                return r
+            }
+        }
+        if rc != 0 {
+            throw QueueError.renameFailed(
+                from: claimPath, to: dst,
+                underlying: NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(err), userInfo: nil))
+        }
+        return true
+    }
 
     // MARK: - Identifier validation (planned security hardening, CAND-023)
 
@@ -373,12 +444,13 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
         }
 
         // Decode each file WHILE it is still in new/ — a read does not claim it —
-        // and rename ONLY matching-stream files into cur/. Non-matching files are
-        // never touched, so concurrent drainers of different streams (encode +
-        // dreaming) cannot steal or race on each other's jobs. (The earlier
-        // claim-all-then-unclaim form transiently moved every stream's files into
-        // cur/, which collided under concurrent stream drains — recall-driven dreaming  requires
-        // that one stream's drain never disturbs another's.)
+        // and claim ONLY matching-stream files (two-step, via claimEntry).
+        // Non-matching files are never touched, so concurrent drainers of
+        // different streams (encode + dreaming) cannot steal or race on each
+        // other's jobs. (The earlier claim-all-then-unclaim form transiently
+        // moved every stream's files into cur/, which collided under concurrent
+        // stream drains — recall-driven dreaming requires that one stream's
+        // drain never disturbs another's.)
         var results: [(Job, SessionID)] = []
         for entry in entries {
             let newPath = newDir.appendingPathComponent(entry).path
@@ -393,22 +465,11 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
                 guard job.streamID == stream else {
                     continue  // belongs to another stream — leave it in new/
                 }
-                // Atomic claim: new/ → cur/. A same-stream drainer that won the
-                // race renames it first → our rename hits ENOENT → skip.
-                let dst = curDir.appendingPathComponent(entry).path
-                let rc = newPath.withCString { s in
-                    dst.withCString { d in rename(s, d) }
-                }
-                if rc == 0 {
+                // Two-step exclusive claim (see claimEntry): a same-stream
+                // drainer that won the race moved it out of new/ first →
+                // claimEntry returns false → skip.
+                if try claimEntry(entry) {
                     results.append((job, SessionID.mint()))
-                } else if errno == ENOENT {
-                    continue
-                } else {
-                    throw QueueError.renameFailed(
-                        from: newPath, to: dst,
-                        underlying: NSError(
-                            domain: NSPOSIXErrorDomain,
-                            code: Int(errno), userInfo: nil))
                 }
             } catch let e as QueueError {
                 throw e
@@ -457,23 +518,12 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
                 detail: "cannot list new/: \(error)")
         }
 
+        // Two-step exclusive claim per file (see claimEntry): a losing
+        // concurrent drainer gets false, never a duplicate success.
         var claimedFiles: [String] = []
         for entry in entries {
-            let src = newDir.appendingPathComponent(entry).path
-            let dst = curDir.appendingPathComponent(entry).path
-            let rc = src.withCString { s in
-                dst.withCString { d in rename(s, d) }
-            }
-            if rc == 0 {
+            if try claimEntry(entry) {
                 claimedFiles.append(entry)
-            } else if errno == ENOENT {
-                continue  // another drainer won
-            } else {
-                throw QueueError.renameFailed(
-                    from: src, to: dst,
-                    underlying: NSError(
-                        domain: NSPOSIXErrorDomain,
-                        code: Int(errno), userInfo: nil))
             }
         }
 
@@ -510,16 +560,42 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
     // MARK: - reclaim (crash recovery)
 
     /// Move every job left in `cur/` (claimed by a prior process that exited
-    /// before completing it) back to `new/`, so the next `drainAvailable` re-drives
-    /// it. The inverse of the `new/`→`cur/` claim in `drainAvailable`.
+    /// before completing it) back to `new/`, and sweep any file stranded in
+    /// `claim/` (a crash between the two claim renames — see `claimEntry`)
+    /// back to `new/` under its original name, so the next `drainAvailable`
+    /// re-drives all of them.
     ///
     /// Safe to call ONLY at mount, when no drain session is live: a freshly
-    /// started process owns no in-flight work, so every entry in `cur/` is a crash
-    /// orphan from a previous run. With one writer per estate,
-    /// that precondition holds. Returns the number of jobs reclaimed.
+    /// started process owns no in-flight work, so every entry in `cur/` and
+    /// `claim/` is a crash orphan from a previous run. With one writer per
+    /// estate, that precondition holds. Returns the number of jobs reclaimed
+    /// (both slots). Rust twin: `FilesystemBackend::reclaim_in_flight`.
     @discardableResult
     public func reclaimInFlight() async throws -> Int {
         let fm = FileManager.default
+        var reclaimed = 0
+
+        // claim/ sweep first: strip the fixed `<32hex>-` prefix to recover the
+        // original filename. A name too short to carry the prefix is not ours
+        // (only claimEntry writes here) and is left in place.
+        let claimEntries: [String]
+        do {
+            claimEntries = try fm.contentsOfDirectory(atPath: claimDir.path).sorted()
+        } catch {
+            throw QueueError.backendUnavailable(
+                detail: "cannot list claim/: \(error)")
+        }
+        for entry in claimEntries {
+            guard entry.count > Self.claimPrefixLength,
+                  Array(entry)[Self.claimPrefixLength - 1] == "-"
+            else { continue }
+            let original = String(entry.dropFirst(Self.claimPrefixLength))
+            try renameForReclaim(
+                from: claimDir.appendingPathComponent(entry).path,
+                to: newDir.appendingPathComponent(original).path,
+                reclaimed: &reclaimed)
+        }
+
         let entries: [String]
         do {
             entries = try fm.contentsOfDirectory(atPath: curDir.path).sorted()
@@ -527,26 +603,39 @@ public final class FilesystemBackend: QueueBackend, @unchecked Sendable {
             throw QueueError.backendUnavailable(
                 detail: "cannot list cur/: \(error)")
         }
-        var reclaimed = 0
         for entry in entries {
-            let src = curDir.appendingPathComponent(entry).path
-            let dst = newDir.appendingPathComponent(entry).path
-            let rc = src.withCString { s in
-                dst.withCString { d in rename(s, d) }
-            }
-            if rc == 0 {
-                reclaimed += 1
-            } else if errno == ENOENT {
-                continue  // already moved by a concurrent caller (not expected at mount)
-            } else {
-                throw QueueError.renameFailed(
-                    from: src, to: dst,
-                    underlying: NSError(
-                        domain: NSPOSIXErrorDomain,
-                        code: Int(errno), userInfo: nil))
-            }
+            try renameForReclaim(
+                from: curDir.appendingPathComponent(entry).path,
+                to: newDir.appendingPathComponent(entry).path,
+                reclaimed: &reclaimed)
         }
         return reclaimed
+    }
+
+    /// One reclaim rename: success counts, ENOENT (already moved by a
+    /// concurrent caller — not expected at mount) is skipped, anything else
+    /// propagates fail-closed.
+    private func renameForReclaim(
+        from src: String, to dst: String, reclaimed: inout Int
+    ) throws {
+        var err: Int32 = 0
+        let rc = src.withCString { s in
+            dst.withCString { d -> Int32 in
+                let r = rename(s, d)
+                if r != 0 { err = errno }
+                return r
+            }
+        }
+        if rc == 0 {
+            reclaimed += 1
+        } else if err == ENOENT {
+            return
+        } else {
+            throw QueueError.renameFailed(
+                from: src, to: dst,
+                underlying: NSError(
+                    domain: NSPOSIXErrorDomain, code: Int(err), userInfo: nil))
+        }
     }
 
     // MARK: - watch (spec §3)

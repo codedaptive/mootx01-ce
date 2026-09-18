@@ -1,0 +1,212 @@
+#!/bin/sh
+# Pre-commit hook — three gates, all blocking.
+#
+# GATE 1: Developer-path leak guard.
+#   Blocks a commit that adds a reconstructable developer worktree path under
+#   the documentation tree. Covered forms: absolute /Users/<name>/... paths,
+#   prefix-substituted forms where a username segment immediately precedes a
+#   known home subdirectory (devlop, dev_docs, Library/Application Support),
+#   and tilde-user forms such as ~<username>/devlop where the tilde is followed
+#   immediately by a username rather than acting as the home shorthand.
+#   The sanctioned spellings ~/..., $HOME/..., and ${HOME}/... all pass.
+#   This gate runs on staged blobs only (new content versus HEAD) — it does
+#   not retroactively flag paths already in the committed tree.
+#   Activate once per checkout:  git config core.hooksPath .githooks
+#
+# GATE 2: Pattern-regression selftest.
+#   When the staged set touches the guard script, its fixture file, its
+#   selftest runner, or this hook — scripts/check-docs-internal-paths.sh,
+#   scripts/path-leak-fixtures.txt,
+#   scripts/check-docs-internal-paths-selftest.sh, or .githooks/pre-commit —
+#   this hook runs the selftest and blocks the commit if the selftest exits
+#   non-zero.
+#
+#   Why this gate exists: three pattern revisions were made in mission GI-01,
+#   and each was bypassed in review. None of the bypasses was found by reading
+#   the regex — all three were found only by running strings against the pattern.
+#   The selftest runner (scripts/check-docs-internal-paths-selftest.sh) and its
+#   30-case fixture (scripts/path-leak-fixtures.txt) commit those strings so the
+#   next author has something to run. But a regression test that nobody executes
+#   is the "existed but ran in no workflow, so it sat red unnoticed" failure the
+#   guard's own header names. This gate makes a pattern change unable to land
+#   with a reopened bypass: the selftest fires on every commit that modifies the
+#   guard, the fixture, the runner, or this hook.
+#
+#   The selftest is NOT run on commits that do not touch those four files —
+#   ordinary commits pay nothing.
+#
+# GATE 3: Transcript-currency check.
+#   When the staged set touches the transcript generator, the committed
+#   transcript, the evidence file, or the guard script —
+#   scripts/dg01-guard-evidence-gen.sh,
+#   scripts/dg01-guard-evidence-transcript.txt,
+#   docs/analysis/DG-01_GUARD_EVIDENCE.md, or
+#   scripts/check-docs-internal-paths.sh —
+#   this hook regenerates the transcript to a temporary file, diffs it
+#   against the committed copy, and blocks the commit if they differ.
+#
+#   Why this gate exists: the committed transcript is a function of three
+#   inputs — the generator, the guard, and the evidence file — but none of
+#   those three was previously watched. Editing the evidence file silently
+#   staled the transcript and nothing caught it, the same shape as the defect
+#   that produced GATE 2. This gate ensures the transcript cannot diverge from
+#   what the generator would produce right now.
+#
+#   The hook generates to a temp file and compares — it does NOT write to the
+#   working tree. A pre-commit hook that mutates tracked files changes the tree
+#   out from under the author mid-commit. To fix a stale transcript, run:
+#     bash scripts/dg01-guard-evidence-gen.sh --write-transcript
+#   then re-stage and retry.
+#
+#   This gate is NOT run on commits that do not touch those four files —
+#   ordinary commits pay nothing.
+
+repo_root="$(git rev-parse --show-toplevel)" || exit 0
+
+# --- GATE 1: developer-path leak guard ---
+"$repo_root/scripts/check-docs-internal-paths.sh" diff || exit 1
+
+
+# --- Staged-content materialisation (shared by GATE 2 and GATE 3) ---
+#
+# Both gates below validate the commit that is ABOUT TO LAND, which is the
+# INDEX — not the working tree. Git lets the two differ, and before this helper
+# existed both gates read the worktree: a contributor could stage a weakened
+# guard pattern, restore the good copy in the worktree, and the hook would
+# happily validate the good copy while committing the weakened one. The gate
+# reported success about a file that was not being committed.
+#
+# So every input a gate reads is extracted from the index into a scratch tree,
+# and the gate runs there. The selftest and the generator both resolve their
+# siblings relative to their own location, so materialising the whole set into
+# one mirrored directory makes them read staged content throughout without
+# either script needing to know about the index.
+#
+# A path staged for DELETION cannot be extracted. That is not a reason to skip
+# the gate: removing the guard, its fixture, or its runner is exactly the
+# regression these gates exist to stop, so it blocks.
+_staged_root=""
+materialise_staged() {
+  _staged_root="$(mktemp -d)"
+  for _rel in "$@"; do
+    if ! git cat-file -e ":$_rel" 2>/dev/null; then
+      echo ""
+      echo "BLOCKED: $_rel is staged for deletion or is absent from the index."
+      echo "The path-leak guard, its fixture, and its runner are load-bearing;"
+      echo "removing one disables the gate that protects the rest."
+      rm -rf "$_staged_root"
+      exit 1
+    fi
+    mkdir -p "$_staged_root/$(dirname "$_rel")"
+    git show ":$_rel" > "$_staged_root/$_rel"
+  done
+  chmod +x "$_staged_root"/scripts/*.sh 2>/dev/null || true
+}
+
+# Collect staged file paths ONCE, before any consumer. The self-validation
+# block below previously read $staged_files before this assignment ran, so
+# the mismatch check silently never fired (codex finding 2026-08-26).
+staged_files="$(git diff --cached --name-only)"
+
+# The hook cannot validate a staged copy of ITSELF: git invokes the worktree
+# hook, so a staged-but-different hook is not the code running this check. The
+# correct response is to refuse rather than to report on the wrong file.
+if printf '%s\n' "$staged_files" | grep -qE '^\.githooks/pre-commit$'; then
+  if ! git show ":.githooks/pre-commit" | diff -q - "$repo_root/.githooks/pre-commit" > /dev/null 2>&1; then
+    echo ""
+    echo "BLOCKED: .githooks/pre-commit is staged with content that differs from"
+    echo "the working-tree copy git just executed. The gates below would report on"
+    echo "the hook running now, not the hook being committed."
+    echo ""
+    echo "To fix: make the worktree copy identical to what you intend to commit"
+    echo "(git checkout-index -f .githooks/pre-commit), then re-run the commit so"
+    echo "the hook that validates is the hook that lands."
+    exit 1
+  fi
+fi
+
+# --- GATE 2: pattern-regression selftest ---
+# Collect staged file paths once; grep against exact paths with anchors.
+#   This hook's own path is in the trigger set below. That is deliberate: the
+#   recurring failure this mission exists to close is that a guard's own
+#   artifacts get treated as exempt from the guard. A change to the wiring here
+#   can disable GATE 2 as surely as a change to the pattern can reopen a bypass,
+#   so the wiring is gated by the same selftest it invokes.
+#   ($staged_files was collected once, above the hook self-validation block.)
+if printf '%s\n' "$staged_files" | grep -qE \
+    '^(scripts/check-docs-internal-paths\.sh|scripts/path-leak-fixtures\.txt|scripts/check-docs-internal-paths-selftest\.sh|\.githooks/pre-commit)$'
+then
+  echo "pre-commit: guard pattern or fixtures staged — running regression selftest"
+  echo "  fixture: scripts/path-leak-fixtures.txt"
+  materialise_staged \
+    scripts/check-docs-internal-paths.sh \
+    scripts/path-leak-fixtures.txt \
+    scripts/check-docs-internal-paths-selftest.sh
+  if ! "$_staged_root/scripts/check-docs-internal-paths-selftest.sh"; then
+    rm -rf "$_staged_root"
+    echo ""
+    echo "BLOCKED: selftest failed. The pattern change reopens a previously closed"
+    echo "bypass. Fix the pattern in scripts/check-docs-internal-paths.sh so every"
+    echo "FIRE case exits 1 and every CLEAN case exits 0, then re-stage and retry."
+    echo "Cases live in scripts/path-leak-fixtures.txt."
+    exit 1
+  fi
+  rm -rf "$_staged_root"
+fi
+
+# --- GATE 3: transcript-currency check ---
+# Regenerate the transcript to a temp file and diff against the committed copy.
+# Do NOT use --write-transcript here — that would mutate the working tree.
+# The generator's plain stdout mode emits scenario output only (no header).
+# The committed transcript prepends a generated-file header (lines starting
+# with #). Strip the header from the committed copy before diffing so both
+# sides contain only scenario output.
+if printf '%s\n' "$staged_files" | grep -qE \
+    '^(scripts/dg01-guard-evidence-gen\.sh|scripts/dg01-guard-evidence-transcript\.txt|docs/analysis/DG-01_GUARD_EVIDENCE\.md|scripts/check-docs-internal-paths\.sh)$'
+then
+  echo "pre-commit: transcript inputs staged — checking transcript currency"
+  # Same index-versus-worktree hazard as GATE 2: regenerate from the STAGED
+  # generator, guard and evidence file, and diff against the STAGED transcript.
+  # Reading any of these from the worktree would let a stale transcript land
+  # beside a good worktree copy that git never commits.
+  materialise_staged \
+    scripts/dg01-guard-evidence-gen.sh \
+    scripts/dg01-guard-evidence-transcript.txt \
+    scripts/check-docs-internal-paths.sh \
+    docs/analysis/DG-01_GUARD_EVIDENCE.md
+  _generated="$(mktemp)"
+  _committed_body="$(mktemp)"
+  # Defence in depth: clear every git plumbing variable before invoking the
+  # generator. Git exports GIT_DIR, GIT_INDEX_FILE, and related variables into
+  # the hook environment. The generator creates throwaway repositories and
+  # stages files inside them; those variables, if inherited, would redirect
+  # those git operations to the REAL repository's index — a pre-commit hook
+  # mutating the very index it is validating. The generator also clears these
+  # variables at its own top (HALF 1 of the fix), but a defence-in-depth call
+  # site means a future edit to the generator cannot accidentally re-expose
+  # this hazard. POSIX subshell + unset requires no external utility.
+  ( unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX \
+          GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES \
+          GIT_COMMON_DIR GIT_NAMESPACE GIT_SUPER_PREFIX \
+          GIT_INTERNAL_SUPER_PREFIX
+    bash "$_staged_root/scripts/dg01-guard-evidence-gen.sh" ) > "$_generated" 2>&1
+  # Extract the scenario body from the committed transcript: skip header lines
+  # (all lines before the first scenario delimiter) so both sides are comparable.
+  awk '/^----- /{found=1} found{print}' \
+    "$_staged_root/scripts/dg01-guard-evidence-transcript.txt" > "$_committed_body"
+  if ! diff -q "$_generated" "$_committed_body" > /dev/null 2>&1; then
+    echo ""
+    echo "BLOCKED: the committed transcript is stale. The generator would produce"
+    echo "different output against the current evidence file and guard."
+    echo ""
+    echo "To fix: bash scripts/dg01-guard-evidence-gen.sh --write-transcript"
+    echo "Then re-stage scripts/dg01-guard-evidence-transcript.txt and retry."
+    echo ""
+    echo "Why this gate exists: the transcript is evidence of the guard's"
+    echo "behaviour; a stale transcript is false evidence."
+    rm -f "$_generated" "$_committed_body"
+    rm -rf "$_staged_root"
+    exit 1
+  fi
+  rm -f "$_generated" "$_committed_body"
+fi

@@ -6,22 +6,21 @@
 //! `memory` tool appears when MOOTX01_MEMORY_TOOL=1 and is absent otherwise).
 //!
 //! The sensitivity gate (restricted/secret drawers hidden) and the elevated-tier
-//! preservation on edit are tested in `dispatch_tests.rs` — those three tests
-//! live there because they were the first memory-tool tests written and relied on
-//! the dispatch helpers already established in that file.
+//! preservation on edit use the selected-v2 public dispatcher below. They remain
+//! adapter contracts even though their fixtures seed drawers directly.
 //!
-//! # Env-var serialization
-//!
-//! All tests that read `MOOTX01_MEMORY_TOOL` hold `mem_lock()` to prevent
-//! concurrent env-var mutations under the parallel test runner.
+//! The adapter is invoked through its explicit production flag, so these tests
+//! do not mutate process-global memory-tool environment state.
 
 use std::collections::BTreeMap;
+mod test_support;
+use test_support::SelectedV2Session;
 use aria_mcp::{
-    dispatch::{dispatch_tool, wall_now},
+    dispatch::wall_now,
     estate_registry::EstateRegistry,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
-    tool_list::{build_tool_list_with_flags, vault_enabled},
+    memory_adapter::dispatch_memory,
+    sensitivity_grant_ledger::SensitivityGrantLedger,
 };
 use locus_kit::{
     adjectives::AdjectiveSensitivity,
@@ -51,26 +50,15 @@ fn is_error(result: &serde_json::Value) -> bool {
     result["isError"] == serde_json::json!(true)
 }
 
-/// Serialize all tests that mutate MOOTX01_MEMORY_TOOL so their env writes
-/// do not race each other under the parallel test runner.
-fn mem_lock() -> std::sync::MutexGuard<'static, ()> {
-    static MEM: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    MEM.lock().unwrap_or_else(|e| e.into_inner())
-}
-
-/// Enable the memory tool and dispatch a single call, then restore the env.
+/// Construct the production adapter's direct live seam with an explicit enabled
+/// flag. Adapter behavior does not need a process-global environment mutation.
 fn with_memory_enabled<F>(f: F)
 where
-    F: FnOnce(&EstateRegistry, &SurfacedRecallLedger),
+    F: FnOnce(&EstateRegistry, &SensitivityGrantLedger),
 {
-    let _guard = mem_lock();
-    std::env::set_var("MOOTX01_MEMORY_TOOL", "1");
     let registry = EstateRegistry::new_inmemory_bare();
-    let ledger = SurfacedRecallLedger::new();
+    let ledger = SensitivityGrantLedger::new();
     f(&registry, &ledger);
-    // Always restore — even if f() panics this runs via drop on the guard,
-    // but the env var must be cleared after the test body explicitly.
-    std::env::remove_var("MOOTX01_MEMORY_TOOL");
 }
 
 /// Seed a drawer directly into the `memories` wing at the given room path
@@ -98,13 +86,38 @@ fn seed_memory_file(
         .expect("seed_memory_file: capture must succeed");
 }
 
+/// Seed through the session's pre-captured test observation handles before
+/// exercising the same session's dispatcher-owned state.
+fn seed_memory_file_session(
+    session: &SelectedV2Session,
+    room: &str,
+    content: &str,
+    sensitivity: AdjectiveSensitivity,
+) {
+    let mut frame = CaptureFrame::new(
+        content,
+        CaptureChannel::Actuator,
+        room,
+        LatticeAnchor::udc("000"),
+        "aria-mcp-tests",
+        "default",
+    );
+    frame.wing = Some("memories".to_string());
+    frame.sensitivity = sensitivity;
+    let coord = session.coord.lock().unwrap();
+    coord
+        .capture(&session.default.handle, frame, wall_now())
+        .expect("seed_memory_file: capture must succeed");
+}
+
 fn call(
     name: &str,
     a: &BTreeMap<String, JsonValue>,
     registry: &EstateRegistry,
-    ledger: &SurfacedRecallLedger,
+    ledger: &SensitivityGrantLedger,
 ) -> serde_json::Value {
-    dispatch_tool(name, a, registry, ledger).expect("dispatch must not throw")
+    assert_eq!(name, "memory", "this helper exercises only the memory adapter seam");
+    dispatch_memory(a, registry, true, ledger).expect("memory adapter must not throw")
 }
 
 // ---------------------------------------------------------------------------
@@ -114,69 +127,20 @@ fn call(
 /// Mirror of Swift `MemoryToolAdapterSensitivityTests.disabledMemoryToolRefusesDispatch`.
 #[test]
 fn env_gate_absent_refuses_dispatch() {
-    let _guard = mem_lock();
-    std::env::remove_var("MOOTX01_MEMORY_TOOL");
     let registry = EstateRegistry::new_inmemory_bare();
-    let result = dispatch_tool(
-        "memory",
+    let result = dispatch_memory(
         &args! {"command" => "view", "path" => "/memories"},
         &registry,
-        &SurfacedRecallLedger::new(),
+        false,
+        &SensitivityGrantLedger::new(),
     )
-    .expect("dispatch must return a tool result, not a transport error");
+    .expect("adapter must return a tool result, not a transport error");
     let t = text(&result);
     assert!(
         t.contains("disabled"),
         "absent MOOTX01_MEMORY_TOOL must produce a disabled refusal; got: {t}"
     );
     assert!(is_error(&result), "refusal must be isError:true; got: {result:?}");
-    // Restore for tests sharing the process.
-    std::env::remove_var("MOOTX01_MEMORY_TOOL");
-}
-
-// ---------------------------------------------------------------------------
-// Tool list projection
-// ---------------------------------------------------------------------------
-
-/// When MOOTX01_MEMORY_TOOL=1, the `memory` tool appears first in the list
-/// (mirroring Swift ToolProjection.tools() which prepends memoryAdapterTools()).
-/// When disabled, it is absent and the base counts (71/65) are unchanged.
-#[test]
-fn memory_tool_in_list_when_enabled_absent_when_disabled() {
-    // Disabled: `memory` must not appear in the baseline list.
-    let base = build_tool_list_with_flags(vault_enabled(), false);
-    let base_arr = base.as_array().expect("must be array");
-    assert!(
-        !base_arr.iter().any(|t| t["name"] == "memory"),
-        "`memory` must be absent from the baseline tool list"
-    );
-    let base_count = base_arr.len();
-
-    // Enabled: `memory` must appear and the count must be base + 1.
-    let enabled = build_tool_list_with_flags(vault_enabled(), true);
-    let enabled_arr = enabled.as_array().expect("must be array");
-    assert!(
-        enabled_arr.iter().any(|t| t["name"] == "memory"),
-        "`memory` must appear in the tool list when memory_on=true"
-    );
-    assert_eq!(
-        enabled_arr.len(),
-        base_count + 1,
-        "enabling the memory tool must add exactly 1 to the tool count"
-    );
-
-    // The `memory` tool must be the first entry (mirrors Swift prepend order).
-    assert_eq!(
-        enabled_arr[0]["name"].as_str(),
-        Some("memory"),
-        "`memory` must be the first tool when memory_on=true"
-    );
-
-    // Schema must carry `command` as a required field.
-    let schema = &enabled_arr[0]["inputSchema"];
-    let required = schema["required"].as_array().expect("required must be array");
-    let has_command = required.iter().any(|v| v.as_str() == Some("command"));
-    assert!(has_command, "`command` must be in the required fields of the memory tool schema");
 }
 
 // ---------------------------------------------------------------------------
@@ -534,14 +498,14 @@ fn rename_refuses_collision_at_destination() {
 
 #[test]
 fn traversal_in_path_is_rejected() {
-    with_memory_enabled(|registry, _ledger| {
+    with_memory_enabled(|registry, ledger| {
         // `..` traversal must be caught by validate_path, returning an INVALID_PARAMS
         // JSON-RPC error (not an isError tool result).
-        let err = dispatch_tool(
-            "memory",
+        let err = dispatch_memory(
             &args! {"command" => "view", "path" => "/memories/../etc/passwd"},
             registry,
-            &SurfacedRecallLedger::new(),
+            true,
+            ledger,
         );
         assert!(
             err.is_err(),
@@ -552,14 +516,31 @@ fn traversal_in_path_is_rejected() {
 
 #[test]
 fn path_not_under_memories_is_rejected() {
-    with_memory_enabled(|registry, _ledger| {
-        let err = dispatch_tool(
-            "memory",
+    with_memory_enabled(|registry, ledger| {
+        let err = dispatch_memory(
             &args! {"command" => "view", "path" => "/etc/passwd"},
             registry,
-            &SurfacedRecallLedger::new(),
+            true,
+            ledger,
         );
         assert!(err.is_err(), "/etc/passwd must produce INVALID_PARAMS; got: {err:?}");
+    });
+}
+
+#[test]
+fn unicode_immediately_after_memories_root_is_rejected_without_panicking() {
+    with_memory_enabled(|registry, ledger| {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch_memory(
+                &args! {"command" => "view", "path" => "/memoriesé"},
+                registry,
+                true,
+                ledger,
+            )
+        }));
+        let result = outcome.expect("malformed Unicode path must not panic");
+        let error = result.expect_err("path without the /memories/ boundary must be rejected");
+        assert_eq!(error.code, aria_mcp::jsonrpc::JSONRPCErrorCode::INVALID_PARAMS);
     });
 }
 
@@ -572,7 +553,7 @@ fn path_not_under_memories_is_rejected() {
 #[test]
 fn missing_command_returns_text_result_not_transport_error() {
     with_memory_enabled(|registry, ledger| {
-        // dispatch_tool must not throw; the result must be a text result.
+        // The direct adapter must not throw; the result must be a text result.
         let result = call("memory", &args! {}, registry, ledger);
         let t = text(&result);
         assert!(!is_error(&result), "missing command must be isError:false; got: {result:?}");
@@ -774,4 +755,202 @@ fn view_range_array_slices_lines() {
         // Line numbers must start at 3.
         assert!(t.contains("     3\t"), "line numbers must start at 3; got: {t}");
     });
+}
+
+// ---------------------------------------------------------------------------
+// Sensitivity grant ceiling on the write side
+// ---------------------------------------------------------------------------
+//
+// The `memory` tool has no sensitivity argument, so its content-bearing
+// writes (create, str_replace, insert) file at the live restricted or secret
+// grant ceiling from the dispatcher's SensitivityGrantLedger, the same rule
+// moot_file_memory applies, and the reply names the tier while a grant is
+// live. These dispatch through the direct live `memory_adapter` seam without
+// touching process environment. Swift twin:
+// `MemoryToolAdapterSensitivityTests` (the "grant ceiling" cases).
+
+/// Dispatch one `memory` call through the test-local memory-enabled session.
+fn memory_with_session(
+    a: &BTreeMap<String, JsonValue>,
+    session: &SelectedV2Session,
+) -> serde_json::Value {
+    session.call("memory", a).expect("memory dispatch must not throw")
+}
+
+/// The adjective sensitivity of the live drawer in the `memories` wing whose
+/// content contains `marker`, read through an explicit sensitivity filter so
+/// a restricted or secret row is visible to the assertion.
+fn filed_tier_of_session(
+    session: &SelectedV2Session,
+    marker: &str,
+    tier: AdjectiveSensitivity,
+) -> Option<AdjectiveSensitivity> {
+    use locus_kit::filter::{Filter, HydrationLevel, RecallFrame};
+    let coord = session.coord.lock().unwrap();
+    let mut frame = RecallFrame::new(vec![Filter::Sensitivity(tier)]);
+    frame.hydration_level = HydrationLevel::Full;
+    frame.limit = Some(50);
+    coord
+        .recall(&session.default.handle, frame, wall_now())
+        .expect("recall must succeed")
+        .into_iter()
+        .find(|d| d.tombstoned_at.is_none() && d.content.contains(marker))
+        .map(|d| d.adjective_sensitivity())
+}
+
+/// The public `memory` tool has an elevated-or-below read ceiling without a
+/// grant. Restricted and secret drawers must be indistinguishable from absent
+/// paths while the normal and elevated controls remain visible.
+#[test]
+fn memory_tool_excludes_hidden_tiers_through_selected_dispatcher() {
+    let session = SelectedV2Session::new_with_memory_enabled(EstateRegistry::new_inmemory_bare());
+    seed_memory_file_session(&session, "normal.txt", "visible normal", AdjectiveSensitivity::Normal);
+    seed_memory_file_session(&session, "elevated.txt", "visible elevated", AdjectiveSensitivity::Elevated);
+    seed_memory_file_session(&session, "private.txt", "private restricted secret-value", AdjectiveSensitivity::Restricted);
+    seed_memory_file_session(&session, "secret.txt", "top secret secret-value", AdjectiveSensitivity::Secret);
+
+    let listing = memory_with_session(&args!["command" => "view", "path" => "/memories"], &session);
+    let listing_text = text(&listing);
+    assert!(!is_error(&listing), "memory root view must succeed: {listing_text}");
+    assert!(listing_text.contains("/memories/normal.txt"), "{listing_text}");
+    assert!(listing_text.contains("/memories/elevated.txt"), "{listing_text}");
+    assert!(!listing_text.contains("/memories/private.txt"), "{listing_text}");
+    assert!(!listing_text.contains("/memories/secret.txt"), "{listing_text}");
+
+    let private_view = memory_with_session(
+        &args!["command" => "view", "path" => "/memories/private.txt"],
+        &session,
+    );
+    let private_text = text(&private_view);
+    assert!(!is_error(&private_view), "hidden path must use the ordinary missing result: {private_text}");
+    assert!(private_text.contains("does not exist"), "{private_text}");
+    assert!(!private_text.contains("private restricted secret-value"), "{private_text}");
+}
+
+/// Editing an elevated drawer through the public dispatcher must retain the
+/// source tier when no higher grant is active; it must not silently downgrade
+/// the new drawer to normal.
+#[test]
+fn memory_tool_edit_preserves_elevated_sensitivity_through_selected_dispatcher() {
+    let session = SelectedV2Session::new_with_memory_enabled(EstateRegistry::new_inmemory_bare());
+    seed_memory_file_session(&session, "elevated.txt", "elevated old text", AdjectiveSensitivity::Elevated);
+
+    let edit = memory_with_session(
+        &args![
+            "command" => "str_replace",
+            "path" => "/memories/elevated.txt",
+            "old_str" => "old",
+            "new_str" => "new",
+        ],
+        &session,
+    );
+    assert!(!is_error(&edit), "elevated edit must succeed: {}", text(&edit));
+    assert!(text(&edit).contains("edited"), "{}", text(&edit));
+    assert_eq!(
+        filed_tier_of_session(&session, "elevated new text", AdjectiveSensitivity::Elevated),
+        Some(AdjectiveSensitivity::Elevated),
+        "str_replace re-capture must carry the source tier rather than downgrade to normal",
+    );
+}
+
+#[test]
+fn memory_create_under_restricted_grant_files_restricted_and_names_it() {
+    let session = SelectedV2Session::new_with_memory_enabled(EstateRegistry::new_inmemory_bare());
+    session.unlock("restricted");
+    let a = args![
+        "command" => "create",
+        "path" => "/memories/ceiling-restricted.txt",
+        "file_text" => "ceiling-restricted body"
+    ];
+    let result = memory_with_session(&a, &session);
+    let t = text(&result);
+    assert!(!is_error(&result), "create under a grant must succeed; got: {t}");
+    assert!(t.contains("File created successfully at: /memories/ceiling-restricted.txt"), "got: {t}");
+    assert!(t.contains("sensitivity: restricted"), "the reply must name the tier applied; got: {t}");
+    assert_eq!(
+        filed_tier_of_session(&session, "ceiling-restricted body", AdjectiveSensitivity::Restricted),
+        Some(AdjectiveSensitivity::Restricted)
+    );
+}
+
+#[test]
+fn memory_create_under_secret_grant_files_secret_and_names_it() {
+    let session = SelectedV2Session::new_with_memory_enabled(EstateRegistry::new_inmemory_bare());
+    session.unlock("secret");
+    let a = args![
+        "command" => "create",
+        "path" => "/memories/ceiling-secret.txt",
+        "file_text" => "ceiling-secret body"
+    ];
+    let result = memory_with_session(&a, &session);
+    let t = text(&result);
+    assert!(!is_error(&result), "create under a grant must succeed; got: {t}");
+    assert!(t.contains("sensitivity: secret"), "the reply must name the tier applied; got: {t}");
+    assert_eq!(
+        filed_tier_of_session(&session, "ceiling-secret body", AdjectiveSensitivity::Secret),
+        Some(AdjectiveSensitivity::Secret)
+    );
+}
+
+#[test]
+fn memory_create_with_no_grant_files_normal_and_reply_is_unchanged() {
+    let session = SelectedV2Session::new_with_memory_enabled(EstateRegistry::new_inmemory_bare());
+    let a = args![
+        "command" => "create",
+        "path" => "/memories/ceiling-none.txt",
+        "file_text" => "ceiling-none body"
+    ];
+    let result = memory_with_session(&a, &session);
+    let t = text(&result);
+    assert!(!is_error(&result), "got: {t}");
+    assert_eq!(t, "File created successfully at: /memories/ceiling-none.txt");
+    assert_eq!(
+        filed_tier_of_session(&session, "ceiling-none body", AdjectiveSensitivity::Normal),
+        Some(AdjectiveSensitivity::Normal)
+    );
+}
+
+#[test]
+fn memory_str_replace_under_restricted_grant_lifts_the_edit_to_restricted() {
+    let session = SelectedV2Session::new_with_memory_enabled(EstateRegistry::new_inmemory_bare());
+    seed_memory_file_session(&session, "ceiling-edit.txt", "old ceiling-edit body", AdjectiveSensitivity::Normal);
+    session.unlock("restricted");
+    let a = args![
+        "command" => "str_replace",
+        "path" => "/memories/ceiling-edit.txt",
+        "old_str" => "old",
+        "new_str" => "new"
+    ];
+    let result = memory_with_session(&a, &session);
+    let t = text(&result);
+    assert!(!is_error(&result), "got: {t}");
+    assert!(t.contains("The memory file has been edited."), "got: {t}");
+    assert!(t.contains("sensitivity: restricted"), "the reply must name the tier applied; got: {t}");
+    assert_eq!(
+        filed_tier_of_session(&session, "new ceiling-edit body", AdjectiveSensitivity::Restricted),
+        Some(AdjectiveSensitivity::Restricted)
+    );
+    // The superseded normal row is withdrawn, so the old body is gone at Normal.
+    assert_eq!(filed_tier_of_session(&session, "old ceiling-edit body", AdjectiveSensitivity::Normal), None);
+}
+
+#[test]
+fn memory_insert_under_secret_grant_lifts_the_edit_to_secret() {
+    let session = SelectedV2Session::new_with_memory_enabled(EstateRegistry::new_inmemory_bare());
+    seed_memory_file_session(&session, "ceiling-insert.txt", "line one\nline two", AdjectiveSensitivity::Elevated);
+    session.unlock("secret");
+    let a = args![
+        "command" => "insert",
+        "path" => "/memories/ceiling-insert.txt",
+        "insert_line" => 1,
+        "insert_text" => "ceiling-insert middle"
+    ];
+    let result = memory_with_session(&a, &session);
+    let t = text(&result);
+    assert!(!is_error(&result), "got: {t}");
+    assert!(t.contains("sensitivity: secret"), "the reply must name the tier applied; got: {t}");
+    assert_eq!(
+        filed_tier_of_session(&session, "ceiling-insert middle", AdjectiveSensitivity::Secret),
+        Some(AdjectiveSensitivity::Secret)
+    );
 }

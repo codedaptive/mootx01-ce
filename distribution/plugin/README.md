@@ -76,12 +76,12 @@ Or run the orientation command in Claude Code:
   loopback HTTP, so every session shares the one running daemon instead of
   spawning a private `serve` process per session
 
-Version 1.1.0-beta-19 — this plugin tracks the MOOTx01 product version.
+Version 1.1.0-rc1 — this plugin tracks the MOOTx01 product version.
 
 ## Documentation
 
 - Product: [github.com/codedaptive/mootx01-ce](https://github.com/codedaptive/mootx01-ce)
-- Why the plugin depth matters: [PLUGIN.MD](https://github.com/codedaptive/mootx01-ce/blob/stable/1.0.x/apps/moot-agent-skills/PLUGIN.MD)
+- Why the plugin depth matters: [PLUGIN.MD](https://github.com/codedaptive/mootx01-ce/blob/HEAD/apps/moot-agent-skills/PLUGIN.MD)
 - Site: [mootx01.ai](https://mootx01.ai)
 
 ---

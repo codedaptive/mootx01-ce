@@ -32,7 +32,7 @@ use intellectus_lib::{report, StatSample};
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
-use vectorkit::VectorStore;
+use synapsekit::VectorStore;
 
 #[derive(Debug, Clone, Copy)]
 pub struct HybridRecallConfiguration {

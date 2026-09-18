@@ -60,6 +60,18 @@ impl EngramLib {
         kernel().hamming_distance_256(a, b)
     }
 
+/// Batch Jaccard similarities of `probe` against `candidates` (W2.5
+/// Track M1). Delegates set arithmetic to `substrate_types::jaccard`
+/// (zip4 AND/OR + popcount — the same conformance-gated primitives
+/// Hamming uses; scalar is the oracle). Twin of Swift
+/// `EngramLib.jaccardSimilarities(probe:candidates:)`.
+pub fn jaccard_similarities(probe: &Engram, candidates: &[Engram]) -> Vec<f64> {
+    candidates
+        .iter()
+        .map(|c| substrate_types::jaccard::similarity(probe, c))
+        .collect()
+}
+
     /// Hamming distance from probe to every candidate. Returns a
     /// vector with the same length and indexing as `candidates`.
     /// Returns an empty vector if `candidates` is empty.

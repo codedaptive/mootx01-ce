@@ -47,6 +47,7 @@ pub mod novel_token_cache;
 pub mod novel_pool_submitter;
 pub mod pool_reducer;
 pub mod qid_closure;
+pub mod qid_facts;
 
 pub use fdc_runtime::{Fdc, FdcContentKind};
 pub use fdc_code_language::{detect_code_language, FdcCodeLanguage};

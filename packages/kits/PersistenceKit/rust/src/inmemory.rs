@@ -13,7 +13,12 @@
 use crate::audit_log::{AuditEvent, AuditLog};
 use crate::blob_store::BlobStore;
 use crate::error::{StorageError, StorageResult};
+use crate::storage::SchemaKitRenameOutcome;
 use crate::generated_column::GeneratedColumn;
+use crate::inventory_snapshot::{
+    InventorySnapshot, InventorySnapshotBuilder, InventorySnapshotLimits, InventorySnapshotResult,
+    INVENTORY_SNAPSHOT_DRAWERS_TABLE, INVENTORY_SNAPSHOT_NODES_TABLE,
+};
 use crate::observer::{BlobChange, BlobEvent, BlobObserverHub, ChangeOrigin, ObserverHub, StorageEvent, StorageObserver, TableChange};
 use crate::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use crate::caching_row_store::CachingRowStore;
@@ -185,6 +190,38 @@ impl Storage for InMemoryStorage {
         })
     }
 
+    fn capture_inventory_snapshot(
+        &self,
+        limits: InventorySnapshotLimits,
+    ) -> InventorySnapshotResult<InventorySnapshot> {
+        // One lock covers both count checks and copies. Do not route through
+        // RowStore::query: that API builds an unbounded Vec before this
+        // primitive can apply its limits.
+        let state = self.state.lock().unwrap();
+        let drawers = state
+            .tables
+            .get(INVENTORY_SNAPSHOT_DRAWERS_TABLE)
+            .ok_or_else(|| StorageError::InvalidQuery {
+                detail: "inventory snapshot: drawers table not found".to_owned(),
+            })?;
+        let nodes = state
+            .tables
+            .get(INVENTORY_SNAPSHOT_NODES_TABLE)
+            .ok_or_else(|| StorageError::InvalidQuery {
+                detail: "inventory snapshot: nodes table not found".to_owned(),
+            })?;
+        let mut snapshot = InventorySnapshotBuilder::new(limits, drawers.rows.len(), nodes.rows.len())?;
+        for row in drawers.rows.values() {
+            // Account while still borrowing the stored row, before cloning any
+            // body into the retained snapshot.
+            snapshot.copy_drawer_values(row)?;
+        }
+        for row in nodes.rows.values() {
+            snapshot.copy_node_values(row)?;
+        }
+        Ok(snapshot.finish())
+    }
+
     /// Dataset store override: returns the storage's single shared
     /// `InMemoryDatasetStore` instance — every call sees the same dataset
     /// state, mirroring the Swift leg's stored `let datasetStore` property.
@@ -218,6 +255,33 @@ impl Storage for InMemoryStorage {
 
     fn current_schema_version_for(&self, kit_id: &str) -> StorageResult<i32> {
         Ok(self.state.lock().unwrap().kit_schema_versions.get(kit_id).copied().unwrap_or(0))
+    }
+
+    /// Move the per-kit version entry for `old_kit_id` to `new_kit_id` (SPEC
+    /// I-7a). The global `schema_version` is a maximum across kits and does
+    /// not change.
+    fn rename_schema_kit(
+        &self,
+        old_kit_id: &str,
+        new_kit_id: &str,
+    ) -> StorageResult<SchemaKitRenameOutcome> {
+        let mut state = self.state.lock().unwrap();
+        let Some(old_version) = state.kit_schema_versions.get(old_kit_id).copied() else {
+            return Ok(SchemaKitRenameOutcome::NoRow);
+        };
+        if let Some(new_version) = state.kit_schema_versions.get(new_kit_id).copied() {
+            return Ok(SchemaKitRenameOutcome::Conflict {
+                old_version,
+                new_version,
+            });
+        }
+        state.kit_schema_versions.remove(old_kit_id);
+        state
+            .kit_schema_versions
+            .insert(new_kit_id.to_string(), old_version);
+        Ok(SchemaKitRenameOutcome::Renamed {
+            version: old_version,
+        })
     }
 
     fn migrate(&self, schema: &SchemaDeclaration) -> StorageResult<()> {

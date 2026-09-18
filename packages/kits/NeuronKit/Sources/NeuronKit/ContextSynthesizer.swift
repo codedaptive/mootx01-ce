@@ -109,7 +109,10 @@ internal enum ContextSynthesisEngine {
     /// every ranked survivor is VISIBLE in the document — trial 3 measured
     /// 30/35 misses where the answer drawer was ranked into the capped set
     /// but invisible because only the first 3 rows were excerpted.
-    static func synthesize(page: RecallStream.Page, maxKeyInsights: Int = 3) -> ContextDocument {
+    static func synthesize(
+        page: RecallStream.Page,
+        maxKeyInsights: Int = 3
+    ) -> ContextDocument {
         let rows = page.rows
         if rows.isEmpty {
             return ContextDocument(
@@ -127,7 +130,8 @@ internal enum ContextSynthesisEngine {
         let successRate = currentlyBelievedRate(rows: rows)
         let averageReward: Float = 0 // No reward field on Drawer at v0.1 — see spec note.
         let recommendations = makeRecommendations(patterns: patterns)
-        let keyInsights = makeKeyInsights(rows: rows, maxCount: max(1, maxKeyInsights))
+        let keyInsights = makeKeyInsights(
+            rows: rows, maxCount: max(1, maxKeyInsights))
 
         return ContextDocument(
             summary: summary,
@@ -236,11 +240,32 @@ internal enum ContextSynthesisEngine {
         return patterns.map { "Explore further evidence about '\($0)'." }
     }
 
-    /// First-line excerpts from up to `maxCount` rows, in stream
-    /// order. The "first line" is the substring up to the first
-    /// newline, or the full content if there is no newline.
-    static func makeKeyInsights(rows: [Drawer], maxCount: Int) -> [String] {
-        rows.prefix(maxCount).map { row in
+    /// First-line excerpts from up to `maxCount` provenance-admissible rows.
+    ///
+    /// Adornment augmentation was removed in the Encoder Rerank Program
+    /// (2026-09-05): adornments did not earn their cost and are now dark.
+    ///
+    /// Provenance sensitivity gate (KEYINSIGHTS-PROV = a ruling): take
+    /// `maxCount` rows in stream order first, THEN drop every row whose
+    /// provenance sensitivity classifies as anything but admissible. Do NOT
+    /// filter first and then take — that would promote rows below the cap.
+    ///
+    /// Provenance sensitivity lives in bits 30–35 of `drawer.provenance`
+    /// (raw = (provenance >> 30) & 0x3f). Admissible raws: 0 (normal) and
+    /// 16 (elevated). All other raws — including 32 (restricted), 48
+    /// (secret), and any out-of-range value — contribute nothing (fail
+    /// closed). This mapping mirrors AriaV2RecallLensPrivacy.classify in
+    /// AriaMcpKit at AriaV2RecallLens.swift:445–453; NeuronKit cannot
+    /// depend on AriaMcpKit, so the bit extraction is repeated here.
+    static func makeKeyInsights(
+        rows: [Drawer],
+        maxCount: Int
+    ) -> [String] {
+        rows.prefix(maxCount).compactMap { row in
+            // Provenance sensitivity classification (bits 30–35, fail closed).
+            let raw = Int((row.provenance >> 30) & 0x3f)
+            guard raw == 0 || raw == 16 else { return nil }
+            // First line of content is the excerpt.
             if let nl = row.content.firstIndex(of: "\n") {
                 return String(row.content[..<nl])
             }

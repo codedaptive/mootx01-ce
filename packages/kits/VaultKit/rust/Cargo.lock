@@ -72,7 +72,7 @@ checksum = "9035ad2d096bed7955a320ee7e2230574d28fd3c3a0f186cbea1ff3c7eed5dbb"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -210,6 +210,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6ef517f0926dd24a1582492c791b6a4818a4d94e789a334894aa15b0d12f55c"
 
 [[package]]
+name = "context-distill-lib"
+version = "0.1.0"
+dependencies = [
+ "moot-product-identity",
+ "serde",
+ "serde_json",
+ "substrate-kernel",
+]
+
+[[package]]
 name = "convergence-kit"
 version = "0.1.0"
 dependencies = [
@@ -255,8 +265,23 @@ dependencies = [
  "substrate-lib",
  "substrate-ml",
  "substrate-types",
+ "synapsekit",
  "uuid",
- "vectorkit",
+]
+
+[[package]]
+name = "corpus-kit-providers"
+version = "0.1.0"
+dependencies = [
+ "corpus-kit",
+ "eidetic-lib",
+ "engram-lib",
+ "lattice-lib",
+ "sha2 0.10.9",
+ "substrate-kernel",
+ "substrate-ml",
+ "substrate-types",
+ "synapsekit",
 ]
 
 [[package]]
@@ -354,7 +379,7 @@ checksum = "f46882e17999c6cc590af592290432be3bce0428cb0d5f8b6715e4dc7b383eb3"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -446,6 +471,21 @@ checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "estate-encryption"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+]
+
+[[package]]
+name = "fact-extraction-kit"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
 ]
 
 [[package]]
@@ -580,22 +620,27 @@ name = "genius-locus-kit"
 version = "0.35.0"
 dependencies = [
  "base64",
+ "context-distill-lib",
  "convergence-kit",
  "corpus-kit",
+ "corpus-kit-providers",
  "eidetic-lib",
  "engram-lib",
+ "fact-extraction-kit",
  "intellectus-lib",
  "lattice-lib",
  "locus-kit",
+ "moot-product-identity",
  "persistence-kit",
  "queuekit",
  "serde",
  "serde_json",
  "substrate-kernel",
+ "substrate-lib",
  "substrate-ml",
  "substrate-types",
+ "synapsekit",
  "uuid",
- "vectorkit",
  "zeroize",
 ]
 
@@ -808,6 +853,7 @@ dependencies = [
 name = "lattice-lib"
 version = "0.1.0"
 dependencies = [
+ "moot-product-identity",
  "serde",
  "serde_json",
  "substrate-kernel",
@@ -879,6 +925,7 @@ dependencies = [
  "substrate-ml",
  "substrate-types",
  "unicode-normalization",
+ "unicode-segmentation",
  "uuid",
 ]
 
@@ -925,6 +972,13 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "moot-product-identity"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
 ]
 
 [[package]]
@@ -1024,7 +1078,7 @@ checksum = "a948666b637a0f465e8564c73e89d4dde00d72d4d473cc972f390fc3dcee7d9c"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1090,6 +1144,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "chrono",
+ "estate-encryption",
  "intellectus-lib",
  "libc",
  "native-tls",
@@ -1217,7 +1272,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "479ca8adacdd7ce8f1fb39ce9ecccbfe93a3f1344b3d0d97f20bc0196208f62b"
 dependencies = [
  "proc-macro2",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1414,7 +1469,7 @@ checksum = "d540f220d3187173da220f885ab66608367b6574e925011a9353e4badda91d79"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1545,6 +1600,7 @@ dependencies = [
 name = "substrate-ml"
 version = "1.0.0-skeleton"
 dependencies = [
+ "context-distill-lib",
  "intellectus-lib",
  "substrate-kernel",
  "substrate-types",
@@ -1572,6 +1628,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "syn"
+version = "3.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6275cddf4610d1775e6d1fe9469b2e77d0f39fd98fb7450901b821e0c53649f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "unicode-ident",
+]
+
+[[package]]
+name = "synapsekit"
+version = "0.2.0"
+dependencies = [
+ "engram-lib",
+ "intellectus-lib",
+ "persistence-kit",
+ "substrate-ml",
+ "substrate-types",
+ "uuid",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1582,6 +1661,26 @@ dependencies = [
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "thiserror"
+version = "2.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec86235f5fcc2a73650310756d2ac5b138a5780bbbdfae3eeccec992c435ba4f"
+dependencies = [
+ "thiserror-impl",
+]
+
+[[package]]
+name = "thiserror-impl"
+version = "2.0.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bc04cd3e1236dd4a98afca4569f2deb3f120e5422a4023be2cb683f8486292af"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -1751,18 +1850,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
-name = "vectorkit"
-version = "0.2.0"
-dependencies = [
- "engram-lib",
- "intellectus-lib",
- "persistence-kit",
- "substrate-ml",
- "substrate-types",
- "uuid",
-]
-
-[[package]]
 name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1852,7 +1939,7 @@ dependencies = [
  "bumpalo",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "wasm-bindgen-shared",
 ]
 
@@ -1952,7 +2039,7 @@ checksum = "053e2e040ab57b9dc951b72c264860db7eb3b0200ba345b4e4c3b14f67855ddf"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -1963,7 +2050,7 @@ checksum = "3f316c4a2570ba26bbec722032c4099d8c8bc095efccdc15688708623367e358"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -2101,7 +2188,7 @@ dependencies = [
  "heck",
  "indexmap",
  "prettyplease",
- "syn",
+ "syn 2.0.117",
  "wasm-metadata",
  "wit-bindgen-core",
  "wit-component",
@@ -2117,7 +2204,7 @@ dependencies = [
  "prettyplease",
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
  "wit-bindgen-core",
  "wit-bindgen-rust",
 ]
@@ -2176,7 +2263,7 @@ checksum = "0b631b19d36a892ab55420c92dbc83ccd79274f25be714855d3074aa71cab639"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn",
+ "syn 2.0.117",
 ]
 
 [[package]]

@@ -406,9 +406,11 @@ mod tests {
             room: String::new(),
             score: RecallScoreVector::ZERO,
             udc_code: String::new(),
+            qid: String::new(),
             udc_facets: None,
             coarse_rank,
             event_time: None,
+            filed_at: None,
             is_currently_believed: true,
             // precision_score is 0 here — the fold stamps the real value.
             precision_score: 0.0,

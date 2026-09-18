@@ -194,6 +194,8 @@ public extension Estate {
             embeddingModelID: frame.embeddingModelID,
             provenance: provenanceBitmap,
             adjectiveBitmap: adjBitmap,
+            // New captures start with bit 27 clear: the span-encode duty picks
+            // them up through spanIndexDebtBatch.
             operationalBitmap: opBitmap,
             lineageID: frame.lineageID ?? UUID(),
             udcCode: frame.latticeAnchor.udcCode,
@@ -365,15 +367,23 @@ public extension Estate {
                 shift: 30, width: 6
             )
 
+            // Per-record capture timestamp: when frame.captureDate is set
+            // (schema v1.2 import field), that instant is used as filedAt and
+            // as the HLC physical-time seed for this drawer. When absent, the
+            // batch wall-clock `now` is used — byte-identical to all existing
+            // capture paths where no captureDate is supplied.
+            let drawerFiledAt = frame.captureDate ?? now
             let drawer = Drawer(
                 content: frame.content,
                 parentNodeId: triple.roomNodeId.uuidString,
                 addedBy: frame.addedBy,
-                filedAt: now,
-                eventTime: frame.eventTime ?? now,
+                filedAt: drawerFiledAt,
+                eventTime: frame.eventTime ?? drawerFiledAt,
                 embeddingModelID: frame.embeddingModelID,
                 provenance: provenanceBitmap,
                 adjectiveBitmap: adjBitmap,
+                // Superseding drawers start with bit 27 clear; the span-encode
+                // duty picks them up through spanIndexDebtBatch.
                 operationalBitmap: opBitmap,
                 lineageID: frame.lineageID ?? UUID(),
                 udcCode: frame.latticeAnchor.udcCode,
@@ -381,9 +391,11 @@ public extension Estate {
                 wikidataQID: frame.latticeAnchor.wikidataQID,
                 wikidataQidsSecondary: frame.latticeAnchor.wikidataQidsSecondary,
                 // Subject trio at birth — identical translation to capture().
+                // subjectAt uses drawerFiledAt so the subject timestamp
+                // is consistent with the drawer's ingest clock.
                 subject: frame.subject,
                 subjectPipelineVersion: frame.subject == nil ? nil : DrawerStore.subjectPipelineAIV1,
-                subjectAt: frame.subject == nil ? nil : now
+                subjectAt: frame.subject == nil ? nil : drawerFiledAt
             )
             prepared.append(PreparedItem(drawer: drawer, wing: triple.wing, room: triple.room))
         }
@@ -722,6 +734,7 @@ public extension Estate {
         }
 
         let filtered: [Drawer]
+        var withheldBySensitivity = 0
         if degradedStages.isEmpty {
             // Only attempt evaluation when liveRows succeeded; on a failed
             // read `live` is empty and evaluation would just re-confirm empty.
@@ -744,9 +757,11 @@ public extension Estate {
                 } else {
                     nodeNames = [:]
                 }
-                filtered = try await BitmapEvaluator.evaluate(
+                let evaluation = try await BitmapEvaluator.evaluateResult(
                     frame: frame, drawers: live, store: store, nodeNames: nodeNames
                 )
+                filtered = evaluation.rows
+                withheldBySensitivity = evaluation.withheldBySensitivity
             } catch {
                 // BitmapEvaluator's throwable failure modes (substrate errors
                 // during historical reconstruction) DEGRADE rather than masquerade
@@ -802,7 +817,8 @@ public extension Estate {
             rows: filtered,
             pageSize: pageSize,
             hydrationLevel: frame.hydrationLevel,
-            degradedStages: degradedStages
+            degradedStages: degradedStages,
+            withheldBySensitivity: withheldBySensitivity
         )
     }
 
@@ -957,16 +973,17 @@ public extension Estate {
             candidates = Array(rows.prefix(scanBound))
         } else {
             // No pruning possible: bounded corpus scan.
-            // P4-secfix: scan ORDER BY (filedAt DESC, id DESC) so the cap
+            // Scan ORDER BY (filedAt DESC, content DESC, id DESC) so the cap
             // retains the NEWEST candidates rather than the oldest. An estate
             // with >256 drawers and a Director-path caller (frame.limit == nil
             // → scanBound = 256) would silently exclude every drawer filed
             // after the 256th-oldest. DESC ordering ensures recent content is
             // always in the candidate pool.
-            // The compound (filedAt, id) key gives a deterministic total
-            // order: rows with the same filedAt are broken by id (the declared
-            // TEXT primary key, present in SQLite + PostgreSQL + InMemory),
-            // so DESC is exactly reverse(ASC) for any fixed dataset.
+            // The three-column key gives a deterministic total order: rows
+            // with the same filedAt are broken by content (content-stable,
+            // deterministic per seed), then by id (primary key, TEXT).
+            // DrawerStore.allDrawers enforces this order on all backends
+            // (SCORE-ORDERING mission, 2026-08-24).
             // Using id (not rowid) makes the tie-break portable to PostgreSQL
             // estates where rowid is undefined (c-recall-portable fix).
             // The RecallDirector downstream ranks by content signal, not
@@ -1097,23 +1114,25 @@ public extension Estate {
     /// The audit event is sealed atomically inside the storage transaction —
     /// correct for direct callers that own the full expunge. GeniusLocusKit's
     /// two-step §B-2a orchestration (seal after cross-kit vector delete) must
-    /// use `expungeReturningUnsealedEvent(rowID:reason:confirmation:now:)` instead;
+    /// use `expungeReturningUnsealedEvent(rowID:reason:confirmation:sensitivityCeiling:now:)` instead;
     /// that method is the only path that defers the seal. Removing `sealAudit`
     /// from this public surface prevents any caller from accidentally suppressing
     /// the audit event (secfix/ws2-coredelete).
     ///
     /// Returns the full `DrawerStore.ExpungeOutcome`. `refusedSiblingIDs`
-    /// names every lineage member the gate refused (accepted rows, S-3);
-    /// `auditEvent` is nil on this path because the event was sealed inside
-    /// the transaction. The result is deliberately NOT `@discardableResult`:
-    /// an expunge that refused a sibling is not a success, and a layer that
-    /// summarises it as one is the defect (SPEC B-8b, MXE-FA). Every caller
-    /// must consume the outcome and propagate — or explicitly acknowledge —
-    /// the refusal.
+    /// names every lineage member not tombstoned: ceiling-refused (sensitivity
+    /// exceeds `sensitivityCeiling`; checked before gate admission) or
+    /// gate-refused (accepted rows, S-3). `auditEvent` is nil on this path
+    /// because the event was sealed inside the transaction. The result is
+    /// deliberately NOT `@discardableResult`: an expunge that refused a
+    /// sibling is not a success, and a layer that summarises it as one is the
+    /// defect (SPEC B-8b, MXE-FA). Every caller must consume the outcome and
+    /// propagate — or explicitly acknowledge — the refusal.
     func expunge(
         rowID: RowID,
         reason: String,
         confirmation: Bool,
+        sensitivityCeiling: AdjectiveSensitivity = .secret,
         now: Date = Date()
     ) async throws -> DrawerStore.ExpungeOutcome {
         guard confirmation else {
@@ -1141,7 +1160,8 @@ public extension Estate {
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: reason.isEmpty ? "expunged via Estate.expunge" : reason,
             now: now,
-            sealAudit: true
+            sealAudit: true,
+            sensitivityCeiling: sensitivityCeiling
         )
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member — not just the room of the
@@ -1170,8 +1190,10 @@ public extension Estate {
     /// swallowed — GLK uses a force-unwrap (`!`) as a deliberate
     /// programmer-error trap.
     ///
-    /// `refusedSiblingIDs` names every lineage member the gate refused
-    /// (accepted rows, S-3). Invariant (SPEC B-8b, MXE-FA): an expunge that
+    /// `refusedSiblingIDs` names every lineage member not tombstoned:
+    /// ceiling-refused (sensitivity exceeds `sensitivityCeiling`; checked
+    /// before gate admission) or gate-refused (accepted rows, S-3). Invariant
+    /// (SPEC B-8b, MXE-FA): an expunge that
     /// refused a sibling is not a success, and a layer that summarises it as
     /// one is the defect — GLK must scope its cross-kit vector delete to the
     /// members that were actually scrubbed and must report the refusal to its
@@ -1184,6 +1206,7 @@ public extension Estate {
         rowID: RowID,
         reason: String,
         confirmation: Bool,
+        sensitivityCeiling: AdjectiveSensitivity = .secret,
         now: Date = Date()
     ) async throws -> DrawerStore.ExpungeOutcome {
         guard confirmation else {
@@ -1209,7 +1232,8 @@ public extension Estate {
             changedBy: changedBy.isEmpty ? "estate" : changedBy,
             reason: reason.isEmpty ? "expunged via Estate.expunge" : reason,
             now: now,
-            sealAudit: false
+            sealAudit: false,
+            sensitivityCeiling: sensitivityCeiling
         )
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member (WS2-F2, fixed 2026-06-28).
@@ -2152,15 +2176,25 @@ public extension Estate {
         let roomNode = try await nodeStore.createNode(
             displayName: hintRoom, parentId: wingNode.id, now: now)
 
+        // Canonical charter identity: roster wings get a FIXED drawer id and
+        // the FIXED charterSeedDate filing instant (see DefaultWings.swift for
+        // the recency-exclusion and determinism rationale). Node creation above
+        // keeps the caller's `now` — only the drawer row is pinned. A wing not
+        // in the default roster falls back to the ordinary random id + `now`.
+        let rosterIndex = defaultWings.firstIndex(where: { $0.name == wingName })
+        let charterID = rosterIndex.map { charterDrawerID(forWingIndex: $0) } ?? UUID().uuidString
+        let charterStamp = rosterIndex != nil ? charterSeedDate : now
+
         // UDC "001" (Knowledge) is the canonical code for self-describing /
         // meta-knowledge drawers per spec I-5 (udcCode must not be empty).
         // The hint uses the caller-supplied embedding model ID so it is
         // indexed semantically and recallable like any other drawer.
         let drawer = Drawer(
+            id: charterID,
             content: hintText,
             parentNodeId: roomNode.id.uuidString,
             addedBy: addedBy,
-            filedAt: now,
+            filedAt: charterStamp,
             embeddingModelID: embeddingModelID,
             udcCode: hintUDCCode,
             // Structural seeds emit their own subject (SPEC § 14): a hint
@@ -2170,7 +2204,7 @@ public extension Estate {
             // pipeline tag so a regeneration sweep can target seeds.
             subject: String("Charter hint: how to use the \(wingName) wing.".prefix(DrawerStore.subjectLengthContract)),
             subjectPipelineVersion: "seed-v1",
-            subjectAt: now
+            subjectAt: charterStamp
         )
         // Route through the covered chokepoint so the container fingerprint
         // is maintained — same structural guarantee as ordinary capture.
@@ -2191,7 +2225,7 @@ public extension Estate {
     /// Adjective sensitivity lives at bits 6–11 (shift 6, width 6) per
     /// cookbook §2.3. The caller uses BitField.writeField to compute the
     /// promoted value before calling this method.
-    public func repairVagueAdjectiveBitmap(drawerId: String, newAdjective: Int64, now: Date) async throws {
+    func repairVagueAdjectiveBitmap(drawerId: String, newAdjective: Int64, now: Date) async throws {
         try await store.mutateAdjective(
             drawerId: drawerId,
             newAdjective: newAdjective,
@@ -2207,7 +2241,7 @@ public extension Estate {
     /// Provenance sensitivity lives at bits 30–35 (shift 30, width 6) per
     /// cookbook §2.5. The caller uses BitField.writeField to compute the
     /// promoted value before calling this method.
-    public func repairVagueProvenance(drawerId: String, newProvenance: Int64, now: Date) async throws {
+    func repairVagueProvenance(drawerId: String, newProvenance: Int64, now: Date) async throws {
         try await store.mutateProvenance(
             drawerId: drawerId,
             newProvenance: newProvenance,
@@ -2219,8 +2253,104 @@ public extension Estate {
 
     /// Repair prologue helper (§D.6 #4): overwrites the adjective bitmap on a
     /// tunnel. Delegates to DrawerStore.updateTunnelAdjBitmap. No audit event.
-    public func updateTunnelAdjBitmap(id tunnelId: String, adjBitmap: Int64) async throws {
+    func updateTunnelAdjBitmap(id tunnelId: String, adjBitmap: Int64) async throws {
         try await store.updateTunnelAdjBitmap(id: tunnelId, adjBitmap: adjBitmap)
+    }
+
+    /// Append an encode-completion audit marker for one encode drain unit
+    /// (A2, benchmark reset 2026-08-13). Called by the GLK drain worker's
+    /// onEncoded hook; delegates to `DrawerStore.appendEncodeCompleteMarker`,
+    /// which seals an informational audit event (verb `encodeComplete`,
+    /// actor `encode_worker`, `reason: "session=<id> rows=<n>"`) with no
+    /// bitmap change. Mirrors Rust `Estate::append_encode_complete_marker`.
+    func appendEncodeCompleteMarker(
+        firstDrawerID: String,
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try await store.appendEncodeCompleteMarker(
+            drawerId: firstDrawerID,
+            rowCount: rowCount,
+            unitSessionID: unitSessionID,
+            at: completedAt
+        )
+    }
+
+    /// All audit events for one row, HLC-ascending. Public pass-through to
+    /// `DrawerStore.auditEventsForRow` so audit consumers (the A2/A3 marker
+    /// readers, the C3 timing derivation) read through the Estate seam
+    /// rather than reaching into the store.
+    func auditEventsForRow(_ rowID: UUID) async throws -> [AuditEvent] {
+        try await store.auditEventsForRow(rowID)
+    }
+
+    /// Estate-wide audit page in HLC order, strictly after `after` (nil =
+    /// from the beginning), capped at `limit`. The C3/A6 timing derivation's
+    /// watermark-paging seam. Mirrors Rust `Estate::audit_events`.
+    func auditEvents(after: HLC?, limit: Int) async throws -> [AuditEvent] {
+        try await store.auditEvents(after: after, limit: limit)
+    }
+
+    /// Append a reindex-completion marker (C3) — the CYCLE tier-3 boundary.
+    /// Mirrors Rust `Estate::append_reindex_complete_marker`.
+    func appendReindexCompleteMarker(
+        rowCount: Int,
+        unitSessionID: String,
+        at completedAt: Date
+    ) async throws {
+        try await store.appendReindexCompleteMarker(
+            rowCount: rowCount, unitSessionID: unitSessionID, at: completedAt)
+    }
+
+    /// Append a dream-cycle bracket marker (A3, benchmark reset 2026-08-13).
+    /// A cycle emits `.start` when it begins and `.end` when it completes,
+    /// both with the same session id, so CYCLE-dreamt time is attributable
+    /// from the audit log alone. Mirrors Rust
+    /// `Estate::append_dream_cycle_marker`.
+    func appendDreamCycleMarker(
+        phase: DrawerStore.DreamCyclePhase,
+        unitSessionID: String,
+        at markedAt: Date
+    ) async throws {
+        try await store.appendDreamCycleMarker(
+            phase: phase,
+            unitSessionID: unitSessionID,
+            at: markedAt
+        )
+    }
+
+    // MARK: - Archive (community review duplicate resolution — F4)
+
+    /// Archive a drawer by running the full expunge path (tombstones the row,
+    /// zeroes the content blob, records an erasure ledger entry, seals the
+    /// audit event). This is the estate effect that backs the community review
+    /// "archive the older duplicate" resolution choices.
+    ///
+    /// Semantics:
+    ///   - The drawer becomes invisible to any consumer that filters on
+    ///     `tombstonedAt == nil` (review sessions, recall, LAN eligibility).
+    ///   - The row is retained in the database with tombstonedAt stamped, so
+    ///     the erasure ledger and audit trail remain intact.
+    ///   - Content is zeroed to prevent retention of archived duplicates.
+    ///
+    /// Throws `LocusKitError.drawerNotFound` if the id does not resolve, or
+    /// `LocusKitError.invalidContent` if the gate refuses the transition
+    /// (e.g. the drawer is already accepted / S-3 protected).
+    ///
+    /// The `DrawerStore.ExpungeOutcome.refusedSiblingIDs` field names any
+    /// lineage siblings the gate refused; the caller receives the full outcome
+    /// so it can propagate partial refusals accurately rather than treating
+    /// a partial expunge as a complete success (SPEC B-8b, MXE-FA).
+    func archiveDrawer(
+        id: String,
+        reason: String,
+        now: Date
+    ) async throws -> DrawerStore.ExpungeOutcome {
+        // Delegate to the internal expunge path: confirmation is always true
+        // because the community review coordinator is the decision authority —
+        // the caller has already confirmed via the choiceID it submitted.
+        try await expunge(rowID: id, reason: reason, confirmation: true, now: now)
     }
 
 }

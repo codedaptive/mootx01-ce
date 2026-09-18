@@ -13,6 +13,7 @@
 
 use crate::error::VaultKitError;
 use crate::note_ir::NoteIR;
+use std::collections::HashSet;
 use std::path::Path;
 
 /// Progress callback for vault import/export operations.
@@ -35,6 +36,34 @@ pub trait VaultAdapter: Send + Sync {
     /// equality `to_ir(from_ir(x)) == x` are stable regardless of
     /// filesystem enumeration order.
     fn to_ir(&self, vault_path: &Path) -> Result<Vec<NoteIR>, VaultKitError>;
+
+    /// Read a vault directory into canonical notes, restricted to a selected
+    /// set of vault-relative paths.
+    ///
+    /// This is a trait method rather than a free function so a concrete adapter
+    /// can skip the per-note read and parse for unselected notes, and so the
+    /// override is reachable through a trait object. Adapters that cannot
+    /// narrow their read do NOT need to implement it — the default below reads
+    /// everything and filters, which is correct but pays full source cost.
+    ///
+    /// `including` holds vault-relative paths with forward slashes and the
+    /// source's file extension (e.g. `"Chem/Benzene.md"`). Paths absent from
+    /// the source are ignored. `None` reads the whole vault.
+    /// Mirrors Swift `VaultAdapter.toIR(vaultURL:includingPaths:)`.
+    fn to_ir_filtered(
+        &self,
+        vault_path: &Path,
+        including: Option<&HashSet<String>>,
+    ) -> Result<Vec<NoteIR>, VaultKitError> {
+        let notes = self.to_ir(vault_path)?;
+        let Some(selected) = including else { return Ok(notes) };
+        // A note's vault-relative path is stable_source_key + ".md" — the
+        // inverse of what a Markdown adapter constructs on read.
+        Ok(notes
+            .into_iter()
+            .filter(|note| selected.contains(&format!("{}.md", note.stable_source_key)))
+            .collect())
+    }
 
     /// Write canonical notes back out to a vault directory, mirroring the
     /// folder tree carried in each note's `stable_source_key`.

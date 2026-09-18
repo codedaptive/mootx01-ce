@@ -5,6 +5,16 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 development line uses the explicit SemVer pre-release
 `1.1.0-beta-YY`.
 
+## Relicensed to Apache-2.0 — 2026-08-16
+
+**MOOTx01 is now open source under the Apache License, Version 2.0 —
+retroactively, over every prior release.** The FSL-1.1-ALv2 grant and its
+two-year conversion timer are superseded; there is no use restriction, no
+Competing Use clause, and no commercial-license tier ladder. See
+`RELICENSE.md` for the retroactive grant, `LICENSING.md` for the new
+plain-language model, `EDITIONS.md` for the edition structure, and
+`TRADEMARKS.md` for the trademark policy. No code changes in this entry.
+
 ## 1.1.0-beta-19 — 2026-08-12
 
 **No code changes from beta-18.** This release exists to publish corrected

@@ -13,15 +13,9 @@
 //!   └─► framing::read_frames
 //!         └─► jsonrpc::JSONRPCRequest::decode
 //!               └─► dispatcher::Dispatcher::handle
-//!                     ├─► tool_list (projected AI-client surface)
-//!                     └─► tool_call  ──► dispatch::dispatch_tool
-//!                                         ├─► teachme pre-check (intercepts before any runner)
-//!                                         ├─► interface_tools (Tier 1–5 + maintenance/admin)
-//!                                         ├─► vault_tools (moot_vault_export, moot_vault_import, …)
-//!                                         ├─► dataset_tools (moot_file_dataset, moot_dataset_query, moot_dataset_stats; MX-TAB-7b)
-//!                                         ├─► recipe_tools (moot_list_lenses, moot_synthesize, …)
-//!                                         ├─► lens_tools (moot_lens_keystones … moot_lens_concepts)
-//!                                         └─► hint injection (CoachingEngine, non-error results only)
+//!                     ├─► surface::SelectedSurface::decode (v2 admission + frozen gate)
+//!                     └─► surface::execute  ──► v2::{core_memory, estate_diagnostics, …}
+//!                                                 ├─► (81 ARIA v2 tools)
 //! stdout (newline-delimited JSON responses)
 //! ```
 //!
@@ -38,14 +32,22 @@
 //! Vault tools are backed by `vault-kit` (`VaultBridge`, `ObsidianAdapter`,
 //! `DrawerMapping`). The ARIA layer owns the SHA-256 sidecar manifest for drift
 //! detection (Vault drift and candidate handling decision b).
-//! SQLite persistence: `ARIA_MCP_SQLITE_PATH`. PostgreSQL: `ARIA_MCP_POSTGRES_URL`.
+//! The estate is selected by the host through the estate catalog and passed to
+//! `runtime::run` as a `RuntimeEstate` (SQLite, PostgreSQL or in-memory).
 
 pub mod build_serial;
 pub mod coaching_engine;
+// mode_registry: the five-mode roster, RecallVariant enum, and ModeDeclaration parser.
+// Modes are advisory and fail-open (mirrors Swift mode registry (v1, removed in ARIA v2)).
+pub mod mode_registry;
+// mode_session_state: per-session sticky mode state and call counters.
+// Uses Mutex for interior mutability (mirrors Swift ModeSessionState.swift actor).
+pub mod mode_session_state;
 pub mod dataset_tools;
-pub mod dense_row;
+// dense_row module deleted in COMPOSER-02B: all render sites migrated to result_composer.
 pub mod dispatch;
 pub mod dispatcher;
+pub mod estate_posture;
 // monitoring_control: injection seam for daemon telemetry monitoring state.
 // AriaMcpKit defines the trait; serve host injects the StatsStore-backed impl.
 pub mod monitoring_control;
@@ -60,19 +62,35 @@ pub mod estate_registry;
 pub mod governor_topology_adapter;
 pub mod http_server;
 pub mod interface_tools;
+pub mod recall_skim;
+pub mod recall_distillation;
 pub mod jsonrpc;
 pub mod memory_adapter;
-pub mod lens_tools;
 pub mod recall_discrimination;
+// result_composer: the shared result composer for every ARIA MCP return shape
+// (ARIA_MCP_SPEC 2.0.0 § 8 composer invariant). All render functions are free
+// functions in this module; the typed intermediates (CandidateRowData,
+// ControlSignals, etc.) are exported for use by callers and the conformance
+// suite. Public so composer_conformance.rs integration tests can drive it.
+pub mod result_composer;
 pub mod recipe_tools;
 pub mod runtime;
+pub use runtime::stats_store_path; // re-exported for integration tests
+pub use runtime::build_fact_extraction_cycle; // re-exported for integration tests
+pub use runtime::activate_and_build_extraction_cycle; // re-exported for integration tests
 pub mod sensitivity_grant_ledger;
 pub mod server;
 pub mod session_protocol;
+pub mod surface;
 pub mod surfaced_recall_ledger;
-pub mod teachme_guides;
 pub mod tool_list;
+pub mod tool_mutation_inventory;
 pub mod vault_tools;
+pub mod v2;
+// periodic_coach: deterministic coaching block renderer for the v2 periodic
+// coaching system. Exposes `render_block` for the v2 dispatcher wiring and
+// is pinned by the golden-pin fixture tests in both ports.
+pub mod periodic_coach;
 
 /// Re-export the shared whole-file key entry point so the `mootx01` binary can
 /// ensure the estate-encryption key exists at serve startup without a direct

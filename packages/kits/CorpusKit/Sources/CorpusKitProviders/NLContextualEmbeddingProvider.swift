@@ -1,3 +1,8 @@
+#if APPLE_ENCODERS
+// Apple encoder provider — compiled only when the AppleEncoders trait is on.
+// Retained in case Apple improves the NaturalLanguage framework, or for a device class
+// that cannot host a CoreML encoder.
+// Off by default; held for v1.2 iOS and Apple cloud compute. See Package.swift.
 // NLContextualEmbeddingProvider.swift
 //
 // Apple NaturalLanguage contextual (transformer) embedding provider.
@@ -59,7 +64,7 @@ import CorpusKit
 import EngramLib
 import SubstrateKernel
 import SubstrateML
-import VectorKit
+import SynapseKit
 
 // ─────────────────────────────────────────────────────────────────
 // DO NOT REIMPLEMENT SUBSTRATE MATH.
@@ -248,7 +253,7 @@ public struct NLContextualEmbeddingProvider: EmbeddingProvider, Sendable {
 
         // Mean pool: sum element-wise then divide by the number of tokens.
         // This is plain Swift floating-point on primitives — no new substrate
-        // primitive is required (similar to PPMI's weight accumulation in
+        // primitive is required (similar to the IDF fit in RandomIndexing's
         // finalize()). The result is then delegated to the substrate for
         // L2 normalisation, which IS the conformance-gated primitive.
         var sum = [Float](repeating: 0, count: dim)
@@ -271,3 +276,5 @@ public struct NLContextualEmbeddingProvider: EmbeddingProvider, Sendable {
     }
 }
 #endif // canImport(NaturalLanguage)
+
+#endif // APPLE_ENCODERS

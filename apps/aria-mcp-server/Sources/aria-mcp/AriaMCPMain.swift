@@ -1,5 +1,4 @@
 import Foundation
-import Security
 import AriaMCP
 import CorpusKit
 import CorpusKitProviders
@@ -10,52 +9,50 @@ import PersistenceKit
 import PersistenceKitInMemory
 import PersistenceKitSQLite
 import PersistenceKitPostgreSQL
-import VectorKit
+import SynapseKit
 import AriaResident
 
 // Entry point for the ARIA_MCP server (stdio or loopback HTTP transport,
 // selected by MOOTX01_HTTP_PORT).
 //
-// Backend selection follows a four-state precedence ladder driven by two
-// environment variables. No trimming on either variable — a whitespace-only
-// value is treated as a non-empty string and fails fast as a config error,
-// not a silent fallback (byte-for-byte parity with the Rust server's from_env).
+// The estate is selected the way every mootx01 command selects one: through
+// the estate catalog. No environment value names a database.
 //
-// Precedence table (evaluated at startup, in order):
+//   aria-mcp                       the catalog's active estate
+//   aria-mcp --db <name>           a registered estate by name
+//   aria-mcp --db <dir>/<name>     a transient estate at that directory,
+//                                  attached for this process only
+//   aria-mcp --in-memory           the selected estate served from the
+//                                  in-memory backend as a TRANSIENT estate:
+//                                  same protocol and algorithms, no
+//                                  federation, no charters, gone at exit
 //
-//   Both ARIA_MCP_POSTGRES_URL and ARIA_MCP_SQLITE_PATH set (non-empty)
-//     → Ambiguous config: clear stderr message naming both vars; exit 1.
-//       Never pick silently — the operator must resolve the ambiguity.
+// The record decides the backend. A SQLite record opens `estate.sqlite` in
+// its directory under the posture the file requires (EstateOpenPosture: an
+// existing encrypted estate loads its existing key and fails closed when it
+// is missing; a registered estate is created encrypted; a transient estate
+// is plaintext). A PostgreSQL record opens its connection string with a lazy
+// pool; the first real I/O is Estate.create, so an unreachable server fails
+// there before any tool is dispatched, the same lifecycle point where
+// SQLiteStorage.init fails for an unusable file.
 //
-//   Only ARIA_MCP_POSTGRES_URL set (non-empty)
-//     → PostgreSQLStorage at that connection string (pooled, lazy — the
-//       pool opens connections on first use; a connectivity failure
-//       surfaces at Estate.create/kit.open, before any tool is dispatched).
-//       Pool defaults: poolSize=10, connectionTimeout=5s, idleTimeout=300s
-//       (PersistenceKit BackendConfiguration defaults; read from
-//       EstateConfiguration.BackendConfiguration.postgresql parameters).
+// Registered estates are this machine's: their Ed25519 identity lives in the
+// Keychain and they federate. Transient estates keep their identity in
+// memory, never touch the Keychain, and never federate.
 //
-//   Only ARIA_MCP_SQLITE_PATH set (non-empty)
-//     → SQLiteStorage at that path (WAL-mode, durable across restarts).
-//       Parent directories are created automatically. An unusable path
-//       causes a clear stderr message and a nonzero exit.
+// `--in-memory` is always transient (R8, 2026-09-08), whatever the record it
+// selected says. Nothing survives the process, so there is no identity for a
+// peer to address later and no charter map to outlive the run — and a
+// benchmark RAM arm measures the pool it imported and nothing else. The
+// catalog is still opened and the record still resolved, so a `--db` naming
+// no estate is refused before the backend is chosen. The same rule holds in
+// the Rust port and in both ports of `mootx01 serve`.
 //
-//   Neither set (both absent or empty)
-//     → InMemoryStorage (ephemeral, discarded on exit; v1.0 default).
+// The JSON-RPC wire surface (tools, schemas, methods) is the same on every
+// backend. Clients do not know or care which backend is active.
 //
-// The JSON-RPC wire surface (tools, schemas, methods) is unchanged for all
-// backends. Clients do not need to know or care which backend is active.
-//
-// Per ARIA_MCP_SPEC_v0.2 §5, stdout is reserved for JSON-RPC frames;
-// all logging routes through Logging.stderr.
-//
-// Lazy-vs-probe decision (PostgreSQL): PostgreSQLStorage uses a lazy
-// connection pool — no TCP connection is opened in the constructor.
-// The first real I/O occurs at Estate.create (which calls storage.open),
-// so an unreachable server surfaces at startup before any tool call is
-// dispatched. No explicit probe is needed; the estate-open call IS the
-// probe. This is the same fail-fast point as SQLite (SQLiteStorage.init
-// is the probe there). Both backends fail fast at the same lifecycle stage.
+// Per ARIA_MCP_SPEC §5, stdout is reserved for JSON-RPC frames; all logging
+// routes through Logging.stderr.
 
 @main
 struct AriaMCPMain {
@@ -63,194 +60,188 @@ struct AriaMCPMain {
         await AriaMCPMain.run()
     }
 
+    /// The two arguments the binary takes, plus `--help`. Anything else is a
+    /// usage error: this server has no other configuration on its command
+    /// line. Twin of the Rust `aria-mcp` `Arguments`; both ports refuse the
+    /// same shapes and exit with `usageExitCode`.
+    struct Arguments: Equatable {
+        var db: String?
+        var inMemory = false
+        /// `--help` or `-h` was given: print the usage line and exit 0
+        /// without opening a catalog or an estate.
+        var help = false
+
+        static let usage = "usage: aria-mcp [--db <name>|<dir>/<name>] [--in-memory]"
+
+        /// The exit code both ports use for a refused command line. A
+        /// supervisor scripting on the code must not have to know which port
+        /// it launched.
+        static let usageExitCode: Int32 = 1
+
+        init(_ arguments: [String]) throws {
+            var rest = arguments[...]
+            while let argument = rest.popFirst() {
+                switch argument {
+                case "--db":
+                    // Three refusals, all so a mistyped line never serves the
+                    // wrong estate: a missing value; a value that is itself a
+                    // flag (`--db --in-memory` would otherwise name an estate
+                    // "--in-memory"); and a repeat (two estates named, neither
+                    // of them unambiguously the one wanted).
+                    guard db == nil else { throw UsageError("--db given twice") }
+                    guard let value = rest.popFirst() else {
+                        throw UsageError("--db requires a value")
+                    }
+                    guard !value.hasPrefix("--") else {
+                        throw UsageError("--db requires an estate name, got the flag '\(value)'")
+                    }
+                    db = value
+                case "--in-memory":
+                    inMemory = true
+                case "--help", "-h":
+                    help = true
+                default:
+                    throw UsageError("unexpected argument '\(argument)'")
+                }
+            }
+        }
+
+        struct UsageError: Error, Equatable, CustomStringConvertible {
+            let reason: String
+            init(_ reason: String) { self.reason = reason }
+            var description: String { "\(reason). \(Arguments.usage)" }
+        }
+    }
+
     static func run() async {
+        let arguments: Arguments
+        do {
+            arguments = try Arguments(Array(CommandLine.arguments.dropFirst()))
+        } catch {
+            fputs("ARIA_MCP fatal: \(error)\n", stderr)
+            exit(Arguments.usageExitCode)
+        }
+        if arguments.help {
+            print(Arguments.usage)
+            return
+        }
+
+        let environment = ProcessInfo.processInfo.environment
+        let frozen = EstatePosture.resolve(frozenFlag: false, environment: environment) == .frozen
+        if frozen && (arguments.inMemory || !(environment["MOOTX01_HTTP_PORT"] ?? "").isEmpty) {
+            fputs("ARIA_MCP fatal: frozen mode requires an existing estate over stdio.\n", stderr)
+            exit(1)
+        }
+
+        // The catalog is the one place that knows which estates exist and
+        // where. `--db` selects a registered estate by name or attaches a
+        // transient one by path; absent, the active estate serves.
+        let catalog: EstateCatalog
+        do {
+            catalog = try arguments.db.map { try EstateCatalog.open(selecting: $0) } ?? EstateCatalog.open()
+        } catch {
+            fputs("ARIA_MCP fatal: \(error)\n", stderr)
+            exit(1)
+        }
+        let estate = catalog.active
+        // The estate's posture for THIS open. `--in-memory` forces transient
+        // (see the header): it decides the identity store, federation, and
+        // charter seeding — the same rule as `mootx01 serve` (ServeCommand.swift:196).
+        let registered = AriaMCPMain.isRegisteredOpening(kind: estate.kind, inMemory: arguments.inMemory)
+
         let kit = GeniusLocusKit()
         let owner = OwnerCredentials(ownerIdentifier: "aria-mcp-owner")
 
-        // Read both env vars. No trimming on either — exact parity with the
-        // Rust server's from_env. Present and non-empty → the operator
-        // intended that backend; a whitespace-only value is a config error
-        // that fails fast, not a silent fallback.
-        let rawPostgresURL = ProcessInfo.processInfo.environment["ARIA_MCP_POSTGRES_URL"] ?? ""
-        let rawSQLitePath = ProcessInfo.processInfo.environment["ARIA_MCP_SQLITE_PATH"] ?? ""
+        // The catalog decided what kind of estate this is, and the kind decides
+        // every Keychain question. nil lets Estate.open resolve the identity
+        // store per backend (the Keychain for SQLite); a transient estate's
+        // Ed25519 key stays in memory.
+        let identityKeyStore: (any EstateIdentityKeyStore)? =
+            registered ? nil : InMemoryEstateIdentityKeyStore()
 
-        // Estate key-material lifetime (estate-key-lifetime fix, 2026-07-29).
-        //
-        // MOOTX01_ESTATE_LIFETIME=ephemeral — agent-driven test loops declare this
-        // so they can provision and destroy estates in bulk without accumulating
-        // Keychain items. When set:
-        //   1. The SQLite branch skips KeychainKeyStore.loadOrCreateKey() and uses
-        //      a freshly-generated in-memory random db key (the file is still
-        //      SQLCipher-encrypted, but the key is not persisted to the Keychain
-        //      and is not recoverable after process exit — correct for a throwaway
-        //      estate).
-        //   2. kit.open() receives an InMemoryEstateIdentityKeyStore() so the
-        //      Ed25519 signing key never touches the Keychain.
-        //
-        // The default (.durable) is production behavior; all existing callers that
-        // do not set this var are unaffected.
-        let rawLifetime = ProcessInfo.processInfo.environment["MOOTX01_ESTATE_LIFETIME"] ?? ""
-        let isEphemeral = rawLifetime.lowercased() == "ephemeral"
-        let identityKeyStore: (any EstateIdentityKeyStore)? = isEphemeral
-            ? InMemoryEstateIdentityKeyStore()
-            : nil  // nil → Estate.open resolves from storage backend (Keychain for SQLite)
+        // The at-rest posture, resolved only for a SQLite record that is going
+        // to open its file. Kept for the manifest refresh after prepare.
+        var encryption: EstateEncryptionConfig?
+        // A PostgreSQL connection string may carry user:password; it is never
+        // logged and is redacted from any error text that might echo it.
+        var redactedSecret: String?
 
         let storage: any Storage
-
-        // All three backends wire the LocusKit semantic recall lane and the
-        // CorpusKit/VectorKit vector recall lane after `open`. LocusKit owns
-        // LocusKit-native semantic recall (structural, BM25, matrix-tier).
-        // CorpusKit + VectorStore own the dense float vector recall lane (Lane D).
-        //
-        // Lane D uses CorpusEnsemble.defaultEnsemble() — the canonical 1.0
-        // five-signal recall ensemble (RI / PPMI / LSA / NMF / FDC). All five
-        // are model-free and self-contained: the trainable distributional /
-        // matrix signals (RI/PPMI/LSA/NMF) train on the estate's own corpus and
-        // persist their bases; FDC is a stateless lattice co-classification
-        // signal. Each signal embeds under its own modelID and the dense lane
-        // fuses them, so recall reflects honest distributional + taxonomic
-        // structure — not a single surface/lexical hash.
-        //
-        // The learned semantic vector (MiniLM/MPNet/Gemma model providers) is an
-        // ADDITIVE v1.1 on-device lane for richer similarity — it does not replace
-        // this default ensemble. Being model-dependent, those learned providers
-        // cannot serve as a federation-reproducible vector (weights differ across
-        // devices); the five-signal ensemble is reproducible cross-port.
-        //
-        // The wiring step that happens after `open` below sets this to true;
-        // each backend branch sets `wireSemanticRecall = true` unconditionally.
-        var wireSemanticRecall = false
-
-        if !rawPostgresURL.isEmpty && !rawSQLitePath.isEmpty {
-            // Ambiguous config: both vars set. Never pick silently — the
-            // operator must resolve the ambiguity by unsetting one of them.
-            fputs(
-                "ARIA_MCP fatal: ambiguous config — both ARIA_MCP_POSTGRES_URL and " +
-                "ARIA_MCP_SQLITE_PATH are set. Unset one to select the intended backend.\n",
-                stderr
-            )
-            exit(1)
-        } else if !rawPostgresURL.isEmpty {
-            // Only ARIA_MCP_POSTGRES_URL set → PostgreSQL-backed estate.
-            // PostgreSQLStorage uses a lazy connection pool (no TCP connection
-            // opened here). The pool defaults match PersistenceKit's
-            // BackendConfiguration.postgresql defaults:
-            //   poolSize: 10, connectionTimeout: 5.0s, idleTimeout: 300.0s
-            // A connectivity failure surfaces at Estate.create/kit.open below.
-            // Redact userinfo before logging — rawPostgresURL may contain
-            // user:password@host which would leak credentials to stderr/log aggregators.
-            // URL(string:) parses standard postgres:// format; keyword-value strings
-            // (e.g. "host=... user=... password=...") are not URL-parseable and fall
-            // back to "configured" so no connection details appear in logs.
-            let redactedHost = URL(string: rawPostgresURL)?.host ?? "configured"
-            Logging.stderr.log("ARIA_MCP starting (stdio, PostgreSQL backend: \(redactedHost))")
-            let configuration = EstateConfiguration(
-                estateID: UUID(),
-                backend: .postgresql(connectionString: rawPostgresURL)
-            )
-            // PostgreSQLStorage.init is non-throwing (lazy pool); errors
-            // surface at Estate.create / kit.open when the first connection
-            // is attempted. Semantic recall is wired after open using the
-            // same storage handle (shared pool connection, same PG schema).
-            storage = PostgreSQLStorage(configuration: configuration)
-            wireSemanticRecall = true
-        } else if !rawSQLitePath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            // Only ARIA_MCP_SQLITE_PATH set → SQLite-backed durable estate.
-            let dbURL = URL(fileURLWithPath: rawSQLitePath)
-            Logging.stderr.log("ARIA_MCP starting (stdio, SQLite backend: \(rawSQLitePath))")
-
-            // Create parent directories so the caller does not need to
-            // pre-create them. Bare filenames (no directory component) skip
-            // creation entirely — exact parity with the Rust server's
-            // empty-parent guard (server.rs from_env) — so a read-only cwd
-            // does not fail a path that needs no directory created.
-            if rawSQLitePath.contains("/") {
-                let parentDir = dbURL.deletingLastPathComponent()
+        if arguments.inMemory {
+            // The estate lives and dies with this process. No Keychain contact:
+            // the .inMemory backend resolves the in-memory identity store and no
+            // db key exists to mint. Accuracy sweeps only; a durable estate never
+            // selects it, and no environment value turns it on.
+            Logging.stderr.log("ARIA_MCP starting (estate: \(estate.name) [\(estate.kind.rawValue)], IN-MEMORY backend — exists only for this process; served transient: no federation, no charters)")
+            storage = InMemoryStorage(configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        } else {
+            switch estate.backend {
+            case .postgresql(let connectionString):
+                // Lazy pool: no TCP connection is opened here. Pool defaults are
+                // PersistenceKit's BackendConfiguration.postgresql defaults
+                // (poolSize 10, connectionTimeout 5 s, idleTimeout 300 s). The
+                // host is the only part of the connection string that is logged.
+                redactedSecret = connectionString
+                let host = URL(string: connectionString)?.host ?? "configured"
+                Logging.stderr.log("ARIA_MCP starting (estate: \(estate.name) [\(estate.kind.rawValue)], PostgreSQL backend: \(host))")
+                storage = PostgreSQLStorage(configuration: EstateConfiguration(
+                    estateID: UUID(),
+                    backend: .postgresql(connectionString: connectionString)))
+            case .sqlite:
+                Logging.stderr.log("ARIA_MCP starting (estate: \(estate.name) [\(estate.kind.rawValue)] at \(estate.directory.path), SQLite backend)")
+                // Fail closed: never fall back to a plaintext open of an encrypted
+                // estate, and never create a new estate over one that would not open.
+                if frozen && !FileManager.default.fileExists(atPath: estate.databaseURL.path) {
+                    fputs("ARIA_MCP fatal: frozen mode requires an existing estate.\n", stderr)
+                    exit(1)
+                }
+                let resolved: (encryption: EstateEncryptionConfig, posture: EstateOpenPosture.Posture)
                 do {
-                    try FileManager.default.createDirectory(
-                        at: parentDir,
-                        withIntermediateDirectories: true,
-                        attributes: nil
-                    )
+                    resolved = try EstateOpenPosture.resolve(for: estate)
                 } catch {
-                    fputs(
-                        "ARIA_MCP fatal: cannot create parent directory '\(parentDir.path)': \(error)\n",
-                        stderr
-                    )
+                    fputs("ARIA_MCP fatal: estate encryption posture unavailable: \(error)\n", stderr)
+                    exit(1)
+                }
+                encryption = resolved.encryption
+                if !registered {
+                    Logging.stderr.log("ARIA_MCP: transient estate — identity in memory, no federation, no Keychain writes")
+                } else if resolved.posture == .newPlaintextDeclared {
+                    // A declared-plaintext open is never silent: name the posture and
+                    // its source, so a downgrade caused by an altered manifest shows.
+                    Logging.stderr.log("ARIA_MCP: creating estate UNENCRYPTED — its manifest \(estate.manifestURL.path) declares plaintext. Run `mootx01 upgrade` to encrypt.")
+                }
+                // busyTimeout 5.0 s is PersistenceKit's sqlite default; enough for
+                // one server process with no concurrent writers. The backend creates
+                // the directory and the file on first open.
+                do {
+                    storage = try SQLiteStorage(configuration: EstateConfiguration(
+                        estateID: UUID(),
+                        backend: .sqlite(url: estate.databaseURL, busyTimeout: 5.0),
+                        encryptionConfig: resolved.encryption))
+                } catch {
+                    fputs("ARIA_MCP fatal: cannot open SQLite at '\(estate.databaseURL.path)': \(error)\n", stderr)
                     exit(1)
                 }
             }
-
-            // Construct the SQLite storage. busyTimeout of 5.0 seconds is
-            // the PersistenceKit BackendConfiguration.sqlite default; sufficient
-            // for a single-process server with no concurrent writers.
-            //
-            // Whole-file encryption (durable path, the default):
-            //   Open the estate as FullDatabase with this estate's per-estate
-            //   key from the Keychain (keyed by the estate file path), so the
-            //   file — schema and content — is SQLCipher-encrypted at rest.
-            //   The app and this server point at the same file, so they derive
-            //   the same account and load the same key; the shared Keychain
-            //   access group (verified on a signed build) lets them read the
-            //   same item.
-            //
-            // Ephemeral path (MOOTX01_ESTATE_LIFETIME=ephemeral):
-            //   Generate a random 32-byte db key in process memory — no Keychain
-            //   write. The file is still SQLCipher-encrypted (full-database), but
-            //   the key is never persisted and is not recoverable after process
-            //   exit. Correct for a throwaway agent test estate. The identity key
-            //   is handled below (InMemoryEstateIdentityKeyStore via identityKeyStore).
-            do {
-                let encryptionConfig: EstateEncryptionConfig
-                if isEphemeral {
-                    // Random ephemeral db key — no Keychain write.
-                    var keyBytes = [UInt8](repeating: 0, count: 32)
-                    let result = SecRandomCopyBytes(kSecRandomDefault, keyBytes.count, &keyBytes)
-                    guard result == errSecSuccess else {
-                        fputs("ARIA_MCP fatal: cannot generate ephemeral db key (SecRandomCopyBytes: \(result))\n", stderr)
-                        exit(1)
-                    }
-                    encryptionConfig = .fullDatabase(key: Data(keyBytes))
-                } else {
-                    // Shared access group (#94): match the app's group so both
-                    // processes read the same Keychain item for the same estate.
-                    let dbKey = try KeychainKeyStore(
-                        service: "com.codedaptive.mootx01",
-                        estateURL: dbURL,
-                        accessGroup: "com.codedaptive.mootx01.shared"
-                    ).loadOrCreateKey()
-                    encryptionConfig = .fullDatabase(key: dbKey)
-                }
-                let configuration = EstateConfiguration(
-                    estateID: UUID(),
-                    backend: .sqlite(url: dbURL, busyTimeout: 5.0),
-                    encryptionConfig: encryptionConfig
-                )
-                storage = try SQLiteStorage(configuration: configuration)
-            } catch {
-                fputs(
-                    "ARIA_MCP fatal: cannot open SQLite at '\(rawSQLitePath)': \(error)\n",
-                    stderr
-                )
-                exit(1)
-            }
-            // Durable, explicit-path estate → wire LocusKit semantic recall
-            // (structural/BM25) and CorpusKit/VectorKit deterministic vector
-            // recall (Lane D) after `open`.
-            wireSemanticRecall = true
-        } else {
-            // Neither set → in-memory ephemeral estate. The estate UUID is
-            // fresh each run so the server serves one ephemeral estate per
-            // process, matching the v1.0 owner-by-default credential model.
-            // Both recall lanes (LocusKit semantic + CorpusKit/VectorKit vector)
-            // are wired after open using the same InMemoryStorage handle — all
-            // tables coexist in one instance. BM25 + deterministic Lane D are
-            // live from the first capture, same as the SQLite branch.
-            Logging.stderr.log("ARIA_MCP starting (stdio, in-memory backend)")
-            let configuration = EstateConfiguration(estateID: UUID(), backend: .inMemory)
-            storage = InMemoryStorage(configuration: configuration)
-            wireSemanticRecall = true
         }
+
+        /// Error text with the connection string, if any, replaced.
+        func redacted(_ error: any Error) -> String {
+            let text = String(describing: error)
+            guard let secret = redactedSecret, !secret.isEmpty else { return text }
+            return text.replacingOccurrences(of: secret, with: "[REDACTED]")
+        }
+
+        // Production model-directory resolver, installed before the estate is
+        // opened and wired: the semantic-recall wiring acts on the manifest's
+        // `embedding_provider = "encoder"` by building the span encoder from
+        // the active registry row, and it can only find the bundled model
+        // through this resolver (the kit's default answers nil for every id,
+        // which leaves recall lexical-only). Install-wide files such as the
+        // bundled models live in the configuration directory; estate files
+        // live with the estate.
+        await kit.setModelDirectoryResolver(
+            BundledModelDirectoryResolver(dataDirectory: EstateCatalog.configurationDirectory))
 
         let handle: EstateHandle
         do {
@@ -259,29 +250,22 @@ struct AriaMCPMain {
             // or PostgreSQL estate is safe: it re-stamps owner_identifier and
             // leaves all other manifest values intact. The subsequent kit.open
             // validates the bitmap layout version and issues the EstateHandle.
-            // For PostgreSQL, this is also the point where the lazy pool opens
-            // its first real TCP connection — a connectivity failure surfaces
-            // here as a thrown error.
-            _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
-            // identityKeyStore is nil for durable estates (backend-heuristic
-            // resolution: Keychain for SQLite, in-memory for .inMemory) and
-            // InMemoryEstateIdentityKeyStore() for ephemeral estates so the
-            // Ed25519 signing key never touches the Keychain.
-            handle = try await kit.open(storage: storage, owner: owner, identityKeyStore: identityKeyStore)
+            // For PostgreSQL this is where the lazy pool opens its first TCP
+            // connection, so an unreachable server surfaces here.
+            if !frozen { _ = try await LocusKit.Estate.create(storage: storage, owner: owner) }
+            handle = try await kit.open(storage: storage, owner: owner,
+                                        identityKeyStore: identityKeyStore, federate: registered, frozen: frozen)
+            // This entry point creates on every open (Estate.create above is an
+            // idempotent re-stamp), so the create-time default belongs here too:
+            // the span encoder becomes the recall stage of an estate that names
+            // no provider; an estate that already names one is left alone.
+            if !frozen { try await kit.provisionDefaultEncoderIfAbsent(for: handle) }
         } catch {
-            // Redact the raw PostgreSQL connection string from error descriptions —
-            // storage errors may propagate the full connection string (which can contain
-            // user:password) when the URL fails to parse or the connection is refused.
-            // Replace any verbatim occurrence of rawPostgresURL with "[REDACTED]"
-            // before logging so credentials never appear in stderr.
-            let safeDescription = rawPostgresURL.isEmpty
-                ? String(describing: error)
-                : String(describing: error).replacingOccurrences(of: rawPostgresURL, with: "[REDACTED]")
-            Logging.stderr.log("ARIA_MCP fatal: failed to open estate: \(safeDescription)")
+            Logging.stderr.log("ARIA_MCP fatal: failed to open estate: \(redacted(error))")
             exit(1)
         }
 
-        // Semantic recall wiring (all backends: in-memory, SQLite, PostgreSQL).
+        // Semantic recall wiring, every backend.
         //
         // `kit.open` admits the estate and issues the handle, but it does NOT
         // register a Corpus or VectorStore — so on a bare open the BM25 + vector
@@ -289,74 +273,57 @@ struct AriaMCPMain {
         // row recall. The full composition normally lands at `kit.provision`
         // (EstateLifecycle), which wires Corpus + VectorStore for a `.glk` estate.
         //
-        // We do NOT call `provision` here: `provision` also re-stamps the manifest
-        // (estate name, kind-prefixed framework profile, zoom window) and is the
+        // `provision` is not called here: it also re-stamps the manifest (estate
+        // name, kind-prefixed framework profile, zoom window) and is the
         // create-from-scratch surface. Re-running aria-mcp against an EXISTING
-        // on-disk estate must remain idempotent — today's `Estate.create + open`
-        // is idempotent and we must not regress that. Instead we call the shared
-        // `wireGLKSubstores` seam — the single canonical post-open wiring path that
-        // `provision` and `mootx01 serve` also use: build a Corpus and a standalone
-        // VectorStore on the same backing storage, register both, and mount the
-        // estate's encode queue.
-        //
-        // Backend-specific notes:
-        // - SQLite: Corpus + VectorStore share the same storage instance as the
-        //   DrawerStore. Schema migrations are idempotent; re-opening the same
-        //   path re-registers against already-migrated tables without data loss.
-        // - In-memory: Corpus + VectorStore share the same InMemoryStorage
-        //   instance as the DrawerStore. Tables are disjoint namespaces within
-        //   the single in-process store. Ephemeral — discarded on process exit.
-        // - PostgreSQL: Corpus + VectorStore are wired on the same
-        //   PostgreSQLStorage handle (same lazy connection pool, same PG schema).
-        //   Schema migrations are idempotent. The pool acquires connections on
-        //   first use; wiring itself does not open a TCP connection.
-        //
-        // Idempotent across restarts (SQLite + PostgreSQL): `Corpus(storage:models:)`
-        // and `VectorStore(storage:)` apply their schema declarations via the
-        // backend's idempotent `migrate`, and `registerCorpus`/`registerVectorStore`
-        // are plain registry writes. Re-opening the same on-disk estate re-registers
-        // against already-migrated tables and re-reads persisted vectors — no data
-        // is dropped, no schema is rewritten. In-memory is not persistent so
-        // idempotency across restarts is not applicable.
-        //
-        // The encode queue is mounted eagerly by `wireGLKSubstores` (idempotent
-        // with the mode-aware `capture` verb's lazy mount). The gauntlet's
-        // impatient writes still ingest into the Corpus inline.
-        //
-        // Embedding ensemble: `CorpusEnsemble.defaultEnsemble()` — the canonical
-        // 1.0 five-signal recall default (RI / PPMI / LSA / NMF / FDC). The
-        // trainable distributional signals train and persist on first ingest /
-        // reindex under their own modelIDs; FDC is stateless and live immediately.
-        // The dense float lane fuses all five honest signals, so recall is the
-        // multi-signal default — not pinned to a single hash lane — from the first
-        // capture on every backend.
-        if wireSemanticRecall {
-            do {
-                // Shared seam: Corpus + VectorStore + encode queue, the same wiring
-                // `provision` and `mootx01 serve` perform. Idempotent on reopen.
-                _ = try await GLKMigrationCatalog.prepare(
-                    kit: kit, handle: handle, now: Date())
-                try await kit.wireGLKSubstores(for: handle, backingStorage: storage)
-                // Rebuild + register the matrix tier from the persisted audit log
-                // so matrix-driven recall (co-occurrence/temporal scoring — the
-                // matrixAware scoring and the matrix/lattice/weighted-all
-                // compositions) is live from the FIRST query on a reopened estate.
-                // Like Corpus/VectorStore above, the matrix tier is an in-memory
-                // DERIVED accelerator rebuilt from durable ground truth (the audit
-                // log), not persisted state: a fresh process has matrixTiers[handle]
-                // = nil, so without this every matrix score column reads 0.0 and
-                // matrix recall is dark after a restart until the next in-process
-                // dreaming cycle. This is the same rebuild moot_dream performs as
-                // its "un-starving" step; doing it on open makes the durable estate
-                // correct from the first recall. Idempotent — rebuild from the same
-                // log is deterministic, and the dreaming cycle refreshes it later.
-                try await kit.rebuildDerivedAccelerators(for: handle)
-                Logging.stderr.log("ARIA_MCP recall lit: LocusKit semantic recall (structural/BM25) + CorpusKit/VectorKit vector recall (five-signal honest ensemble Lane D — RI/PPMI/LSA/NMF/FDC, trained on-corpus and fused) + matrix tier registered. Learned semantic embedding (MiniLM/MPNet/Gemma): additive v1.1 on-device lane, not wired here.")
-            } catch {
-                fputs("ARIA_MCP fatal: cannot wire semantic recall: \(error)\n", stderr)
-                exit(1)
+        // estate must stay idempotent, as `Estate.create + open` is. Instead the
+        // shared `wireGLKSubstores` seam runs — the one canonical post-open
+        // wiring path `provision` and `mootx01 serve` also use: build a Corpus
+        // and a standalone VectorStore on the same backing storage, register
+        // both, and mount the estate's encode queue. `Corpus(storage:models:)`
+        // and `VectorStore(storage:)` apply their schema through the backend's
+        // idempotent `migrate`, so reopening re-registers against migrated
+        // tables and re-reads persisted vectors; nothing is dropped or rewritten.
+        do {
+            if frozen {
+                guard try await EstateFormatStore(storage: storage).readIfPresent() == .current else {
+                    throw EstateError.substrateUnavailable("frozen estate requires migration before serving")
+                }
+            } else {
+            let preparation = try await GLKMigrationCatalog.prepare(kit: kit, handle: handle, now: Date())
+            // The manifest must say what is on disk: after a migration, or for
+            // an estate that predates manifests, rewrite estate.json. Only a
+            // SQLite record has a file whose posture the manifest describes.
+            if let encryption, try EstateManifestRefresh.afterPrepare(
+                preparation, estate: estate, encryption: encryption, now: Date()) {
+                Logging.stderr.log("ARIA_MCP: estate manifest refreshed (format \(preparation.format), schema \(GeniusLocusKitSchema.version))")
             }
+            }
+            try await kit.wireGLKSubstores(for: handle, backingStorage: storage, frozen: frozen)
+            // Rebuild + register the matrix tier from the persisted audit log so
+            // matrix-driven recall (co-occurrence/temporal scoring — the
+            // matrixAware scoring and the matrix/lattice/weighted-all
+            // compositions) is live from the FIRST query on a reopened estate.
+            // Like Corpus/VectorStore above, the matrix tier is an in-memory
+            // DERIVED accelerator rebuilt from durable ground truth (the audit
+            // log), not persisted state: a fresh process has matrixTiers[handle]
+            // = nil, so without this every matrix score column reads 0.0 until
+            // the next in-process dreaming cycle. Same rebuild moot_dream performs
+            // as its "un-starving" step; deterministic, so idempotent.
+            try await kit.rebuildDerivedAccelerators(for: handle, frozen: frozen)
+            Logging.stderr.log("ARIA_MCP recall lit: LocusKit semantic recall (structural/BM25) + CorpusKit/SynapseKit vector recall + matrix tier registered.")
+        } catch {
+            fputs("ARIA_MCP fatal: cannot wire semantic recall: \(redacted(error))\n", stderr)
+            exit(1)
         }
+
+        // Charters seed only into a registered estate, matching `mootx01 serve`
+        // (ServeCommand.swift:336-349). A transient or in-memory estate holds
+        // exactly what was imported into it (2026-08-24 ruling; ARIA_MCP_SPEC §6.6).
+        // Extracted into a static helper so tests can verify the `registered` gate
+        // directly without going through the full `run()` stack.
+        await AriaMCPMain.seedChartersIfRegistered(
+            kit: kit, handle: handle, registered: registered, frozen: frozen, now: Date())
 
         let info = ARIA_MCPDispatcher.ServerInfo(name: "ARIA_MCP", version: "0.1.0")
         // Server identity injected so facts/memories filed via this host are
@@ -377,10 +344,9 @@ struct AriaMCPMain {
                 exit(1)
             }
             // Resident HTTP mode: pass useDefault: true so the daemon wires
-            // PersistenceStatsSink to the moot-mgr default path when
-            // ARIA_MCP_STATS_STORE is not set. Telemetry is durable by default
-            // in resident mode; stdio mode stays opt-in.
-            let statsStorePath = AriaResident.statsStorePathFromEnv(useDefault: true)
+            // PersistenceStatsSink to the moot-mgr default path. Telemetry is
+            // durable by default in resident mode; stdio mode stays opt-in.
+            let statsStorePath = AriaResident.statsStorePath(useDefault: true)
             let config = AriaResident.ResidentConfig(
                 port: portValue,
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(),
@@ -407,8 +373,8 @@ struct AriaMCPMain {
         } else {
             // stdio: ephemeral, per-client. Startup-once telemetry only (no
             // continuous gate — the process does not outlive the client session).
-            // useDefault: false → telemetry off unless ARIA_MCP_STATS_STORE is set.
-            let statsStorePath = AriaResident.statsStorePathFromEnv(useDefault: false)
+            // useDefault: false → stdio mode telemetry off (opt-in only).
+            let statsStorePath = AriaResident.statsStorePath(useDefault: false)
             _ = await AriaResident.installManagerTelemetry(storePath: statsStorePath)
             let server = StdioServer(dispatcher: dispatcher)
             Logging.stderr.log("ARIA_MCP ready (\(dispatcher.tools.count) tools, stdio transport)")
@@ -417,4 +383,39 @@ struct AriaMCPMain {
         }
     }
 
+    /// Seed default wing charters into a writable registered estate.
+    /// Called by `run()` after the estate is open and semantic recall is wired.
+    /// Extracted so `CharterSeedingTests` can exercise the `registered` gate
+    /// without the full `run()` stack: removing the `guard registered` check
+    /// makes `transientOpeningSeedsNoCharterDrawers` red; disabling the seeding
+    /// call makes `registeredOpeningSeedsSevenCharterDrawers` red.
+    static func seedChartersIfRegistered(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        registered: Bool,
+        frozen: Bool,
+        now: Date
+    ) async {
+        guard registered && !frozen else { return }
+        do {
+            try await kit.seedDefaultWings(for: handle, now: now)
+        } catch {
+            // Non-fatal: the estate is open and functional; a fresh agent sees
+            // no charter map at worst. Log and continue — identical treatment
+            // to `mootx01 serve`.
+            Logging.stderr.log("ARIA_MCP warning: default wing seeding failed: \(error) — continuing")
+        }
+    }
+
+    /// Whether the estate should be opened with registered posture: federated
+    /// identity, Keychain key store, and charter seeding. Returns `false` when
+    /// `inMemory` is true regardless of the record kind — `--in-memory` always
+    /// forces the transient posture (R8, 2026-09-08).
+    ///
+    /// Extracted from `run()` so that `EstateSelectionTests` can verify the
+    /// condition with records from a scratch catalog. A mutation that drops
+    /// `&& !inMemory` makes `inMemoryAlwaysTransientWhateverTheRecordKind` red.
+    static func isRegisteredOpening(kind: EstateRecordKind, inMemory: Bool) -> Bool {
+        kind == .registered && !inMemory
+    }
 }

@@ -32,7 +32,7 @@
 //   7. Register tier  — registerMatrixTier(_:for:) installs the rebuilt tier
 //                       so RecallDirector scoring is live from the first recall.
 //
-// The ANN/HNSW index does NOT need an explicit rebuild step: VectorKit uses
+// The ANN/HNSW index does NOT need an explicit rebuild step: SynapseKit uses
 // an O(N) in-process Hamming scan per query. The first query after hydrate
 // operates on the hydrated `vectors` table rows with zero additional setup.
 //
@@ -45,12 +45,13 @@
 //            REPLICATION_TRACK_PLAN.md §3 GLK estate-level hydrate integration.
 
 import Foundation
+import MootProductIdentity
 import OSLog
 import LocusKit
 import PersistenceKit
 import PersistenceKitReplication
 
-private let log = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+private let log = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 
 // MARK: - Hydrate-on-open API
 
@@ -70,7 +71,7 @@ public extension GeniusLocusKit {
     ///      For `inMemory` this creates all schema-declared tables (blank, ready for hydration).
     ///      For `durable` this is idempotent — CREATE TABLE IF NOT EXISTS and a new
     ///      migration-version record for "GeniusLocusKit" (the data tables already
-    ///      exist from prior LocusKit/VectorKit/CorpusKit opens).
+    ///      exist from prior LocusKit/SynapseKit/CorpusKit opens).
     ///   2. Hydrate: copy all schema-declared tables + audit events from
     ///      `durable` into `inMemory` via `StorageReplicator.hydrate`.
     ///   3. Open: run `LocusKit.Estate.open` against the now-populated `inMemory`
@@ -111,7 +112,7 @@ public extension GeniusLocusKit {
         // The replication schema gate (StorageReplicator.replicateFull) checks
         // `currentSchemaVersion(for: schema.kitID)` on BOTH source and destination.
         // A GLK estate in normal operation has its component kit schemas opened
-        // individually (LocusKit opens "LocusKit" v1, VectorKit opens "VectorKit" v1,
+        // individually (LocusKit opens "LocusKit" v1, SynapseKit opens "SynapseKit" v1,
         // etc.), but the GLK composite kitID "GeniusLocusKit" is never registered
         // unless we explicitly open it. We do that here for both backends:
         //
@@ -175,123 +176,35 @@ public extension GeniusLocusKit {
     /// from-scratch rebuild (conformance-tested), so calling it twice produces
     /// the same registered tier.
     ///
-    /// PERSISTENCE: the matrix tier is read from its on-disk SQLite snapshot
-    /// (MatrixSnapshotStore) and folded FORWARD over only the audit tail past the
-    /// snapshot's HLC watermark — it is NOT recomputed from the whole audit log on
-    /// every launch. A full rebuild runs only when there is no snapshot (cold
-    /// start) or the persisted format is stale. After computing, the fresh tier is
-    /// persisted so the next launch loads it. This is the spec-mandated behaviour:
-    /// all derived/reference state lives on disk, never memory-only, never
-    /// reassembled from scratch on launch once it has been persisted.
+    /// The isolated worker loads normalized records, folds count matrices forward,
+    /// and recomputes time-dependent decay using the injected clock. It stages
+    /// bounded row batches before atomically publishing a complete generation.
+    /// This explicit convenience awaits completion; standing signals enqueue only.
     ///
     /// - Parameters:
     ///   - handle: A handle for an already-open estate. Must be in the registry.
-    ///   - now: Persist timestamp for the saved snapshot's `updated_at` (metadata
-    ///          only; the matrix math itself is deterministic and clock-free).
+    ///   - now: Generation timestamp and clock for time-dependent decay.
     /// - Throws: `GeniusLocusKitError.estateNotOpen` if the handle is stale.
     ///           Any storage-tier error surfaced by `AuditLog.iterate`.
     func rebuildDerivedAccelerators(
         for handle: EstateHandle,
-        now: Date = Date()
+        now: Date = Date(),
+        frozen: Bool = false
     ) async throws {
-        // Step 3 — Load the unified audit log.
-        // `feedAuditLog` (N+1 per-drawer queries into a grow-only RAM dict)
-        // is removed. `auditLog(for:)` now
-        // issues a single bounded SQL query against `_storagekit_audit`.
-        let log_ = try await auditLog(for: handle)
-
-        // Build the eventTime map (rowID → authored-in-world epoch ms) so the
-        // temporal (T) matrix pass keys off `eventTime`, not the capture HLC —
-        // all temporal-cognition primitives key off eventTime. A bulk
-        // historical import stamps every capture with one HLC, so hlc-based lags
-        // are all 0 and no causality pairs form; the real ordering lives in each
-        // drawer's eventTime. For streaming capture eventTime == captureTime, so
-        // this leaves the T matrix unchanged there.
-        let estate_ = try estate(for: handle)
-        let drawers_ = try await estate_.allDrawers()
-        var eventTimes: [UUID: Int64] = [:]
-        eventTimes.reserveCapacity(drawers_.count)
-        for d in drawers_ where !d.id.isEmpty {
-            if let rowUUID = UUID(uuidString: d.id) {
-                eventTimes[rowUUID] = Int64(d.eventTime.timeIntervalSince1970 * 1000)
-            }
-        }
-
-        // Steps 4 + 5 — Matrix tier: LOAD from disk and fold the tail forward,
-        // else cold-start full rebuild.
-        let store = try await matrixSnapshotStore(for: handle)
-        let tier: MatrixTier
-        if let snapshot = try await store.load(estateID: handle.estateUUID) {
-            // Persisted snapshot present: fold only the entries past its watermark
-            // onto the loaded tier. incrementalUpdate is conformance-proven equal
-            // to fullRebuild cell-for-cell, including cross-cursor expunge/withdraw
-            // and temporal window-boundary pairs — so this is exact, not an
-            // approximation, and it skips the O(N) full fold over the whole log.
-            var loaded = snapshot.tier
-            loaded.incrementalUpdate(from: log_, eventTimes: eventTimes)
-            tier = loaded
-            // Restore the persisted calibration registry if the estate has none in
-            // memory yet — calibration is derived/reference state too, and lives in
-            // the same on-disk snapshot row.
-            if calibrationRegistries[handle] == nil {
-                calibrationRegistries[handle] = snapshot.calibration
-            }
-            log.info("rebuildDerivedAccelerators: matrix tier loaded from snapshot + folded forward for \(handle.estateUUID, privacy: .public)")
-        } else {
-            // Cold start (no snapshot) or stale format — full two-pass rebuild.
-            // fullRebuild runs F/O/C then T and merges them; see
-            // MatrixTier.fullRebuild(from:) for the two-pass rationale.
-            tier = MatrixTier.fullRebuild(from: log_, eventTimes: eventTimes)
-            log.info("rebuildDerivedAccelerators: matrix tier full-rebuilt (no snapshot) for \(handle.estateUUID, privacy: .public)")
-        }
-
-        // Install the tier so RecallDirector scoring is live from the first recall.
-        // Before this call matrixTiers[handle] is nil and all matrix score columns
-        // read 0.0.
-        registerMatrixTier(tier, for: handle)
-
-        // Persist the freshly-computed tier so the NEXT launch loads it instead of
-        // rebuilding. The watermark is the tier's lastHLC (the F/O/C cursor); the
-        // saved calibration is the estate's current registry, defaulting to empty.
-        let snapshot = MatrixSnapshot(
-            tier: tier,
-            calibration: calibrationRegistries[handle] ?? MatrixCalibrationRegistry(),
-            hlcWatermark: tier.lastHLC
-        )
-        try await store.upsert(estateID: handle.estateUUID, snapshot: snapshot, now: now)
-
-        // Persist the dense vector store's resident-array sidecar alongside the
-        // matrix snapshot — both are derived accelerators that must live on disk so
-        // a cold restart loads them instead of rebuilding from a full table scan.
-        // The sidecar is write-behind; this is the periodic flush point (runs on
-        // launch and on every dreaming cycle). No-op when the store has no sidecar
-        // (in-memory backend) or no pending writes.
-        if let vectorStore = vectorStores[handle] {
-            do {
-                try await vectorStore.flush()
-            } catch {
-                // A sidecar flush failure is non-fatal: the `vectors` table remains
-                // the source of truth and the array rebuilds from it next launch.
-                log.error("rebuildDerivedAccelerators: vector sidecar flush failed: \(error.localizedDescription, privacy: .public)")
-            }
-        }
-
-        log.info("rebuildDerivedAccelerators: matrix tier ready + persisted for \(handle.estateUUID, privacy: .public)")
-    }
-
-    /// Build a `MatrixSnapshotStore` over the estate's backing storage, ensuring
-    /// its table exists. The schema migration is idempotent (CREATE TABLE IF NOT
-    /// EXISTS under the store's own kitID), so calling this on every hydrate is
-    /// safe and keeps the store available on every launch path (serve + hydrate)
-    /// without threading a registry through wiring.
-    private func matrixSnapshotStore(
-        for handle: EstateHandle
-    ) async throws -> MatrixSnapshotStore {
-        guard let storage = storages[handle] else {
+        let worker = try matrixWorker(for: handle)
+        _ = try await requestMatrixRefresh(handle, now: now, frozen: frozen)
+        let tier = try await worker.wait()
+        guard registry[handle] != nil, mountStates[handle] != .draining, matrixRefreshWorkers[handle] === worker else {
             throw GeniusLocusKitError.estateNotOpen(estateUUID: handle.estateUUID)
         }
-        try await storage.migrate(to: MatrixSnapshotStore.schemaDeclaration)
-        return MatrixSnapshotStore(storage: storage)
+        matrixTiers[handle] = tier
+        // Sidecar ownership is unchanged; matrix work no longer holds GLK.
+        if !frozen, !matrixFrozenHandles.contains(handle), let vectors = vectorStores[handle] {
+            do { try await vectors.flush() }
+            catch {
+                log.error("matrix refresh: vector sidecar flush failed: \(error.localizedDescription, privacy: .public)")
+            }
+        }
     }
 
     // MARK: - Flush convenience

@@ -12,7 +12,7 @@
 //! fallback reported. This is the non-Apple installer vertical; the Swift
 //! vertical (MootInstallerCore/InstallDepth.swift) implements the identical
 //! behaviour independently. No FFI — both read the same embedded install
-//! bundle (`src/embedded/install-bundle.json`), the shared agreement substrate.
+//! bundle (`src/embedded/install-bundle-v2.json`), the shared agreement substrate.
 //!
 //! The installer consumes pre-generated elements; it NEVER generates them
 //! (spec §4 / Decision 3). The bundle is byte-sourced from tools/moot-packager.
@@ -105,9 +105,175 @@ impl ClaudeCliRunning for ProcessClaudeCliRunner {
     }
 }
 
+/// Codex CLI seam. Tests use a fake; production runs without terminal input and
+/// with a deadline. `None` means unavailable, unsuccessful, or malformed output.
+pub trait CodexCliRunning {
+    fn run(&self, args: &[&str]) -> Option<String>;
+}
+
+pub struct ProcessCodexCliRunner;
+impl CodexCliRunning for ProcessCodexCliRunner {
+    fn run(&self, args: &[&str]) -> Option<String> {
+        use std::io::Read;
+        use std::process::{Command, Stdio};
+        let mut child = Command::new("codex").args(args)
+            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null())
+            .spawn().ok()?;
+        let stdout = child.stdout.take()?;
+        // Drain concurrently so list output cannot fill the pipe and deadlock.
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let result = stdout.take(4 * 1024 * 1024 + 1).read_to_end(&mut bytes);
+            let output = if result.is_ok() && bytes.len() <= 4 * 1024 * 1024 {
+                String::from_utf8(bytes).ok()
+            } else { None };
+            let _ = sender.send(output);
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return if status.success() { receiver.recv_timeout(std::time::Duration::from_secs(2)).ok().flatten() } else { None };
+                }
+                Ok(None) if std::time::Instant::now() < deadline =>
+                    std::thread::sleep(std::time::Duration::from_millis(100)),
+                _ => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return None;
+                }
+            }
+        }
+    }
+}
+
+/// Registry state comes from Codex, never a leftover materialized directory.
+/// Outer None is a failed/invalid query; inner None means not installed.
+pub fn codex_installed_enabled(cli: &dyn CodexCliRunning) -> Option<Option<bool>> {
+    let output = cli.run(&["plugin", "list", "--json"])?;
+    let root: serde_json::Value = serde_json::from_str(&output).ok()?;
+    let installed = root.get("installed")?.as_array()?;
+    for plugin in installed {
+        if plugin.get("pluginId")?.as_str()? == "mootx01@mootx01" {
+            if !plugin.get("installed")?.as_bool()? { return Some(None); }
+            return Some(Some(plugin.get("enabled")?.as_bool()?));
+        }
+    }
+    Some(None)
+}
+
+fn codex_registered_version(cli: &dyn CodexCliRunning, expected: &str) -> bool {
+    let Some(output) = cli.run(&["plugin", "list", "--json"]) else { return false; };
+    let Ok(root) = serde_json::from_str::<serde_json::Value>(&output) else { return false; };
+    root.get("installed").and_then(|v| v.as_array()).map(|plugins| plugins.iter().any(|p|
+        p.get("pluginId").and_then(|v| v.as_str()) == Some("mootx01@mootx01")
+        && p.get("installed").and_then(|v| v.as_bool()) == Some(true)
+        && p.get("enabled").and_then(|v| v.as_bool()) == Some(true)
+        && p.get("version").and_then(|v| v.as_str()) == Some(expected)
+    )).unwrap_or(false)
+}
+
+/// Remove only the exact HTTP table written by this installer, after verified
+/// plugin registration. Extra options, child tables, alternate endpoints and
+/// malformed/duplicate tables are preserved for manual inspection.
+fn cleanup_codex_default_direct_entry(home: &Path) -> std::io::Result<()> {
+    let codex_home = if codex_cli_home_matches(home) {
+        std::env::var_os("CODEX_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".codex"))
+    } else { home.join(".codex") };
+    let path = codex_home.join("config.toml");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e),
+    };
+    let mut in_table = false;
+    let mut tables = 0;
+    let mut body = Vec::new();
+    for line in content.lines() {
+        let line = line.trim();
+        if line.starts_with('[') {
+            if line.starts_with("[mcp_servers.mootx01.") { return Ok(()); }
+            in_table = line == "[mcp_servers.mootx01]";
+            if in_table { tables += 1; }
+        } else if in_table && !line.is_empty() && !line.starts_with('#') {
+            body.push(line);
+        }
+    }
+    if tables != 1 || body != ["url = \"http://127.0.0.1:4242\""] { return Ok(()); }
+    backup_existing(&path)?;
+    crate::core::merge::remove_from_toml_config(&path, "mootx01")
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+    Ok(())
+}
+
+/// Production guard: a fixture/alternate home must never mutate the live Codex
+/// registry. The CLI resolves CODEX_HOME itself for the actual user's install.
+pub fn codex_cli_home_matches(home: &Path) -> bool {
+    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from).as_deref() == Some(home)
+}
+
+/// Install the embedded Codex package and register it through Codex's supported
+/// CLI. Upgrade only refreshes confirmed installed/enabled plugins; disabled
+/// plugins are left untouched because `plugin add` can re-enable them.
+pub fn apply_codex_plugin(
+    home: &Path,
+    vault_off: bool,
+    upgrade_only: bool,
+    cli: &dyn CodexCliRunning,
+) -> std::io::Result<Option<DepthOutcome>> {
+    if upgrade_only {
+        match codex_installed_enabled(cli) {
+            Some(Some(true)) => {},
+            Some(Some(false)) => {
+                println!("  ⓘ Codex mootx01 plugin is disabled; update deferred to preserve that choice.");
+                return Ok(None);
+            }
+            Some(None) => return Ok(None),
+            None => {
+                println!("  ⓘ Could not check installed Codex plugins; plugin update skipped.");
+                return Ok(None);
+            }
+        }
+    }
+    let outcome = apply("codex", InstallDepth::Plugin, home, vault_off, &ProcessClaudeCliRunner)?;
+    let DepthOutcome::Plugin(ref path) = outcome else { return Ok(Some(outcome)); };
+    let dir = Path::new(path);
+    let marketplace_dir = dir.join(".codex-plugin");
+    std::fs::create_dir_all(&marketplace_dir)?;
+    let marketplace = serde_json::json!({
+        "name": "mootx01",
+        "owner": {"name": "Codedaptive"},
+        "plugins": [{"name": "mootx01", "source": "./"}]
+    });
+    std::fs::write(marketplace_dir.join("marketplace.json"),
+        serde_json::to_vec_pretty(&marketplace)?)?;
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.join(".codex-plugin/plugin.json"))?)?;
+    let expected_version = manifest.get("version").and_then(|v| v.as_str())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "Codex plugin version missing"))?;
+    if cli.run(&["plugin", "marketplace", "add", path]).is_none()
+        || cli.run(&["plugin", "add", "mootx01@mootx01"]).is_none()
+        || !codex_registered_version(cli, expected_version) {
+        println!("  ⓘ Codex plugin files prepared; registration failed. Run `codex plugin marketplace add '{}'` then `codex plugin add mootx01@mootx01`, then restart Codex.", path.replace('\'', "'\\''"));
+        let skill = apply("codex", InstallDepth::Skills, home, vault_off, &ProcessClaudeCliRunner)?;
+        if let DepthOutcome::Skills(path) = skill {
+            return Ok(Some(DepthOutcome::PluginFellBackToSkills(path,
+                "Codex CLI registration failed; wrote skill only".to_string())));
+        }
+    } else {
+        if let Err(e) = cleanup_codex_default_direct_entry(home) {
+            println!("  ⓘ Codex plugin registered, but direct MCP cleanup failed: {e}");
+        }
+        println!("  ✓ Codex mootx01 plugin registered — restart Codex to load it.");
+    }
+    Ok(Some(outcome))
+}
+
 /// The committed, embedded install bundle (compact JSON). Self-contained: the
 /// installed binary carries the skill, the host map, and every package.
-const INSTALL_BUNDLE_JSON: &str = include_str!("../embedded/install-bundle.json");
+const INSTALL_BUNDLE_JSON: &str = include_str!("../embedded/install-bundle-v2.json");
 
 /// Requested integration depth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,8 +363,14 @@ struct InstallMapWire {
 
 #[derive(Debug, Deserialize)]
 struct BundleWire {
+    #[serde(rename = "ariaVersion")]
+    aria_version: Option<String>,
+    #[serde(rename = "ariaBundleIdentity")]
+    aria_bundle_identity: Option<String>,
     #[serde(rename = "skillMarkdown")]
     skill_markdown: String,
+    #[serde(rename = "skillMarkdownByHost")]
+    skill_markdown_by_host: Option<BTreeMap<String, String>>,
     #[serde(rename = "installMap")]
     install_map: InstallMapWire,
     /// "<host>/<relpath>" -> file contents.
@@ -207,29 +379,57 @@ struct BundleWire {
 
 /// The decoded embedded bundle: canonical skill, host map, package trees.
 pub struct InstallBundle {
+    pub aria_version: String,
+    pub aria_bundle_identity: String,
     pub skill_markdown: String,
+    skill_markdown_by_host: BTreeMap<String, String>,
     hosts: BTreeMap<String, InstallMapHost>,
     packages: BTreeMap<String, String>,
 }
 
 impl InstallBundle {
+    fn selected_aria_version() -> &'static str {
+        // The Rust vertical reads the public selected-surface authority directly.
+        // V2 is the unconditional surface; no Cargo feature gate is required.
+        aria_mcp::v2::render::V2_SURFACE_VERSION
+    }
+
+    fn from_json(json: &str) -> Result<Self, String> {
+        let wire: BundleWire = serde_json::from_str(json).map_err(|error| error.to_string())?;
+        let aria_version = wire.aria_version.unwrap_or_else(|| "v1".to_string());
+        let selected = Self::selected_aria_version();
+        if aria_version != selected {
+            return Err(format!(
+                "install bundle ARIA release {aria_version} does not match executable release {selected}"
+            ));
+        }
+        let aria_bundle_identity = match wire.aria_bundle_identity {
+            Some(identity) if !identity.is_empty() => identity,
+            _ if aria_version == "v1" => "legacy-v1".to_string(),
+            _ => return Err(format!("install bundle has no identity for ARIA release {aria_version}")),
+        };
+        let mut hosts = BTreeMap::new();
+        for h in wire.install_map.hosts {
+            hosts.insert(h.id.clone(), h);
+        }
+        Ok(InstallBundle {
+            aria_version,
+            aria_bundle_identity,
+            skill_markdown: wire.skill_markdown,
+            skill_markdown_by_host: wire.skill_markdown_by_host.unwrap_or_default(),
+            hosts,
+            packages: wire.packages,
+        })
+    }
+
     /// Decode the embedded bundle. Panics on malformed embedded data — that is
     /// a build defect (the artifact is committed), surfaced loudly.
     pub fn embedded() -> &'static InstallBundle {
         use std::sync::OnceLock;
         static BUNDLE: OnceLock<InstallBundle> = OnceLock::new();
         BUNDLE.get_or_init(|| {
-            let wire: BundleWire = serde_json::from_str(INSTALL_BUNDLE_JSON)
-                .expect("embedded install-bundle.json failed to parse (build defect)");
-            let mut hosts = BTreeMap::new();
-            for h in wire.install_map.hosts {
-                hosts.insert(h.id.clone(), h);
-            }
-            InstallBundle {
-                skill_markdown: wire.skill_markdown,
-                hosts,
-                packages: wire.packages,
-            }
+            Self::from_json(INSTALL_BUNDLE_JSON)
+                .expect("embedded install-bundle-v2.json failed to parse (build defect)")
         })
     }
 
@@ -238,6 +438,15 @@ impl InstallBundle {
     /// Installer client ids and host ids are identical where both exist.
     pub fn host(&self, client_id: &str) -> Option<&InstallMapHost> {
         self.hosts.get(client_id)
+    }
+
+    /// Select a generated host wrapper, retaining the neutral scalar for
+    /// pre-selector or intentionally shared payloads.
+    pub fn skill_markdown_for_host(&self, host_id: &str) -> &str {
+        self.skill_markdown_by_host
+            .get(host_id)
+            .map(String::as_str)
+            .unwrap_or(&self.skill_markdown)
     }
 
     pub fn host_count(&self) -> usize {
@@ -317,13 +526,13 @@ pub fn apply(
 
     match depth {
         InstallDepth::Server => Ok(DepthOutcome::Server),
-        InstallDepth::Skills => write_skill(host, home),
+        InstallDepth::Skills => write_skill(host, bundle, home),
         InstallDepth::Plugin => {
             if host.supports_plugin() {
                 install_plugin(host, home, vault_off, claude_cli)
             } else {
                 // §4.4 ceiling: fall back to skills and report it.
-                match write_skill(host, home)? {
+                match write_skill(host, bundle, home)? {
                     DepthOutcome::Skills(path) => Ok(DepthOutcome::PluginFellBackToSkills(
                         path,
                         host.fallback_reason().to_string(),
@@ -350,18 +559,33 @@ pub fn plugin_install_directory(host: &InstallMapHost, home: &Path) -> PathBuf {
         .and_then(|p| p.parent()) // host plugin root
         .map(Path::to_path_buf)
         .unwrap_or_else(|| home.to_path_buf());
-    plugin_root.join("mootx01-plugin")
+    // `~/.agents` is the agent-neutral skills root more than one host reads
+    // (Codex and GitHub Copilot today). A package directory shared there is
+    // overwritten by whichever host materializes last, and the Codex
+    // marketplace registration then fails against a tree with no
+    // `.codex-plugin/`. Hosts on that root get their own directory, named by
+    // host id; every host with a root of its own keeps the plain name. Twin
+    // of the Swift `pluginInstallDirectory`.
+    let shared_root = plugin_root.file_name().is_some_and(|n| n == ".agents");
+    if shared_root {
+        plugin_root.join(format!("mootx01-plugin-{}", host.id))
+    } else {
+        plugin_root.join("mootx01-plugin")
+    }
 }
 
 /// Mode 2: write the embedded canonical SKILL.md to the host's skillUserPath.
-fn write_skill(host: &InstallMapHost, home: &Path) -> std::io::Result<DepthOutcome> {
-    let bundle = InstallBundle::embedded();
+fn write_skill(
+    host: &InstallMapHost,
+    bundle: &InstallBundle,
+    home: &Path,
+) -> std::io::Result<DepthOutcome> {
     let dest = expand_tilde(&host.skill_user_path, home);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
     backup_existing(&dest)?;
-    std::fs::write(&dest, &bundle.skill_markdown)?;
+    std::fs::write(&dest, bundle.skill_markdown_for_host(&host.id))?;
     Ok(DepthOutcome::Skills(dest.display().to_string()))
 }
 
@@ -388,7 +612,7 @@ fn install_plugin(
     let files = bundle.package_files(&host.id);
     if files.is_empty() {
         // No embedded package — fall back to skills.
-        return match write_skill(host, home)? {
+        return match write_skill(host, bundle, home)? {
             DepthOutcome::Skills(path) => Ok(DepthOutcome::PluginFellBackToSkills(
                 path,
                 "no embedded package for host; wrote skill only".to_string(),
@@ -468,20 +692,79 @@ fn refresh_stranded_plugin_cache(
     home: &Path,
     claude_cli: &dyn ClaudeCliRunning,
 ) -> Option<String> {
-    if !crate::core::mcp_ownership::is_plugin_installed(CLAUDE_CODE_PLUGIN_ID, home) {
+    let Some(entry) = crate::core::mcp_ownership::installed_entry(CLAUDE_CODE_PLUGIN_ID, home) else {
         return None;
+    };
+    if !claude_cli.run(&["plugin", "update", CLAUDE_CODE_PLUGIN_ID]) {
+        return Some(format!(
+            "  ⓘ Could not refresh the cached mootx01 plugin automatically — run \
+             `claude plugin update {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
+        ));
     }
-    if claude_cli.run(&["plugin", "update", CLAUDE_CODE_PLUGIN_ID]) {
-        return Some(
-            "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new \
-             session) to load the updated plugin."
-                .to_string(),
-        );
+    // `claude plugin update` compares manifest VERSIONS only: a package
+    // rewritten under the same version (the server key moved from "mootx01"
+    // to "memory" on 2026-09-16 with no version bump) reports "already at the
+    // latest version" and leaves the stale cache in place. So compare the
+    // cached copy's MCP manifest with the package just materialised, and
+    // when they differ reinstall through the CLI, which rebuilds the cache
+    // from the current package. Twin of the Swift `refreshStrandedPluginCache`.
+    if cached_manifest_differs(&entry, home) {
+        // `claude plugin install` is an activation: it writes
+        // `enabledPlugins[id] = true`, and the uninstall before it drops the
+        // entry, so a user who deliberately turned the plugin off would come
+        // out of a routine upgrade with it on again. Read the recorded
+        // decision first and put it back after the rebuild; the cache is
+        // fresh either way, and the plugin stays exactly as the user left
+        // it. `mootx01 install` is how they turn it back on.
+        let recorded_disable =
+            crate::core::mcp_ownership::recorded_plugin_disable(CLAUDE_CODE_PLUGIN_ID, home);
+        if !(claude_cli.run(&["plugin", "uninstall", CLAUDE_CODE_PLUGIN_ID])
+            && claude_cli.run(&["plugin", "install", CLAUDE_CODE_PLUGIN_ID]))
+        {
+            return Some(format!(
+                "  ⓘ The cached mootx01 plugin is stale under the same version — run \
+                 `claude plugin uninstall {CLAUDE_CODE_PLUGIN_ID}` then `claude plugin install \
+                 {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
+            ));
+        }
+        if recorded_disable {
+            return Some(
+                match crate::core::mcp_ownership::write_plugin_enabled(false, CLAUDE_CODE_PLUGIN_ID, home) {
+                    Ok(()) => "  ✓ Claude Code plugin cache refreshed; the plugin stays disabled as \
+                               your settings record — run `mootx01 install` to turn it back on."
+                        .to_string(),
+                    Err(err) => format!(
+                        "  ⓘ Claude Code plugin cache refreshed, but your recorded disable could not \
+                         be restored ({err}) — run `claude plugin disable {CLAUDE_CODE_PLUGIN_ID}` \
+                         yourself if you want it to stay off."
+                    ),
+                },
+            );
+        }
     }
-    Some(format!(
-        "  ⓘ Could not refresh the cached mootx01 plugin automatically — run \
-         `claude plugin update {CLAUDE_CODE_PLUGIN_ID}` yourself, then restart Claude Code."
-    ))
+    Some(
+        "  ✓ Claude Code plugin cache refreshed — restart Claude Code (start a new \
+         session) to load the updated plugin."
+            .to_string(),
+    )
+}
+
+/// True when the cached plugin copy's `.mcp.json` differs from the package
+/// on disk. An unreadable cache reads as different (it must be rebuilt); an
+/// unreadable package reads as not different (nothing to compare against).
+fn cached_manifest_differs(entry: &serde_json::Value, home: &Path) -> bool {
+    let claude_home = home.join(".claude");
+    let Some(install_path) = entry.get("installPath").and_then(|v| v.as_str()) else { return false };
+    let cache_root = if Path::new(install_path).is_absolute() {
+        PathBuf::from(install_path)
+    } else {
+        claude_home.join("plugins").join(install_path)
+    };
+    let Ok(package) = std::fs::read(claude_home.join("mootx01-plugin").join(".mcp.json")) else { return false };
+    match std::fs::read(cache_root.join(".mcp.json")) {
+        Ok(cached) => cached != package,
+        Err(_) => true,
+    }
 }
 
 /// Inject
@@ -617,6 +900,141 @@ mod tests {
     use super::*;
     use crate::core::clients;
 
+    struct FakeCodexCli {
+        replies: std::cell::RefCell<std::collections::VecDeque<Option<String>>>,
+        calls: std::cell::RefCell<Vec<Vec<String>>>,
+    }
+    impl FakeCodexCli {
+        fn new(replies: Vec<Option<&str>>) -> Self {
+            Self {
+                replies: std::cell::RefCell::new(replies.into_iter().map(|s| s.map(str::to_string)).collect()),
+                calls: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+    impl CodexCliRunning for FakeCodexCli {
+        fn run(&self, args: &[&str]) -> Option<String> {
+            self.calls.borrow_mut().push(args.iter().map(|s| s.to_string()).collect());
+            self.replies.borrow_mut().pop_front().expect("unexpected Codex CLI call")
+        }
+    }
+    fn codex_test_home() -> PathBuf {
+        let home = std::env::temp_dir().join(format!("moot-codex-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        home
+    }
+    fn codex_current_registry() -> String {
+        let bundle = InstallBundle::embedded();
+        let manifest: serde_json::Value = serde_json::from_str(
+            &bundle.package_files("codex")[".codex-plugin/plugin.json"]).unwrap();
+        serde_json::json!({"installed":[{"pluginId":"mootx01@mootx01", "installed":true,
+            "enabled":true,"version":manifest["version"]}]}).to_string()
+    }
+    #[test]
+    fn codex_install_registers_local_embedded_plugin() {
+        let home = codex_test_home();
+        let registry = codex_current_registry();
+        let cli = FakeCodexCli::new(vec![Some("{}"), Some("{}"), Some(&registry)]);
+        let result = apply_codex_plugin(&home, false, false, &cli).unwrap();
+        let Some(DepthOutcome::Plugin(path)) = result else { panic!("expected plugin"); };
+        let calls = cli.calls.borrow();
+        assert_eq!(calls[0], vec!["plugin", "marketplace", "add", &path]);
+        assert_eq!(calls[1], vec!["plugin", "add", "mootx01@mootx01"]);
+        let manifest: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            Path::new(&path).join(".codex-plugin/marketplace.json")).unwrap()).unwrap();
+        assert_eq!(manifest["plugins"][0]["source"], "./");
+        assert!(Path::new(&path).join(".codex-plugin/plugin.json").is_file());
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn hosts_sharing_the_agents_root_get_their_own_plugin_directory() {
+        let home = codex_test_home();
+        let bundle = InstallBundle::embedded();
+        let codex = plugin_install_directory(bundle.host("codex").unwrap(), &home);
+        let copilot = plugin_install_directory(bundle.host("github-copilot").unwrap(), &home);
+        let claude = plugin_install_directory(bundle.host("claude-code").unwrap(), &home);
+        assert_ne!(codex, copilot, "two hosts on ~/.agents must not share one package directory");
+        assert_eq!(codex.file_name().unwrap(), "mootx01-plugin-codex");
+        assert_eq!(copilot.file_name().unwrap(), "mootx01-plugin-github-copilot");
+        assert_eq!(claude, join_rel(&home, ".claude/mootx01-plugin"), "a host with its own root keeps the plain name");
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn codex_upgrade_uses_registry_not_materialized_directory() {
+        for reply in [Some(r#"{"installed":[]}"#),
+            Some(r#"{"installed":[{"pluginId":"mootx01@mootx01","installed":true,"enabled":false}]}"#),
+            Some("malformed"), None] {
+            let home = codex_test_home();
+            let bundle = InstallBundle::embedded();
+            let dir = plugin_install_directory(bundle.host("codex").unwrap(), &home);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("marker"), "untouched").unwrap();
+            let cli = FakeCodexCli::new(vec![reply]);
+            assert!(apply_codex_plugin(&home, false, true, &cli).unwrap().is_none());
+            assert_eq!(std::fs::read_to_string(dir.join("marker")).unwrap(), "untouched");
+            assert_eq!(cli.calls.borrow().len(), 1);
+            assert!(!dir.join(".codex-plugin/plugin.json").exists());
+            std::fs::remove_dir_all(home).unwrap();
+        }
+    }
+    #[test]
+    fn codex_upgrade_refreshes_installed_plugin_without_loose_directory() {
+        let home = codex_test_home();
+        let registry = codex_current_registry();
+        let cli = FakeCodexCli::new(vec![Some(&registry), Some("{}"), Some("{}"), Some(&registry)]);
+        assert!(matches!(apply_codex_plugin(&home, false, true, &cli).unwrap(), Some(DepthOutcome::Plugin(_))));
+        assert_eq!(cli.calls.borrow().len(), 4);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+    #[test]
+    fn codex_cleanup_preserves_foreign_and_removes_only_managed_http() {
+        for (body, removed) in [
+            ("url = \"http://127.0.0.1:4242\"\n", true),
+            ("url = \"http://127.0.0.1:4243\"\n", false),
+            ("url = \"http://127.0.0.1:4242\"\nenabled = false\n", false),
+            ("url = \"http://127.0.0.1:4242\"\n[mcp_servers.mootx01.env]\nA = \"B\"\n", false),
+        ] {
+            let home = codex_test_home();
+            std::fs::create_dir_all(home.join(".codex")).unwrap();
+            let path = home.join(".codex/config.toml");
+            let original = format!("model = \"test\"\n[mcp_servers.mootx01]\n{body}[other]\nx = true\n");
+            std::fs::write(&path, &original).unwrap();
+            cleanup_codex_default_direct_entry(&home).unwrap();
+            let actual = std::fs::read_to_string(path).unwrap();
+            assert_eq!(!actual.contains("[mcp_servers.mootx01]"), removed);
+            if !removed { assert_eq!(actual, original); }
+            assert!(actual.contains("[other]\nx = true"));
+            std::fs::remove_dir_all(home).unwrap();
+        }
+    }
+    #[test]
+    fn codex_readback_failure_preserves_direct_connection() {
+        let home = codex_test_home();
+        std::fs::create_dir_all(home.join(".codex")).unwrap();
+        let path = home.join(".codex/config.toml");
+        let original = "[mcp_servers.mootx01]\nurl = \"http://127.0.0.1:4242\"\n";
+        std::fs::write(&path, original).unwrap();
+        let cli = FakeCodexCli::new(vec![Some("{}"), Some("{}"), Some(r#"{"installed":[]}"#)]);
+        assert!(matches!(apply_codex_plugin(&home, false, false, &cli).unwrap(),
+            Some(DepthOutcome::PluginFellBackToSkills(_, _))));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+        assert_eq!(cli.calls.borrow().len(), 3);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn codex_registration_failure_writes_fallback_skill_and_stops_sequence() {
+        let home = codex_test_home();
+        let cli = FakeCodexCli::new(vec![None]);
+        let Some(DepthOutcome::PluginFellBackToSkills(path, _)) =
+            apply_codex_plugin(&home, false, false, &cli).unwrap() else { panic!("expected skill fallback"); };
+        assert!(Path::new(&path).is_file());
+        assert_eq!(cli.calls.borrow().len(), 1);
+        assert!(!codex_cli_home_matches(&home));
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
     #[test]
     fn mode_flag_parses() {
         assert_eq!(InstallDepth::from_flag("server"), Some(InstallDepth::Server));
@@ -627,16 +1045,95 @@ mod tests {
         assert_eq!(InstallDepth::DEFAULT, InstallDepth::Plugin);
     }
 
+    /// No embedded Codex lifecycle hook command may resolve `mootx01` via
+    /// bare PATH order (CH-01 security finding: hooks fire automatically on
+    /// Codex lifecycle events, so a bare name hands code execution to any
+    /// attacker-controlled directory earlier in PATH). `mootx01 install`
+    /// materializes the packages map compiled in above (INSTALL_BUNDLE_JSON,
+    /// include_str!) — this guards the carrier the Rust port actually ships,
+    /// parsed via serde_json, never substring-matched. A bare token is any
+    /// token delimited by whitespace, shell separators (`;&|()`), quote
+    /// characters, or backticks that equals `mootx01` with no `/` — so
+    /// `exec mootx01 …`, `env mootx01 …`, `sh -c 'mootx01 …'`, and both
+    /// command-substitution forms are all caught, not just a bare head
+    /// token. Mirrors the Swift twin in MootInstallerCoreTests
+    /// PluginPackageShapeTests and the packager guard in moot-packager
+    /// GeneratorTests; keep the three token rules in sync.
+    #[test]
+    fn embedded_codex_hook_commands_never_resolve_via_bare_path() {
+        fn hook_commands(v: &serde_json::Value, out: &mut Vec<String>) {
+            match v {
+                serde_json::Value::Object(map) => {
+                    if map.get("type").and_then(|t| t.as_str()) == Some("command") {
+                        if let Some(cmd) = map.get("command").and_then(|c| c.as_str()) {
+                            out.push(cmd.to_string());
+                        }
+                    }
+                    for val in map.values() {
+                        hook_commands(val, out);
+                    }
+                }
+                serde_json::Value::Array(arr) => {
+                    for val in arr {
+                        hook_commands(val, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let bundle = InstallBundle::embedded();
+        let wiring = bundle
+            .packages
+            .get("codex/.codex/hooks.json")
+            .expect("embedded codex package carries no .codex/hooks.json — bundle shape changed?");
+        let root: serde_json::Value = serde_json::from_str(wiring)
+            .expect("embedded codex hooks wiring is not valid JSON");
+
+        let mut commands = Vec::new();
+        hook_commands(&root, &mut commands);
+        assert!(
+            !commands.is_empty(),
+            "embedded codex hooks wiring carries no commands — wiring shape changed?"
+        );
+
+        for cmd in &commands {
+            let bare = cmd
+                .split(|c: char| c.is_whitespace() || ";&|()'\"`".contains(c))
+                .any(|token| token == "mootx01");
+            assert!(
+                !bare,
+                "embedded codex hooks wiring resolves mootx01 via bare PATH: {cmd}"
+            );
+        }
+    }
+
     #[test]
     fn embedded_bundle_decodes() {
         let b = InstallBundle::embedded();
         assert!(b.skill_markdown.contains("name: mootx01-memory"));
+        assert_eq!(b.aria_version, InstallBundle::selected_aria_version());
+        assert!(b.aria_bundle_identity.starts_with(&format!("mootx01/{}/", b.aria_version)));
         assert_eq!(b.host_count(), 10); // 10th host: xcode (EE packager sync 0b632002)
         assert!(b.host("claude-code").is_some());
         // MCP-only clients have no matrix row.
         assert!(b.host("claude-desktop").is_none());
         assert!(b.host("continue").is_none());
         assert!(b.host("kiro").is_none());
+    }
+
+    #[test]
+    fn v2_embedded_bundle_identity_matches_registry() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors().nth(3).expect("repository root from apps/mootx01/rust");
+        let registry: serde_json::Value = serde_json::from_slice(&std::fs::read(
+            root.join("packages/kits/AriaMcpKit/Registry/aria-v2-selected-release.json")
+        ).expect("read selected ARIA release artifact")).expect("decode selected ARIA release artifact");
+        let catalog_identity = registry["catalogIdentity"].as_str().expect("catalog identity");
+        let bundle = InstallBundle::embedded();
+        assert_eq!(registry["ariaVersion"], "v2");
+        assert_eq!(bundle.aria_version, "v2");
+        assert_eq!(bundle.aria_bundle_identity, format!("mootx01/v2/{catalog_identity}"));
     }
 
     #[test]
@@ -651,9 +1148,49 @@ mod tests {
         }
         // Package SKILL.md is byte-identical to the canonical skill (§0.4).
         assert_eq!(
-            b.package_files("claude-code").get("skills/mootx01-memory/SKILL.md"),
-            Some(&b.skill_markdown)
+            b.package_files("claude-code")
+                .get("skills/mootx01-memory/SKILL.md")
+                .map(String::as_str),
+            Some(b.skill_markdown_for_host("claude-code"))
         );
+    }
+
+    fn staged_bundle_json(version: &str) -> String {
+        format!(r#"{{
+          "schemaVersion": 1,
+          "ariaVersion": "{version}",
+          "ariaBundleIdentity": "mootx01/fixture/selected",
+          "skillMarkdown": "shared teaching",
+          "skillMarkdownByHost": {{"codex": "codex teaching"}},
+          "installMap": {{"hosts": [{{
+            "id": "codex", "displayName": "Codex", "family": "manifestBundle",
+            "mcpMapKey": "mcpServers", "mcpUserFormat": "json",
+            "mcpUserPath": "~/.codex/config.json", "roadmap": "now",
+            "skillUserPath": "~/.codex/skills/mootx01-memory/SKILL.md"
+          }}]}},
+          "packages": {{}}
+        }}"#)
+    }
+
+    #[test]
+    fn staged_bundle_selects_host_payload_and_writes_fixture_home() {
+        let staged = InstallBundle::from_json(&staged_bundle_json(InstallBundle::selected_aria_version())).unwrap();
+        assert_eq!(staged.aria_bundle_identity, "mootx01/fixture/selected");
+        assert_eq!(staged.skill_markdown_for_host("codex"), "codex teaching");
+        assert_eq!(staged.skill_markdown_for_host("unknown"), "shared teaching");
+
+        let home = tmp_home("staged-host-payload");
+        let host = staged.host("codex").unwrap();
+        write_skill(host, &staged, &home).unwrap();
+        let written = std::fs::read_to_string(join_rel(&home, ".codex/skills/mootx01-memory/SKILL.md")).unwrap();
+        assert_eq!(written, "codex teaching");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn staged_bundle_rejects_unselected_release() {
+        let other = if InstallBundle::selected_aria_version() == "v1" { "v2" } else { "v1" };
+        assert!(InstallBundle::from_json(&staged_bundle_json(other)).is_err());
     }
 
     fn tmp_home(tag: &str) -> PathBuf {
@@ -692,7 +1229,7 @@ mod tests {
         let dest = join_rel(&home, ".claude/skills/mootx01-memory/SKILL.md");
         assert_eq!(outcome, DepthOutcome::Skills(dest.display().to_string()));
         let written = std::fs::read_to_string(&dest).unwrap();
-        assert_eq!(written, InstallBundle::embedded().skill_markdown);
+        assert_eq!(written, InstallBundle::embedded().skill_markdown_for_host("claude-code"));
         let _ = std::fs::remove_dir_all(&home);
     }
 
@@ -774,6 +1311,8 @@ mod tests {
     /// gets `MOOTX01_VAULT=0` injected; an HTTP-shaped entry does not.
     #[test]
     fn inject_vault_env_shape_check() {
+        // Entries use PLUGIN_SERVER_NAME ("memory") as the key — inject_vault_env
+        // looks up by clients::PLUGIN_SERVER_NAME; entries under other keys are untouched.
         let command_entry = r#"{"mcpServers":{"memory":{"command":"mootx01","args":["proxy"]}}}"#;
         let patched = inject_vault_env(".mcp.json", command_entry);
         let patched_json: serde_json::Value = serde_json::from_str(&patched).unwrap();
@@ -871,6 +1410,70 @@ mod tests {
     }
 
     #[test]
+    fn stranded_cache_stale_under_the_same_version_is_reinstalled() {
+        let home = tmp_home("stranded-stale");
+        write_installed_plugins(&home, "1.1.0-rc1");
+        let package = home.join(".claude").join("mootx01-plugin");
+        let cache = home.join(".claude").join("plugins").join("cache/mootx01/mootx01/1.1.0-rc1");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(package.join(".mcp.json"), r#"{"mcpServers":{"memory":{}}}"#).unwrap();
+        std::fs::write(cache.join(".mcp.json"), r#"{"mcpServers":{"mootx01":{}}}"#).unwrap();
+        let fake = FakeClaudeCliRunner::new(true);
+        let line = refresh_stranded_plugin_cache(&home, &fake).unwrap();
+        let calls: Vec<Vec<String>> = fake.invocations();
+        assert_eq!(calls.len(), 3, "update, then uninstall + install because the cache is stale: {calls:?}");
+        assert_eq!(calls[1][1], "uninstall");
+        assert_eq!(calls[2][1], "install");
+        assert!(line.contains("✓"));
+        // A cache that matches the package is left alone after the update call.
+        std::fs::write(cache.join(".mcp.json"), r#"{"mcpServers":{"memory":{}}}"#).unwrap();
+        let fake = FakeClaudeCliRunner::new(true);
+        refresh_stranded_plugin_cache(&home, &fake);
+        assert_eq!(fake.invocations().len(), 1);
+        std::fs::remove_dir_all(home).ok();
+    }
+
+    #[test]
+    fn stranded_cache_rebuild_honours_recorded_enablement() {
+        let home = tmp_home("stranded-enablement");
+        write_installed_plugins(&home, "1.1.0-rc1");
+        let package = home.join(".claude").join("mootx01-plugin");
+        let cache = home.join(".claude").join("plugins").join("cache/mootx01/mootx01/1.1.0-rc1");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(package.join(".mcp.json"), r#"{"mcpServers":{"memory":{}}}"#).unwrap();
+        std::fs::write(cache.join(".mcp.json"), r#"{"mcpServers":{"mootx01":{}}}"#).unwrap();
+        let settings = home.join(".claude").join("settings.json");
+        let enabled_state = |settings: &Path| -> Option<bool> {
+            let root: serde_json::Value = serde_json::from_slice(&std::fs::read(settings).unwrap()).unwrap();
+            root["enabledPlugins"]["mootx01@mootx01"].as_bool()
+        };
+
+        // A recorded disable survives the uninstall + install the rebuild runs.
+        std::fs::write(
+            &settings,
+            r#"{"enabledPlugins":{"mootx01@mootx01":false,"other@m":true},"theme":"dark"}"#,
+        )
+        .unwrap();
+        let line = refresh_stranded_plugin_cache(&home, &FakeClaudeCliRunner::new(true)).unwrap();
+        assert_eq!(enabled_state(&settings), Some(false), "the recorded disable is put back after the reinstall");
+        assert!(line.contains("stays disabled"), "the line says the plugin stayed off: {line}");
+        assert!(line.contains("mootx01 install"), "the line names how to turn it back on: {line}");
+        let root: serde_json::Value = serde_json::from_slice(&std::fs::read(&settings).unwrap()).unwrap();
+        assert_eq!(root["theme"], "dark", "other settings keys are kept");
+        assert_eq!(root["enabledPlugins"]["other@m"], true, "other plugins are kept");
+
+        // No recorded disable: the rebuild's install stands and the line is the plain success.
+        std::fs::write(cache.join(".mcp.json"), r#"{"mcpServers":{"mootx01":{}}}"#).unwrap();
+        std::fs::write(&settings, r#"{"enabledPlugins":{"mootx01@mootx01":true}}"#).unwrap();
+        let plain = refresh_stranded_plugin_cache(&home, &FakeClaudeCliRunner::new(true)).unwrap();
+        assert_eq!(enabled_state(&settings), Some(true), "an enabled plugin is left enabled");
+        assert!(!plain.contains("stays disabled"));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
     fn stranded_cache_refresh_noop_when_not_installed() {
         let home = tmp_home("stranded-absent");
         let fake = FakeClaudeCliRunner::new(true);
@@ -955,9 +1558,11 @@ mod tests {
             "converged package must be HTTP-shaped"
         );
         assert!(!mcp_text.contains("\"serve\""), "stdio-era serve entry must not survive rematerialization");
+        // The fixture's cache carries no .mcp.json, so after the version-only
+        // update the refresh reads it as stale and rebuilds it by reinstalling.
         assert_eq!(
-            fake.invocations(),
-            vec![vec!["plugin".to_string(), "update".to_string(), "mootx01@mootx01".to_string()]],
+            fake.invocations().iter().map(|c| c[1].as_str()).collect::<Vec<_>>(),
+            vec!["update", "uninstall", "install"],
             "the stranded cache must be refreshed as part of convergence"
         );
 
@@ -1021,6 +1626,11 @@ mod tests {
         // the loop body into a per-file helper would let the count-guard
         // drift away from the assertions it certifies, which is the precise
         // failure this suite exists to prevent.
+        //
+        // Key split (2026-09-16): the Claude Code plugin registers its server
+        // under PLUGIN_SERVER_NAME ("memory"), giving tools the
+        // mcp__plugin_mootx01_memory__ prefix. Every other manifestBundle host
+        // is a direct install and keeps SERVER_NAME ("mootx01").
         let bundle = InstallBundle::embedded();
         let mut hosts: Vec<&str> = bundle.plugin_capable_hosts().map(|h| h.id.as_str()).collect();
         hosts.sort_unstable();
@@ -1037,20 +1647,27 @@ mod tests {
                 "{host_id} is plugin-capable but its package declares no MCP server map"
             );
 
+            // claude-code's plugin package registers under PLUGIN_SERVER_NAME ("memory");
+            // every other manifestBundle host is a direct install and uses SERVER_NAME ("mootx01").
+            let expected_key = if *host_id == "claude-code" {
+                clients::PLUGIN_SERVER_NAME
+            } else {
+                clients::SERVER_NAME
+            };
+
             for (rel, map_key, servers) in maps {
                 let at = format!("{host_id}/{rel} [{map_key}]");
                 let keys: Vec<&str> = servers.keys().map(|k| k.as_str()).collect();
                 assert_eq!(
                     keys,
-                    vec![clients::PLUGIN_SERVER_NAME],
-                    "{at}: must declare exactly the plugin server key '{}'",
-                    clients::PLUGIN_SERVER_NAME
+                    vec![expected_key],
+                    "{at}: must declare exactly the expected server key '{expected_key}'"
                 );
 
                 let entry = servers
-                    .get(clients::PLUGIN_SERVER_NAME)
+                    .get(expected_key)
                     .and_then(|v| v.as_object())
-                    .unwrap_or_else(|| panic!("{at}: no object entry under the plugin server key"));
+                    .unwrap_or_else(|| panic!("{at}: no object entry under the expected server key"));
 
                 assert!(
                     URL_KEYS.iter().any(|k| entry.contains_key(*k)),
@@ -1084,15 +1701,19 @@ mod tests {
         );
     }
 
-    /// The constant the installer reads must be the key the packager writes.
-    /// `PLUGIN_SERVER_NAME` mirrors generated data; this keeps the mirror
-    /// honest. Direct tripwire for a repeat of 7f64973aa, where the generated
-    /// key moved and the installer's copy did not.
+    /// The constant the installer reads must be the key the packager writes for
+    /// the Claude Code plugin package specifically. `PLUGIN_SERVER_NAME` mirrors
+    /// generated data; this keeps the mirror honest. Direct tripwire for a repeat
+    /// of 7f64973aa, where the generated key moved and the installer's copy did not.
+    ///
+    /// Only the claude-code package is checked here because claude-code is the
+    /// only host whose plugin package uses PLUGIN_SERVER_NAME ("memory"). Direct-
+    /// install packages for other hosts use SERVER_NAME ("mootx01") and are
+    /// covered by `plugin_package_entries_are_http_shaped`.
     #[test]
     fn plugin_server_name_matches_generated_packages() {
-        let mut emitted: Vec<String> = InstallBundle::embedded()
-            .plugin_capable_hosts()
-            .flat_map(|h| server_maps(&h.id))
+        let mut emitted: Vec<String> = server_maps("claude-code")
+            .into_iter()
             .flat_map(|(_, _, servers)| servers.keys().cloned().collect::<Vec<_>>())
             .collect();
         emitted.sort_unstable();
@@ -1100,19 +1721,19 @@ mod tests {
         assert_eq!(
             emitted,
             vec![clients::PLUGIN_SERVER_NAME.to_string()],
-            "the generated packages are the authority for the plugin server key; \
-             PLUGIN_SERVER_NAME is '{}' but the packages emit {emitted:?}",
+            "the generated claude-code package is the authority for the plugin server key; \
+             PLUGIN_SERVER_NAME is '{}' but the claude-code package emits {emitted:?}",
             clients::PLUGIN_SERVER_NAME
         );
     }
 
-    /// The two keys are deliberately different (7f64973aa): a plugin entry is
-    /// namespaced under the plugin id by the host, so it reads as
-    /// `plugin:mootx01:memory`; a direct entry has no such namespace and keeps
-    /// `mootx01`. Collapsing them would break the plugin-ownership hook's
-    /// ability to spot a competing direct entry.
+    /// The plugin and direct server keys are intentionally distinct: the plugin
+    /// registers under `"memory"` (prefix `mcp__plugin_mootx01_memory__`) while
+    /// direct installs continue to use `"mootx01"` (prefix `mcp__mootx01__`).
     #[test]
     fn plugin_and_direct_server_keys_are_distinct() {
         assert_ne!(clients::PLUGIN_SERVER_NAME, clients::SERVER_NAME);
+        assert_eq!(clients::PLUGIN_SERVER_NAME, "memory");
+        assert_eq!(clients::SERVER_NAME, "mootx01");
     }
 }

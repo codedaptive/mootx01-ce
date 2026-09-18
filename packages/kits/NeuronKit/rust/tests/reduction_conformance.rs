@@ -81,6 +81,7 @@ fn candidate(spec: &CandidateSpec) -> ReductionCandidate {
         dense: spec.dense,
     };
     ReductionCandidate {
+        qid: String::new(),
         id: spec.id.clone(),
         content: spec.content.clone(),
         room: spec.room.clone(),
@@ -89,6 +90,7 @@ fn candidate(spec: &CandidateSpec) -> ReductionCandidate {
         udc_facets: None,
         coarse_rank: spec.coarse_rank,
         event_time: None,
+        filed_at: None,
         is_currently_believed: spec.is_currently_believed,
         // precision_score is populated by the composition fold; 0 here because
         // this builds pre-fold candidates for the conformance harness.
@@ -102,6 +104,11 @@ fn reduction_is_rank_identical_to_swift() {
     let candidates: Vec<ReductionCandidate> = fixture.candidates.iter().map(candidate).collect();
 
     for case in &fixture.cases {
+        // Compositions not known to this build fall back to the default
+        // composition in `named`, which would compare the wrong recipe; skip them instead.
+        if !neuron_kit::composition_grid::is_known(&case.composition) {
+            continue;
+        }
         let comp = named_composition(Some(&case.composition));
         let query = ReductionQuery::new(case.query.clone());
         let ranked = reduce(&comp, &query, &candidates, case.limit);

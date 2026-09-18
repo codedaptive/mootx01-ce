@@ -1,10 +1,17 @@
 // ReleaseDownloader.swift
 //
-// Online upgrade path for `mootx01 upgrade`. Mirrors scripts/install.sh:
-// fetch the latest GitHub release tag, download the platform asset,
-// verify SHA-256 via CryptoKit, authenticate checksums.txt with minisign on
-// Linux/POSIX (macOS relies on Developer ID + Gatekeeper), extract the binary,
-// and delegate placement to Installer.placeBinary.
+// Online upgrade path for `mootx01 upgrade`: fetch the latest GitHub
+// release tag, download the platform asset, verify SHA-256 via CryptoKit,
+// authenticate checksums.txt with minisign on EVERY platform, extract the
+// binary, and delegate placement to Installer.placeBinary.
+//
+// The minisign Ed25519 signature is the sole artifact-authentication gate
+// on all platforms, macOS included (UP-01). The release tarball binaries
+// carry no Developer ID signature and no notarization ticket, so Gatekeeper
+// cannot authenticate them; checksums.txt is fetched from the same origin
+// as the tarball, so the SHA-256 check alone authenticates nothing against
+// a compromised or MITMed release endpoint. No downloaded artifact leaves
+// download() until the signature over checksums.txt verifies.
 //
 // Repo slug is "codedaptive/mootx01-ee", matching install.sh:15.
 // Asset naming follows install.sh:136: mootx01-{tag}-{os}-{arch}.tar.gz
@@ -36,22 +43,37 @@ public struct ReleaseDownloader: Sendable {
     // Async data-fetch function injected for tests; defaults to URLSession.shared.
     private let fetchData: @Sendable (URL) async throws -> (Data, URLResponse)
 
-    /// Production initializer — uses URLSession.shared for all network calls.
+    // Signature-verification hook injected for tests; defaults to the real
+    // minisign subprocess check. Injectable for the same reason as fetchData:
+    // the verify-before-extract ordering tests must drive download() through
+    // pass, fail, and tool-error verification outcomes without requiring the
+    // production signing key (whose private half only CI holds) or a minisign
+    // install on the test machine. Production callers always get the real check.
+    private let verifySignature: @Sendable (_ checksumsURL: URL, _ signatureURL: URL) throws -> Void
+
+    /// Production initializer — uses URLSession.shared for all network calls
+    /// and the real minisign verification for the release signature.
     public init(repo: String, currentVersion: String) {
         self.repo = repo
         self.currentVersion = currentVersion
         self.fetchData = { url in try await URLSession.shared.data(from: url) }
+        self.verifySignature = Self.verifyMinisignSignature
     }
 
-    /// Test initializer — accepts an injectable fetch function to stub network calls.
+    /// Test initializer — accepts an injectable fetch function to stub network
+    /// calls and (optionally) an injectable signature verifier to stub the
+    /// minisign subprocess. Omitting `verifySignature` keeps the real check.
     init(
         repo: String,
         currentVersion: String,
-        fetchData: @Sendable @escaping (URL) async throws -> (Data, URLResponse)
+        fetchData: @Sendable @escaping (URL) async throws -> (Data, URLResponse),
+        verifySignature: @Sendable @escaping (_ checksumsURL: URL, _ signatureURL: URL) throws -> Void
+            = ReleaseDownloader.verifyMinisignSignature
     ) {
         self.repo = repo
         self.currentVersion = currentVersion
         self.fetchData = fetchData
+        self.verifySignature = verifySignature
     }
 
     // MARK: - Public API
@@ -119,20 +141,27 @@ public struct ReleaseDownloader: Sendable {
     }
 
     /// Downloads the platform asset for `tag`, verifies SHA-256, verifies the
-    /// detached minisign signature for `checksums.txt` on non-macOS platforms,
+    /// detached minisign signature for `checksums.txt` on every platform,
     /// extracts the binary, and returns a URL pointing to the extracted
     /// `mootx01` binary.
     ///
     /// The asset name mirrors install.sh:136: `mootx01-{tag}-{os}-{arch}.tar.gz`.
     /// The checksum file `checksums.txt` is downloaded from the same release base,
-    /// authenticated against the embedded Ed25519 minisign public key on
-    /// Linux/POSIX, and verified against the tarball using CryptoKit.SHA256.
+    /// authenticated against the embedded Ed25519 minisign public key, and
+    /// verified against the tarball using CryptoKit.SHA256.
     /// Extraction uses `/usr/bin/tar -xzf`.
+    ///
+    /// Ordering is the security contract (UP-01): signature verification is a
+    /// hard, fail-closed gate — a failed or error-state verification throws
+    /// BEFORE any archive member is listed, extracted, or made runnable, so no
+    /// caller can obtain an unverified binary from this function.
     ///
     /// - Parameter tag: raw GitHub tag string (e.g. "v1.0.0") from `latestTag()`.
     /// - Returns: URL of the extracted binary inside a temporary directory.
     /// - Throws: `UpgradeError.checksumMismatch` if SHA-256 verification fails;
-    ///   `UpgradeError.extractionFailed` if tar exits non-zero or binary is absent.
+    ///   `UpgradeError.signatureVerificationFailed` if the minisign check fails
+    ///   or cannot run; `UpgradeError.extractionFailed` if tar exits non-zero
+    ///   or the binary is absent.
     public func download(tag: String) async throws -> URL {
         let platformOS   = currentPlatformOS()
         let platformArch = currentPlatformArch()
@@ -161,16 +190,19 @@ public struct ReleaseDownloader: Sendable {
         // the install path (mirrors verify_checksum in scripts/install.sh).
         try verifySHA256(tarballURL: tarballURL, checksumsURL: checksumsURL, tarball: tarball)
 
-        #if !os(macOS)
         // Authenticate checksums.txt against the bundled Ed25519 trust root before
         // extracting or installing anything. Without this, an attacker who can
         // tamper with release assets can ship a malicious tarball plus a matching
-        // unauthenticated checksums.txt and satisfy the SHA-256 check.
+        // unauthenticated checksums.txt and satisfy the SHA-256 check. This runs
+        // on EVERY platform (UP-01): the macOS release binaries are not
+        // codesigned, so Gatekeeper cannot substitute for this gate, and the
+        // upgrade path executes the new binary before any quarantine assessment
+        // could occur. Fail closed — a missing .minisig, a missing minisign
+        // tool, or a bad signature all abort here, before extraction.
         let sigURL = URL(string: "\(base)/checksums.txt.minisig")!
         let (sigData, _) = try await fetchData(sigURL)
         try sigData.write(to: minisigURL)
-        try verifyMinisignSignature(checksumsURL: checksumsURL, signatureURL: minisigURL)
-        #endif
+        try verifySignature(checksumsURL, minisigURL)
 
         // Validate all archive members before extraction to prevent zip-slip:
         // an archive member with an absolute path or .. component could escape
@@ -238,7 +270,12 @@ public struct ReleaseDownloader: Sendable {
     /// repository's embedded public key. Mirrors install.sh and the Rust vertical:
     /// fail closed if the key is a placeholder, minisign is unavailable, or the
     /// signature does not validate.
-    private func verifyMinisignSignature(checksumsURL: URL, signatureURL: URL) throws {
+    ///
+    /// Visibility is `internal` (not `private`) because it is the default value
+    /// of the test initializer's injectable `verifySignature` parameter — Swift
+    /// requires a default-argument expression to be visible at the call site,
+    /// and `ReleaseDownloaderTests` constructs downloaders via `@testable import`.
+    internal static func verifyMinisignSignature(checksumsURL: URL, signatureURL: URL) throws {
         if minisignPublicKey.contains("PLACEHOLDER") {
             throw UpgradeError.signatureVerificationFailed(
                 "minisign public key is a PLACEHOLDER — signature verification not yet active"
@@ -264,9 +301,14 @@ public struct ReleaseDownloader: Sendable {
         do {
             try process.run()
         } catch {
+            // Same condition and remedy list as install.sh's verify_minisign
+            // guard — keep the two messages aligned when editing either.
             throw UpgradeError.signatureVerificationFailed(
                 "minisign is required for release signature verification but was not found. "
-                + "Install minisign and retry; do not bypass this check."
+                + "Install it and retry — Homebrew: `brew install minisign`; "
+                + "Debian/Ubuntu: `apt-get install minisign`; "
+                + "from source: https://github.com/jedisct1/minisign. "
+                + "Do not bypass this check."
             )
         }
         let stderr = errPipe.fileHandleForReading.readDataToEndOfFile()

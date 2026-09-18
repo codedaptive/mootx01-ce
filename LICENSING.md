@@ -1,63 +1,73 @@
 # Licensing
 
-MOOTx01 uses a three-layer licensing model.
+MOOTx01 is open source.
 
-The ARIA interface specification is free for everyone. The MOOTx01 foundation libraries are published under the Apache License 2.0 through their public repositories. The MOOTx01 product core in this repository is source-available under FSL-1.1-ALv2, with Apache 2.0 as the future license. See [`LICENSE`](./LICENSE) for the controlling terms.
+Everything in the MOOTx01 Community Edition — the public `mootx01-ce`
+repository: the substrate libraries, the kits, the
+composition layer, the Brain layers, VaultKit, the ARIA MCP server, the
+management console, the installer, and the MOOTx01 Community application —
+is licensed under the Apache License, Version 2.0. See [`LICENSE`](./LICENSE)
+for the controlling terms and [`RELICENSE.md`](./RELICENSE.md) for the
+notice that retroactively applies Apache-2.0 to every prior release.
 
-## Apache-Licensed Foundation
+There is no use restriction, no conversion timer, no commercial-use
+carve-out, and no licensing meter. Apache-2.0 means everything that
+license permits: personal use, corporate use, embedding in commercial
+products, hosted services, and managed offerings.
 
-The foundation libraries are available under Apache 2.0 from:
+## The rule
 
-* [`moot-core`](https://github.com/codedaptive/moot-core)
-* [`moot-semantics`](https://github.com/codedaptive/moot-semantics)
-* [`moot-system`](https://github.com/codedaptive/moot-system)
-* [`moot-memory`](https://github.com/codedaptive/moot-memory)
+**The code is free. Assurance is Enterprise.**
 
-Code obtained from those repositories carries the rights granted by Apache 2.0, including commercial and hosted use.
+You never pay for the substrate. You pay when you want Codedaptive
+standing behind a deployment: supported builds, contracts, compliance
+evidence, and the commercial applications.
 
-The product core in this repository includes GeniusLocusKit, NeuronKit, CognitionKit, VaultKit, the ARIA MCP server, the management console, and the installer.
+## What is free
 
-## Free Use
+- Running MOOTx01 anywhere, for anyone, at any scale.
+- Embedding the substrate in your application, commercial or not.
+- Hosting or managing MOOTs for clients, paid or not.
+- Compiling, signing, and distributing your own builds.
+- **MOOTx01 Community**, the open desktop application in the Community
+  Edition repository:
+  local encrypted estate, Capture, Recall, Review, Quick Capture,
+  ARIA/MCP, Product Dock, portable LAN serving, import/export, and full
+  engine diagnostics.
 
-A personal MOOT is an isolated MOOTx01 deployment running on one computer or synchronized across multiple computers used by one person.
+## What is commercial
 
-Personal MOOTs are free for personal and professional use. A company may install a separate personal MOOT on every employee’s computer without paying a license fee. The company may use precompiled distributions or compile, sign, distribute, and maintain those installations itself.
+Commercial offerings are separate products built on the same substrate.
+None of them is required to use MOOTx01.
 
-A personal MOOT may be used by a person, local AI clients, local agents, or an agentic orchestration system running on the same computer. This remains free even when the computer performs work for an organization.
+- **MOOTx01 Pro** — the personal Apple application for macOS, iPhone, and
+  iPad: on-device Intelligence, Apple system surfaces, iCloud sync,
+  personal federation, attended miners, and work packets. Distributed
+  through the App Store.
+- **MOOTx01 Enterprise** — the organizational application: managed policy
+  and federation, organizational identity, remote administration, managed
+  deployment, and audit and compliance assurance.
+- **Enterprise Edition (EE)** — the assurance lane for organizations that
+  need a contract behind the software:
+  - supported, hardened production builds with SLAs;
+  - compliance documentation for regulated deployments (FedRAMP- and
+    CMMC-aligned evidence packages);
+  - the **FIPS Sponsorship Program** — MOOTx01 is built FIPS-ready on
+    validated cryptographic modules; full CMVP validation of the module
+    is undertaken with a sponsoring organization, which receives a
+    multi-year support and maintenance agreement;
+  - certified integrations and indemnification;
+  - additional language editions (the Go implementation for
+    financial-sector use; the planned C edition).
 
-Building and sharing unpaid work is also free.
+Contact: licensing@codedaptive.com
 
-## Commercial License Required
+## Trademarks
 
-A commercial license is required when the MOOTx01 product core is:
-
-* connected to or embedded in a shared or multiuser enterprise system;
-* connected to or embedded in an application, product, or service provided to the organization’s paying clients;
-* offered as a hosted or managed service for third parties;
-* used as part of an MSP or service-provider offering; or
-* compiled into an application offered for sale.
-
-A single-computer agentic deployment remains free. It requires a license only when it becomes part of a shared system or is provided to a paying client as a product or service.
-
-## License Tiers
-
-* Personal use: free.
-* Separate personal MOOTs for employees: free.
-* Single-computer agentic use: free.
-* Building and sharing unpaid work: free.
-* Mobile application: one-time $500 license per application for each major version of MOOTx01 used.
-* Corporate internal system: $5,000 per major version of MOOTx01.
-* Service provider or MSP: $5,000 annually.
-* FedRAMP- or CMMC-aligned deployment: negotiated.
-
-A commercial license covers the purchased major version and all point releases within that version. The next major version requires a new license unless the commercial agreement states otherwise. MOOTx01 major versions are defined as 1.x, 2.x, and so forth.
-
-## Future License
-
-Two years after a version of the product core is released, that version converts automatically to the Apache License 2.0 under the terms of [`LICENSE`](./LICENSE).
-
-The foundation libraries are already available under Apache 2.0 and do not depend on this conversion period.
+Apache-2.0 licenses the code, not the names. MOOTx01, MOOT, and ARIA are
+trademarks of Codedaptive, LLC. See [`TRADEMARKS.md`](./TRADEMARKS.md).
 
 ---
 
-*Current as of MOOTx01 stable/1.0.x.*
+*Current as of MOOTx01 1.1. For the edition structure and the reasoning
+behind this model, see [`EDITIONS.md`](./EDITIONS.md).*

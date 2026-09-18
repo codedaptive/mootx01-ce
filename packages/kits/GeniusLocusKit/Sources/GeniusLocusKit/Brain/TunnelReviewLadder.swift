@@ -29,9 +29,10 @@
 // `EstateCoordinator::object_to_tunnel` (coordinator.rs).
 
 import Foundation
+import MootProductIdentity
 import OSLog
 
-private let logger = Logger(subsystem: "com.mootx01.kit", category: "GeniusLocusKit")
+private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "GeniusLocusKit")
 import LocusKit
 
 /// Outcome of one `endorseTunnel` call.

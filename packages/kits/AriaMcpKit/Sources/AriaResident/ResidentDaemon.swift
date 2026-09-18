@@ -1,7 +1,13 @@
 import Foundation
+import MootProductIdentity
 import AriaMCP
 import CognitionKit
+import FactExtractionKit
 import GeniusLocusKit
+// Scoped import: NeuronKit also exports a `TournamentReport`; the estate
+// tournament returns GeniusLocusKit's, and the `GeniusLocusKit` actor shadows
+// the module name so a qualified spelling cannot reach it.
+import struct GeniusLocusKit.TournamentReport
 import NeuronKit
 import ObserverSink
 import IntellectusLib
@@ -96,64 +102,58 @@ public enum AriaResident {
     /// default path is computed so telemetry is live out-of-the-box without
     /// any manual configuration.
     ///
-    /// Resolution order:
+    /// Resolution:
     ///
-    /// 1. `ARIA_MCP_STATS_STORE` set and non-empty → use that exact path.
-    /// 2. `useDefault` is `true` (resident HTTP mode) → fall back to the
-    ///    platform default:
-    ///    `<app-support>/com.mootx01.ce/moot-mgr/stats.sqlite`
-    ///    This is the same file the `moot-mgr` manager process owns; the resident
-    ///    daemon writes its dropbox rows here and the manager reads them. On macOS
-    ///    the app-support root is `~/Library/Application Support`; on Linux Swift
-    ///    it is `~/.local/share`.
-    /// 3. `useDefault` is `false` (stdio mode) → return `nil` (telemetry off).
+    /// 1. `useDefault` is `false` (stdio mode) → return `nil` (telemetry off).
     ///    Short-lived stdio processes get startup-once install only (no continuous
     ///    monitoring gate), and without an explicit path the caller opts out.
+    /// 2. `useDefault` is `true` (resident HTTP mode):
+    ///    a. `daemon.stats_store` key in `<config-dir>/config.json` (R6 setting,
+    ///       2026-09-09): a changeable value operators can edit without rebuilding.
+    ///       `mootx01 install` seeds the default when the key is absent;
+    ///       `mootx01 upgrade` leaves it untouched.
+    ///    b. Fallback: `<config-dir>/moot-mgr/stats.sqlite` (the same file
+    ///       `moot-mgr`'s `ManagerConfig` targets when no override is set).
     ///
     /// The store file and its parent directories are created by `StatsStore.open()`
     /// (via SQLiteStorage) — the caller does not need to pre-create them.
     ///
+    /// Twin of Rust `stats_store_path(use_default:, config_dir:)` in runtime.rs.
+    ///
     /// - Parameters:
-    ///   - env:        Environment variable map (injectable for tests).
-    ///   - useDefault: When `true` and the env var is absent, compute the
-    ///                 platform-default path. Pass `true` for resident HTTP mode;
-    ///                 `false` for stdio mode.
+    ///   - useDefault: When `true`, compute the platform-default path. Pass `true`
+    ///                 for resident HTTP mode; `false` for stdio mode.
+    ///   - configurationDirectory: The directory that contains `config.json`.
+    ///                             Defaults to `Storage.configurationDirectory`.
+    ///                             Inject a scratch directory in tests.
     /// - Returns: A path string, or `nil` when telemetry should be off.
-    public static func statsStorePathFromEnv(
-        env: [String: String] = ProcessInfo.processInfo.environment,
-        useDefault: Bool = false
+    public static func statsStorePath(
+        useDefault: Bool = false,
+        configurationDirectory: URL = MootProductIdentity.Storage.configurationDirectory
     ) -> String? {
-        // Explicit env override takes precedence over everything.
-        if let raw = env["ARIA_MCP_STATS_STORE"], !raw.isEmpty {
-            return raw
-        }
         guard useDefault else {
             // stdio mode: no default — telemetry off unless explicitly configured.
             return nil
         }
-        // Resident HTTP mode: compute the moot-mgr default path so the daemon
-        // self-reports without any manual operator configuration.
+        // Resident HTTP mode: step 1 — check the product settings file.
+        // `daemon.stats_store` in `config.json` is the operator-editable setting
+        // (R6, 2026-09-09). Reading through the injected directory makes this
+        // testable without touching the developer's real configuration file.
+        if let overridePath = MootProductIdentity.Settings.load(
+            configurationDirectory: configurationDirectory
+        ).daemonStatsStore {
+            return overridePath
+        }
+        // Resident HTTP mode: step 2 — computed default. The same path
+        // ManagerConfig resolves when the setting is absent, so both processes
+        // open the same store out of the box without any operator configuration.
         //
-        // Path: <app-support>/com.mootx01.ce/moot-mgr/stats.sqlite
-        //   - com.mootx01.ce is the shared data-dir bundle convention
-        //   - moot-mgr/ is the manager's subdirectory (matches ManagerConfig.storeSubdirectory)
-        //   - stats.sqlite is the manager's store file (matches ManagerConfig.storeFileName)
-        //
-        // macOS: ~/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite
-        // Linux: ~/.local/share/com.mootx01.ce/moot-mgr/stats.sqlite
-        // Fallback (app-support unavailable, e.g. headless CI): <tmp>/com.mootx01.ce/moot-mgr/stats.sqlite
-        let base = (try? FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: false
-        )) ?? FileManager.default.temporaryDirectory
-        let path = base
-            .appendingPathComponent("com.mootx01.ce", isDirectory: true)
+        // macOS (Apple container): ~/Library/Application Support/com.mootx01.ce/moot-mgr/stats.sqlite
+        // Swift ships on Apple platforms only; the Rust port owns the Linux and Windows paths.
+        return configurationDirectory
             .appendingPathComponent("moot-mgr", isDirectory: true)
             .appendingPathComponent("stats.sqlite", isDirectory: false)
             .path
-        return path
     }
 
     // MARK: - Telemetry install (resident-mode, opt-in)
@@ -256,6 +256,28 @@ public enum AriaResident {
         /// Estate→vault poll interval in seconds (default 60).
         /// Controls how often exportable drawers are pushed from estate to vault.
         public var vaultEstatePollSeconds: Int
+        /// Factory that (re)builds the fact extractor on demand, called fresh at
+        /// daemon start AND at every off→on preference edge (F2/F12: a `nil`
+        /// captured once at daemon start — because `fact_extraction` was `.off`
+        /// when `mootx01 serve` launched, or no model asset was staged yet — used
+        /// to be stored as a static `(any FactExtractor)?` value on this config
+        /// and never rebuilt, so an operator who turned the preference on later
+        /// found Signal 14 permanently inert until the next restart). `nil` means
+        /// no factory is available and Signal 14 remains inert regardless of the
+        /// setting. Resolved by the caller (ServeCommand) so the daemon reads no
+        /// environment and no paths itself; the closure itself re-reads the
+        /// `fact_extraction` / `fact_extractor` preferences and re-runs
+        /// `FactExtractorBuilder.build` each call, so a later asset install or
+        /// provider switch is picked up without a restart. The built extractor
+        /// carries its own FactExtractorModelSpec, which `runResidentDaemon` uses
+        /// to derive the recipe ID.
+        public var factExtractorFactory: (@Sendable () async -> (any FactExtractor)?)?
+        /// Signal 14 period (`duties.fact_extraction_cadence_seconds`), resolved
+        /// by the caller from the settings module.
+        public var factExtractionCadenceSeconds: TimeInterval
+        /// Batch limits for the row-debt duties, resolved by the caller from the
+        /// settings module and installed on the kit at daemon start.
+        public var dutyLimits: DutyLimits
 
         public init(
             port: UInt16,
@@ -264,7 +286,10 @@ public enum AriaResident {
             monitoringPollMs: Int,
             statsStorePath: String?,
             vaultPath: String? = nil,
-            vaultEstatePollSeconds: Int = 60
+            vaultEstatePollSeconds: Int = 60,
+            factExtractorFactory: (@Sendable () async -> (any FactExtractor)?)? = nil,
+            factExtractionCadenceSeconds: TimeInterval = FactExtractionSignal.defaultCadenceSeconds,
+            dutyLimits: DutyLimits = DutyLimits()
         ) {
             self.port = port
             self.maxBodyBytes = maxBodyBytes
@@ -273,6 +298,182 @@ public enum AriaResident {
             self.statsStorePath = statsStorePath
             self.vaultPath = vaultPath
             self.vaultEstatePollSeconds = vaultEstatePollSeconds
+            self.factExtractorFactory = factExtractorFactory
+            self.factExtractionCadenceSeconds = factExtractionCadenceSeconds
+            self.dutyLimits = dutyLimits
+        }
+    }
+
+    // MARK: - Fact-extraction activation
+
+    /// Batch limit for one Signal 14 invocation. 16 sources per cycle keeps
+    /// per-tick latency predictable; the signal fires every 300 seconds and
+    /// schedules until bit-28 debt is cleared, so throughput is bounded by
+    /// the duty cadence rather than by the batch limit.
+    static let factExtractionBatchLimit = 16
+
+    /// Decide whether Signal 14 (fact-extraction) runs live and, if so, activate
+    /// the extractor. Returns the live cycle closure when activation succeeds,
+    /// or `nil` when the signal should remain inert.
+    ///
+    /// All three cases are resolved here so the daemon path and the test suite
+    /// drive exactly the same logic:
+    ///
+    /// - `.off`: the operator has disabled extraction; the signal stays inert.
+    /// - `.on`, extractor `nil`: no extractor was provisioned (model assets
+    ///   absent or unavailable); the signal stays inert. This is the common
+    ///   case in a fresh install that carries no CoreAI asset. Logged, not fatal.
+    /// - `.on`, extractor non-nil: activate the recipe, wire the live cycle.
+    ///
+    /// The recipe ID is derived from the extractor's own spec so that changing
+    /// the model clears bit-28 debt estate-wide:
+    ///   `"\(providerID):\(modelID):\(modelVersion)"`
+    /// This form is the cross-port contract (unit 2a constructs the identical
+    /// string in Rust from the same three spec fields).
+    ///
+    /// - Parameters:
+    ///   - setting: The estate's `fact_extraction` setting.
+    ///   - extractor: The extractor resolved by the caller, or `nil` if absent.
+    ///   - kit: The running GeniusLocusKit coordinator.
+    ///   - handle: The open estate.
+    /// - Returns: A live cycle closure, or `nil` when the signal stays inert.
+    static func resolveFactExtractionCycle(
+        setting: EstatePreferenceValue,
+        extractor: (any FactExtractor)?,
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async -> (@Sendable (Date) async throws -> Int)? {
+        guard setting == .on else {
+            // Operator opt-out, or a value invalid for the master key.
+            return nil
+        }
+        guard let extractor else {
+                // No extractor available — model assets absent or not installed.
+                // This is the common field case; log and continue.
+                Logging.stderr.log(
+                    "AriaResident fact extraction: setting=on but no extractor available " +
+                    "for the estate's selected provider")
+                return nil
+        }
+        // Derive the recipe ID from the extractor's own spec so a model change
+        // clears bit-28 debt estate-wide (cross-port contract: same three-field
+        // colon-separated form as the Rust port).
+        let spec = extractor.spec
+        let recipeID = "\(spec.providerID):\(spec.modelID):\(spec.modelVersion)"
+        do {
+            let cleared = try await kit.activateFactExtractor(
+                extractor, recipeID: recipeID, for: handle)
+            Logging.stderr.log(
+                "AriaResident fact extraction activated: recipe=\(recipeID) " +
+                "provider=\(spec.providerID) cleared=\(cleared)")
+            return { now in
+                // Enqueue only (§ DUTY_LIFECYCLE): the duty worker pays the
+                // batch off the tick, so Signal 14 returns at once.
+                _ = try await kit.enqueueDuty(.factExtraction, in: handle, now: now)
+                return 0
+            }
+        } catch {
+            Logging.stderr.log(
+                "AriaResident fact-extraction activation failed: \(error). " +
+                "Signal 14 will remain inert.")
+            return nil
+        }
+    }
+
+    /// Build the FactExtractionSignal spec for the off→on preference edge
+    /// (F2/F12), calling `factExtractorFactory` fresh rather than reading a
+    /// value captured once at daemon start. `reconcilePreferenceSignal` only
+    /// invokes its `makeSpec` closure when the preference has just gone from
+    /// disabled to enabled, so this is exactly the "operator turned it on"
+    /// moment — the factory re-derives the extractor from the estate's
+    /// CURRENT `fact_extraction` / `fact_extractor` preferences, so a model
+    /// asset staged, or a provider switched, after daemon start is picked up
+    /// without a restart. `nil` factory or `nil` build result both leave
+    /// Signal 14 inert, matching `resolveFactExtractionCycle`'s existing
+    /// "no extractor available" posture.
+    static func makeFactExtractionSpec(
+        factExtractorFactory: (@Sendable () async -> (any FactExtractor)?)?,
+        cadenceSeconds: TimeInterval,
+        kit: GeniusLocusKit,
+        handle: EstateHandle
+    ) async -> SignalSpec? {
+        guard let cycle = await resolveFactExtractionCycle(
+            setting: .on,
+            extractor: await factExtractorFactory?(),
+            kit: kit,
+            handle: handle
+        ) else { return nil }
+        return FactExtractionSignal.spec(
+            cadenceSeconds: cadenceSeconds, factExtractionCycle: cycle)
+    }
+
+    /// One fact-extraction duty-worker cycle (F2/F12). The duty worker in
+    /// `runResidentDaemon`'s `dutyWorkerTasks` is a SECOND driver of
+    /// `.factExtraction`, independent of the `FactExtractionSignal` the
+    /// preference-reconciliation loop manages — before this fix it enqueued
+    /// and drained on its own cadence unconditionally, never consulting the
+    /// live `fact_extraction` preference, so turning the preference off only
+    /// tore down the signal and left this loop paying debt forever. This
+    /// function reads the preference fresh every cycle:
+    ///
+    /// - `.off`: detach the runtime extractor via `unregisterFactExtractor`
+    ///   (the off-edge action — `dutyDebt(.factExtraction)` gates on the
+    ///   extractor being registered, so detaching also stops the debt count
+    ///   itself, not merely this call site) and enqueue/drain nothing.
+    /// - otherwise: the ordinary enqueue-then-drain pass every other duty in
+    ///   `dutyWorkerTasks` already runs.
+    ///
+    /// Returns `nil` when the cycle was skipped (preference off), so a
+    /// caller/test can distinguish "skipped" from "ran and found no work".
+    @discardableResult
+    static func runFactExtractionDutyCycle(
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async throws -> DutyDrainReport? {
+        let setting = try await kit.provisionedPreference(.factExtraction, for: handle)
+        guard setting != .off else {
+            await kit.unregisterFactExtractor(for: handle)
+            return nil
+        }
+        _ = try await kit.enqueueDuty(.factExtraction, in: handle, now: now)
+        return try await kit.drainDuty(.factExtraction, in: handle, now: now)
+    }
+
+    static func reconcilePreferenceSignal(
+        name: String,
+        enabled: Bool,
+        ids: inout [String: SignalID],
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date,
+        makeSpec: () async -> SignalSpec?
+    ) async throws {
+        if !enabled, let id = ids[name] {
+            _ = try await kit.signalUnregister(id, in: handle)
+            ids.removeValue(forKey: name)
+        } else if enabled, ids[name] == nil, let spec = await makeSpec() {
+            ids[name] = try await kit.registerStandingSignal(spec, in: handle, now: now)
+        }
+    }
+
+    static func failClosedPreferenceSignals(
+        names: [String],
+        ids: inout [String: SignalID],
+        kit: GeniusLocusKit,
+        handle: EstateHandle,
+        now: Date
+    ) async {
+        for name in names {
+            do {
+                try await reconcilePreferenceSignal(
+                    name: name, enabled: false, ids: &ids,
+                    kit: kit, handle: handle, now: now
+                ) { nil }
+            } catch {
+                Logging.stderr.log(
+                    "AriaResident failed to unregister managed signal \(name); will retry: \(error)")
+            }
         }
     }
 
@@ -286,6 +487,8 @@ public enum AriaResident {
         handle: EstateHandle,
         config: ResidentConfig
     ) async throws {
+        // Batch limits first: every duty the governor pays reads them.
+        await kit.configureDutyLimits(config.dutyLimits, for: handle)
         let wiring = await installManagerTelemetry(storePath: config.statsStorePath)
         let statsStore = wiring?.store
         let observer = wiring?.observer
@@ -350,12 +553,13 @@ public enum AriaResident {
             StatsStoreMonitoringControl(store: store)
         }
         let residentDispatcher: ARIA_MCPDispatcher
-        if let monitoringControl {
+        if let monitoringControl, let existingTooling = dispatcher.tooling {
             // Re-wrap the dispatcher with the monitoring seam wired. ToolDispatcher
             // is a value type, so this copies all fields and overwrites only
             // monitoringControl. ARIA_MCPDispatcher.init re-invokes ToolProjection
             // to regenerate the projected-tool list — idempotent and cheap.
-            let updatedTooling = dispatcher.tooling.withMonitoringControl(monitoringControl)
+            // Community-only mode (tooling == nil) has no monitoring seam; skip.
+            let updatedTooling = existingTooling.withMonitoringControl(monitoringControl)
             residentDispatcher = ARIA_MCPDispatcher(info: dispatcher.info, tooling: updatedTooling)
         } else {
             residentDispatcher = dispatcher
@@ -381,10 +585,9 @@ public enum AriaResident {
             let drawers = try await kit.allDrawers(in: handle)
             // Resolve parentNodeIds to display names for per-wing iteration.
             // Drawer no longer carries stored wing/room after node-tree integrity.
-            let estate = try await kit.estate(for: handle)
             let activeDrawers = drawers.filter { $0.tombstonedAt == nil }
-            let nodeNames = try await estate.resolveNodeNames(
-                parentNodeIds: activeDrawers.map(\.parentNodeId))
+            let nodeNames = try await kit.resolveNodeNames(
+                handle, parentNodeIds: activeDrawers.map(\.parentNodeId))
             let wings = Set(activeDrawers.compactMap { nodeNames[$0.parentNodeId]?.wing }).sorted()
             for wing in wings {
                 // Date() is permitted here — ResidentDaemon is the ARIA MCP boundary,
@@ -396,6 +599,16 @@ public enum AriaResident {
             }
         }
 
+        // Read the estate's VectorStore before constructing the governor so the
+        // HNSW maintenance seam can be wired. The store is always registered in
+        // resident mode (set up by AriaMCPMain before this call); reading it here
+        // before governor construction avoids a two-phase init that would leave
+        // the governor with nil hnswMaintenance on the first tick.
+        let vectorStore = await kit.registeredVectorStore(for: handle)
+        let hnswMaint: (any HNSWGraphMaintenance)? = vectorStore.map {
+            EstateHNSWGraphMaintenance(vectorStore: $0)
+        }
+
         let governor = AutonomicGovernor(
             kit: kit,
             handle: handle,
@@ -404,7 +617,8 @@ public enum AriaResident {
             topologyFingerprintLoader: topologyFingerprintLoader,
             topologySnapshotLoader: topologySnapshotLoader,
             topologyGate: topologyGate,
-            graphAnalyticsHandler: graphAnalyticsHandler
+            graphAnalyticsHandler: graphAnalyticsHandler,
+            hnswMaintenance: hnswMaint
         )
 
         // Standing-signal bootstrap (the dormant-loop activation). The governor
@@ -416,13 +630,13 @@ public enum AriaResident {
         // scheduler and drives real emissions (vector-similarity → associate,
         // decay-sweep, etc.).
         //
-        // VectorStore: read back the store `AriaMCPMain` already registered for
-        // this estate. Resident HTTP mode always wires semantic recall, so the
-        // store is present here; the registration API needs it to build the
-        // `VectorSimilaritySignal`. If (defensively) no store is registered, we
-        // skip registration and the governor keeps benign-skipping `signalTick`
-        // exactly as before activation — no fallback store is fabricated (that
-        // would register a vector signal scanning an empty throwaway estate).
+        // VectorStore: already read above for HNSW maintenance wiring. Resident
+        // HTTP mode always wires semantic recall, so the store is present here;
+        // the registration API needs it to build the `VectorSimilaritySignal`.
+        // If (defensively) no store is registered, we skip registration and the
+        // governor keeps benign-skipping `signalTick` exactly as before
+        // activation — no fallback store is fabricated (that would register a
+        // vector signal scanning an empty throwaway estate).
         //
         // dreamingCycle: left as the DEFAULT no-op. The heavy dreaming cycle is
         // already driven by THIS governor's own `dreaming.pump` on its 30 s
@@ -439,9 +653,129 @@ public enum AriaResident {
         // cadences so a drawer filed between fires is never missed. The hunt
         // persists proposed contradicts tunnels itself; the closure returns
         // counts only (single-write invariant, same as dreamingCycle).
-        if let vectorStore = await kit.registeredVectorStore(for: handle) {
+        // Fact-extraction activation (FACT_EXTRACTION_WIRE §2b).
+        // Read the estate setting and resolve the live cycle closure
+        // BEFORE registering standing signals so Signal 14 starts in the
+        // correct state.  If the setting read throws (e.g. storage offline
+        // during open), treat as .on — the cycle closure will still be nil
+        // if no extractor was provisioned, which is the safe inert path.
+        let factExtractionSetting: EstatePreferenceValue
+        do {
+            factExtractionSetting = try await kit.provisionedPreference(.factExtraction, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.factExtraction) read failed (\(error)) — defaulting to .on")
+            factExtractionSetting = .on
+        }
+        let factExtractionCycleClosure = await AriaResident.resolveFactExtractionCycle(
+            setting: factExtractionSetting,
+            extractor: await config.factExtractorFactory?(),
+            kit: kit,
+            handle: handle)
+
+        // Consolidation and contradiction-sweep activation: each of these
+        // standing signals registers only while its estate preference is
+        // not .off. A failed read counts as .on, the same posture as fact
+        // extraction above: both sweeps are bounded, cursor-resumable
+        // maintenance work, and a storage hiccup during open must not
+        // silently switch them off.
+        let consolidationSetting: EstatePreferenceValue
+        do {
+            consolidationSetting = try await kit.provisionedPreference(.consolidation, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.consolidation) read failed (\(error)) — defaulting to .on")
+            consolidationSetting = .on
+        }
+        let contradictionSweepSetting: EstatePreferenceValue
+        do {
+            contradictionSweepSetting = try await kit.provisionedPreference(.contradictionSweep, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.contradictionSweep) read failed (\(error)) — defaulting to .on")
+            contradictionSweepSetting = .on
+        }
+        // Live consolidation cycle: one bounded sweep per daily fire under
+        // the production distill function. Registration follows the live switch.
+        let consolidationCycleClosure: @Sendable (Date) async throws -> ConsolidationSweepReport =
+            { @Sendable now in
+                try await kit.consolidationSweepReport(
+                    handle: handle,
+                    distillFn: GeniusLocusKit.consolidationDistillFn,
+                    now: now)
+            }
+        // Live contradiction sweep: the typed rule sweep plus the lexical
+        // pass at their default registry/model/probe/top-K parameters.
+        // Registration follows the live switch.
+        let contradictionSweepCycleClosure: @Sendable (Date) async throws -> ConflictTunnelProposalReport =
+            { @Sendable now in
+                try await kit.proposeConflictTunnels(in: handle, now: now)
+            }
+        // Maintenance-family activation: the maintenance-daemon, decay-sweep
+        // and by-reference-validity signals each drive one category of the
+        // governor's maintenance engine (the daemon the governor holds) and
+        // register only while the estate's `.maintenance` preference is not
+        // .off. A failed read counts as .on, the same posture as the sweeps
+        // above. The governor tick does not pump the engine; these signals
+        // are its only drive.
+        let maintenanceSetting: EstatePreferenceValue
+        do {
+            maintenanceSetting = try await kit.provisionedPreference(.maintenance, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.maintenance) read failed (\(error)) — defaulting to .on")
+            maintenanceSetting = .on
+        }
+        let maintenanceDaemon = await governor.maintenance
+        let maintenanceCycleClosure: @Sendable (Date) async throws -> Int =
+            { @Sendable now in
+                try await maintenanceDaemon.triggerMaintenanceCycle(
+                    now: now, categories: [.tombstone]).tombstoneCandidates
+            }
+        let decayCycleClosure: @Sendable (Date) async throws -> Int =
+            { @Sendable now in
+                try await maintenanceDaemon.triggerMaintenanceCycle(
+                    now: now, categories: [.decay]).decayCandidates
+            }
+        let byReferenceCycleClosure: @Sendable (Date) async throws -> Int =
+            { @Sendable now in
+                try await maintenanceDaemon.triggerMaintenanceCycle(
+                    now: now, categories: [.byReference]).byReferenceDrifts
+            }
+
+        // Adaptive-recall activation: the temporal-causality-fold and
+        // training-daemon signals keep the matrix tier learning from the
+        // audit log, and the end-of-day-tournament signal folds the day's
+        // recall traces into recall_ratings; all three register only while
+        // the estate's `.adaptiveRecall` preference is not .off. A failed
+        // read counts as .on, the same posture as the sweeps above: each is
+        // a bounded pass over a recent tail, and a storage hiccup during
+        // open must not silently switch them off.
+        let adaptiveRecallSetting: EstatePreferenceValue
+        do {
+            adaptiveRecallSetting = try await kit.provisionedPreference(.adaptiveRecall, for: handle)
+        } catch {
+            Logging.stderr.log(
+                "AriaResident: provisionedPreference(.adaptiveRecall) read failed (\(error)) — defaulting to .on")
+            adaptiveRecallSetting = .on
+        }
+        let foldCycleClosure: @Sendable (Date) async throws -> Void =
+            { @Sendable now in
+                try await kit.runTemporalCausalityFold(handle, now: now)
+            }
+        let trainingCycleClosure: @Sendable (Date) async throws -> String =
+            { @Sendable now in
+                try await kit.runTrainingTick(handle, now: now)
+            }
+        let tournamentCycleClosure: @Sendable (Date) async throws -> TournamentReport =
+            { @Sendable now in
+                try await kit.endOfDayTournament(handle, now: now)
+            }
+
+        var registeredSignalIDs: [String: SignalID] = [:]
+        if let vectorStore = vectorStore {
             do {
-                _ = try await kit.registerDefaultStandingSignals(
+                registeredSignalIDs = try await kit.registerDefaultStandingSignals(
                     in: handle,
                     vectorStore: vectorStore,
                     huntCycle: { now in
@@ -452,9 +786,43 @@ public enum AriaResident {
                             now: now)
                         return (report.proposed.count, report.borderline.count)
                     },
+                    // Live anomaly cycle (P3 wiring completion): without this
+                    // closure the AnomalySweepSignal registers its no-op
+                    // defaultSpec and drawer bit 26 is never set in a resident
+                    // estate. Threshold stays the sweep default; the signal's
+                    // scheduler clock is the deterministic `now` it passes.
+                    anomalyCycle: { now in
+                        // Enqueue only (§ DUTY_LIFECYCLE): the anomaly duty
+                        // worker scores owed rooms off the tick, and only the
+                        // rooms touched since their last scoring.
+                        _ = try await kit.enqueueDuty(.anomalySweep, in: handle, now: now)
+                        return 0
+                    },
+                    // Live span-encode cycle (Encoder Rerank contract sheet
+                    // §10): encodes drawers whose bit 27 is clear under the
+                    // registered encoder and writes their int8 span rows. A
+                    // no-op (0) when no encoder is active for the estate.
+                    spanEncodeCycle: { now in
+                        // Enqueue only (§ DUTY_LIFECYCLE): the duty worker pays
+                        // the batch off the tick.
+                        _ = try await kit.enqueueDuty(.spanEncode, in: handle, now: now)
+                        return 0
+                    },
+                    // Live fact-extraction cycle (FACT_EXTRACTION_WIRE §2b):
+                    // non-nil when setting=.on AND an extractor is provisioned;
+                    // nil (inert default) when setting=.off or no extractor.
+                    factExtractionCycle: factExtractionCycleClosure ?? { _ in 0 },
+                    consolidationCycle: consolidationSetting == .off ? nil : consolidationCycleClosure,
+                    contradictionSweepCycle: contradictionSweepSetting == .off ? nil : contradictionSweepCycleClosure,
+                    maintenanceCycle: maintenanceSetting == .off ? nil : maintenanceCycleClosure,
+                    decayCycle: maintenanceSetting == .off ? nil : decayCycleClosure,
+                    byReferenceCycle: maintenanceSetting == .off ? nil : byReferenceCycleClosure,
+                    foldCycle: adaptiveRecallSetting == .off ? nil : foldCycleClosure,
+                    trainingCycle: adaptiveRecallSetting == .off ? nil : trainingCycleClosure,
+                    tournamentCycle: adaptiveRecallSetting == .off ? nil : tournamentCycleClosure,
                     now: Date()
                 )
-                Logging.stderr.log("AriaResident standing signals registered (\(GeniusLocusKit.defaultStandingSignalNames.count) defaults)")
+                Logging.stderr.log("AriaResident standing signals registered (\(GeniusLocusKit.defaultStandingSignalNames.count) defaults; consolidation=\(consolidationSetting.rawValue) contradictionSweep=\(contradictionSweepSetting.rawValue) maintenance=\(maintenanceSetting.rawValue))")
             } catch {
                 Logging.stderr.log("AriaResident standing-signal registration failed (governor will benign-skip signalTick): \(error)")
             }
@@ -462,7 +830,121 @@ public enum AriaResident {
             Logging.stderr.log("AriaResident standing signals NOT registered (no VectorStore for estate; governor signalTick will benign-skip)")
         }
 
+        let preferenceTask = Task {
+            var ids = registeredSignalIDs
+            let intervalNs = UInt64(config.brainTickMs) * 1_000_000
+            while !Task.isCancelled {
+                let now = Date()
+                do {
+                    let factOn = try await kit.provisionedPreference(.factExtraction, for: handle) != .off
+                    let consolidationOn = try await kit.provisionedPreference(.consolidation, for: handle) != .off
+                    let contradictionOn = try await kit.provisionedPreference(.contradictionSweep, for: handle) != .off
+                    let maintenanceOn = try await kit.provisionedPreference(.maintenance, for: handle) != .off
+                    let adaptiveOn = try await kit.provisionedPreference(.adaptiveRecall, for: handle) != .off
+                    try await reconcilePreferenceSignal(
+                        name: FactExtractionSignal.signalName, enabled: factOn, ids: &ids,
+                        kit: kit, handle: handle, now: now
+                    ) {
+                        await makeFactExtractionSpec(
+                            factExtractorFactory: config.factExtractorFactory,
+                            cadenceSeconds: config.factExtractionCadenceSeconds,
+                            kit: kit, handle: handle)
+                    }
+                    try await reconcilePreferenceSignal(name: ConsolidationSignal.signalName, enabled: consolidationOn, ids: &ids, kit: kit, handle: handle, now: now) {
+                        ConsolidationSignal.spec(consolidationCycle: consolidationCycleClosure)
+                    }
+                    try await reconcilePreferenceSignal(name: ContradictionSweepSignal.signalName, enabled: contradictionOn, ids: &ids, kit: kit, handle: handle, now: now) {
+                        ContradictionSweepSignal.spec(sweepCycle: contradictionSweepCycleClosure)
+                    }
+                    let maintenanceSpecs: [(String, SignalSpec)] = [
+                        (MaintenanceSignal.signalName, MaintenanceSignal.spec(maintenanceCycle: maintenanceCycleClosure)),
+                        (DecaySweepSignal.signalName, DecaySweepSignal.spec(decayCycle: decayCycleClosure)),
+                        (ByReferenceValiditySignal.signalName, ByReferenceValiditySignal.spec(byReferenceCycle: byReferenceCycleClosure)),
+                    ]
+                    for (name, spec) in maintenanceSpecs {
+                        try await reconcilePreferenceSignal(name: name, enabled: maintenanceOn, ids: &ids, kit: kit, handle: handle, now: now) { spec }
+                    }
+                    let adaptiveSpecs: [(String, SignalSpec)] = [
+                        (TemporalCausalitySignal.signalName, TemporalCausalitySignal.spec(foldCycle: foldCycleClosure)),
+                        (TrainingSignal.signalName, TrainingSignal.spec(trainingCycle: trainingCycleClosure)),
+                        (EndOfDayTournamentSignal.signalName, EndOfDayTournamentSignal.spec(tournamentCycle: tournamentCycleClosure)),
+                    ]
+                    for (name, spec) in adaptiveSpecs {
+                        try await reconcilePreferenceSignal(name: name, enabled: adaptiveOn, ids: &ids, kit: kit, handle: handle, now: now) { spec }
+                    }
+                } catch {
+                    Logging.stderr.log("AriaResident preference reconciliation failed; unregistering managed signals: \(error)")
+                    let managedNames = [
+                        FactExtractionSignal.signalName,
+                        ConsolidationSignal.signalName,
+                        ContradictionSweepSignal.signalName,
+                        MaintenanceSignal.signalName,
+                        DecaySweepSignal.signalName,
+                        ByReferenceValiditySignal.signalName,
+                        TemporalCausalitySignal.signalName,
+                        TrainingSignal.signalName,
+                        EndOfDayTournamentSignal.signalName,
+                    ]
+                    await failClosedPreferenceSignals(
+                        names: managedNames, ids: &ids,
+                        kit: kit, handle: handle, now: now)
+                }
+                do { try await Task.sleep(nanoseconds: intervalNs) } catch { break }
+            }
+        }
+
         let pumpTask = Task { await governor.run() }
+
+        // The duty workers (§ DUTY_LIFECYCLE): the tick and the signals only
+        // enqueue owed duties; ONE task per duty pays ONE bounded batch per
+        // cadence, off the tick, so a model-bound batch never stalls the
+        // brain and a fast lane (span encode, 30 s) never waits behind a slow
+        // one (a subject or fact batch runs minutes). The two on-demand
+        // duties (facts backfill, basis retrain) are drained when something
+        // queued them, never enqueued here.
+        let dutyCadence = max(1, config.factExtractionCadenceSeconds)
+        let dutyWorkerTasks: [Task<Void, Never>] = [
+            (DutyKind.spanEncode, SpanEncodeSignal.defaultCadenceSeconds, true),
+            (DutyKind.subjectBackfill, dutyCadence, true),
+            (DutyKind.factExtraction, dutyCadence, true),
+            (DutyKind.anomalySweep, dutyCadence, true),
+            (DutyKind.factsBackfill, SpanEncodeSignal.defaultCadenceSeconds, false),
+            (DutyKind.retrainBasis, SpanEncodeSignal.defaultCadenceSeconds, false),
+        ].map { kind, cadence, enqueues in
+            Task {
+                while !Task.isCancelled {
+                    // Date() is permitted here: the daemon is the host boundary.
+                    let now = Date()
+                    do {
+                        // F2/F12: `.factExtraction` is the one duty this loop
+                        // must NOT pay unconditionally — it is a second driver
+                        // of the same duty the FactExtractionSignal above
+                        // already gates on the live preference, and unlike the
+                        // other kinds it must consult that preference itself
+                        // every cycle rather than trusting a value captured at
+                        // daemon start. See `runFactExtractionDutyCycle`.
+                        if kind == .factExtraction {
+                            let report = try await runFactExtractionDutyCycle(
+                                kit: kit, handle: handle, now: now)
+                            if let report, report.jobsRun > 0 {
+                                Logging.stderr.log(
+                                    "AriaResident duty \(kind.rawValue): \(report.unitsPaid) paid, \(report.remainingDebt) remaining")
+                            }
+                        } else {
+                            if enqueues { _ = try await kit.enqueueDuty(kind, in: handle, now: now) }
+                            let report = try await kit.drainDuty(kind, in: handle, now: now)
+                            if report.jobsRun > 0 {
+                                Logging.stderr.log(
+                                    "AriaResident duty \(kind.rawValue): \(report.unitsPaid) paid, \(report.remainingDebt) remaining")
+                            }
+                        }
+                    } catch {
+                        Logging.stderr.log("AriaResident duty \(kind.rawValue) failed: \(error)")
+                    }
+                    try? await Task.sleep(for: .seconds(cadence))
+                }
+            }
+        }
 
         // Continuous monitoring gate: the observer program re-decides its enable
         // state on each poll from the live store flag (OR the ARIA_MCP_OBSERVER
@@ -570,12 +1052,16 @@ public enum AriaResident {
             try await server.run()   // resident: returns only on bind failure
         } catch {
             pumpTask.cancel()
+            dutyWorkerTasks.forEach { $0.cancel() }
+            preferenceTask.cancel()
             monitoringTask?.cancel()
             serverMetricsTask?.cancel()
             vaultResidentTask?.cancel()
             throw error
         }
         pumpTask.cancel()
+        dutyWorkerTasks.forEach { $0.cancel() }
+        preferenceTask.cancel()
         monitoringTask?.cancel()
         serverMetricsTask?.cancel()
         vaultResidentTask?.cancel()

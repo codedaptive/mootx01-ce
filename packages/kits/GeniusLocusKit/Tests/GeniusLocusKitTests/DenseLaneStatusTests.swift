@@ -21,12 +21,14 @@
 // cross telemetry emit sites (open, recall) hold withIntellectusLock for their
 // entire duration.
 
+// Whole-record float lane tests.
 import Testing
 import Foundation
 import LocusKit
 import CorpusKit
+import CorpusKitWholeRecordDense
 @testable import CorpusKit
-import VectorKit
+import SynapseKit
 import PersistenceKit
 import PersistenceKitInMemory
 import IntellectusLib
@@ -92,10 +94,7 @@ private func openEstateWithFloatCorpusAndIngest() async throws
         estateID: UUID(), backend: .inMemory))
     let corpus = try await CorpusContentEngine(
         standaloneOn: corpusStorage,
-        models: [.miniLM(inference: { tokens in
-            let v = Float((tokens.first ?? 0) % 4 + 1) / 4.0
-            return Array(repeating: v, count: 384)
-        })]
+        models: [.lsa(provider: HashFloatProvider(modelID: "test-miniLM-v1"))]
     )
     try await corpus.ingest(frame.content, contentID: drawer.id, now: t0)
     await kit.registerCorpus(corpus, for: handle)
@@ -147,6 +146,7 @@ struct DenseLaneExplainerTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: "dense float lane test",
             origin: .internal
         )
@@ -165,6 +165,7 @@ struct DenseLaneExplainerTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: "",   // empty query
             origin: .internal
         )
@@ -184,6 +185,7 @@ struct DenseLaneExplainerTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: nil,  // no query text
             origin: .internal
         )
@@ -203,6 +205,7 @@ struct DenseLaneExplainerTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: "dense float lane test",
             origin: .internal
         )
@@ -239,6 +242,7 @@ struct DenseLaneCounterTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "dense float lane test",
                 origin: .internal
             )
@@ -272,6 +276,7 @@ struct DenseLaneCounterTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "test",
                 origin: .internal
             )
@@ -299,6 +304,7 @@ struct DenseLaneHappyPathTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             queryText: "dense float lane test content",
             origin: .internal
         )
@@ -324,6 +330,7 @@ struct DenseLaneOtherModesTests {
             mode: .locusOnly,
             scoring: .rrf,
             limit: 5,
+            fallback: .failClosed,
             origin: .internal
         )
         let result = try await kit.recall(handle, request)
@@ -415,15 +422,12 @@ struct DenseLaneStoreErrorTests {
             )
             let drawer = try await kit.capture(handle, frame)
 
-            // Build a corpus using the miniLM path (supports embedFloat).
+            // Build a corpus with a float-capable provider so embedFloat fires.
             let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
                 estateID: UUID(), backend: .inMemory))
             let corpus = try await CorpusContentEngine(
                 standaloneOn: corpusStorage,
-                models: [.miniLM(inference: { tokens in
-                    let v = Float((tokens.first ?? 0) % 4 + 1) / 4.0
-                    return Array(repeating: v, count: 384)
-                })]
+                models: [.lsa(provider: HashFloatProvider(modelID: "test-miniLM-v1"))]
             )
             try await corpus.ingest(frame.content, contentID: drawer.id, now: t0)
             await kit.registerCorpus(corpus, for: handle)
@@ -442,6 +446,7 @@ struct DenseLaneStoreErrorTests {
                 mode: .unionBest,
                 scoring: .rrf,
                 limit: 5,
+                fallback: .failClosed,
                 queryText: "photosynthesis recall store error chain",
                 origin: .internal
             )

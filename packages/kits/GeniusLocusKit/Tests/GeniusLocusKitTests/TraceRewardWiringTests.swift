@@ -85,7 +85,7 @@ struct TraceRewardWiringTests {
 
         // Recall with external origin so trace rows are written.
         let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
-        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
+        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, scoring: .matrixAware, limit: 10, fallback: .failClosed, origin: .external)
         _ = try await kit.recall(handle, req)
 
         // `now` is after the recall so the trace's recalledAt falls in the window.
@@ -119,7 +119,7 @@ struct TraceRewardWiringTests {
 
         // Recall with external origin so trace rows are written.
         let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
-        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
+        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, scoring: .matrixAware, limit: 10, fallback: .failClosed, origin: .external)
         _ = try await kit.recall(handle, req)
 
         // `now` after recall so recalledAt falls in the query window.
@@ -150,14 +150,14 @@ struct TraceRewardWiringTests {
     func internalRecallWritesZeroTraceRows() async throws {
         let (kit, handle, tmp) = try await openSQLite()
         defer { try? FileManager.default.removeItem(at: tmp) }
-        let now = Date(timeIntervalSinceReferenceDate: 4_000_000)
 
         // Capture one drawer so recall has something to return.
         _ = try await captureOne(kit: kit, handle: handle)
 
-        // Recall with default (internal) origin — must not write trace rows.
+        // Recall with internal origin — must not write trace rows (B-10a).
+        // Only the ARIA_MCP boundary passes .external.
         let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10)
-        let req = GLKRecallRequest(frame: frame, mode: .locusOnly) // origin defaults to .internal
+        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, scoring: .matrixAware, limit: 10, fallback: .failClosed, origin: .internal)
         let results = try await kit.recall(handle, req)
         #expect(!results.hits.isEmpty, "internal recall should still return rows")
 
@@ -171,12 +171,11 @@ struct TraceRewardWiringTests {
     @Test("External GLKRecallRequest writes recall-trace rows")
     func externalRecallWritesTraceRows() async throws {
         let (kit, handle) = try await openInMemory()
-        let now = Date(timeIntervalSinceReferenceDate: 5_000_000)
 
         _ = try await captureOne(kit: kit, handle: handle)
 
         let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
-        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
+        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, scoring: .matrixAware, limit: 10, fallback: .failClosed, origin: .external)
         let results = try await kit.recall(handle, req)
         #expect(!results.hits.isEmpty, "external recall should return rows")
 
@@ -193,7 +192,7 @@ struct TraceRewardWiringTests {
         _ = try await captureOne(kit: kit, handle: handle)
 
         let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
-        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
+        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, scoring: .matrixAware, limit: 10, fallback: .failClosed, origin: .external)
 
         // Two separate external recalls — should accumulate trace rows.
         _ = try await kit.recall(handle, req)
@@ -218,7 +217,7 @@ struct TraceRewardWiringTests {
 
         // Recall both drawers with external origin.
         let frame = RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .structured, limit: 10, traceLimit: 10)
-        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, origin: .external)
+        let req = GLKRecallRequest(frame: frame, mode: .locusOnly, scoring: .matrixAware, limit: 10, fallback: .failClosed, origin: .external)
         _ = try await kit.recall(handle, req)
 
         // `now` after the recall so all recalledAt timestamps fall in the window.

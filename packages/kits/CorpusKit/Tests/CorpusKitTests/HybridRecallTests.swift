@@ -51,7 +51,7 @@ struct HybridRecallTests {
 // MARK: - P3-secfix: UUID canonicalization fusion test
 
 // HybridRecall.recall() calls Fusion.fuse with itemID keys from two lanes:
-//   - vector lane: UUID string from VectorKit (may be lower- or uppercase)
+//   - vector lane: UUID string from SynapseKit (may be lower- or uppercase)
 //   - keyword lane: UUID.uuidString (always uppercase on Apple)
 // The P3 fix canonicalizes vector-lane keys through UUID parse → .uuidString
 // so both lanes use the same key and fuse. We test the fusion contract here

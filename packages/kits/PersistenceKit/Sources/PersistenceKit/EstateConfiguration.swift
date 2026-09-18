@@ -29,14 +29,32 @@ public struct EstateConfiguration: Sendable {
     /// constraints, especially the federation-incompatibility note.
     public let novelTokenTagger: NovelTokenTaggerChoice
 
-    /// controls whether kits hold computed indexes in RAM
-    /// between queries (`.ramResident`) or load from the durable store
-    /// on demand (`.diskBacked`, the default). `.diskBacked` uses mmap
-    /// and OS page cache — small estates stay fully resident; large
-    /// estates page on demand. `.ramResident` is the pre-disk-default storage residency
-    /// behavior: all indexes cached in heap for minimum query latency
-    /// at the cost of multi-GB memory on large estates.
+    /// Controls whether kits hold computed indexes in RAM between queries
+    /// (`.ramResident`, the default) or load from the durable store on demand
+    /// (`.diskBacked`). `.ramResident` builds the index once per model on first
+    /// query and serves subsequent queries from heap, falling back to the table
+    /// scan when the index is evicted (e.g. under memory pressure).
+    /// `.diskBacked` skips the heap copy entirely and scans SQLite on every
+    /// query, relying on the OS page cache for warm reads.
     public let residencyHint: ResidencyHint
+
+    /// Ceiling on how much RAM the per-model float-lane indexes (FloatBruteForceIndex
+    /// plus, above the HNSW threshold, the HNSWIndex graph) may collectively occupy
+    /// in the heap for this estate.
+    ///
+    /// The default `.systemFraction(0.25)` caps the resident float-index set at 25%
+    /// of physical RAM. That fraction was chosen to leave headroom for all other
+    /// claimants on the same process — the SQLite page cache, the binary-lane resident
+    /// array, HNSW graphs, embedding-provider weights, and (in the app target) the GUI
+    /// itself. A quarter of physical memory is the largest share one subsystem's caches
+    /// may claim while the process remains healthy. It is also far above any realistic
+    /// single-estate index (see BRR §6.4), so residency behaviour below the cap is
+    /// unchanged from the pre-RS-01 baseline.
+    ///
+    /// Use `.unbounded` to reproduce exact pre-RS-01 behaviour (no admission bound).
+    /// Use `.bytes(N)` for an explicit absolute ceiling, useful in tests and constrained
+    /// deployments. Use `.systemFraction(f)` for a deployment-adaptive ceiling.
+    public let residentIndexBudget: ResidentIndexBudget
 
     public init(
         estateID: UUID,
@@ -44,7 +62,8 @@ public struct EstateConfiguration: Sendable {
         encryptionConfig: EstateEncryptionConfig = .plaintext,
         cacheConfig: EstateCacheConfig = .disabled,
         novelTokenTagger: NovelTokenTaggerChoice = .hmm,
-        residencyHint: ResidencyHint = .diskBacked
+        residencyHint: ResidencyHint = .ramResident,
+        residentIndexBudget: ResidentIndexBudget = .systemFraction(0.25)
     ) {
         self.estateID = estateID
         self.backend = backend
@@ -52,6 +71,86 @@ public struct EstateConfiguration: Sendable {
         self.cacheConfig = cacheConfig
         self.novelTokenTagger = novelTokenTagger
         self.residencyHint = residencyHint
+        self.residentIndexBudget = residentIndexBudget
+    }
+}
+
+// MARK: — Resident-index admission budget
+
+/// Controls how much heap the per-model float-lane indexes (FloatBruteForceIndex
+/// plus, above the HNSW threshold, HNSWIndex graphs) may collectively occupy for
+/// one estate.
+///
+/// The budget is resolved to an optional byte ceiling at admission time. `nil`
+/// means unbounded — the exact pre-RS-01 behaviour — and is used when detection
+/// of physical RAM returns nothing (an undetectable platform must not silently
+/// degrade every estate to the disk-backed path by guessing a ceiling).
+public enum ResidentIndexBudget: Sendable, Equatable {
+    /// Ceiling = `fraction` × physical RAM. Must be in (0, 1].
+    ///
+    /// Default `fraction` used by `EstateConfiguration` is `0.25`. See
+    /// `EstateConfiguration.residentIndexBudget` for the rationale.
+    case systemFraction(Double)
+
+    /// Explicit absolute ceiling in bytes. Useful in tests and tightly
+    /// memory-constrained deployments.
+    case bytes(Int)
+
+    /// No admission bound — the exact pre-RS-01 behaviour. The float index
+    /// is always admitted regardless of projected size.
+    case unbounded
+
+    /// Resolve this budget to an optional byte ceiling.
+    ///
+    /// - Parameter physicalMemoryBytes: the host's total physical memory in bytes.
+    ///   Pass `ProcessInfo.processInfo.physicalMemory` at the call site; pass a
+    ///   fixed value in tests so assertions are machine-independent.
+    ///   A value of `0` means "undetectable". It affects `.systemFraction` ONLY,
+    ///   which has nothing to take a fraction of; `.bytes` is an absolute ceiling
+    ///   that does not depend on how much memory the host has, so it is still
+    ///   honoured. Discarding an explicitly configured ceiling because RAM
+    ///   detection failed would leave the operator with no cap at all — the
+    ///   opposite of what they asked for.
+    /// - Returns: the byte ceiling, or `nil` if no bound applies (`.unbounded`, or
+    ///   `.systemFraction` on a host whose physical memory could not be detected).
+    public func resolveCeiling(physicalMemoryBytes: UInt64) -> Int? {
+        switch self {
+        case .unbounded:
+            return nil
+        case let .bytes(n):
+            // Absolute ceiling: independent of host memory, honoured even when
+            // detection failed. Twin of Rust `Bytes(n) => Some(n)`.
+            //
+            // Floored at 0 because the Rust twin stores this as a u64 and cannot
+            // represent a negative ceiling at all. Without the floor the two ports
+            // would diverge on a negative input: Swift would return it unchanged,
+            // and since `residentTotal + projection > cap` is then always true,
+            // every index would be silently refused for the process's lifetime.
+            // Zero is the nearest value Rust can hold and carries the same meaning
+            // (admit nothing), so both ports now behave identically.
+            return max(0, n)
+        case let .systemFraction(f):
+            guard physicalMemoryBytes > 0 else {
+                // Physical memory is undetectable, so there is no quantity to take
+                // a fraction OF. Return nil (unbounded) rather than guessing: a
+                // wrong guess would refuse every estate on an unknown platform,
+                // which is worse than admitting without a bound.
+                return nil
+            }
+            // Clamp the fraction to (0, 1] to guard against misconfiguration.
+            // The Rust twin clamps identically, so both ports resolve the same
+            // ceiling for the same inputs — the cross-port agreement contract.
+            let clamped = max(1e-9, min(f, 1.0))
+            let ceiling = Double(physicalMemoryBytes) * clamped
+            // `Double(Int.max)` rounds UP to 2^63, which is NOT representable as
+            // Int, so `Int(min(ceiling, Double(Int.max)))` traps at exactly that
+            // boundary rather than clamping. Compare against 2^63 as a Double and
+            // return Int.max explicitly. Unreachable on real hardware, but this is
+            // a public API taking caller-supplied bytes, so it must not trap.
+            let intMaxExclusive = 9_223_372_036_854_775_808.0  // 2^63, one past Int.max
+            if ceiling >= intMaxExclusive { return Int.max }
+            return Int(ceiling)
+        }
     }
 }
 
@@ -66,18 +165,17 @@ public enum BackendConfiguration: Sendable {
     case inMemory
 }
 
-/// controls whether kits hold computed indexes in heap
-/// between queries or load from the durable store on demand.
+/// Controls whether kits hold computed indexes in heap between queries
+/// or load from the durable store on demand.
 public enum ResidencyHint: Sendable, Equatable {
-    /// Indexes loaded from disk on demand; OS page cache manages RAM
-    /// residency. Default for all production estates. Multi-GB heap
-    /// savings on large estates; small estates stay fully cached by
-    /// the OS page cache with no measurable latency difference.
+    /// Indexes loaded from the durable store on demand; the OS page cache
+    /// manages RAM residency. Float NN search scans the SQLite table directly
+    /// on every query. Use when heap pressure outweighs query latency.
     case diskBacked
-    /// All indexes cached in the Swift/Rust heap for minimum query
-    /// latency. Pre-disk-default storage residency behavior. Use for test fixtures, small
-    /// embedded deployments, or any path that needs guaranteed
-    /// sub-millisecond float NN search without a SQLite round-trip.
+    /// All indexes cached in the Swift/Rust heap for minimum query latency.
+    /// The float-lane index is built lazily on first query per model and evicted
+    /// automatically under critical memory pressure, falling back to the table
+    /// scan. Default for all production estates.
     case ramResident
 }
 
@@ -150,7 +248,8 @@ extension EstateConfiguration {
                 backend: .sqlite(url: siblingURL, busyTimeout: busyTimeout),
                 encryptionConfig: encryptionConfig,
                 cacheConfig: cacheConfig,
-                novelTokenTagger: novelTokenTagger
+                novelTokenTagger: novelTokenTagger,
+                residentIndexBudget: residentIndexBudget
             )
 
         case .inMemory:
@@ -162,7 +261,8 @@ extension EstateConfiguration {
                 backend: .inMemory,
                 encryptionConfig: encryptionConfig,
                 cacheConfig: cacheConfig,
-                novelTokenTagger: novelTokenTagger
+                novelTokenTagger: novelTokenTagger,
+                residentIndexBudget: residentIndexBudget
             )
 
         case .postgresql:

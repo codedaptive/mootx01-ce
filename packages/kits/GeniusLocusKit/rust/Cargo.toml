@@ -11,6 +11,21 @@ publish = false
 name = "genius_locus_kit"
 path = "src/lib.rs"
 
+# scripts/moot-test reads [package.metadata.moot-test] test-features and passes
+# --features <list> to cargo test for this crate. A bare `cargo test` silently
+# skips the seven [[test]] entries below because they carry
+# required-features = ["test-seams"] — cargo does not build those binaries when
+# the feature is inactive and emits no warning; all 117 tests live in those
+# seven integration targets. The #[cfg(any(test, feature = "test-seams"))]
+# items in src are the seam methods those targets call, not tests; the `test`
+# arm means the crate's own unit-test harness already sees them, but an
+# integration binary does not inherit the library's `test` cfg — hence
+# required-features. The list here mirrors the [features].test-seams line and
+# the required-features declarations below, so the next person editing either
+# is already looking at the relevant neighbour.
+[package.metadata.moot-test]
+test-features = ["test-seams"]
+
 [dependencies]
 # R10 (2026-06-20): EideticLib provides the canonical cross-leg sentence
 # segmenter (eidetic_lib::segmenter::sentences). The distill_items_sweep
@@ -24,13 +39,29 @@ path = "src/lib.rs"
 # GLK also depends on, so this adds no new transitive external crate.
 # Per in-repository dependency direction (Rust no-inversion rule).
 eidetic-lib = { path = "../../../libs/EideticLib/rust" }
+# MootProductIdentity: the product's identity strings spelled once. The estate
+# catalog takes the configuration directory and every on-disk name from it, as
+# the Swift catalog imports MootProductIdentity. Foundation lib, no kit deps;
+# layering does not invert.
+moot-product-identity = { path = "../../../libs/MootProductIdentity/rust" }
 # F18.3 (2026-05-27): GLK now depends on SubstrateLib so the unified
 # audit log can consume the canonical SHA-256 content-hash and HLC
 # rather than hold byte-compatible local mirrors. The GLK-01/03 missions
 # deferred this dependency ("no new dependencies"); the local types were
 # always built byte-compatible anticipating exactly this wiring.
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
+# CDL-02: the deterministic dense-context distiller. render_distillation
+# produces the stored `distilled` text through context_distill_lib, and the
+# library's converter ID is what distill_item writes to
+# distilled_pipeline_version. Foundation tier (no kit deps); no inversion.
+context-distill-lib = { path = "../../../libs/ContextDistillLib/rust" }
+fact-extraction-kit = { path = "../../FactExtractionKit/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
+# substrate-lib: locus-kit's audit seam (Estate::audit_events, the C3/A6
+# timing-derivation paging surface) returns substrate_lib::verbs::AuditEvent,
+# so the coordinator pass-through names that type directly. In-repo layering:
+# composition → substrate lib, no inversion.
+substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 # SubstrateML (Layer 3 algorithms) is required so `MatrixTier::rebuild_temporal`
 # can delegate to `temporal_causality_fold::fold` — the canonical T-matrix engine
 # (cookbook §6.4). Mirrors the Swift dependency added 2026-06-04 per
@@ -46,12 +77,20 @@ substrate-ml = { path = "../../../libs/SubstrateML/rust" }
 # depend on GLK). persistence-kit supplies the in-memory `Storage` backend.
 locus-kit = { path = "../../LocusKit/rust" }
 persistence-kit = { path = "../../PersistenceKit/rust" }
-# GLK_RAG_WIRING_001: VectorKit and CorpusKit are the RAG and vector
+# GLK_RAG_WIRING_001: SynapseKit and CorpusKit are the RAG and vector
 # seam dependencies. VectorSimilaritySignal queries VectorStore.find_nearest
 # for row-pair proximity; ExternalCorpus.hybrid_recall routes through
 # Corpus.recall for hybrid BM25+vector retrieval.
-vectorkit = { path = "../../VectorKit/rust" }
+synapsekit = { path = "../../SynapseKit/rust" }
 corpus-kit = { path = "../../CorpusKit/rust" }
+# corpus-kit-providers: `apply_provisioned_embedding_provider` builds the span
+# encoder for the `"encoder"` manifest value through `SpanEncoderFactory`, and
+# the I4 test provisions with `default_ensemble()`. Layering: GLK →
+# corpus-kit-providers is acyclic (providers depend on corpus-kit core, not on
+# GLK). The candle runtime behind the factory is optional: see the `encoder`
+# feature below; without it the factory reports the model unavailable and
+# recall runs lexical-only. Per in-repository dependency direction.
+corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
 # Dual-Path Intake (G7): the per-estate encode queue is a real QueueKit
 # mounted on the in-memory PersistenceKit backend (D-B), so GLK depends on
 # queuekit with the persistencekit feature. Mirrors the Swift
@@ -92,7 +131,7 @@ convergence-kit = { path = "../../ConvergenceKit/rust" }
 # The `find_nearest_distilled` function takes `&Engram` in its public signature —
 # the probe is a structural fingerprint computed by DistillationPipeline — so
 # Engram must be nameable in production code. Engram was already a transitive dep
-# via vectorkit → engram-lib; this entry makes the dependency explicit per the
+# via synapsekit → engram-lib; this entry makes the dependency explicit per the
 # production signature. Layering: genius-locus-kit (composition) → engram-lib
 # (substrate primitive) does NOT invert. Per in-repository dependency direction.
 engram-lib = { path = "../../../libs/EngramLib/rust" }
@@ -104,6 +143,8 @@ engram-lib = { path = "../../../libs/EngramLib/rust" }
 # substrate) does NOT invert (lattice-lib has no dependency on GLK).
 # Per in-repository dependency direction (Rust no-inversion rule).
 lattice-lib = { path = "../../../libs/LatticeLib/rust" }
+# writing to the drawer row. Layering: genius-locus-kit (composition) →
+# Per BRR Group 10. Per in-repository dependency direction.
 
 [features]
 # test-seams: exposes EstateCoordinator::inject_vector_hamming_error and
@@ -115,6 +156,26 @@ lattice-lib = { path = "../../../libs/LatticeLib/rust" }
 # 1-5). Without this, the dependency crate's `test` cfg does NOT apply to GLK's
 # integration tests and the seam method would be absent.
 test-seams = ["locus-kit/test-seams", "corpus-kit/canonical-test-seams"]
+# encoder: compile the candle span-encoder runtime behind SpanEncoderFactory so
+# `embedding_provider = "encoder"` can load all-MiniLM-L6-v2 in-process. Off by
+# default (kit tests stay ML-free); the product crate (apps/mootx01/rust)
+# enables it in its default feature set.
+encoder = ["corpus-kit-providers/candle"]
+# cross-encoder: compile the candle pair-classifier runtime behind
+# PairScorerFactory so an `apply` rerank directive can load the packaged
+# ms-marco-MiniLM-L-6-v2 in-process. Off by default (kit tests stay ML-free);
+# the product crate enables it. With it off an apply degrades with reason
+# `capability_off`. Twin of the Swift package trait `CrossEncoder`
+# (MOOTX01_CROSS_ENCODER).
+cross-encoder = ["corpus-kit-providers/candle"]
+# harness-keyfile: the open posture consults the `db.key` file beside a
+# database before the record's kind, for every record, so the benchmark
+# harness can serve a scratch estate it converted (spec § ESTATE_OPEN_POSTURE,
+# "Harness builds"). Twin of the Swift compile condition
+# MOOTX01_HARNESS_KEYFILE (`-Xswiftc -D`). Off by default and enabled by no
+# product crate; a shipping build refuses a transient ciphertext estate
+# whether or not a key file sits beside it.
+harness-keyfile = []
 
 [dev-dependencies]
 # P6 scale-qualification driver (tests/scale_qualification.rs, #[ignore],
@@ -124,7 +185,7 @@ test-seams = ["locus-kit/test-seams", "corpus-kit/canonical-test-seams"]
 rusqlite = { version = "0.31", features = ["bundled-sqlcipher-vendored-openssl"] }
 # Test-only: engram-lib is needed to implement the EmbeddingProvider trait in
 # integration tests (D5: ThrowingFloatProvider for dense_lane_status parity tests).
-# engram-lib is already a transitive dependency via vectorkit → engram-lib;
+# engram-lib is already a transitive dependency via synapsekit → engram-lib;
 # this dev-dep makes it directly nameable in tests/ without altering the
 # production dependency graph.
 # Per in-repository dependency direction (dev-dep, no layering inversion:
@@ -139,12 +200,14 @@ corpus-kit = { path = "../../CorpusKit/rust", features = ["test-seams"] }
 # tests/expunge_vector_orphan.rs E8. The production dependency above carries
 # no features, so this remains test-only wiring.
 locus-kit = { path = "../../LocusKit/rust", features = ["test-seams"] }
-# I4 test: provision with the production default ensemble (5 untrained signals)
-# to prove cluster assignment works on a fresh estate. The real providers live
-# in corpus-kit-providers (the factory layer above corpus-kit core). dev-dep
-# only; not linked into the production binary. Layering: GLK → corpus-kit-providers
-# is acyclic — providers depend on corpus-kit core, not on GLK.
-corpus-kit-providers = { path = "../../CorpusKit/rust-providers" }
+# test-support enables FaultCell/FaultingStorage in persistence-kit, used by
+# coordinator.rs fail-closed pre-read tests (ERASE_CEILING Phase B). Cargo
+# unifies features at test time: the `test-support` feature activates only
+# for test compilation because this is a dev-dependency. The production
+# [dependencies] entry above carries no features so the types are absent
+# from the shipped binary. No layering inversion (persistence-kit is a
+# substrate lib below GLK).
+persistence-kit = { path = "../../PersistenceKit/rust", features = ["test-support"] }
 # FED-SIG-01 grant-signature tests: LocalIdentity::from_secret / ::sign /
 # ::public_key_bytes to build and verify Ed25519-signed grants for D9 tests.
 # convergence-kit is already a production dep; the dev-dep makes it directly
@@ -191,12 +254,6 @@ required-features = ["test-seams"]
 name = "coordinator_dispatcher_tests"
 required-features = ["test-seams"]
 
-# distillation_signal_tests uses the SchedulerNoopDispatcher stub, which is
-# gated behind test-seams (same pattern as standing_signals_parity above).
-[[test]]
-name = "distillation_signal_tests"
-required-features = ["test-seams"]
-
 # dreaming_queue_parity uses the test-seam accessors dreaming_queue_is_mounted,
 # dreaming_queue_pending_count, and dreaming_queue_drain — gated behind
 # `#[cfg(any(test, feature = "test-seams"))]`. The library's own `test` cfg does
@@ -205,3 +262,11 @@ required-features = ["test-seams"]
 [[test]]
 name = "dreaming_queue_parity"
 required-features = ["test-seams"]
+
+# cross_encoder_stage_tests: most tests run under default features.
+# Only counting_factory_loads_once_on_empty_slot requires test-seams
+# (EstateCoordinator::set_test_pair_scorer_maker) and cross-encoder
+# (the code path the seam intercepts). Those tests are gated per-item
+# with #[cfg(all(feature = "test-seams", feature = "cross-encoder"))]
+# so the binary is included in every default cargo test run and the
+# capability_off assertion at line ~341 is always compiled in.

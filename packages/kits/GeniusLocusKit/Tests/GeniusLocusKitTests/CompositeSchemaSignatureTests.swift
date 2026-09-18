@@ -23,7 +23,7 @@
 import Testing
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 import PersistenceKit
 @testable import GeniusLocusKit
@@ -46,7 +46,7 @@ struct CompositeSchemaSignatureTests {
             + CorpusSchemaProfile.attachedDeclaration.version
             + EstateFormatStore.schemaDeclaration.version
             + 1  // grants
-            + MatrixSnapshotStore.schemaDeclaration.version
+            + MatrixRecordStore.schemaDeclaration.version
         #expect(GeniusLocusKitSchema.version == expected)
         #expect(GeniusLocusKitSchema.estateSchemaDeclaration.version == expected)
     }

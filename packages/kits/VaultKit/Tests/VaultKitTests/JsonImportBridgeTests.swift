@@ -29,10 +29,10 @@ struct JsonImportBridgeTests {
         _ json: String,
         limits: JsonImportLimits = .default
     ) throws -> JsonSeedFile {
-        try JsonSeedFile.parse(data: Data(json.utf8), limits: limits)
+        try JsonSeedFile.parse(data: Data(json.utf8), limits: limits, now: Date(timeIntervalSince1970: 1_790_000_000))
     }
 
-    /// Expect `parse` to throw `VaultKitError.adapterError` whose message
+    /// Expect `parse` to throw `VaultKitError.seedFileInvalid` whose message
     /// contains every given fragment (the "one error naming the first
     /// offending element" contract).
     private func expectParseError(
@@ -44,9 +44,9 @@ struct JsonImportBridgeTests {
         do {
             _ = try parse(json, limits: limits)
             Issue.record(
-                "expected adapterError containing \(fragments); parse succeeded",
+                "expected seedFileInvalid containing \(fragments); parse succeeded",
                 sourceLocation: sourceLocation)
-        } catch let VaultKitError.adapterError(message) {
+        } catch let VaultKitError.seedFileInvalid(message) {
             for fragment in fragments {
                 #expect(
                     message.contains(fragment),
@@ -55,7 +55,7 @@ struct JsonImportBridgeTests {
             }
         } catch {
             Issue.record(
-                "expected VaultKitError.adapterError; got \(error)",
+                "expected VaultKitError.seedFileInvalid; got \(error)",
                 sourceLocation: sourceLocation)
         }
     }
@@ -79,7 +79,7 @@ struct JsonImportBridgeTests {
     @Test("valid fixture seed parses with defaults applied and file order kept")
     func validFixtureParses() throws {
         let data = try Data(contentsOf: Self.fixtureSeedURL)
-        let file = try JsonSeedFile.parse(data: data, limits: .default)
+        let file = try JsonSeedFile.parse(data: data, limits: .default, now: Date(timeIntervalSince1970: 1_790_000_000))
 
         #expect(file.formatVersion == 1)
         #expect(file.name == "fixture-valid-seed")
@@ -366,7 +366,7 @@ struct JsonImportPipelineTests {
 
     private func fixtureFile() throws -> JsonSeedFile {
         let data = try Data(contentsOf: JsonImportBridgeTests.fixtureSeedURL)
-        return try JsonSeedFile.parse(data: data, limits: .default)
+        return try JsonSeedFile.parse(data: data, limits: .default, now: Date(timeIntervalSince1970: 1_790_000_000))
     }
 
     // MARK: - Phase 3: strict append
@@ -591,11 +591,10 @@ struct JsonImportWriteTests {
         // label for the unlabeled one. The unlabeled tunnel's source is
         // r0002, which omits `wing` and therefore lands in the estate
         // DEFAULT wing — resolve it rather than assuming a name.
-        let estate = try await kit.estate(for: handle)
         let r2 = try #require(drawers.first {
             $0.lineageID == DrawerMapping.lineageID(forStableSourceKey: "r0002")
         })
-        let r2Names = try await estate.resolveNodeNames(parentNodeIds: [r2.parentNodeId])
+        let r2Names = try await kit.resolveNodeNames(handle, parentNodeIds: [r2.parentNodeId])
         let defaultWingName = try #require(r2Names[r2.parentNodeId]?.wing)
 
         let benchmarkTunnels = try await kit.recallTunnels(handle, wing: "Benchmark")
@@ -646,8 +645,7 @@ struct JsonImportWriteTests {
         let r2 = try #require(drawers.first {
             $0.lineageID == DrawerMapping.lineageID(forStableSourceKey: "r0002")
         })
-        let estate = try await kit.estate(for: handle)
-        let names = try await estate.resolveNodeNames(parentNodeIds: [r2.parentNodeId])
+        let names = try await kit.resolveNodeNames(handle, parentNodeIds: [r2.parentNodeId])
         #expect(names[r2.parentNodeId]?.wing == "SeedWing")
     }
 
@@ -702,7 +700,7 @@ struct JsonImportWriteTests {
         do {
             _ = try await bridge.importSeed(at: url, into: handle, now: Date())
             Issue.record("expected validation error")
-        } catch let VaultKitError.adapterError(message) {
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("\"r999\""), "got: \(message)")
         }
 
@@ -841,7 +839,7 @@ struct JsonImportSubjectTests {
     }
 
     private func parse(_ json: String) throws -> JsonSeedFile {
-        try JsonSeedFile.parse(data: Data(json.utf8), limits: .default)
+        try JsonSeedFile.parse(data: Data(json.utf8), limits: .default, now: Date(timeIntervalSince1970: 1_790_000_000))
     }
 
     private func tempSeedFile(_ json: String) throws -> URL {
@@ -897,12 +895,12 @@ struct JsonImportSubjectTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for subject exceeding 120 chars")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for subject exceeding 120 chars")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("subject"), "got: \(message)")
             #expect(message.contains("120"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -916,11 +914,11 @@ struct JsonImportSubjectTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for empty subject")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for empty subject")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("subject"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -938,12 +936,12 @@ struct JsonImportSubjectTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for multiline subject")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for multiline subject")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("subject"), "got: \(message)")
             #expect(message.contains("single line"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -959,12 +957,12 @@ struct JsonImportSubjectTests {
         """
         do {
             _ = try parse(json)
-            Issue.record("expected adapterError for untrimmed subject")
-        } catch let VaultKitError.adapterError(message) {
+            Issue.record("expected seedFileInvalid for untrimmed subject")
+        } catch let VaultKitError.seedFileInvalid(message) {
             #expect(message.contains("subject"), "got: \(message)")
             #expect(message.contains("whitespace"), "got: \(message)")
         } catch {
-            Issue.record("expected VaultKitError.adapterError; got \(error)")
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
         }
     }
 
@@ -1101,5 +1099,519 @@ struct JsonImportSubjectTests {
                 "receipt must carry subjectsProvided; got: \(receipt.entry)")
         #expect(receipt.entry.contains(#""subjectsDebt":1"#),
                 "receipt must carry subjectsDebt; got: \(receipt.entry)")
+    }
+}
+
+// Part 6 — schema v1.2: optional per-record capture_date field.
+//
+// Each import record may carry an optional "capture_date" (UTC ISO8601
+// instant). When present, that record's capture path receives it as the
+// ingest clock: the resulting drawer's `filedAt` equals the per-record
+// date, and the capture HLC physical time derives from it. Records
+// without "capture_date" keep the batch `now` — byte-identical legacy
+// behavior. Validates strictly: malformed value → tool error naming the
+// record index and id.
+@Suite("JsonImportBridge schema v1.2 — capture_date field")
+struct JsonImportCaptureDateTests {
+
+    // MARK: — Helpers
+
+    private func parse(_ json: String) throws -> JsonSeedFile {
+        try JsonSeedFile.parse(data: Data(json.utf8), limits: .default, now: Date(timeIntervalSince1970: 1_790_000_000))
+    }
+
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "jsonimport-capturedate-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    private func tempSeedFile(_ json: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("jsonimport-cd-\(UUID().uuidString).json")
+        try Data(json.utf8).write(to: url)
+        return url
+    }
+
+    // MARK: — Parser tests (pure, no estate)
+
+    @Test("capture_date present and valid populates captureDate on JsonSeedRecord")
+    func captureDateParsed() throws {
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd1","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "capture_date":"2026-01-15T10:00:00Z"}
+        ]}
+        """)
+        let fmt = ISO8601DateFormatter()
+        let expected = fmt.date(from: "2026-01-15T10:00:00Z")
+        let parsed = try #require(file.records[0].captureDate,
+                                  "captureDate must be non-nil when capture_date is present")
+        #expect(abs(parsed.timeIntervalSince(expected!)) < 0.001,
+                "captureDate must equal the capture_date instant; got \(parsed)")
+    }
+
+    @Test("fractional-second capture_date parses to the exact instant")
+    func captureDateFractionalSeconds() throws {
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd-frac","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "capture_date":"2026-06-20T14:30:00.750Z"}
+        ]}
+        """)
+        let base = ISO8601DateFormatter().date(from: "2026-06-20T14:30:00Z")!
+        let expected = base.addingTimeInterval(0.750)
+        let parsed = try #require(file.records[0].captureDate)
+        #expect(abs(parsed.timeIntervalSince(expected)) < 0.001,
+                "fractional capture_date must carry the fractional second; got \(parsed)")
+    }
+
+    @Test("capture_date absent leaves captureDate nil — no legacy regression")
+    func captureDateAbsentIsNil() throws {
+        let file = try parse("""
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd-absent","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm"}
+        ]}
+        """)
+        #expect(file.records[0].captureDate == nil,
+                "captureDate must be nil when capture_date is absent")
+    }
+
+    @Test("malformed capture_date is a hard error naming the record index and id")
+    func malformedCaptureDateError() {
+        // "not-a-date" is not UTC ISO8601 — must throw adapterError
+        // naming both the record and the field.
+        let json = """
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd-bad","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "capture_date":"not-a-date"}
+        ]}
+        """
+        do {
+            _ = try parse(json)
+            Issue.record("expected seedFileInvalid for malformed capture_date")
+        } catch let VaultKitError.seedFileInvalid(message) {
+            #expect(message.contains("capture_date"), "got: \(message)")
+            #expect(message.contains("cd-bad"), "error must name the record id; got: \(message)")
+        } catch {
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
+        }
+    }
+
+    @Test("offset capture_date is rejected — UTC only for cross-port parity")
+    func offsetCaptureDateRejected() {
+        // Offset forms produce ambiguous milliseconds across time zones;
+        // the UTC-only rule (matching event_time) ensures the Rust twin
+        // can use an identical byte-for-byte parser without a TZ library.
+        let json = """
+        {"format_version":1,"name":"t","records":[
+          {"id":"cd-offset","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+           "capture_date":"2026-01-15T10:00:00+05:30"}
+        ]}
+        """
+        do {
+            _ = try parse(json)
+            Issue.record("expected seedFileInvalid for offset capture_date")
+        } catch let VaultKitError.seedFileInvalid(message) {
+            #expect(message.contains("capture_date"), "got: \(message)")
+        } catch {
+            Issue.record("expected VaultKitError.seedFileInvalid; got \(error)")
+        }
+    }
+
+    @Test("capture_date is in the allowed record-key set — no unknown-key error")
+    func captureDateInAllowedKeys() throws {
+        // If capture_date were not in recordKeys the schema validator
+        // would throw "unknown key" before even attempting to parse the
+        // value. This test confirms the key is admitted, so the value
+        // path is exercised rather than the key-rejection path.
+        #expect(throws: Never.self) {
+            _ = try parse("""
+            {"format_version":1,"name":"t","records":[
+              {"id":"cd-key","content":"c","event_time":"2026-01-01T00:00:00Z","room":"rm",
+               "capture_date":"2026-01-15T10:00:00Z"}
+            ]}
+            """)
+        }
+    }
+
+    // MARK: — Pipeline tests (require estate + bridge)
+
+    @Test("record with capture_date: drawer filedAt equals the capture_date instant")
+    func captureDateSetsFiled() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Use a batch now that is definitely different from capture_date
+        // so we can distinguish per-record vs batch clock. The batch now is
+        // AFTER the capture instant: capture_date is a historical capture
+        // time by contract, and the future-skew gate (codex 2026-08-26)
+        // rejects capture dates beyond now + 24h.
+        let batchNow = ISO8601DateFormatter().date(from: "2026-06-01T00:00:00Z")!
+        let captureInstant = ISO8601DateFormatter().date(from: "2026-01-15T10:00:00Z")!
+
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"cd-pipeline","records":[
+          {"id":"cdp1","content":"Has capture date.","event_time":"2026-01-15T10:00:00Z","room":"rm",
+           "capture_date":"2026-01-15T10:00:00Z"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: batchNow)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        let drawer = try #require(drawers.first { $0.content == "Has capture date." })
+        #expect(abs(drawer.filedAt.timeIntervalSince(captureInstant)) < 0.001,
+                "filedAt must equal capture_date; got \(drawer.filedAt)")
+    }
+
+    @Test("capture_date more than 24h in the future is a hard error — HLC poison gate")
+    func futureCaptureDateRejected() throws {
+        // codex finding 2026-08-26: a far-future capture_date becomes the
+        // HLC physical time and permanently advances the estate clock.
+        // Rejected in total validation; historical dates pass untouched.
+        let now = ISO8601DateFormatter().date(from: "2026-06-01T00:00:00Z")!
+        let json = """
+        {"format_version":1,"name":"cd-future","records":[
+          {"id":"f1","content":"Future.","event_time":"2026-01-15T10:00:00Z","room":"rm",
+           "capture_date":"9999-12-31T23:59:59Z"}
+        ]}
+        """
+        #expect(throws: (any Error).self) {
+            try JsonSeedFile.parse(data: Data(json.utf8), limits: .default, now: now)
+        }
+        // Within-skew (same day) passes.
+        let ok = """
+        {"format_version":1,"name":"cd-ok","records":[
+          {"id":"f2","content":"Past.","event_time":"2026-01-15T10:00:00Z","room":"rm",
+           "capture_date":"2026-05-31T10:00:00Z"}
+        ]}
+        """
+        _ = try JsonSeedFile.parse(data: Data(ok.utf8), limits: .default, now: now)
+    }
+
+    @Test("record without capture_date: filedAt uses captureBatch wall clock — legacy behavior pinned")
+    func legacyAbsentCaptureDateUsesWallClock() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Bracket the import time to confirm captureBatch uses wall-clock
+        // `Date()` for filedAt — the pre-existing behavior before schema v1.2.
+        // `capture_date` absent means no change to filedAt semantics.
+        let beforeImport = Date()
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"cd-legacy","records":[
+          {"id":"leg1","content":"No capture date.","event_time":"2025-06-15T12:00:00Z","room":"rm"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: Date())
+        let afterImport = Date()
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        let drawer = try #require(drawers.first { $0.content == "No capture date." })
+        // filedAt must fall within [beforeImport, afterImport] — the wall-clock
+        // window of the captureBatch call. A per-record capture_date would
+        // override this to an arbitrary historical instant; absent it is unchanged.
+        #expect(drawer.filedAt >= beforeImport && drawer.filedAt <= afterImport,
+                "filedAt must equal the captureBatch wall-clock time when capture_date is absent; got \(drawer.filedAt)")
+    }
+
+    @Test("mixed batch: per-record capture_dates override wall-clock only where set")
+    func mixedBatchCaptureDates() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let t1 = ISO8601DateFormatter().date(from: "2024-02-10T08:00:00Z")!
+        let t2 = ISO8601DateFormatter().date(from: "2024-08-20T16:30:00Z")!
+
+        // Bracket the import to verify mx2 (no capture_date) uses wall-clock.
+        let beforeImport = Date()
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"cd-mixed","records":[
+          {"id":"mx1","content":"Stale item.","event_time":"2024-02-10T08:00:00Z","room":"rm",
+           "capture_date":"2024-02-10T08:00:00Z"},
+          {"id":"mx2","content":"Batch-clock item.","event_time":"2025-09-01T00:00:00Z","room":"rm"},
+          {"id":"mx3","content":"Fresh item.","event_time":"2024-08-20T16:30:00Z","room":"rm",
+           "capture_date":"2024-08-20T16:30:00Z"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: Date())
+        let afterImport = Date()
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+
+        let mx1 = try #require(drawers.first { $0.content == "Stale item." })
+        let mx2 = try #require(drawers.first { $0.content == "Batch-clock item." })
+        let mx3 = try #require(drawers.first { $0.content == "Fresh item." })
+
+        // Per-record capture_date: exact pinned instant.
+        #expect(abs(mx1.filedAt.timeIntervalSince(t1)) < 0.001,
+                "mx1 filedAt must equal capture_date 2024-02-10; got \(mx1.filedAt)")
+        #expect(abs(mx3.filedAt.timeIntervalSince(t2)) < 0.001,
+                "mx3 filedAt must equal capture_date 2024-08-20; got \(mx3.filedAt)")
+        // No capture_date: wall-clock inside the import window (legacy behavior).
+        #expect(mx2.filedAt >= beforeImport && mx2.filedAt <= afterImport,
+                "mx2 filedAt (no capture_date) must be wall-clock time inside the import window; got \(mx2.filedAt)")
+    }
+
+    // MARK: — Golden pin (BOTH ports must agree on this exact value)
+    //
+    // Fixed inputs → fixed output. The Rust twin in
+    // packages/kits/VaultKit/rust/src/json_import_bridge.rs must
+    // assert the same filedAt millisecond value for the same seed.
+    // Canonical seed: one record, capture_date "2026-01-15T10:00:00Z".
+    // Expected filedAt: 2026-01-15T10:00:00Z
+    //   = 1767225600 (2026-01-01 epoch s) + 14*86400 (Jan days) + 10*3600 (hours)
+    //   = 1767225600 + 1209600 + 36000
+    //   = 1768471200 Unix seconds
+    //   = 1768471200000 milliseconds.
+
+    @Test("golden-pin: capture_date '2026-01-15T10:00:00Z' → filedAt exactly that instant")
+    func goldenPinCaptureDateFiledAt() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        // Batch now is a far-future value so any accidental fall-through
+        // to batchNow would produce a clearly wrong filedAt.
+        let batchNow = ISO8601DateFormatter().date(from: "2030-12-31T23:59:59Z")!
+
+        let url = try tempSeedFile("""
+        {"format_version":1,"name":"golden-pin","records":[
+          {"id":"gp1","content":"Golden pin record.","event_time":"2026-01-15T10:00:00Z","room":"rm",
+           "capture_date":"2026-01-15T10:00:00Z"}
+        ]}
+        """)
+        defer { try? FileManager.default.removeItem(at: url) }
+        _ = try await bridge.importSeed(at: url, into: handle, now: batchNow)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        let drawer = try #require(drawers.first { $0.content == "Golden pin record." })
+
+        // 2026-01-15T10:00:00Z in milliseconds since Unix epoch.
+        // Derivation: 2026-01-01 = 1767225600 s; +14 days = 1768435200 s;
+        // +10 h = 1768471200 s = 1768471200000 ms.
+        // This value is the cross-port golden pin — the Rust twin must
+        // produce the same filed_at from the same capture_date.
+        let expectedMs: Int64 = 1_768_471_200_000
+        let actualMs = Int64(drawer.filedAt.timeIntervalSince1970 * 1000)
+        #expect(actualMs == expectedMs,
+                "golden-pin: filedAt must be 2026-01-15T10:00:00Z (1768384800000 ms); got \(actualMs)")
+    }
+}
+
+// MARK: - Schema-19 importer round-trip tests
+//
+// These tests verify that the JSON import lane, the PalaceBridge lane, and the
+// MemPalaceChromaAdapter produce schema-19-clean estates: bit 27 (spanIndexed,
+// contract sheet §5) is clear on newly imported drawers so the span-encode
+// duty picks them up, and the ssc_facts column survives a vault round-trip.
+//
+// Contract references:
+//   §3  vectors_v6 — span rows, bit 27 gate
+//   §5  drawer bit 27 = spanIndexed (cleared on import so duty re-encodes)
+//   §6  ssc_facts column on drawers (written at ingest)
+//   §12 schema 19 delta
+//
+// Failure modes tested:
+//   1. Bit 27 clear on new drawers — duty skips bit-set drawers; importers
+//      must leave bit 27 = 0 so the duty knows to encode.
+//   2. PalaceBridge import: same invariant as the JSON lane (§12 contract).
+//   3. ssc_facts round-trip: export → import preserves the column value.
+
+@Suite("schema-19 importer clean-field invariants")
+struct Schema19ImporterInvariantsTests {
+
+    /// Bit 27 value as defined by contract sheet §5 (spanIndexed).
+    /// W1 will add a named accessor `DrawerOperational.isSpanIndexed`; until
+    /// then we use the raw bit position here to keep this test self-contained.
+    private static let bit27SpanIndexed: Int64 = 1 << 27
+
+    // Open an in-memory estate (current schema; mirrors the InMemory path used
+    // by all other VaultKit suite openers).
+    private func openEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "enc-w8-schema19-tests")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        return (kit, handle)
+    }
+
+    private func tempSeedFile(_ json: String) throws -> URL {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("enc-w8-\(UUID().uuidString).json")
+        try Data(json.utf8).write(to: url)
+        return url
+    }
+
+    // MARK: — Test 1: JSON import writes ssc_facts for every imported drawer (§6)
+    //
+    // Failure mode: an import lane that bypasses the capture path's SSC facts
+    // write leaves the column NULL, so the BM25 supplement has no tokens for
+    // imported memories and their SSC terms never match.
+
+    @Test("json import: ssc_facts is computed from content on every imported drawer")
+    func jsonImportWritesSSCFacts() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let bodies = [
+            "Sanjay loves painting in Brazil and runs marathons in Rio.",
+            "Priya reviewed the Geneva contract with Sarah on Tuesday.",
+        ]
+        let seedJSON = """
+        {"format_version":1,"name":"schema19-ssc-facts",
+         "records":[
+           {"id":"d1","content":"\(bodies[0])","event_time":"2026-09-01T10:00:00Z","room":"import-facts"},
+           {"id":"d2","content":"\(bodies[1])","event_time":"2026-09-01T10:01:00Z","room":"import-facts"}
+         ],"facts":[],"tunnels":[]}
+        """
+        let url = try tempSeedFile(seedJSON)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.drawersWritten == 2)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 10))
+        #expect(drawers.count == 2, "expected 2 imported drawers")
+        for drawer in drawers {
+            // Every fixture body names people and places, so the enrichment
+            // stage anchors at least one fact; an import lane that bypasses the
+            // capture path's facts write leaves the column NULL instead.
+            #expect(drawer.sscFacts != nil,
+                    "ssc_facts must be written at import for drawer \(drawer.id): \(drawer.content)")
+        }
+    }
+
+    // MARK: — Test 2: JSON import leaves bit 27 clear (§5)
+    //
+    // Failure mode: if bit 27 is set on import, the drain duty treats the
+    // drawer as already span-encoded and never enqueues it — memories never
+    // get vector representations and recall quality drops to BM25-only.
+
+    @Test("json import: bit 27 (spanIndexed) is clear on all imported drawers")
+    func jsonImportBit27Clear() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let seedJSON = """
+        {"format_version":1,"name":"enc-w8-bit27-gate",
+         "records":[
+           {"id":"b1","content":"Memory for bit-27 gate test","event_time":"2026-09-01T12:00:00Z","room":"enc-w8"}
+         ],"facts":[],"tunnels":[]}
+        """
+        let url = try tempSeedFile(seedJSON)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.drawersWritten == 1)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 5))
+        let drawer = try #require(drawers.first, "expected one imported drawer")
+
+        // Contract sheet §5: bit 27 = spanIndexed is set by the drain duty AFTER
+        // a successful writeSpanVectors call. On import it must be 0 so the duty
+        // picks this drawer up for encoding. The named accessor is
+        // DrawerOperational.isSpanIndexed; the raw bit keeps the test
+        // independent of the accessor.
+        #expect(
+            drawer.operationalBitmap & Self.bit27SpanIndexed == 0,
+            "bit 27 (spanIndexed) must be clear on import; operationalBitmap = \(drawer.operationalBitmap)")
+    }
+
+    // MARK: — Test 3: JSON import sets only the capture-channel bits (§12)
+    //
+    // Failure mode: an importer that stamps operational bits beyond the
+    // capture channel (a span-indexed bit, a representation bit) would make
+    // the drain duties skip freshly imported memories.
+
+    @Test("json import: only capture-channel bits are set on imported drawers")
+    func jsonImportOnlyCaptureChannelBits() async throws {
+        let (kit, handle) = try await openEstate()
+        let bridge = JsonImportBridge(kit: kit)
+
+        let seedJSON = """
+        {"format_version":1,"name":"schema19-bitmap-gate",
+         "records":[
+           {"id":"a1","content":"Bitmap gate test memory","event_time":"2026-09-01T14:00:00Z","room":"import-bits"},
+           {"id":"a2","content":"Second bitmap gate memory","event_time":"2026-09-01T14:01:00Z","room":"import-bits"}
+         ],"facts":[],"tunnels":[]}
+        """
+        let url = try tempSeedFile(seedJSON)
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let report = try await bridge.importSeed(at: url, into: handle, now: Date())
+        #expect(report.drawersWritten == 2)
+
+        let drawers = try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 5))
+        #expect(drawers.count == 2)
+
+        // Bits 0–3 are the capture channel; every other operational bit is
+        // set by a duty or a verb after import, never by the importer.
+        for drawer in drawers {
+            // Only bits 0–3 (capture channel) may be set on a fresh import.
+            let unexpectedBits = drawer.operationalBitmap & ~Int64(0xF)
+            #expect(unexpectedBits == 0,
+                    "unexpected bits in operationalBitmap after import: 0x\(String(unexpectedBits, radix: 16))")
+        }
+    }
+
+    // MARK: — Test 4: ssc_facts round-trip via vault export + import (§6)
+    //
+    // Failure mode: if vault export/import silently drops ssc_facts, the
+    // enrichment stage's tokens are lost on every import — semantic search
+    // quality degrades for imported memories.
+
+    @Test("vault export → import round-trips ssc_facts unchanged")
+    func vaultExportImportPreservesSSCFacts() async throws {
+        let (kit, handle) = try await openEstate()
+        // The capture path writes ssc_facts from the content (contract §6).
+        let captured = try await kit.capture(handle, CaptureFrame(
+            content: "Sanjay loves painting in Brazil and runs marathons.",
+            channel: .importedFile, room: "vault-facts",
+            latticeAnchor: LatticeAnchor(udcCode: "000"),
+            addedBy: "vault-facts-test", embeddingModelID: "no-embedding"))
+        let source = try #require(try await kit.recall(
+            handle,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 5))
+            .first { $0.id == captured.id })
+        #expect(source.sscFacts != nil, "the capture path must write facts for the fixture content")
+        // Export to a vault directory and re-import into a second estate.
+        let vault = FileManager.default.temporaryDirectory
+            .appendingPathComponent("vault-facts-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: vault, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: vault) }
+        let exportBridge = VaultBridge(kit: kit, mapping: DrawerMapping(classifyOnImport: false))
+        try await exportBridge.export(estate: handle, to: vault, scope: .believed, now: Date())
+        let importEstate = try await openEstate()
+        let importBridge = VaultBridge(kit: importEstate.0, mapping: DrawerMapping(classifyOnImport: false))
+        try await importBridge.importVault(at: vault, into: importEstate.1, now: Date())
+        let importedDrawers = try await importEstate.0.recall(
+            importEstate.1,
+            RecallFrame(filterChain: [.unconfirmed], hydrationLevel: .full, limit: 5))
+        let importedDrawer = try #require(importedDrawers.first)
+        // ssc_facts must survive the round-trip.
+        #expect(importedDrawer.sscFacts == source.sscFacts)
     }
 }

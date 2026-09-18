@@ -80,6 +80,47 @@ fn tools_list_round_trips_over_in_memory_io() {
 }
 
 #[test]
+fn v2_tools_list_and_monitoring_status_round_trip_over_in_memory_io() {
+    let list = serde_json::json!({
+        "jsonrpc": "2.0", "id": 1, "method": "tools/list"
+    });
+    let monitoring = serde_json::json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {"name": "moot_monitoring_status", "arguments": {}}
+    });
+    let mut input = serde_json::to_vec(&list).unwrap();
+    input.push(b'\n');
+    input.extend(serde_json::to_vec(&monitoring).unwrap());
+    input.push(b'\n');
+
+    let output = run_with(&input);
+    let replies: Vec<serde_json::Value> = output
+        .split(|&byte| byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).expect("response must be valid JSON"))
+        .collect();
+    assert_eq!(replies.len(), 2);
+    let list_reply = replies.iter().find(|reply| reply["id"] == 1).expect("tools/list reply");
+    let listed_names: std::collections::BTreeSet<String> = list_reply["result"]["tools"]
+        .as_array().expect("tools/list array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name").to_owned())
+        .collect();
+    let selected_names: std::collections::BTreeSet<String> = aria_mcp::v2::catalog::selected_tools()
+        .as_array().expect("selected catalog array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("selected tool name").to_owned())
+        .collect();
+    assert_eq!(listed_names, selected_names);
+    assert!(listed_names.contains("moot_monitoring_status"));
+
+    let call_reply = replies.iter().find(|reply| reply["id"] == 2).expect("monitoring reply");
+    assert_eq!(call_reply["result"]["structuredContent"]["surface_version"], "v2");
+    assert_eq!(call_reply["result"]["structuredContent"]["tool"], "moot_monitoring_status");
+    assert_eq!(call_reply["result"]["structuredContent"]["meta"]["effect"], "read");
+}
+
+#[test]
 fn parse_error_emits_null_id_response() {
     // Garbage line — not valid JSON.
     let input = b"{ not json\n";
@@ -88,7 +129,8 @@ fn parse_error_emits_null_id_response() {
 
     let resp = parse_first(&output);
     let obj = resp.as_object().unwrap();
-    assert_eq!(obj["id"], serde_json::json!(null));
+    assert!(obj.contains_key("id"), "JSON-RPC 2.0 requires id present on an error response");
+    assert!(obj["id"].is_null(), "JSON-RPC 2.0 requires id null when the request carried no id");
     let error = obj["error"].as_object().unwrap();
     assert_eq!(error["code"], serde_json::json!(-32700_i64));
 }
@@ -150,7 +192,8 @@ fn invalid_request_emits_null_id_response() {
 
     let resp = parse_first(&output);
     let obj = resp.as_object().unwrap();
-    assert_eq!(obj["id"], serde_json::json!(null));
+    assert!(obj.contains_key("id"), "JSON-RPC 2.0 requires id present on an error response");
+    assert!(obj["id"].is_null(), "JSON-RPC 2.0 requires id null when the request carried no id");
     let error = obj["error"].as_object().unwrap();
     assert_eq!(error["code"], serde_json::json!(-32600_i64));
 }

@@ -83,7 +83,7 @@ use crate::association::Association;
 use crate::container_fingerprint_store::{ContainerFingerprintStore, RoomLevelEntry};
 use crate::node::Node;
 use crate::node_store::T_NODES;
-use crate::drawer_store::{DrawerStore, SUBJECT_LENGTH_CONTRACT};
+use crate::drawer_store::{subject_length, DrawerStore, ENCODE_COMPLETE_VERB, ENCODE_WORKER_ACTOR, SUBJECT_LENGTH_CONTRACT};
 use crate::error::LocusKitError;
 use crate::estate_types::{LatticeAnchor, RowID};
 use crate::kg_fact::KGFact;
@@ -95,9 +95,10 @@ use crate::schema;
 use crate::source_catalog_entry::{SourceCatalogEntry, SourceKind};
 use crate::summaries::{RoomSummary, WingSummary};
 use crate::tunnel::Tunnel;
-use crate::tunnel_operational::{TunnelKind, TunnelLifecycle};
+use crate::tunnel_operational::{TunnelKind, TunnelLifecycle, TunnelOriginClass};
 use persistence_kit::audit_log::AuditEvent as PkAuditEvent;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
+use persistence_kit::row_store::RowStore;
 use persistence_kit::storage::{IsolationLevel, Storage};
 use persistence_kit::types::{Column, StorageRow, TypedValue};
 use std::collections::{BTreeMap, BTreeSet};
@@ -124,6 +125,7 @@ const T_SOURCE_CATALOG: &str = "source_catalog";
 const T_DIARY: &str = "diary";
 const T_MANIFEST: &str = "manifest";
 const T_RECALL_TRACE: &str = "recall_trace";
+const T_RECALL_RATINGS: &str = crate::recall_rating::RECALL_RATINGS_TABLE;
 
 /// The structured (no-blob) column projection for the `drawers` table: every
 /// drawer column EXCEPT `content`. Used by `all_drawers_bounded_projected` so a
@@ -151,17 +153,10 @@ const DRAWER_STRUCTURED_COLUMNS: &[&str] = &[
     "wikidataQID",
     "wikidataQidsSecondary",
     "ext",
-    // Distilled representation metadata (SPEC_DISTILLATION_STORAGE §6)
-    // rides the structured projection — the context-budgeting signal at
-    // a few bytes per row. The `distilled` TEXT column itself is
-    // projected away like `content` (both text columns stay no-blob);
-    // `drawer_from_row` decodes its absence to None.
-    "distilled_pipeline_version",
-    "distilled_token_count",
-    "distilled_at",
-    // Subject trio (PR-01): the subject IS structured-tier data — it
-    // exists precisely so candidate rows can be judged without hydrating
-    // content, so the structured projection carries all three.
+    // ssc_facts and the subject trio are short derived text that exists
+    // precisely so a candidate row can be judged and rendered without
+    // hydrating content, so both ride the structured projection.
+    "ssc_facts",
     "subject",
     "subject_pipeline_version",
     "subject_at",
@@ -366,7 +361,11 @@ impl DrawerStoreCore {
 
         let defaults: [(&str, String); 18] = [
             ("manifest_version", "1.0".to_string()),
-            ("schema_version", "1.0".to_string()),
+            // 1.1 since 2026-08-17 — see the Swift twin's note in
+            // DrawerStore.populateV1ManifestDefaults. The estate format moved
+            // (shared-content cutover, then vector generations) while this
+            // string stayed at the ratification value.
+            ("schema_version", "1.1".to_string()),
             ("estate_uuid", estate_uuid),
             ("estate_name", String::new()),
             ("owner_identifier", String::new()),
@@ -1024,26 +1023,13 @@ impl DrawerStoreCore {
         if parent_node_ids.is_empty() {
             return Ok(BTreeMap::new());
         }
-        let unique: BTreeSet<_> = parent_node_ids.iter().cloned().collect();
+        let unique: BTreeSet<String> = parent_node_ids.iter().cloned().collect();
         let row_store = self.storage.row_store();
-        let room_predicates: Vec<StoragePredicate> = unique
-            .iter()
-            .map(|id| {
-                StoragePredicate::Eq(
-                    Column::new(T_NODES, "id"),
-                    TypedValue::Text(id.to_string()),
-                )
-            })
-            .collect();
-        let room_rows = row_store
-            .query(
-                T_NODES,
-                Some(&StoragePredicate::any(room_predicates)),
-                &[],
-                None,
-                None,
-            )
-            .map_err(map_storage_err)?;
+        // Chunked at 900 ids per query: a large-wing estate resolves
+        // thousands of room ids here at estate open (rebuild_container_
+        // fingerprints), and an unchunked Or-chain exceeds SQLite's
+        // ~1000 expression-depth cap. See ID_BATCH_CHUNK_SIZE.
+        let room_rows = query_by_id_chunks(&*row_store, T_NODES, "id", &unique, &[])?;
         let mut room_map: BTreeMap<String, (String, String)> = BTreeMap::new();
         let mut wing_ids: BTreeSet<String> = BTreeSet::new();
         for row in &room_rows {
@@ -1055,24 +1041,9 @@ impl DrawerStoreCore {
         }
         let mut wing_names: BTreeMap<String, String> = BTreeMap::new();
         if !wing_ids.is_empty() {
-            let wing_predicates: Vec<StoragePredicate> = wing_ids
-                .iter()
-                .map(|id| {
-                    StoragePredicate::Eq(
-                        Column::new(T_NODES, "id"),
-                        TypedValue::Text(id.to_string()),
-                    )
-                })
-                .collect();
-            let wing_rows = row_store
-                .query(
-                    T_NODES,
-                    Some(&StoragePredicate::any(wing_predicates)),
-                    &[],
-                    None,
-                    None,
-                )
-                .map_err(map_storage_err)?;
+            // Same 900-id chunking as the room lookup above: a 5000-wing
+            // estate yields >1000 distinct parent wing ids in one call.
+            let wing_rows = query_by_id_chunks(&*row_store, T_NODES, "id", &wing_ids, &[])?;
             for row in &wing_rows {
                 wing_names.insert(
                     string_value_of(row.get("id")),
@@ -1097,6 +1068,216 @@ impl DrawerStoreCore {
 impl DrawerStore for DrawerStoreCore {
     fn storage(&self) -> Option<Arc<dyn Storage>> {
         Some(Arc::clone(&self.storage))
+    }
+
+    fn atomic_file_conflict_proposal(
+        &self,
+        request: &crate::drawer_store::AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<crate::drawer_store::AtomicConflictProposalOutcome, LocusKitError> {
+        use crate::drawer_store::{conflict_proposal_digests, AtomicConflictProposalOutcome};
+        use persistence_kit::error::StorageError;
+
+        let mut outcome = None;
+        let mut validation_error = None;
+        let transaction = self.storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let run = || -> Result<AtomicConflictProposalOutcome, LocusKitError> {
+                let row_store = txn.row_store();
+                let source_rows = row_store.query(
+                    T_DRAWERS,
+                    Some(&StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(request.source_drawer_id.clone()))),
+                    &[], Some(1), None,
+                ).map_err(map_storage_err)?;
+                let target_rows = row_store.query(
+                    T_DRAWERS,
+                    Some(&StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(request.target_drawer_id.clone()))),
+                    &[], Some(1), None,
+                ).map_err(map_storage_err)?;
+                // Every guard below answers `Stale` (nothing written) in the
+                // same order as the Swift filer: missing or tombstoned rows,
+                // then the pair key and digests, then lifecycle state,
+                // sensitivity and endpoint placement. A storage fault still
+                // propagates as an error.
+                let (Some(source_row), Some(target_row)) = (source_rows.first(), target_rows.first()) else {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                };
+                let source = drawer_from_row(source_row)?;
+                let target = drawer_from_row(target_row)?;
+                if source.tombstoned_at.is_some() || target.tombstoned_at.is_some() {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                }
+                // The pair key is the hunt's canonical spelling: both ids
+                // lowercased, sorted, joined by a double bar (GeniusLocusKit
+                // conflict_projection_sweep::pair_key and the Swift twin).
+                let mut ordered = [source.id.to_lowercase(), target.id.to_lowercase()];
+                ordered.sort();
+                if request.pair_key != format!("{}||{}", ordered[0], ordered[1]) {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                }
+                let (source_digest, evidence_digest) = conflict_proposal_digests(&source, &target, request.tier, &request.renewal_identity);
+                if source_digest != request.source_digest || evidence_digest != request.evidence_digest {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                }
+                // Atomic filing is an authority boundary, so inspect the raw
+                // bitmap fields here rather than using the retrieval-facing
+                // fallbacks. Reserved state raws must not become Active, and
+                // reserved sensitivity raws must not become Normal.
+                let source_state_raw = bit_field::extract_field(source.adjective_bitmap, 0, 6);
+                let target_state_raw = bit_field::extract_field(target.adjective_bitmap, 0, 6);
+                let source_sensitivity_raw = bit_field::extract_field(source.adjective_bitmap, 6, 6);
+                let target_sensitivity_raw = bit_field::extract_field(target.adjective_bitmap, 6, 6);
+                let is_currently_believed_raw = |raw| {
+                    matches!(
+                        raw,
+                        value if value == State::Active.raw_value()
+                            || value == State::Pending.raw_value()
+                            || value == State::Contested.raw_value()
+                            || value == State::Accepted.raw_value()
+                    )
+                };
+                let is_recognized_sensitivity_raw = |raw| matches!(raw, 0 | 16 | 32 | 48);
+                if !is_currently_believed_raw(source_state_raw)
+                    || !is_currently_believed_raw(target_state_raw)
+                    || !is_recognized_sensitivity_raw(source_sensitivity_raw)
+                    || !is_recognized_sensitivity_raw(target_sensitivity_raw)
+                {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                }
+                // Endpoint placement is part of the write authority: resolve
+                // both active room/wing paths from the same serializable
+                // snapshot as the evidence, pair history, and insertion.
+                // Caller-supplied coordinates would create a TOCTOU seam.
+                // `Ok(None)` is a drawer without an active endpoint (the
+                // filing is stale); `Err` is a storage fault.
+                let endpoint = |drawer: &Drawer| -> Result<Option<(String, String)>, LocusKitError> {
+                    let node_is_active_at_depth = |node: &StorageRow, expected_depth: i64| {
+                        matches!(node.get("depth"), Some(TypedValue::Int(depth)) if *depth == expected_depth)
+                            && matches!(node.get("lifecycle"), Some(TypedValue::Int(0)))
+                            && matches!(node.get("tombstoned_hlc"), None | Some(TypedValue::Null))
+                            && matches!(node.get("tombstoned_at"), None | Some(TypedValue::Null))
+                    };
+                    let node_value_is_null = |value: Option<&TypedValue>| {
+                        matches!(value, None | Some(TypedValue::Null))
+                    };
+                    if Uuid::parse_str(&drawer.parent_node_id).is_err() {
+                        return Ok(None);
+                    }
+                    let room_rows = row_store.query(
+                        T_NODES,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_NODES, "id"),
+                            TypedValue::Text(drawer.parent_node_id.clone()),
+                        )),
+                        &[], Some(1), None,
+                    ).map_err(map_storage_err)?;
+                    let Some(room) = room_rows.first() else { return Ok(None) };
+                    if !node_is_active_at_depth(room, 2) {
+                        return Ok(None);
+                    }
+                    let room_name = string_value_of(room.get("display_name"));
+                    let wing_id = string_value_of(room.get("parent_id"));
+                    if room_name.is_empty() || Uuid::parse_str(&wing_id).is_err() {
+                        return Ok(None);
+                    }
+                    let wing_rows = row_store.query(
+                        T_NODES,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_NODES, "id"),
+                            TypedValue::Text(wing_id),
+                        )),
+                        &[], Some(1), None,
+                    ).map_err(map_storage_err)?;
+                    let Some(wing) = wing_rows.first() else { return Ok(None) };
+                    let wing_name = string_value_of(wing.get("display_name"));
+                    let root_id = string_value_of(wing.get("parent_id"));
+                    if !node_is_active_at_depth(wing, 1)
+                        || wing_name.is_empty()
+                        || Uuid::parse_str(&root_id).is_err()
+                    {
+                        return Ok(None);
+                    }
+                    let root_rows = row_store.query(
+                        T_NODES,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_NODES, "id"),
+                            TypedValue::Text(root_id),
+                        )),
+                        &[], Some(1), None,
+                    ).map_err(map_storage_err)?;
+                    let Some(root) = root_rows.first() else { return Ok(None) };
+                    if !node_is_active_at_depth(root, 0)
+                        || !node_value_is_null(root.get("parent_id"))
+                    {
+                        return Ok(None);
+                    }
+                    Ok(Some((wing_name, room_name)))
+                };
+                let Some((source_wing, source_room)) = endpoint(&source)? else {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                };
+                let Some((target_wing, target_room)) = endpoint(&target)? else {
+                    return Ok(AtomicConflictProposalOutcome::Stale);
+                };
+                let pair = StoragePredicate::Or(vec![
+                    StoragePredicate::And(vec![
+                        StoragePredicate::Eq(Column::new(T_TUNNELS, "sourceDrawerId"), TypedValue::Text(source.id.clone())),
+                        StoragePredicate::Eq(Column::new(T_TUNNELS, "targetDrawerId"), TypedValue::Text(target.id.clone())),
+                    ]),
+                    StoragePredicate::And(vec![
+                        StoragePredicate::Eq(Column::new(T_TUNNELS, "sourceDrawerId"), TypedValue::Text(target.id.clone())),
+                        StoragePredicate::Eq(Column::new(T_TUNNELS, "targetDrawerId"), TypedValue::Text(source.id.clone())),
+                    ]),
+                ]);
+                let tunnels: Vec<Tunnel> = row_store.query(T_TUNNELS, Some(&pair), &[], None, None)
+                    .map_err(map_storage_err)?.iter().map(tunnel_from_row)
+                    .filter(|t| t.kind == TunnelKind::Contradicts).collect();
+                if let Some(replay) = tunnels.iter().find(|t| t.label.ends_with(&request.replay_identity)) {
+                    return Ok(match replay.lifecycle() {
+                        TunnelLifecycle::Active | TunnelLifecycle::Proposed => AtomicConflictProposalOutcome::Existing {
+                            tunnel_id: replay.id.clone(), lifecycle: conflict_lifecycle_name(replay.lifecycle()).to_owned(),
+                        },
+                        TunnelLifecycle::Withdrawn | TunnelLifecycle::Superseded => AtomicConflictProposalOutcome::Settled,
+                    });
+                }
+                if let Some(existing) = tunnels.iter().find(|t| matches!(t.lifecycle(), TunnelLifecycle::Active | TunnelLifecycle::Proposed)) {
+                    return Ok(AtomicConflictProposalOutcome::Existing {
+                        tunnel_id: existing.id.clone(), lifecycle: conflict_lifecycle_name(existing.lifecycle()).to_owned(),
+                    });
+                }
+                let history: Vec<(u8, String)> = tunnels.iter().filter_map(|t| match t.lifecycle() {
+                    TunnelLifecycle::Withdrawn | TunnelLifecycle::Superseded => conflict_decline_tier(&t.label).map(|tier| (tier, t.label.clone())),
+                    _ => None,
+                }).collect();
+                if (request.decline_suppresses)(request.tier, &request.renewal_identity, &history) {
+                    return Ok(AtomicConflictProposalOutcome::Settled);
+                }
+                let mut tunnel = Tunnel::new(
+                    Uuid::new_v4().to_string(), source_wing, source_room, target_wing, target_room,
+                    format!("{} {}", request.label, request.replay_identity), "aria-v2-contradiction".to_owned(), now,
+                );
+                tunnel.source_drawer_id = Some(source.id.clone());
+                tunnel.target_drawer_id = Some(target.id.clone());
+                tunnel.kind = TunnelKind::Contradicts;
+                tunnel.operational_bitmap = substrate_kernel::bit_field::write_field(
+                    TunnelLifecycle::Proposed.raw_value(),
+                    substrate_kernel::bit_field::write_field(TunnelOriginClass::Derived.raw_value(), 0, 6, 3), 3, 3,
+                );
+                let maximum = source_sensitivity_raw.max(target_sensitivity_raw);
+                tunnel.adjective_bitmap = substrate_kernel::bit_field::write_field(maximum, 0, 6, 6);
+                row_store.insert(T_TUNNELS, tunnel_values(&tunnel)).map_err(map_storage_err)?;
+                Ok(AtomicConflictProposalOutcome::Created { tunnel_id: tunnel.id, lifecycle: "proposed".to_owned() })
+            };
+            match run() {
+                Ok(value) => { outcome = Some(value); Ok(()) }
+                Err(error) => {
+                    validation_error = Some(error);
+                    Err(StorageError::TransactionConflict { detail: "atomic conflict proposal validation failed".to_owned() })
+                }
+            }
+        });
+        if let Some(error) = validation_error { return Err(error); }
+        transaction.map_err(map_storage_err)?;
+        outcome.ok_or_else(|| LocusKitError::DatabaseUnavailable("atomic conflict proposal produced no outcome".to_owned()))
     }
 
     fn resolve_node_names(
@@ -1364,28 +1545,31 @@ impl DrawerStore for DrawerStoreCore {
             crate::telemetry::emit_drawer_query(&_tel_start, 0.0, 0, &self.estate_uuid, "wing");
             return Ok(Vec::new());
         }
-        let predicates: Vec<StoragePredicate> = room_ids
-            .iter()
-            .map(|id| {
-                StoragePredicate::Eq(
-                    Column::new(T_DRAWERS, "parent_node_id"),
-                    TypedValue::Text(id.clone()),
-                )
-            })
-            .collect();
+        // One `parent_node_id IN (...)` predicate, the twin of Swift
+        // `DrawerStore.drawersIn(wing:)`: a wing's room count is bounded
+        // (tens, not thousands), so the list needs no 900-id chunking.
+        let room_predicate = StoragePredicate::In(
+            Column::new(T_DRAWERS, "parent_node_id"),
+            room_ids.iter().map(|id| TypedValue::Text(id.clone())).collect(),
+        );
         let (rows, _skipped) = self
             .storage
             .row_store()
             .query_skip_corrupt(
                 T_DRAWERS,
                 Some(&StoragePredicate::all(vec![
-                    StoragePredicate::any(predicates),
+                    room_predicate,
                     StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
                 ])),
-                &[OrderClause::new(
-                    Column::new(T_DRAWERS, "filedAt"),
-                    OrderDirection::Ascending,
-                )],
+                // Three-column stable sort: (filedAt ASC, content ASC, id ASC).
+                // content is content-stable and deterministic per seed; id is the
+                // TEXT primary key, portable across all backends.
+                // Mirrors Swift DrawerStore.drawersIn(wing:) (SCORE-ORDERING 2026-08-24).
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
                 None,
                 None,
             )
@@ -1414,10 +1598,13 @@ impl DrawerStore for DrawerStoreCore {
                     ),
                     StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
                 ])),
-                &[OrderClause::new(
-                    Column::new(T_DRAWERS, "filedAt"),
-                    OrderDirection::Ascending,
-                )],
+                // Three-column stable sort: (filedAt ASC, content ASC, id ASC).
+                // Mirrors Swift DrawerStore.drawersIn(wing:room:) (SCORE-ORDERING 2026-08-24).
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
                 None,
                 None,
             )
@@ -1465,14 +1652,12 @@ impl DrawerStore for DrawerStoreCore {
         // millisecond-vs-seconds epoch confusion) are skipped at the SQLite
         // cursor level and do not abort the entire corpus scan.
         //
-        // Compound sort key: (filedAt ASC, id ASC). The id secondary term
-        // breaks ties within the same filedAt so the result is a deterministic
-        // total order. id is the declared TEXT primary key of the drawers
-        // table — present in SQLite, PostgreSQL, and InMemory backends.
-        // Using id (not rowid) makes the tie-break portable to PostgreSQL where
-        // rowid is undefined (c-recall-portable fix). DESC variants use
-        // (filedAt DESC, id DESC), which is exactly reverse(ASC).
-        // Mirrors Swift's compound OrderClause in DrawerStore.allDrawers.
+        // Three-column stable sort: (filedAt ASC, content ASC, id ASC).
+        // content is content-stable and deterministic per seed, breaking
+        // filedAt ties before id (the declared TEXT primary key, portable
+        // across SQLite + PostgreSQL + InMemory). DESC variants use
+        // (filedAt DESC, content DESC, id DESC) — the exact reverse.
+        // Mirrors Swift DrawerStore.allDrawers (SCORE-ORDERING 2026-08-24).
         let (rows, _skipped) = self
             .storage
             .row_store()
@@ -1481,6 +1666,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
                 &[
                     OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Ascending),
                     OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
                 ],
                 None,
@@ -1508,10 +1694,10 @@ impl DrawerStore for DrawerStoreCore {
         // to omit the content column. The behavioral contract (bounded scan,
         // filedAt order, correct result set) matches the Swift port.
         //
-        // Compound sort key: (filedAt ASC, id ASC) for deterministic total
-        // order — ties in filedAt are broken by id (declared TEXT primary key,
-        // portable across SQLite + PostgreSQL + InMemory). DESC variant uses
-        // the same compound key with both directions flipped.
+        // Three-column stable sort: (filedAt ASC, content ASC, id ASC).
+        // content breaks filedAt ties before id (TEXT primary key, portable
+        // across all backends). DESC variant flips all three directions.
+        // Mirrors Swift DrawerStore.allDrawers (SCORE-ORDERING 2026-08-24).
         let _tel_start = std::time::Instant::now();
 
         let (rows, _skipped) = self
@@ -1522,6 +1708,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
                 &[
                     OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Ascending),
                     OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
                 ],
                 limit,
@@ -1580,6 +1767,61 @@ impl DrawerStore for DrawerStoreCore {
         rows.iter().map(drawer_from_row).collect::<Result<Vec<_>, _>>()
     }
 
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, LocusKitError> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let content_kind_mask = 0xFC0i64;
+        let dataset_kind = (crate::drawer_operational::ContentKind::Dataset as i64) << 6;
+        let predicate = StoragePredicate::all(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "content"),
+                TypedValue::Text(String::new()),
+            ),
+            StoragePredicate::Not(Box::new(StoragePredicate::BitwiseEq {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                expected: dataset_kind,
+                mask: content_kind_mask,
+            })),
+            StoragePredicate::Neq(
+                Column::new(T_DRAWERS, "embeddingModelID"),
+                TypedValue::Text(
+                    crate::dataset_handle::DATASET_HANDLE_EMBEDDING_MODEL_ID.to_string(),
+                ),
+            ),
+        ]);
+        let rows = self
+            .storage
+            .row_store()
+            .query_projected(
+                T_DRAWERS,
+                &["id"],
+                Some(&predicate),
+                &[
+                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
+                ],
+                Some(limit),
+                None,
+            )
+            .map_err(map_storage_err)?;
+        rows.into_iter()
+            .map(|row| match row.get("id") {
+                Some(TypedValue::Text(id)) => Ok(id.clone()),
+                _ => Err(LocusKitError::CorruptStoredValue {
+                    table: T_DRAWERS.to_string(),
+                    column: "id".to_string(),
+                    stored_text: String::new(),
+                }),
+            })
+            .collect()
+    }
+
     fn all_drawers_bounded_projected(
         &self,
         limit: Option<usize>,
@@ -1598,9 +1840,11 @@ impl DrawerStore for DrawerStoreCore {
         // storage level; decode_rows_skip_corrupt handles any remaining
         // drawer_from_row failures.
         //
-        // Compound sort key: (filedAt ASC, id ASC) — same deterministic total
-        // order as all_drawers_bounded (full path) and all_drawers. id is the
-        // declared TEXT primary key, portable across all backends.
+        // Three-column stable sort: (filedAt ASC, content ASC, id ASC) — same
+        // deterministic total order as all_drawers_bounded (full path) and
+        // all_drawers. content is projected (present in DRAWER_STRUCTURED_COLUMNS)
+        // so it is available to the storage engine for sorting.
+        // Mirrors Swift DrawerStore.allDrawers (SCORE-ORDERING 2026-08-24).
         let (rows, _skipped) = self
             .storage
             .row_store()
@@ -1610,6 +1854,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
                 &[
                     OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Ascending),
                     OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
                 ],
                 limit,
@@ -1640,13 +1885,13 @@ impl DrawerStore for DrawerStoreCore {
     // -----------------------------------------------------------------
 
     fn all_drawers_bounded_desc(&self, limit: Option<usize>) -> Result<Vec<Drawer>, LocusKitError> {
-        // Newest-first bounded scan. Supplies (filedAt DESC, id DESC) to the
-        // storage layer so the most-recently-filed drawers are returned within
-        // the cap. The id secondary term (declared TEXT primary key) breaks
-        // ties within the same filedAt, making this the exact reverse of the
-        // (filedAt ASC, id ASC) total order from all_drawers / all_drawers_bounded.
-        // Using id (not rowid) is portable to PostgreSQL (c-recall-portable fix).
-        // Mirrors Swift's compound OrderClause.
+        // Newest-first bounded scan. Supplies (filedAt DESC, content DESC,
+        // id DESC) — the exact reverse of the (filedAt ASC, content ASC,
+        // id ASC) total order from all_drawers / all_drawers_bounded. content
+        // is content-stable per seed; id is the TEXT primary key, portable
+        // across PostgreSQL where rowid is undefined (c-recall-portable fix).
+        // Mirrors Swift DrawerStore.allDrawers with direction .descending
+        // (SCORE-ORDERING 2026-08-24).
         let _tel_start = std::time::Instant::now();
 
         let (rows, _skipped) = self
@@ -1657,6 +1902,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
                 &[
                     OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Descending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Descending),
                     OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Descending),
                 ],
                 limit,
@@ -1679,12 +1925,13 @@ impl DrawerStore for DrawerStoreCore {
         &self,
         limit: Option<usize>,
     ) -> Result<Vec<Drawer>, LocusKitError> {
-        // Newest-first no-blob bounded scan. Combines (filedAt DESC, id DESC)
-        // ordering with the structured projection (content column omitted) for
-        // the common recall path where content predicates are absent and
-        // hydration is Structured. The id tie-break (declared TEXT primary key)
-        // makes this the exact reverse of the ASC projected path, and is
-        // portable to PostgreSQL where rowid is undefined (c-recall-portable).
+        // Newest-first no-blob bounded scan. Combines (filedAt DESC, content
+        // DESC, id DESC) ordering with the structured projection (content column
+        // still included in DRAWER_STRUCTURED_COLUMNS, so the storage engine
+        // can sort by it). This is the exact reverse of the ASC projected path.
+        // Portable to PostgreSQL where rowid is undefined (c-recall-portable).
+        // Mirrors Swift DrawerStore.allDrawers with direction .descending
+        // (SCORE-ORDERING 2026-08-24).
         let _tel_start = std::time::Instant::now();
 
         let (rows, _skipped) = self
@@ -1696,6 +1943,7 @@ impl DrawerStore for DrawerStoreCore {
                 None,
                 &[
                     OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Descending),
+                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Descending),
                     OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Descending),
                 ],
                 limit,
@@ -1955,14 +2203,17 @@ impl DrawerStore for DrawerStoreCore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
         validate_non_empty(drawer_id, "drawerId")?;
         validate_non_empty(changed_by, "changedBy")?;
 
-        // Resolve the full lineage chain. Every member is walked;
-        // members whose tombstone transition the gate admits are
-        // scrubbed, and accepted members (refused per S-3) are left
-        // untouched and reported in the outcome.
+        // Resolve the full lineage chain. Every sibling is walked. The
+        // ceiling check (Elevated) runs first; a sibling above the
+        // ceiling never reaches the gate. A sibling the ceiling admits
+        // is evaluated by the gate: admitted siblings are scrubbed,
+        // gate-refused siblings (S-3) are left untouched. Both causes
+        // of refusal are reported in the outcome.
         let lineage_ids = self.lineage_chain(drawer_id)?;
 
         // Read all three bitmaps so we can construct BitmapFields and
@@ -2025,13 +2276,12 @@ impl DrawerStore for DrawerStoreCore {
         .map_err(|v| LocusKitError::InvalidContent(format!("expunge rejected by gate: {}", v)))?;
 
         // Materialized projection: write the merged adjective snapshot,
-        // zero the content blob, stamp tombstonedAt. The distilled
-        // representation is content-derived text — the scrub clears it
-        // (and the has_current_representation bit) in the same statement
+        // zero the content blob, stamp tombstonedAt. The content-derived
+        // columns (ssc_facts, subject trio) are NULLed and the
+        // content-derived bits (19, 27, 28; factsExtracted) cleared in the same statement
         // (destruction contract, SPEC §2; cookbook §2.4.1).
         let row_store = self.storage.row_store();
-        let cleared_op =
-            prior_operational & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+        let cleared_op = prior_operational & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
         let mut update_vals = BTreeMap::new();
         update_vals.insert(
             "adjectiveBitmap".to_string(),
@@ -2043,7 +2293,7 @@ impl DrawerStore for DrawerStoreCore {
         );
         update_vals.insert("content".to_string(), TypedValue::Text(String::new()));
         update_vals.insert("tombstonedAt".to_string(), TypedValue::Timestamp(now));
-        // The distilled representation columns (four NULLs).
+        // Clear the content-derived columns (ssc_facts, subject trio).
         insert_cleared_representation(&mut update_vals);
         // Fold the recomputed content_fingerprint into the SAME update
         // (LocusKitSchema v9) rather than a separate write. Refreshed
@@ -2122,8 +2372,11 @@ impl DrawerStore for DrawerStoreCore {
         }
 
         // ── Walk every lineage sibling ──
-        // Siblings the gate admits are scrubbed; siblings the gate
-        // refuses are left untouched and collected for the outcome.
+        // The ceiling check (Elevated) runs first; a sibling above the
+        // ceiling is left untouched without reaching the gate. Siblings
+        // the ceiling admits are evaluated by the gate: admitted
+        // siblings are scrubbed, gate-refused siblings are left
+        // untouched and collected for the outcome.
         let mut refused_sibling_ids: Vec<String> = Vec::new();
         for sibling_id in &lineage_ids {
             if sibling_id == drawer_id {
@@ -2135,6 +2388,20 @@ impl DrawerStore for DrawerStoreCore {
             };
             let sib_state = bit_field::extract_field(sib_bitmap, 0, 6);
 
+            // Sensitivity ceiling: a sibling whose tier exceeds the caller's ceiling
+            // is left byte-identical and recorded as refused. Matches the existing
+            // gate-refused accepted-row shape (S-3): no content write, no state
+            // write, no audit append, no erasure-ledger entry. Invariant
+            // (GLK-CEILING): a caller bounded at Elevated cannot erase rows above
+            // that tier through the lineage cascade, even when the cascade target
+            // is itself at or below the ceiling.
+            let sib_tier =
+                crate::adjectives::AdjectiveSensitivity::from_raw(bit_field::extract_field(sib_bitmap, 6, 6));
+            if sib_tier.raw_value() > sensitivity_ceiling.raw_value() {
+                refused_sibling_ids.push(sibling_id.to_string());
+                continue;
+            }
+
             if sib_state == State::Tombstoned.raw_value() {
                 // Already tombstoned — just ensure content is empty (and
                 // the content-derived representation and the
@@ -2142,8 +2409,8 @@ impl DrawerStore for DrawerStoreCore {
                 let sib_op = self
                     .read_drawer_bitmap(sibling_id, "operationalBitmap")
                     .unwrap_or(0);
-                let sib_cleared_op =
-                    sib_op & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+                // Tombstone: clear the content-derived bits (19, 27, 28; factsExtracted).
+                let sib_cleared_op = sib_op & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
                 let mut vals = BTreeMap::new();
                 vals.insert("content".to_string(), TypedValue::Text(String::new()));
                 vals.insert(
@@ -2209,10 +2476,9 @@ impl DrawerStore for DrawerStoreCore {
                 );
 
                 if let Ok(sib_event) = sib_result {
-                    // has_current_representation (bit 19) cleared alongside
-                    // the four distillation columns (cookbook §2.4.1).
+                    // Tombstone: clear the content-derived bits (19, 27, 28; factsExtracted).
                     let sib_cleared_op =
-                        sib_operational & !DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
+                        sib_operational & !DrawerFeatureFlags::CLEARED_ON_CONTENT_WRITE;
                     let mut vals = BTreeMap::new();
                     vals.insert(
                         "adjectiveBitmap".to_string(),
@@ -2415,39 +2681,52 @@ impl DrawerStore for DrawerStoreCore {
             .map_err(map_storage_err)
     }
 
-    /// Write the distilled representation of one drawer — all four columns
-    /// in ONE atomic UPDATE (SPEC_DISTILLATION_STORAGE §4 invariant: NULL
-    /// together or populated together). Also sets bit 19
-    /// (`HAS_CURRENT_REPRESENTATION`) in `operational_bitmap` in the same
-    /// UPDATE so the bit and the four columns are always in agreement
-    /// (cookbook §2.4.1). Read-then-update in the same synchronous call:
-    /// the in-memory and SQLite backends serialize via their own locking,
-    /// so TOCTOU is not a concern here. Direct column write: no audit
-    /// event, no supersession cascade, no lifecycle/lineage field, no
-    /// content digest/revision bump (§9 search isolation).
-    ///
-    /// Mirrors Swift `DrawerStore.setDistilledRepresentation`.
-    fn set_distilled_representation(
-        &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
+    /// Write (or clear, with `None`) one drawer's SSC facts (Encoder Rerank
+    /// Program §6). A direct column write like the subject line: no audit
+    /// event, no supersession cascade, no lifecycle/lineage field, no content
+    /// digest bump. Returns the count of rows updated (0 = drawer not
+    /// found). Mirrors Swift `DrawerStore.setSSCFacts(_:for:)`.
+    fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
         if drawer_id.is_empty() {
             return Err(LocusKitError::InvalidContent(
                 "drawerId must not be empty".to_string(),
             ));
         }
-        if distilled.is_empty() {
+        if facts == Some("") {
             return Err(LocusKitError::InvalidContent(
-                "distilled must not be empty".to_string(),
+                "ssc_facts must be None or non-empty".to_string(),
             ));
         }
-        if pipeline_version.is_empty() {
+        let mut values = BTreeMap::new();
+        values.insert(
+            "ssc_facts".to_string(),
+            facts
+                .map(|f| TypedValue::Text(f.to_string()))
+                .unwrap_or(TypedValue::Null),
+        );
+        self.storage
+            .row_store()
+            .update(
+                T_DRAWERS,
+                values,
+                &StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(drawer_id.to_string()),
+                ),
+            )
+            .map_err(map_storage_err)
+    }
+
+    /// Set bit 27 (`SPAN_INDEXED`) on one drawer after its span rows were
+    /// written under the active encoder model. A DERIVED SIGNAL write (the
+    /// duty owns it): no audit event, no cascade, no digest bump.
+    /// Read-modify-write like `set_anomalous_flag`; returns 0 when the
+    /// drawer is not found or the bit is already set. Mirrors Swift
+    /// `DrawerStore.setSpanIndexed(drawerId:)`.
+    fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
             return Err(LocusKitError::InvalidContent(
-                "pipelineVersion must not be empty".to_string(),
+                "drawerId must not be empty".to_string(),
             ));
         }
         let row_store = self.storage.row_store();
@@ -2455,14 +2734,6 @@ impl DrawerStore for DrawerStoreCore {
             Column::new(T_DRAWERS, "id"),
             TypedValue::Text(drawer_id.to_string()),
         );
-        // Read the current bitmap fields:
-        //   operationalBitmap — to set bit 19 (HAS_CURRENT_REPRESENTATION) in
-        //     the same UPDATE as the four distillation columns (§4 invariant).
-        //   adjectiveBitmap, provenance, parent_node_id — to OR into the
-        //     container-fingerprint aggregate after a successful write, so
-        //     recall filters on .hasFeatureFlag(.hasCurrentRepresentation) do
-        //     not falsely exclude this container mid-session without a reopen.
-        // Row not found → return 0.
         let rows = row_store
             .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
             .map_err(map_storage_err)?;
@@ -2471,90 +2742,320 @@ impl DrawerStore for DrawerStoreCore {
             None => return Ok(0),
         };
         let current_op = i64_value_of(row.get("operationalBitmap"));
-        let adjective = i64_value_of(row.get("adjectiveBitmap"));
-        let provenance = i64_value_of(row.get("provenance"));
-        let parent_node_id = string_value_of(row.get("parent_node_id"));
-        let set_op = current_op | DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION;
-        let mut values = BTreeMap::new();
-        values.insert(
-            "distilled".to_string(),
-            TypedValue::Text(distilled.to_string()),
-        );
-        values.insert(
-            "distilled_pipeline_version".to_string(),
-            TypedValue::Text(pipeline_version.to_string()),
-        );
-        values.insert(
-            "distilled_token_count".to_string(),
-            TypedValue::Int(token_count),
-        );
-        values.insert(
-            "distilled_at".to_string(),
-            TypedValue::Timestamp(generated_at),
-        );
-        values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(set_op));
-        let updated = row_store
-            .update(T_DRAWERS, values, &id_pred)
-            .map_err(map_storage_err)?;
-        // OR bit 19 into the room/wing fingerprint aggregate. The OR aggregate
-        // is monotone — ORing a set bit is always safe. Clear paths need no
-        // rollup change: stale set bits are a harmless over-approximation
-        // (§ 11.5); rebuild_all at estate open tightens.
-        if updated == 1 {
-            let names = self.resolve_node_names(&[parent_node_id.clone()])?;
-            let (wing, room) = names
-                .get(&parent_node_id)
-                .map(|(w, r)| (w.as_str(), r.as_str()))
-                .unwrap_or(("", ""));
-            self.or_in_container_fingerprint(
-                wing,
-                room,
-                adjective,
-                set_op,
-                provenance,
-                generated_at,
-            )?;
+        let updated_op = current_op | DrawerFeatureFlags::SPAN_INDEXED;
+        if updated_op == current_op {
+            return Ok(0);
         }
-        Ok(updated)
+        let mut values = BTreeMap::new();
+        values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(updated_op));
+        row_store
+            .update(T_DRAWERS, values, &id_pred)
+            .map_err(map_storage_err)
     }
 
-    /// Count of active drawers still awaiting distillation (§7.1
-    /// eligibility predicate): not tombstoned, non-empty content, and
-    /// representation absent (bit 19 clear) OR produced under a different
-    /// pipeline contract. Projected to `id` only — no text column materialized.
-    ///
-    /// The `BitmaskNone` predicate replaces the previous `IsNull(distilled)`
-    /// test — both are correct (§4 invariant), but the bitmap predicate is
-    /// index-friendly and avoids per-row NULL scans on the text column
-    /// (cookbook §2.4.1).
-    ///
-    /// Mirrors Swift `DrawerStore.countUndistilled`.
-    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        let row_store = self.storage.row_store();
-        let predicate = StoragePredicate::And(vec![
-            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
-            StoragePredicate::Neq(
-                Column::new(T_DRAWERS, "content"),
-                TypedValue::Text(String::new()),
-            ),
-            StoragePredicate::Or(vec![
-                // Bit 19 (HAS_CURRENT_REPRESENTATION) clear → no current
-                // representation. Cookbook §2.4.1: authoritative indicator;
-                // faster than IS NULL on the distilled text column.
-                StoragePredicate::BitmaskNone {
-                    column: Column::new(T_DRAWERS, "operationalBitmap"),
-                    mask: DrawerFeatureFlags::HAS_CURRENT_REPRESENTATION,
-                },
-                StoragePredicate::Neq(
-                    Column::new(T_DRAWERS, "distilled_pipeline_version"),
-                    TypedValue::Text(pipeline_version.to_string()),
-                ),
-            ]),
-        ]);
-        let rows = row_store
-            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
+    /// The span-encode duty's work items: active drawers with non-empty
+    /// content whose bit 27 is clear, ordered by id, at most `limit`,
+    /// resuming after `after_drawer_id`. Empty-content active rows
+    /// (gate-rejected erasure scrubs) carry nothing to encode and are
+    /// excluded. Mirrors Swift `DrawerStore.spanIndexDebtBatch`.
+    fn span_index_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let mut clauses = vec![span_index_debt_predicate()];
+        if let Some(after) = after_drawer_id {
+            clauses.push(StoragePredicate::Gt(
+                Column::new(T_DRAWERS, "id"),
+                TypedValue::Text(after.to_string()),
+            ));
+        }
+        let predicate = StoragePredicate::And(clauses);
+        let (rows, _skipped) = self
+            .storage
+            .row_store()
+            .query_skip_corrupt(
+                T_DRAWERS,
+                Some(&predicate),
+                &[OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending)],
+                Some(limit),
+                None,
+            )
             .map_err(map_storage_err)?;
-        Ok(rows.len())
+        decode_rows_skip_corrupt(&rows, "span_index_debt_batch")
+    }
+
+    /// Count of active, non-empty drawers whose bit 27 is clear — the
+    /// span-encode drain's `pending`. F10: a single `COUNT(*)` query
+    /// (`RowStore::count`) rather than materializing and decoding every
+    /// matching row just to measure `rows.len()` — this duty polls on a
+    /// five-second cadence, so the old form re-paid the full matching-row
+    /// materialization cost on every tick regardless of how large the debt
+    /// was. Mirrors Swift `DrawerStore.countSpanIndexDebt()`.
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.storage
+            .row_store()
+            .count(T_DRAWERS, Some(&span_index_debt_predicate()))
+            .map_err(map_storage_err)
+    }
+
+    fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent("drawerId must not be empty".into()));
+        }
+        let store = self.storage.row_store();
+        let predicate = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"), TypedValue::Text(drawer_id.to_string()));
+        let rows = store.query(T_DRAWERS, Some(&predicate), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else { return Ok(0) };
+        let current = i64_value_of(row.get("operationalBitmap"));
+        let updated = current | DrawerFeatureFlags::FACTS_EXTRACTED;
+        if updated == current { return Ok(0); }
+        let mut values = BTreeMap::new();
+        values.insert("operationalBitmap".into(), TypedValue::Bitmap(updated));
+        store.update(T_DRAWERS, values, &predicate).map_err(map_storage_err)
+    }
+
+    fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent("drawerId must not be empty".into()));
+        }
+        let store = self.storage.row_store();
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(drawer_id.into())),
+            StoragePredicate::Eq(Column::new(T_DRAWERS, "content"), TypedValue::Text(expected_content.into())),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        ]);
+        let rows = store.query(T_DRAWERS, Some(&predicate), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else { return Ok(0) };
+        let current = i64_value_of(row.get("operationalBitmap"));
+        let updated = current | DrawerFeatureFlags::FACTS_EXTRACTED;
+        if updated == current { return Ok(1); }
+        let mut values = BTreeMap::new();
+        values.insert("operationalBitmap".into(), TypedValue::Bitmap(updated));
+        store.update(T_DRAWERS, values, &predicate).map_err(map_storage_err)
+    }
+
+    fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        for fact in facts {
+            validate_non_empty(&fact.subject, "subject")?;
+            validate_non_empty(&fact.predicate, "predicate")?;
+            validate_non_empty(&fact.object, "object")?;
+            if fact.source_drawer_id != source_id || fact.extraction_schema_version.is_empty() {
+                return Err(LocusKitError::InvalidContent("extraction publication source mismatch".into()));
+            }
+        }
+        let stamp = self.hlc.lock().unwrap().send(now);
+        let mut result = None;
+        self.storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let rs = txn.row_store();
+            let source_predicate = StoragePredicate::And(vec![
+                StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(source_id.into())),
+                StoragePredicate::Eq(Column::new(T_DRAWERS, "content"), TypedValue::Text(expected_content.into())),
+                StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+                StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"), TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
+            ]);
+            let sources = rs.query(T_DRAWERS, Some(&source_predicate), &[], Some(1), None)?;
+            let Some(source) = sources.first() else { return Ok(()) };
+            let registry = rs.query("fact_extractor_models", Some(&StoragePredicate::And(vec![
+                StoragePredicate::Eq(Column::new("fact_extractor_models", "recipe_id"), TypedValue::Text(recipe_id.into())),
+                StoragePredicate::Eq(Column::new("fact_extractor_models", "is_active"), TypedValue::Int(1)),
+            ])), &[], Some(1), None)?;
+            if registry.is_empty() { return Ok(()); }
+            let op = i64_value_of(source.get("operationalBitmap"));
+            if op & DrawerFeatureFlags::FACTS_EXTRACTED != 0 { result = Some(0); return Ok(()); }
+            let history = rs.query(T_KG_FACTS, Some(&StoragePredicate::Eq(
+                Column::new(T_KG_FACTS, "sourceDrawerID"), TypedValue::Text(source_id.into()))), &[], None, None)?;
+            let mut filed = 0;
+            let mut ids: std::collections::HashSet<_> = history.iter().map(|row| string_value_of(row.get("id"))).collect();
+            let inactive_ids: std::collections::HashSet<_> = history.iter()
+                .filter(|row| i64_value_of(row.get("adjectiveBitmap")) & 63 >= RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)
+                .map(|row| string_value_of(row.get("id"))).collect();
+            for fact in facts {
+                if !ids.insert(fact.id.clone()) { continue; }
+                let mut values = kg_fact_values(fact);
+                values.insert("adjectiveBitmap".into(), TypedValue::Bitmap(i64_value_of(source.get("adjectiveBitmap"))));
+                values.insert("provenanceBitmap".into(), TypedValue::Bitmap(i64_value_of(source.get("provenance"))));
+                rs.insert(T_KG_FACTS, values)?;
+                filed += 1;
+            }
+            let anchor = substrate_lib::verbs::LatticeAnchor::udc_qid(
+                &string_value_of(source.get("udcCode")), &string_value_of(source.get("wikidataQID")));
+            for row in &history {
+                let id = string_value_of(row.get("id"));
+                if facts.is_empty() || facts.iter().any(|fact| fact.id == id)
+                    || string_value_of(row.get("extractionSchemaVersion")).is_empty()
+                    || i64_value_of(row.get("adjectiveBitmap")) & 63 >= RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64
+                    || !facts.iter().any(|fact| !inactive_ids.contains(&fact.id)
+                        && fact.subject == string_value_of(row.get("subject"))
+                        && fact.predicate == string_value_of(row.get("predicate"))
+                        && fact.object == string_value_of(row.get("object"))
+                        && fact.evidence_quote == string_value_of(row.get("evidenceQuote"))) { continue; }
+                let event = audit_gate::admit(self.estate_uuid.as_u128(),
+                    substrate_lib::verbs::RowId(persistence_kit::row_key_derivation::deterministic_row_key(&id).as_u128()),
+                    substrate_lib::verbs::NounType::KGFact, RowVerb::Retract,
+                    Some(BitmapFields { adjective: i64_value_of(row.get("adjectiveBitmap")) as u64,
+                        operational: i64_value_of(row.get("operationalBitmap")) as u64,
+                        provenance: i64_value_of(row.get("provenanceBitmap")) as u64 }), Some(anchor),
+                    &[audit_gate::FieldWrite { slot: audit_gate::FieldSlot::with_values(
+                        audit_gate::Column::Adjective, 0, 6, "state", &[0,1,2,3,16,17,18,19,32,33]), value: 18 }],
+                    anchor, &self.vocabulary, stamp, "fact-extraction-duty")
+                    .map_err(|error| persistence_kit::StorageError::TransactionConflict { detail: format!("fact replacement rejected: {error}") })?;
+                let event = substrate_lib::verbs::AuditEvent {
+                    reason: Some("replaced by grounded extraction generation".into()), ..event };
+                rs.update(T_KG_FACTS, BTreeMap::from([("adjectiveBitmap".into(), TypedValue::Bitmap(event.after_bitmaps.0))]),
+                    &StoragePredicate::Eq(Column::new(T_KG_FACTS, "id"), TypedValue::Text(id)))?;
+                txn.audit_log().append(pk_audit_event_from(&event))?;
+            }
+            rs.update(T_DRAWERS, BTreeMap::from([("operationalBitmap".into(),
+                TypedValue::Bitmap(op | DrawerFeatureFlags::FACTS_EXTRACTED))]), &source_predicate)?;
+            result = Some(filed);
+            Ok(())
+        }).map_err(map_storage_err)?;
+        Ok(result)
+    }
+
+    fn fact_extraction_debt_batch(
+        &self, limit: usize, after_drawer_id: Option<&str>
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let mut clauses = vec![fact_extraction_debt_predicate()];
+        if let Some(after) = after_drawer_id {
+            clauses.push(StoragePredicate::Gt(
+                Column::new(T_DRAWERS, "id"), TypedValue::Text(after.to_string())));
+        }
+        let (rows, _) = self.storage.row_store().query_skip_corrupt(
+            T_DRAWERS, Some(&StoragePredicate::And(clauses)),
+            &[OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending)],
+            Some(limit), None).map_err(map_storage_err)?;
+        decode_rows_skip_corrupt(&rows, "fact_extraction_debt_batch")
+    }
+
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.storage.row_store().count(
+            T_DRAWERS, Some(&fact_extraction_debt_predicate()))
+            .map_err(map_storage_err)
+    }
+
+    // F3: the read (is there still a matching, active, unrejected source?),
+    // the active-recipe check, and the bitmap write used to be three
+    // sequential un-transacted calls. `runFactExtractionBatch` runs the model
+    // call off the coordinator lock (§ DUTY_LIFECYCLE), so a recipe
+    // activation could land between the read and the write; the write then
+    // OR'd the settle bits into the STALE bitmap captured at the read,
+    // silently reverting whatever the interleaved activation changed. All
+    // three now run inside one `IsolationLevel::Serializable` transaction —
+    // the same pattern `publish_extracted_facts` above already uses for the
+    // identical read-check-write shape — and only bits 28|29 are OR'd into
+    // the bitmap the transaction itself just read, never a copy captured
+    // outside it. Swift's twin already had this property for free: the whole
+    // read-check-write runs on the `DrawerStore` actor, so nothing else can
+    // interleave.
+    fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        validate_non_empty(source_id, "sourceID")?;
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::Eq(Column::new(T_DRAWERS, "id"), TypedValue::Text(source_id.into())),
+            StoragePredicate::Eq(Column::new(T_DRAWERS, "content"), TypedValue::Text(expected_content.into())),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"),
+                TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
+        ]);
+        let mut result = None;
+        self.storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let rs = txn.row_store();
+            let rows = rs.query(T_DRAWERS, Some(&predicate), &[], Some(1), None)?;
+            let Some(row) = rows.first() else { return Ok(()) };
+            let active = rs.query_projected("fact_extractor_models", &["recipe_id"],
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(Column::new("fact_extractor_models", "recipe_id"), TypedValue::Text(recipe_id.into())),
+                    StoragePredicate::Eq(Column::new("fact_extractor_models", "is_active"), TypedValue::Int(1)),
+                ])), &[], Some(1), None)?;
+            if active.is_empty() { return Ok(()); }
+            // Read inside this same transaction — never a value captured
+            // before the recipe-activation check above could have run.
+            let current = i64_value_of(row.get("operationalBitmap"));
+            if current & DrawerFeatureFlags::FACTS_EXTRACTED != 0 { result = Some(0); return Ok(()); }
+            let settled = DrawerFeatureFlags::FACTS_EXTRACTED | DrawerFeatureFlags::FACTS_REJECTED;
+            let mut values = BTreeMap::new();
+            values.insert("operationalBitmap".into(), TypedValue::Bitmap(current | settled));
+            let updated = rs.update(T_DRAWERS, values, &predicate)?;
+            result = Some(updated);
+            Ok(())
+        }).map_err(map_storage_err)?;
+        Ok(result)
+    }
+
+    fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        self.storage.row_store().count(T_DRAWERS, Some(&StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"),
+                TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
+            StoragePredicate::BitmaskAll {
+                column: Column::new(T_DRAWERS, "operationalBitmap"),
+                mask: DrawerFeatureFlags::FACTS_REJECTED,
+            },
+        ]))).map_err(map_storage_err)
+    }
+
+    /// Set or clear bit 26 (`IS_ANOMALOUS`) on one drawer's `operational_bitmap`.
+    ///
+    /// A DERIVED SIGNAL write — no audit event, no supersession cascade, no
+    /// lifecycle or lineage field touched. Implements a read-modify-write:
+    /// reads the current bitmap, sets or clears bit 26, and writes only if
+    /// the value changed (idempotent skip-write). Does NOT update the room/wing
+    /// container-fingerprint aggregate — the anomaly gate reads bit 26 per
+    /// hydrated drawer, not from the aggregate; `rebuild_all` at reopen tightens
+    /// any stale AND bits. Mirrors Swift `DrawerStore.setAnomalousFlag`.
+    ///
+    /// Returns 0 when the drawer is not found or the bit is already correct; 1
+    /// on a successful write.
+    fn set_anomalous_flag(
+        &self,
+        drawer_id: &str,
+        anomalous: bool,
+    ) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "drawerId must not be empty".to_string(),
+            ));
+        }
+        let row_store = self.storage.row_store();
+        let id_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        // Read the current operationalBitmap. Row not found → return 0.
+        let rows = row_store
+            .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let row = match rows.first() {
+            Some(r) => r,
+            None => return Ok(0),
+        };
+        let current_op = i64_value_of(row.get("operationalBitmap"));
+        let updated_op: i64 = if anomalous {
+            // Set bit 26 — drawer is a low-cohesion outlier (§11.18).
+            current_op | DrawerFeatureFlags::IS_ANOMALOUS
+        } else {
+            // Clear bit 26 — drawer is not anomalous (or room too small).
+            current_op & !DrawerFeatureFlags::IS_ANOMALOUS
+        };
+        // Skip the write when the bitmap is unchanged — avoids spurious
+        // UPDATE traffic when the sweep re-runs on a stable estate.
+        if updated_op == current_op {
+            return Ok(0);
+        }
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("operationalBitmap".to_string(), TypedValue::Bitmap(updated_op));
+        let n = row_store
+            .update(T_DRAWERS, values, &id_pred)
+            .map_err(map_storage_err)?;
+        Ok(n)
     }
 
     fn set_subject_representation(
@@ -2589,8 +3090,9 @@ impl DrawerStore for DrawerStoreCore {
         // Length contract enforced at the storage boundary — the last
         // common gate under every producer (filing AI, backfill AI, model
         // rider), so no producer can quietly inflate contact-sheet rows.
-        // Character count (not bytes) to match Swift `String.count`.
-        let char_count = subject.chars().count();
+        // Grapheme-cluster count to match Swift's String.count (same unit,
+        // same bound on the same input in both ports).
+        let char_count = subject_length(subject);
         if char_count > SUBJECT_LENGTH_CONTRACT {
             return Err(LocusKitError::InvalidContent(format!(
                 "subject exceeds the {SUBJECT_LENGTH_CONTRACT}-character length contract \
@@ -2601,9 +3103,8 @@ impl DrawerStore for DrawerStoreCore {
         // committed together in one transaction (Codex
         // cc90c5dcecb081918c159788e1ffb3d6): a subject change that
         // persists without its audit row is the defect this closes.
-        // Unlike the distilled quad there is NO presence bit
-        // (feature-flag region is full; see
-        // PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and NO container-fingerprint
+        // There is NO presence bit for the subject (feature-flag region is
+        // full; see PR01_SUBJECT_QUAD_BLAST_RADIUS.md) and NO container-fingerprint
         // rollup — the rollup exists because recall FILTERS on bit 19,
         // and nothing filters on subject presence.
         let row_uuid = require_uuid(drawer_id, "drawerId")?;
@@ -2706,6 +3207,196 @@ impl DrawerStore for DrawerStoreCore {
         Ok(updated)
     }
 
+    /// Append an encode-completion audit marker: one event per encode drain
+    /// unit, anchored on the unit's first drawer (A2, benchmark reset
+    /// 2026-08-13). Mirrors Swift `DrawerStore.appendEncodeCompleteMarker`.
+    ///
+    /// Closes finding P2's gap: capture supplies a start timestamp, nothing
+    /// supplied an encode end, so INGEST time could not be derived from the
+    /// audit log. A single production write is its own drain unit (exact
+    /// per-row marker); a bulk pass emits ONE marker carrying `rows=N`.
+    ///
+    /// Shape follows the `set_subject_representation` precedent: an
+    /// informational event with before == after on every value field,
+    /// appended WITHOUT `audit_gate::admit` (the gate validates bitmap
+    /// FieldWrites; this event mutates nothing). The `reason` column
+    /// carries the machine-parseable payload (`session=<id> rows=<n>`) —
+    /// no schema change. An absent drawer row is a silent no-op: the row
+    /// may be expunged between encode completion and the marker write,
+    /// and a marker must never fail the drain worker.
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "drawerId must not be empty".to_string(),
+            ));
+        }
+        if unit_session_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "unitSessionID must not be empty".to_string(),
+            ));
+        }
+        let row_uuid = require_uuid(drawer_id, "drawerId")?;
+        let id_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        let rows = self
+            .storage
+            .row_store()
+            .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else {
+            return Ok(());
+        };
+        let bitmaps = (
+            i64_value_of(row.get("adjectiveBitmap")),
+            i64_value_of(row.get("operationalBitmap")),
+            i64_value_of(row.get("provenance")),
+        );
+        let anchor =
+            substrate_lib::verbs::LatticeAnchor::udc(&string_value_of(row.get("udcCode")));
+        let stamp = self.hlc.lock().unwrap().send(completed_at);
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(row_uuid.as_u128()),
+                &stamp,
+                ENCODE_COMPLETE_VERB,
+                bitmaps,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(row_uuid.as_u128()),
+            hlc: stamp,
+            verb: ENCODE_COMPLETE_VERB.to_string(),
+            before_bitmaps: Some(bitmaps),
+            after_bitmaps: bitmaps,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: ENCODE_WORKER_ACTOR.to_string(),
+            reason: Some(format!("session={unit_session_id} rows={row_count}")),
+        };
+        let audit_row = pk_audit_event_from(&event);
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.audit_log().append(audit_row.clone())
+            })
+            .map_err(map_storage_err)
+    }
+
+    /// Append a reindex-completion marker (C3, benchmark reset 2026-08-13):
+    /// estate-anchored informational event sealing when a full-corpus basis
+    /// retrain FINISHED — the CYCLE tier-3 boundary. Verb `reindexComplete`,
+    /// actor `reindex_worker`, reason `session=<id> rows=<n>`. Mirrors Swift
+    /// `DrawerStore.appendReindexCompleteMarker`.
+    fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        if unit_session_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "unitSessionID must not be empty".to_string(),
+            ));
+        }
+        let stamp = self.hlc.lock().unwrap().send(completed_at);
+        let zero = (0i64, 0i64, 0i64);
+        let anchor = substrate_lib::verbs::LatticeAnchor::udc("000");
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(self.estate_uuid.as_u128()),
+                &stamp,
+                "reindexComplete",
+                zero,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(self.estate_uuid.as_u128()),
+            hlc: stamp,
+            verb: "reindexComplete".to_string(),
+            before_bitmaps: Some(zero),
+            after_bitmaps: zero,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: "reindex_worker".to_string(),
+            reason: Some(format!("session={unit_session_id} rows={row_count}")),
+        };
+        let audit_row = pk_audit_event_from(&event);
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.audit_log().append(audit_row.clone())
+            })
+            .map_err(map_storage_err)
+    }
+
+    /// Append a dream-cycle bracket marker (A3, benchmark reset 2026-08-13):
+    /// an informational audit event anchored on the ESTATE itself
+    /// (`row_id == estate_uuid` — a dream cycle belongs to no single drawer),
+    /// with zero bitmaps, the unclassified lattice anchor, actor
+    /// `dreaming_daemon`, and reason `session=<id>`. `verb` is one of
+    /// `dreamStart` / `dreamEnd` (callers pass the phase's verb string).
+    /// Same no-gate rationale as the encode marker: nothing mutates.
+    /// Mirrors Swift `DrawerStore.appendDreamCycleMarker`.
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        // AV-01 (Codex finding, commit dc0f362): this is the single shared
+        // write boundary behind SqliteDrawerStore, InMemoryDrawerStore, AND
+        // PostgresDrawerStore (all three are thin pass-through newtypes
+        // over DrawerStoreCore) — validating here covers every backend at
+        // once, so the in-memory backend cannot be more permissive than
+        // SQLite (they are, in fact, the identical code path). Defense in
+        // depth alongside the same check in `Estate::append_dream_cycle_marker`
+        // (estate_verbs.rs): this trait method is `pub` and reachable
+        // without going through `Estate`.
+        crate::estate_verbs::audit_verbs::validate(verb, &crate::estate_verbs::audit_verbs::DREAM_CYCLE)?;
+        if unit_session_id.is_empty() {
+            return Err(LocusKitError::InvalidContent(
+                "unitSessionID must not be empty".to_string(),
+            ));
+        }
+        let stamp = self.hlc.lock().unwrap().send(marked_at);
+        let zero = (0i64, 0i64, 0i64);
+        let anchor = substrate_lib::verbs::LatticeAnchor::udc("000");
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(self.estate_uuid.as_u128()),
+                &stamp,
+                verb,
+                zero,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(self.estate_uuid.as_u128()),
+            hlc: stamp,
+            verb: verb.to_string(),
+            before_bitmaps: Some(zero),
+            after_bitmaps: zero,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: "dreaming_daemon".to_string(),
+            reason: Some(format!("session={unit_session_id}")),
+        };
+        let audit_row = pk_audit_event_from(&event);
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                txn.audit_log().append(audit_row.clone())
+            })
+            .map_err(map_storage_err)
+    }
+
     /// Count of active drawers still awaiting a subject line (PR-01
     /// backfill-eligibility aggregate): not tombstoned, non-empty
     /// content, and subject absent OR produced under a different
@@ -2742,15 +3433,17 @@ impl DrawerStore for DrawerStoreCore {
         self.count_subject_debt_including(&[])
     }
 
-    /// Tier-aware debt count (PR-10). Mirrors Swift
-    /// `countSubjectDebt(includingPipelines:)`.
+    /// Tier-aware debt count (PR-10). F10: a single `COUNT(*)` query
+    /// (`RowStore::count`) rather than materializing and decoding every
+    /// matching row just to measure `rows.len()` — see
+    /// `count_span_index_debt`'s note; the same five-second poll cadence
+    /// applies here. Mirrors Swift `countSubjectDebt(includingPipelines:)`.
     fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
-        let row_store = self.storage.row_store();
         let predicate = subject_debt_predicate(pipelines);
-        let rows = row_store
-            .query_projected(T_DRAWERS, &["id"], Some(&predicate), &[], None, None)
-            .map_err(map_storage_err)?;
-        Ok(rows.len())
+        self.storage
+            .row_store()
+            .count(T_DRAWERS, Some(&predicate))
+            .map_err(map_storage_err)
     }
 
     /// The subject-backfill sweep enumerator (PR-09). Deterministic
@@ -2811,8 +3504,8 @@ impl DrawerStore for DrawerStoreCore {
         let row_store = self.storage.row_store();
         let mut values = std::collections::BTreeMap::new();
         values.insert("content".to_string(), TypedValue::Text(String::new()));
-        // Wipe covers the content-derived distilled representation too —
-        // derived text must not outlive the content it renders (SPEC §2).
+        // Wipe covers the content-derived columns too — derived text must
+        // not outlive the content it was derived from (SPEC §2).
         insert_cleared_representation(&mut values);
         row_store
             .update(T_DRAWERS, values, &StoragePredicate::IsTrue)
@@ -3531,30 +4224,170 @@ impl DrawerStore for DrawerStoreCore {
         Ok(())
     }
 
-    fn withdraw_kg_fact(&self, id: &str, _now: i64) -> Result<(), LocusKitError> {
+    fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
         validate_non_empty(id, "id")?;
-        let fact = self
-            .get_kg_fact(id)?
-            .ok_or_else(|| LocusKitError::InvalidContent(format!("kgFact not found: {id}")))?;
-        // Preserve adjective bits above the State field (bits 6+) and set
-        // bits 0-5 to Withdrawn (raw 18). Mirrors Swift DrawerStore.withdrawKGFact.
-        let new_bitmap = (fact.adjective_bitmap & !0x3Fi64) | State::Withdrawn.raw_value();
-        let mut update_vals = BTreeMap::new();
-        update_vals.insert(
-            "adjectiveBitmap".to_string(),
-            TypedValue::Bitmap(new_bitmap),
+        validate_non_empty(changed_by, "changed_by")?;
+
+        // Derive the canonical row key for the audit log: UUID passthrough for
+        // UUID-shaped IDs; SHA-256 truncated name-based UUID for arbitrary strings.
+        // deterministic_row_key handles both, mirroring Swift RowKeyDerivation.
+        let row_uuid = persistence_kit::row_key_derivation::deterministic_row_key(id);
+
+        // State slot: bits 0-5 of adjective bitmap. Legal values mirror the
+        // Swift DrawerStore.withdrawKGFact stateSlot literal, which is
+        // cross-checked by GuardianPairParityTests drawerStoreWithdrawKGFactSlotLegalValuesMatchesState.
+        let state_slot = audit_gate::FieldSlot::with_values(
+            audit_gate::Column::Adjective,
+            0,
+            6,
+            "state",
+            &[0, 1, 2, 3, 16, 17, 18, 19, 32, 33],
         );
-        self.storage
-            .row_store()
-            .update(
-                T_KG_FACTS,
-                update_vals,
-                &StoragePredicate::Eq(
+
+        // One tick per logical mutation; HLC stamp before the transaction.
+        // Kept outside the closure to match Swift: Swift computes the stamp
+        // before opening the transaction. The stamp is deterministic (clock
+        // parameter is caller-supplied), so moving it outside does not
+        // introduce non-determinism.
+        let stamp = self.hlc.lock().unwrap().send(now);
+
+        // Read the current kg_facts row and the source drawer for lattice
+        // anchor derivation INSIDE the serializable transaction so that
+        // `prior` and `anchor` are derived from the same consistent snapshot
+        // as the update and the audit append. A concurrent writer between an
+        // outside-transaction read and the transaction open cannot produce a
+        // lost-update on `after_bitmaps` (mirrors Swift, which reads inside
+        // its `.serializable` transaction; the transaction opens at
+        // DrawerStore.swift:2968 and the row read is at :2970-2973).
+        //
+        // LocusKitErrors (e.g. "kgFact not found", gate rejection) cannot
+        // propagate directly through a `StorageResult<()>` closure; they are
+        // threaded out via `validation_error` using the same pattern as
+        // `atomic_file_conflict_proposal`.
+        let mut validation_error: Option<LocusKitError> = None;
+        let tx_result = self.storage.transaction(IsolationLevel::Serializable, &mut |txn| {
+            let run = || -> Result<(), LocusKitError> {
+                let row_store = txn.row_store();
+
+                // READ 1 (inside transaction): kg_facts row → prior bitmaps.
+                let fact_rows = row_store
+                    .query(
+                        T_KG_FACTS,
+                        Some(&StoragePredicate::Eq(
+                            Column::new(T_KG_FACTS, "id"),
+                            TypedValue::Text(id.to_string()),
+                        )),
+                        &[],
+                        Some(1),
+                        None,
+                    )
+                    .map_err(map_storage_err)?;
+                let fact_row = fact_rows
+                    .first()
+                    .ok_or_else(|| LocusKitError::InvalidContent(format!("kgFact not found: {id}")))?;
+                let prior = BitmapFields {
+                    adjective:   i64_value_of(fact_row.get("adjectiveBitmap")) as u64,
+                    operational: i64_value_of(fact_row.get("operationalBitmap")) as u64,
+                    provenance:  i64_value_of(fact_row.get("provenanceBitmap")) as u64,
+                };
+                let source_drawer_id = string_value_of(fact_row.get("sourceDrawerID"));
+
+                // READ 2 (inside transaction): source drawer → lattice anchor.
+                // KGFact rows carry no UDC/QID of their own; the source drawer
+                // is the canonical anchor source. A null anchor is used when
+                // source_drawer_id is empty or the drawer cannot be found;
+                // audit_gate::admit accepts null anchors without rejection.
+                let anchor: substrate_lib::verbs::LatticeAnchor = if source_drawer_id.is_empty() {
+                    substrate_lib::verbs::LatticeAnchor::new(0, 0)
+                } else {
+                    let drawer_rows = row_store
+                        .query(
+                            T_DRAWERS,
+                            Some(&StoragePredicate::Eq(
+                                Column::new(T_DRAWERS, "id"),
+                                TypedValue::Text(source_drawer_id),
+                            )),
+                            &[],
+                            Some(1),
+                            None,
+                        )
+                        .map_err(map_storage_err)?;
+                    if let Some(drawer_row) = drawer_rows.first() {
+                        let udc = string_value_of(drawer_row.get("udcCode"));
+                        let qid = string_value_of(drawer_row.get("wikidataQID"));
+                        substrate_lib::verbs::LatticeAnchor::udc_qid(&udc, &qid)
+                    } else {
+                        substrate_lib::verbs::LatticeAnchor::new(0, 0)
+                    }
+                };
+
+                // Route through the substrate write gate: validates the
+                // active→withdrawn transition (verb Retract), enforces I-22
+                // bitmap invariants, and emits the sealed snapshot event.
+                // Mirrors Swift AuditGate.admit.
+                let event = audit_gate::admit(
+                    self.estate_uuid.as_u128(),
+                    substrate_lib::verbs::RowId(row_uuid.as_u128()),
+                    substrate_lib::verbs::NounType::KGFact,
+                    RowVerb::Retract,
+                    Some(prior),
+                    Some(anchor),
+                    &[audit_gate::FieldWrite {
+                        slot: state_slot.clone(),
+                        value: State::Withdrawn.raw_value(),
+                    }],
+                    anchor,
+                    &self.vocabulary,
+                    stamp,
+                    changed_by,
+                )
+                .map_err(|v| {
+                    LocusKitError::InvalidContent(format!("kgFact withdrawal rejected by gate: {}", v))
+                })?;
+
+                // Thread the caller-supplied reason into the event.
+                let event = substrate_lib::verbs::AuditEvent {
+                    reason: reason.map(|s| s.to_string()),
+                    ..event
+                };
+
+                // Materialized projection: write the merged adjective snapshot
+                // to the live kg_facts row. Append the sealed event to the
+                // audit log. Both writes are atomic in this same transaction.
+                let mut update_vals = BTreeMap::new();
+                update_vals.insert(
+                    "adjectiveBitmap".to_string(),
+                    TypedValue::Bitmap(event.after_bitmaps.0),
+                );
+                let update_pred = StoragePredicate::Eq(
                     Column::new(T_KG_FACTS, "id"),
                     TypedValue::Text(id.to_string()),
-                ),
-            )
-            .map_err(map_storage_err)?;
+                );
+                let audit_row = pk_audit_event_from(&event);
+                row_store.update(T_KG_FACTS, update_vals, &update_pred).map_err(map_storage_err)?;
+                txn.audit_log().append(audit_row).map_err(map_storage_err)?;
+                Ok(())
+            };
+            match run() {
+                Ok(()) => Ok(()),
+                Err(e) => {
+                    validation_error = Some(e);
+                    Err(persistence_kit::error::StorageError::TransactionConflict {
+                        detail: "withdraw_kg_fact failed".to_string(),
+                    })
+                }
+            }
+        });
+        if let Some(e) = validation_error {
+            return Err(e);
+        }
+        tx_result.map_err(map_storage_err)?;
         Ok(())
     }
 
@@ -4212,6 +5045,75 @@ impl DrawerStore for DrawerStoreCore {
         Ok(rows.len())
     }
 
+    fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        // One upsert per rating keyed on `drawer_id` (the ledger's primary
+        // key): the row store's dialect-neutral upsert renders INSERT OR
+        // REPLACE on SQLite and INSERT ... ON CONFLICT DO UPDATE on Postgres.
+        // An empty slice is a no-op. Mirrors Swift `DrawerStore.upsertRecallRatings`.
+        if ratings.is_empty() {
+            return Ok(());
+        }
+        ensure_recall_ratings_table(self.storage.as_ref())?;
+        let conflict_columns = vec!["drawer_id".to_string()];
+        for rating in ratings {
+            self.storage
+                .row_store()
+                .upsert(T_RECALL_RATINGS, recall_rating_values(rating), &conflict_columns)
+                .map_err(map_storage_err)?;
+        }
+        Ok(())
+    }
+
+    fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        // One point read per id, in the caller's order; ids without a row
+        // are absent from the result. Mirrors Swift `DrawerStore.recallRatings(ids:)`.
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        // A read never writes. When the schema ledger carries no row for the
+        // rating declaration's kit id the table has never been created
+        // (neither the 1.8 → 1.9 capsule nor an upsert has run), so no drawer
+        // holds a rating and the read returns empty without creating the
+        // table. The scorer reads ratings on every matrix-aware recall, and a
+        // frozen estate must stay byte-identical on disk across a pure read.
+        let schema = crate::recall_rating::recall_ratings_schema();
+        if self
+            .storage
+            .current_schema_version_for(&schema.kit_id)
+            .map_err(map_storage_err)?
+            == 0
+        {
+            return Ok(Vec::new());
+        }
+        let mut ratings = Vec::with_capacity(ids.len());
+        for id in ids {
+            let rows = self
+                .storage
+                .row_store()
+                .query(
+                    T_RECALL_RATINGS,
+                    Some(&StoragePredicate::Eq(
+                        Column::new(T_RECALL_RATINGS, "drawer_id"),
+                        TypedValue::Text((*id).to_string()),
+                    )),
+                    &[],
+                    Some(1),
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            if let Some(row) = rows.first() {
+                ratings.push(recall_rating_from_row(row));
+            }
+        }
+        Ok(ratings)
+    }
+
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
         // COUNT(*) on the drawers table — bypasses all row-decode logic so
         // corrupt rows (e.g. a poison timestamp) are still counted. Used by the
@@ -4262,6 +5164,19 @@ impl DrawerStore for DrawerStoreCore {
             .storage
             .audit_log()
             .events_for_row(uuid)
+            .map_err(map_storage_err)?;
+        Ok(pk_events.iter().map(substrate_audit_event_from).collect())
+    }
+
+    fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        let pk_events = self
+            .storage
+            .audit_log()
+            .iterate(after, None, limit)
             .map_err(map_storage_err)?;
         Ok(pk_events.iter().map(substrate_audit_event_from).collect())
     }
@@ -4384,20 +5299,18 @@ impl DrawerStore for DrawerStoreCore {
             let drawer_count = if room_ids.is_empty() {
                 0
             } else {
-                let predicates: Vec<StoragePredicate> = room_ids
-                    .iter()
-                    .map(|id| {
-                        StoragePredicate::Eq(
-                            Column::new(T_DRAWERS, "parent_node_id"),
-                            TypedValue::Text(id.clone()),
-                        )
-                    })
-                    .collect();
+                // `parent_node_id IN (...)` over the wing's rooms, the twin of
+                // Swift `DrawerStore.wingSummaries()`; unchunked for the same
+                // reason as `drawers_in_wing` (rooms per wing are few).
+                let room_predicate = StoragePredicate::In(
+                    Column::new(T_DRAWERS, "parent_node_id"),
+                    room_ids.iter().map(|id| TypedValue::Text(id.clone())).collect(),
+                );
                 let drawer_rows = row_store
                     .query(
                         T_DRAWERS,
                         Some(&StoragePredicate::all(vec![
-                            StoragePredicate::any(predicates),
+                            room_predicate,
                             StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
                         ])),
                         &[],
@@ -4893,8 +5806,8 @@ impl DrawerStore for DrawerStoreCore {
         // (`adjective_bitmap`, `operational_bitmap`, `provenance`) — so the
         // `content` blob is pure waste here. `all_drawers_bounded_projected`
         // issues a genuine projected SELECT over `DRAWER_STRUCTURED_COLUMNS`
-        // (every drawer column except the `content` and `distilled` text
-        // payloads), so the blob is never read off disk; `drawer_from_row`
+        // (every drawer column except the `content` text payload), so the
+        // blob is never read off disk; `drawer_from_row`
         // decodes the absent column to `""`. With `limit = None` the row set
         // and the `(filedAt ASC, id ASC)` order are exactly those of
         // `all_drawers()`, so the fingerprints are byte-identical to a
@@ -5394,6 +6307,25 @@ impl InMemoryDrawerStore {
         Ok(InMemoryDrawerStore { inner })
     }
 
+    /// Open a new in-memory estate backed by an externally-supplied
+    /// `Arc<dyn Storage>`.
+    ///
+    /// Available under `feature = "test-seams"` only. Needed by
+    /// GeniusLocusKit tests that inject `FaultingStorage` (from
+    /// persistence-kit's `test-support` module) to drive the fail-closed
+    /// pre-read paths in `expunge` and `withdraw_kg_fact`. `with_storage`
+    /// cannot be used for that purpose because it is typed to
+    /// `Arc<InMemoryStorage>`, not `Arc<dyn Storage>`.
+    #[cfg(any(test, feature = "test-seams"))]
+    pub fn with_dyn_storage(
+        storage: Arc<dyn Storage>,
+        now: i64,
+        hlc: Option<HLCGenerator>,
+    ) -> Result<Self, LocusKitError> {
+        let inner = DrawerStoreCore::new(storage, now, hlc)?;
+        Ok(InMemoryDrawerStore { inner })
+    }
+
     /// Kit-internal accessor — the underlying persistence-kit `Storage`
     /// handle.  `#[cfg(test)]` only: used by inline tests that need to
     /// verify audit-log contents directly through the storage handle.
@@ -5406,6 +6338,14 @@ impl InMemoryDrawerStore {
 impl DrawerStore for InMemoryDrawerStore {
     fn storage(&self) -> Option<Arc<dyn Storage>> {
         self.inner.storage()
+    }
+
+    fn atomic_file_conflict_proposal(
+        &self,
+        request: &crate::drawer_store::AtomicConflictProposalRequest,
+        now: i64,
+    ) -> Result<crate::drawer_store::AtomicConflictProposalOutcome, LocusKitError> {
+        self.inner.atomic_file_conflict_proposal(request, now)
     }
 
     fn resolve_node_names(
@@ -5479,11 +6419,17 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<Vec<crate::drawer::Drawer>, LocusKitError> {
         self.inner.active_drawers_after(after_id, limit)
     }
+    fn active_corpus_content_ids_limited(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<String>, LocusKitError> {
+        self.inner.active_corpus_content_ids_limited(limit)
+    }
 
     // Forwarding overrides for the DESC bounded scan methods. Without these,
     // Arc<dyn DrawerStore> callers hit the O(estate) trait default (load
     // all_drawers, reverse, truncate) rather than DrawerStoreCore's efficient
-    // (filed_at DESC, id DESC, LIMIT) path. Forwarding here ensures the
+    // (filed_at DESC, content DESC, id DESC, LIMIT) path. Forwarding here ensures the
     // InMemoryDrawerStore wrapper routes correctly for in-process estates
     // (c-recall-portable fix).
 
@@ -5559,27 +6505,57 @@ impl DrawerStore for InMemoryDrawerStore {
         reason: Option<&str>,
         now: i64,
         seal_audit: bool,
+        sensitivity_ceiling: crate::adjectives::AdjectiveSensitivity,
     ) -> Result<crate::drawer_store::ExpungeOutcome, LocusKitError> {
-        self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit)
+        self.inner.expunge_gated(drawer_id, changed_by, reason, now, seal_audit, sensitivity_ceiling)
     }
-    fn set_distilled_representation(
+    fn set_ssc_facts(&self, drawer_id: &str, facts: Option<&str>) -> Result<usize, LocusKitError> {
+        self.inner.set_ssc_facts(drawer_id, facts)
+    }
+    fn set_span_indexed(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.inner.set_span_indexed(drawer_id)
+    }
+    fn span_index_debt_batch(
         &self,
-        drawer_id: &str,
-        distilled: &str,
-        pipeline_version: &str,
-        token_count: i64,
-        generated_at: i64,
-    ) -> Result<usize, LocusKitError> {
-        self.inner.set_distilled_representation(
-            drawer_id,
-            distilled,
-            pipeline_version,
-            token_count,
-            generated_at,
-        )
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.span_index_debt_batch(limit, after_drawer_id)
     }
-    fn count_undistilled(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
-        self.inner.count_undistilled(pipeline_version)
+    fn count_span_index_debt(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_span_index_debt()
+    }
+    fn set_facts_extracted(&self, drawer_id: &str) -> Result<usize, LocusKitError> {
+        self.inner.set_facts_extracted(drawer_id)
+    }
+    fn set_facts_extracted_if_content_matches(
+        &self, drawer_id: &str, expected_content: &str
+    ) -> Result<usize, LocusKitError> {
+        self.inner.set_facts_extracted_if_content_matches(drawer_id, expected_content)
+    }
+    fn publish_extracted_facts(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str, facts: &[crate::kg_fact::KGFact], now: i64) -> Result<Option<usize>, LocusKitError> {
+        self.inner.publish_extracted_facts(source_id, expected_content, recipe_id, facts, now)
+    }
+    fn fact_extraction_debt_batch(
+        &self,
+        limit: usize,
+        after_drawer_id: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.fact_extraction_debt_batch(limit, after_drawer_id)
+    }
+    fn count_fact_extraction_debt(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_fact_extraction_debt()
+    }
+    fn mark_fact_extraction_rejected(&self, source_id: &str, expected_content: &str,
+        recipe_id: &str) -> Result<Option<usize>, LocusKitError> {
+        self.inner.mark_fact_extraction_rejected(source_id, expected_content, recipe_id)
+    }
+    fn count_fact_extraction_rejected(&self) -> Result<usize, LocusKitError> {
+        self.inner.count_fact_extraction_rejected()
+    }
+    fn set_anomalous_flag(&self, drawer_id: &str, anomalous: bool) -> Result<usize, LocusKitError> {
+        self.inner.set_anomalous_flag(drawer_id, anomalous)
     }
     fn set_subject_representation(
         &self,
@@ -5598,6 +6574,41 @@ impl DrawerStore for InMemoryDrawerStore {
             changed_by,
             reason,
         )
+    }
+
+    fn append_encode_complete_marker(
+        &self,
+        drawer_id: &str,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.append_encode_complete_marker(drawer_id, row_count, unit_session_id, completed_at)
+    }
+
+    fn append_dream_cycle_marker(
+        &self,
+        verb: &str,
+        unit_session_id: &str,
+        marked_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.append_dream_cycle_marker(verb, unit_session_id, marked_at)
+    }
+
+    fn append_reindex_complete_marker(
+        &self,
+        row_count: usize,
+        unit_session_id: &str,
+        completed_at: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.append_reindex_complete_marker(row_count, unit_session_id, completed_at)
+    }
+    fn audit_events(
+        &self,
+        after: Option<substrate_types::hlc::HLC>,
+        limit: usize,
+    ) -> Result<Vec<substrate_lib::verbs::AuditEvent>, LocusKitError> {
+        self.inner.audit_events(after, limit)
     }
     fn count_subject_debt(&self) -> Result<usize, LocusKitError> {
         self.inner.count_subject_debt()
@@ -5721,8 +6732,14 @@ impl DrawerStore for InMemoryDrawerStore {
     fn add_kg_fact(&self, fact: &crate::kg_fact::KGFact) -> Result<(), LocusKitError> {
         self.inner.add_kg_fact(fact)
     }
-    fn withdraw_kg_fact(&self, id: &str, now: i64) -> Result<(), LocusKitError> {
-        self.inner.withdraw_kg_fact(id, now)
+    fn withdraw_kg_fact(
+        &self,
+        id: &str,
+        changed_by: &str,
+        reason: Option<&str>,
+        now: i64,
+    ) -> Result<(), LocusKitError> {
+        self.inner.withdraw_kg_fact(id, changed_by, reason, now)
     }
     fn get_kg_fact(&self, id: &str) -> Result<Option<crate::kg_fact::KGFact>, LocusKitError> {
         self.inner.get_kg_fact(id)
@@ -5878,6 +6895,18 @@ impl DrawerStore for InMemoryDrawerStore {
     }
     fn count_recall_traces(&self) -> Result<usize, LocusKitError> {
         self.inner.count_recall_traces()
+    }
+    fn upsert_recall_ratings(
+        &self,
+        ratings: &[crate::recall_rating::RecallRating],
+    ) -> Result<(), LocusKitError> {
+        self.inner.upsert_recall_ratings(ratings)
+    }
+    fn recall_ratings(
+        &self,
+        ids: &[&str],
+    ) -> Result<Vec<crate::recall_rating::RecallRating>, LocusKitError> {
+        self.inner.recall_ratings(ids)
     }
     fn count_drawer_rows(&self) -> Result<usize, LocusKitError> {
         self.inner.count_drawer_rows()
@@ -6042,23 +7071,58 @@ impl DrawerStore for InMemoryDrawerStore {
 /// populate the column (CRITICAL fix — this column replaces the old
 /// recompute-on-every-read path in `fingerprints_captured_in`/
 /// `fingerprint_bit_series`).
-/// Merge the four representation-clearing NULLs into a content-writing
-/// UPDATE's value map (SPEC_DISTILLATION_STORAGE §4/§7.3): every write
-/// that touches `content` NULLs the distilled representation in the same
-/// statement, so a representation can never outlive the content it
-/// renders (the regeneration trigger and the erasure scrub). Existing
+/// Merge the content-derived NULLs into a content-writing UPDATE's value
+/// map: every write that touches `content` NULLs ssc_facts and the subject
+/// trio in the same statement, so derived text can never outlive the
+/// content it was derived from (the regeneration trigger and the erasure
+/// scrub). Existing
 /// caller values win on key collision by construction — no caller writes
 /// representation columns and content in one statement. Mirrors Swift
 /// `DrawerStore.withClearedRepresentation`.
+/// Active, non-empty, bit 27 clear — the span-encode duty's work predicate.
+/// Mirrors Swift `DrawerStore.spanIndexDebtPredicate`.
+fn span_index_debt_predicate() -> StoragePredicate {
+    StoragePredicate::And(vec![
+        StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        StoragePredicate::Neq(
+            Column::new(T_DRAWERS, "content"),
+            TypedValue::Text(String::new()),
+        ),
+        StoragePredicate::BitmaskNone {
+            column: Column::new(T_DRAWERS, "operationalBitmap"),
+            mask: DrawerFeatureFlags::SPAN_INDEXED,
+        },
+    ])
+}
+
+/// Active, non-empty, bit 28 clear — the distilled-fact extraction duty's
+/// work predicate. A successful zero-fact extraction sets the bit too, so
+/// absence of KGFact rows is never interpreted as unfinished work.
+fn fact_extraction_debt_predicate() -> StoragePredicate {
+    StoragePredicate::And(vec![
+        StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+        StoragePredicate::Lt(Column::new(T_DRAWERS, "g_state_cluster"),
+            TypedValue::Int(RowState::ACTIVE_CLUSTER_UPPER_BOUND_RAW as i64)),
+        StoragePredicate::Neq(
+            Column::new(T_DRAWERS, "content"),
+            TypedValue::Text(String::new()),
+        ),
+        StoragePredicate::BitmaskNone {
+            column: Column::new(T_DRAWERS, "operationalBitmap"),
+            mask: DrawerFeatureFlags::FACTS_EXTRACTED,
+        },
+    ])
+}
+
 pub(crate) fn insert_cleared_representation(values: &mut BTreeMap<String, TypedValue>) {
-    // Covers every content-derived column: the distilled quad AND the
-    // subject trio (PR-01) — derived text must not outlive the content it
-    // renders, so both clear in the same content-touching statement.
+    // Covers every content-derived column: ssc_facts (Encoder Rerank
+    // Program §6 — NULL after a content write is the enrichment stage's
+    // "needs facts" predicate) and the subject trio (PR-01). The matching
+    // bits (19, 27, 28; factsExtracted is cleared too — a content write
+    // revokes the prior extraction result) clear through
+    // CLEARED_ON_CONTENT_WRITE in the same UPDATE.
     for column in [
-        "distilled",
-        "distilled_pipeline_version",
-        "distilled_token_count",
-        "distilled_at",
+        "ssc_facts",
         "subject",
         "subject_pipeline_version",
         "subject_at",
@@ -6121,6 +7185,8 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
         "adjectiveBitmap".to_string(),
         TypedValue::Bitmap(d.adjective_bitmap),
     );
+    // Use the drawer struct's operational_bitmap directly: every bit is
+    // managed by the write path that owns it before drawer_values runs.
     m.insert(
         "operationalBitmap".to_string(),
         TypedValue::Bitmap(d.operational_bitmap),
@@ -6155,40 +7221,19 @@ fn drawer_values(d: &Drawer, fingerprint: &Fingerprint256) -> BTreeMap<String, T
         "content_fingerprint".to_string(),
         TypedValue::Blob(fingerprint.wire_bytes().to_vec()),
     );
-    // Distilled representation (SPEC §4): fresh captures carry None in all
-    // four fields — population happens post-insert via
-    // set_distilled_representation (drain-stage or sweep), never on the
-    // capture path. Mirrors Swift drawerValues.
+    // SSC facts: a fresh capture may carry them when the caller already ran
+    // the enrichment stage; otherwise None until set_ssc_facts runs after
+    // the write. Mirrors Swift drawerValues.
     m.insert(
-        "distilled".to_string(),
-        d.distilled
+        "ssc_facts".to_string(),
+        d.ssc_facts
             .as_ref()
             .map(|s| TypedValue::Text(s.clone()))
             .unwrap_or(TypedValue::Null),
     );
-    m.insert(
-        "distilled_pipeline_version".to_string(),
-        d.distilled_pipeline_version
-            .as_ref()
-            .map(|s| TypedValue::Text(s.clone()))
-            .unwrap_or(TypedValue::Null),
-    );
-    m.insert(
-        "distilled_token_count".to_string(),
-        d.distilled_token_count
-            .map(TypedValue::Int)
-            .unwrap_or(TypedValue::Null),
-    );
-    m.insert(
-        "distilled_at".to_string(),
-        d.distilled_at
-            .map(TypedValue::Timestamp)
-            .unwrap_or(TypedValue::Null),
-    );
-    // Subject trio (PR-01): same capture-path contract as the distilled
-    // quad — a fresh capture MAY carry a subject (the filing AI provides
-    // it at file time); backfill and the model rider populate the rest via
-    // set_subject_representation. Mirrors Swift drawerValues.
+    // Subject trio (PR-01): a fresh capture MAY carry a subject (the filing
+    // AI provides it at file time); backfill and the model rider populate
+    // the rest via set_subject_representation. Mirrors Swift drawerValues.
     m.insert(
         "subject".to_string(),
         d.subject
@@ -6391,6 +7436,18 @@ fn kg_fact_values(f: &KGFact) -> BTreeMap<String, TypedValue> {
         "foreignRecordID".to_string(),
         TypedValue::Text(f.foreign_record_id.clone()),
     );
+    m.insert("evidenceQuote".to_string(), TypedValue::Text(f.evidence_quote.clone()));
+    m.insert("evidenceStart".to_string(), TypedValue::Int(f.evidence_start));
+    m.insert("evidenceEnd".to_string(), TypedValue::Int(f.evidence_end));
+    m.insert("evidenceStartUTF8Byte".to_string(), TypedValue::Int(f.evidence_start_utf8_byte));
+    m.insert("evidenceEndUTF8Byte".to_string(), TypedValue::Int(f.evidence_end_utf8_byte));
+    m.insert("sourceDigest".to_string(), TypedValue::Text(f.source_digest.clone()));
+    m.insert("extractorProviderID".to_string(), TypedValue::Text(f.extractor_provider_id.clone()));
+    m.insert("extractorModelID".to_string(), TypedValue::Text(f.extractor_model_id.clone()));
+    m.insert("extractorModelVersion".to_string(), TypedValue::Text(f.extractor_model_version.clone()));
+    m.insert("extractionSchemaVersion".to_string(), TypedValue::Text(f.extraction_schema_version.clone()));
+    m.insert("searchProjection".to_string(), TypedValue::Text(f.search_projection.clone()));
+    m.insert("searchProjectionVersion".to_string(), TypedValue::Text(f.search_projection_version.clone()));
     m.insert(
         "adjectiveBitmap".to_string(),
         TypedValue::Bitmap(f.adjective_bitmap),
@@ -6582,6 +7639,30 @@ fn recall_trace_values(item: &RecallTraceItem) -> BTreeMap<String, TypedValue> {
         "operationalBitmap".to_string(),
         TypedValue::Bitmap(item.operational_bitmap),
     );
+    // Lane-attribution trio (v15, W2.5 Track R(a)). TEXT nullable: Null
+    // when the writer has no attribution (plain locus-verb traces); the
+    // recall coordinator fills all three.
+    m.insert(
+        "door".to_string(),
+        item.door
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "composition".to_string(),
+        item.composition
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
+    m.insert(
+        "laneRanks".to_string(),
+        item.lane_ranks
+            .clone()
+            .map(TypedValue::Text)
+            .unwrap_or(TypedValue::Null),
+    );
     m
 }
 
@@ -6654,13 +7735,9 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
         udc_facets: opt_string_value_of(row.get("udcFacets")),
         wikidata_qid: opt_string_value_of(row.get("wikidataQID")),
         wikidata_qids_secondary: opt_string_value_of(row.get("wikidataQidsSecondary")),
-        // Distilled representation (SPEC §4). Absent at the structured
-        // projection (the text column is projected away like `content`);
-        // NULL on any row not yet swept. Both decode to None.
-        distilled: opt_string_value_of(row.get("distilled")),
-        distilled_pipeline_version: opt_string_value_of(row.get("distilled_pipeline_version")),
-        distilled_token_count: opt_int_value_of(row.get("distilled_token_count")),
-        distilled_at: opt_int_value_of(row.get("distilled_at")),
+        // SSC facts: NULL on any row the enrichment stage has not written yet
+        // (or since the last content write); decodes to None.
+        ssc_facts: opt_string_value_of(row.get("ssc_facts")),
         // Subject trio (PR-01). NULL on any row not yet subjected;
         // decodes to None — the backfill-eligibility signal.
         subject: opt_string_value_of(row.get("subject")),
@@ -6763,6 +7840,27 @@ fn tunnel_from_row(row: &StorageRow) -> Tunnel {
         // Json (BLOB storage), but legacy TEXT writes and the InMemory
         // backend can surface Text — tolerate both (house discipline).
         ext: opt_json_string_of(row.get("ext")),
+    }
+}
+
+fn conflict_lifecycle_name(lifecycle: TunnelLifecycle) -> &'static str {
+    match lifecycle {
+        TunnelLifecycle::Active => "active",
+        TunnelLifecycle::Proposed => "proposed",
+        TunnelLifecycle::Withdrawn => "withdrawn",
+        TunnelLifecycle::Superseded => "superseded",
+    }
+}
+
+fn conflict_decline_tier(label: &str) -> Option<u8> {
+    if label.starts_with("dcp: ") {
+        Some(1)
+    } else if label.starts_with("tier2:") {
+        Some(2)
+    } else if label.starts_with("tier3:") {
+        Some(3)
+    } else {
+        None
     }
 }
 
@@ -7000,6 +8098,18 @@ fn kg_fact_from_row(row: &StorageRow) -> KGFact {
         added_by: string_value_of(row.get("addedBy")),
         foreign_source_key: string_value_of(row.get("foreignSourceKey")),
         foreign_record_id: string_value_of(row.get("foreignRecordID")),
+        evidence_quote: string_value_of(row.get("evidenceQuote")),
+        evidence_start: i64_value_of(row.get("evidenceStart")),
+        evidence_end: i64_value_of(row.get("evidenceEnd")),
+        evidence_start_utf8_byte: i64_value_of(row.get("evidenceStartUTF8Byte")),
+        evidence_end_utf8_byte: i64_value_of(row.get("evidenceEndUTF8Byte")),
+        source_digest: string_value_of(row.get("sourceDigest")),
+        extractor_provider_id: string_value_of(row.get("extractorProviderID")),
+        extractor_model_id: string_value_of(row.get("extractorModelID")),
+        extractor_model_version: string_value_of(row.get("extractorModelVersion")),
+        extraction_schema_version: string_value_of(row.get("extractionSchemaVersion")),
+        search_projection: string_value_of(row.get("searchProjection")),
+        search_projection_version: string_value_of(row.get("searchProjectionVersion")),
         adjective_bitmap: i64_value_of(row.get("adjectiveBitmap")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
         provenance_bitmap: i64_value_of(row.get("provenanceBitmap")),
@@ -7033,10 +8143,14 @@ fn recall_trace_from_row(row: &StorageRow) -> RecallTraceItem {
         recalled_at: recalled_at_string(row.get("recalledAt")),
         score: opt_float_value_of(row.get("score")),
         operational_bitmap: i64_value_of(row.get("operationalBitmap")),
+        door: opt_string_value_of(row.get("door")),
+        composition: opt_string_value_of(row.get("composition")),
+        lane_ranks: opt_string_value_of(row.get("laneRanks")),
     }
 }
 
-/// Decode the `recalledAt` column to its ISO8601 string, tolerating both the
+/// Decode an ISO8601 TEXT timestamp column (`recall_trace.recalledAt`,
+/// `recall_ratings.updated_at`) to its string, tolerating both the
 /// `Text` form (the InMemory backend round-trips the raw string) and the
 /// `Timestamp` form (the SQLite / Postgres backends parse the TEXT column to
 /// epoch seconds on read because the column is declared `.timestamp`, then we
@@ -7050,6 +8164,40 @@ fn recalled_at_string(v: Option<&TypedValue>) -> String {
         Some(TypedValue::Text(s)) => s.clone(),
         Some(TypedValue::Timestamp(secs)) => format_iso8601(*secs),
         _ => String::new(),
+    }
+}
+
+/// Make sure the `recall_ratings` ledger exists before it is written.
+/// Populated estates receive the table from the 1.8 → 1.9 estate-format
+/// capsule; a fresh estate is stamped at the current format without running
+/// that capsule, so the store declares the same table on the first write.
+/// `migrate` is a no-op once the table exists. Only `upsert_recall_ratings`
+/// calls this: a read never creates the table (see `recall_ratings`).
+fn ensure_recall_ratings_table(storage: &dyn Storage) -> Result<(), LocusKitError> {
+    storage
+        .migrate(&crate::recall_rating::recall_ratings_schema())
+        .map_err(map_storage_err)
+}
+
+fn recall_rating_values(
+    rating: &crate::recall_rating::RecallRating,
+) -> BTreeMap<String, TypedValue> {
+    let mut m = BTreeMap::new();
+    m.insert("drawer_id".to_string(), TypedValue::Text(rating.drawer_id.clone()));
+    m.insert("rating".to_string(), TypedValue::Float(rating.rating));
+    m.insert("contests".to_string(), TypedValue::Int(rating.contests));
+    // updated_at is stored as TEXT ISO8601 per the fleet rule; the struct
+    // already carries the string, so no conversion happens here.
+    m.insert("updated_at".to_string(), TypedValue::Text(rating.updated_at.clone()));
+    m
+}
+
+fn recall_rating_from_row(row: &StorageRow) -> crate::recall_rating::RecallRating {
+    crate::recall_rating::RecallRating {
+        drawer_id: string_value_of(row.get("drawer_id")),
+        rating: opt_float_value_of(row.get("rating")).unwrap_or(0.0),
+        contests: i64_value_of(row.get("contests")),
+        updated_at: recalled_at_string(row.get("updated_at")),
     }
 }
 
@@ -7116,6 +8264,57 @@ fn validate_non_empty(value: &str, label: &str) -> Result<(), LocusKitError> {
 
 fn map_storage_err(e: persistence_kit::error::StorageError) -> LocusKitError {
     LocusKitError::DatabaseUnavailable(e.to_string())
+}
+
+/// Batch ceiling for Or-of-Eq id lookups. Why 900: the SQLite predicate
+/// compiler renders an N-arm `StoragePredicate::Or` as a flat
+/// `(a OR b OR ...)` SQL string, which SQLite parses as a left-deep
+/// expression tree and rejects at ~1000 terms with "Expression tree is
+/// too large (maximum depth 1000)". 900 stays strictly below that cap
+/// with headroom for any wrapping predicate, mirroring the Swift twin's
+/// `chunkSize = 900` ceiling (`DrawerStore.swift`, `getDrawers(ids:)`).
+const ID_BATCH_CHUNK_SIZE: usize = 900;
+
+/// Query `table` for rows whose `column` equals any id in `ids`, issuing
+/// one Or-of-Eq query per chunk of at most [`ID_BATCH_CHUNK_SIZE`] ids
+/// and concatenating the row sets across chunks.
+///
+/// Takes a `BTreeSet` so the id set is de-duplicated by construction: a
+/// repeated id must not fetch its rows twice (an unchunked single Or
+/// query never duplicated rows, and chunking must preserve that).
+///
+/// Ordering contract: `order_by` applies PER CHUNK, not globally. All
+/// rows for one id come from exactly one chunk (ids are unique), so any
+/// per-id row ordering survives; callers needing a global cross-id sort
+/// must sort the merged result themselves. Every current caller either
+/// ignores order or groups rows per id, so per-chunk ordering suffices.
+fn query_by_id_chunks(
+    row_store: &dyn RowStore,
+    table: &str,
+    column: &str,
+    ids: &BTreeSet<String>,
+    order_by: &[OrderClause],
+) -> Result<Vec<StorageRow>, LocusKitError> {
+    let unique: Vec<&String> = ids.iter().collect();
+    let mut out: Vec<StorageRow> = Vec::new();
+    // Chunk at 900 ids per query — below SQLite's ~1000 expression-depth
+    // cap, mirroring the Swift twin's ceiling (see ID_BATCH_CHUNK_SIZE).
+    for chunk in unique.chunks(ID_BATCH_CHUNK_SIZE) {
+        let predicates: Vec<StoragePredicate> = chunk
+            .iter()
+            .map(|id| {
+                StoragePredicate::Eq(
+                    Column::new(table, column),
+                    TypedValue::Text((*id).clone()),
+                )
+            })
+            .collect();
+        let rows = row_store
+            .query(table, Some(&StoragePredicate::any(predicates)), order_by, None, None)
+            .map_err(map_storage_err)?;
+        out.extend(rows);
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -7378,6 +8577,13 @@ mod tests {
     /// Seed nodes and create a drawer whose parent_node_id points to the
     /// room node. Replaces sample_drawer for tests that need node-tree
     /// resolution (drawers_in_wing, drawers_in_wing_room, list_wings, etc.).
+    /// The hunt's canonical pair spelling for two drawer ids.
+    fn conflict_pair_key(a: &str, b: &str) -> String {
+        let mut ordered = [a.to_lowercase(), b.to_lowercase()];
+        ordered.sort();
+        format!("{}||{}", ordered[0], ordered[1])
+    }
+
     fn sample_drawer_with_nodes(
         store: &InMemoryDrawerStore,
         id: &str,
@@ -7579,6 +8785,47 @@ mod tests {
         }
         assert_eq!(store.all_drawers_bounded(Some(2)).unwrap().len(), 2);
         assert_eq!(store.all_drawers_bounded(None).unwrap().len(), 5);
+    }
+
+    #[test]
+    fn active_corpus_ids_filter_before_deterministic_limit() {
+        let store = open_store();
+        let mut empty = sample_drawer("empty", "w", "r", "placeholder");
+        empty.filed_at = 1;
+        let mut dataset = sample_drawer("dataset", "w", "r", "dataset");
+        dataset.filed_at = 2;
+        dataset.operational_bitmap = (crate::drawer_operational::ContentKind::Dataset as i64) << 6;
+        let mut tombstoned = sample_drawer("tombstoned", "w", "r", "removed");
+        tombstoned.filed_at = 3;
+        tombstoned.tombstoned_at = Some(4);
+        let mut beta = sample_drawer("beta", "w", "r", "beta");
+        beta.filed_at = 10;
+        let mut alpha = sample_drawer("alpha", "w", "r", "alpha");
+        alpha.filed_at = 10;
+        let mut gamma = sample_drawer("gamma", "w", "r", "gamma");
+        gamma.filed_at = 10;
+        for drawer in [&empty, &dataset, &tombstoned, &beta, &alpha, &gamma] {
+            store.add_drawer(drawer, NOW).unwrap();
+        }
+        let mut empty_content = BTreeMap::new();
+        empty_content.insert("content".to_string(), TypedValue::Text(String::new()));
+        store
+            .storage()
+            .row_store()
+            .update(
+                T_DRAWERS,
+                empty_content,
+                &StoragePredicate::Eq(
+                    Column::new(T_DRAWERS, "id"),
+                    TypedValue::Text(tid("empty")),
+                ),
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.active_corpus_content_ids_limited(2).unwrap(),
+            vec![tid("alpha"), tid("beta")]
+        );
     }
 
     #[test]
@@ -8016,18 +9263,25 @@ mod tests {
                 NOW + 1,
             )
             .unwrap();
-        assert_eq!(
-            store
-                .get_drawer("11111111-1111-4111-8111-111111111111")
-                .unwrap()
-                .unwrap()
-                .operational_bitmap,
-            0x100
-        );
+        // sample_drawer has operational_bitmap = 0. After capture with the
+        // vocabulary fix (bits 27-30 are now declared slots), the capture event
+        // records bit 27 = 0 (extracted from the struct's operational_bitmap = 0).
+        // drawer_values no longer ORs in bit 27 at persist time. mutate_operational
+        // with 0x100 applies the new value through the gate using all declared
+        // slots; prior bit 27 = 0 is preserved (value 0 written back). Result: 0x100.
+        let stored = store
+            .get_drawer("11111111-1111-4111-8111-111111111111")
+            .unwrap()
+            .unwrap()
+            .operational_bitmap;
+        assert_eq!(stored, 0x100);
         // Gate appended one event carrying the operational write.
         let row = Uuid::parse_str("11111111-1111-4111-8111-111111111111").unwrap();
         let events = store.storage().audit_log().events_for_row(row).unwrap();
         assert_eq!(events.len(), 2); // capture + operational mutation
+        // Bits 27-30 are now declared vocabulary slots, so the audit event
+        // records their value too. Since both struct and mutation value had
+        // bit 27 = 0, the audit event also reflects 0x100.
         assert_eq!(events[1].after_operational, 0x100);
     }
 
@@ -8193,6 +9447,195 @@ mod tests {
         assert_eq!(from_room.len(), 1);
         let to = store.tunnels_to_wing("w").unwrap();
         assert_eq!(to.len(), 1);
+    }
+
+    #[test]
+    fn atomic_conflict_proposal_revalidates_and_replays_the_actual_tunnel() {
+        use crate::drawer_store::{
+            conflict_proposal_digests, AtomicConflictProposalOutcome,
+            AtomicConflictProposalRequest,
+        };
+
+        fn never_suppress(_tier: u8, _renewal: &str, _history: &[(u8, String)]) -> bool {
+            false
+        }
+
+        let store = open_store();
+        let source_id = tid("atomic-conflict-source");
+        let target_id = tid("atomic-conflict-target");
+        let mut source = sample_drawer_with_nodes(
+            &store, &source_id, "memory", "source", "the service is enabled",
+        );
+        source.udc_code = "001".to_owned();
+        let mut target = sample_drawer_with_nodes(
+            &store, &target_id, "memory", "target", "the service is not enabled",
+        );
+        target.udc_code = "001".to_owned();
+        store.add_drawer(&source, NOW).unwrap();
+        store.add_drawer(&target, NOW).unwrap();
+        let (source_digest, evidence_digest) =
+            conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
+        let request = || AtomicConflictProposalRequest {
+            source_drawer_id: source_id.clone(), target_drawer_id: target_id.clone(),
+            pair_key: conflict_pair_key(&source_id, &target_id),
+            tier: 2, renewal_identity: "tier2:negation@1".to_owned(),
+            label: "tier2:negation@1".to_owned(), replay_identity: "aria-v2:test-replay".to_owned(),
+            source_digest: source_digest.clone(), evidence_digest: evidence_digest.clone(),
+            decline_suppresses: never_suppress,
+        };
+
+        let created = store.atomic_file_conflict_proposal(&request(), NOW + 1).unwrap();
+        let tunnel_id = match created {
+            AtomicConflictProposalOutcome::Created { tunnel_id, lifecycle } => {
+                assert_eq!(lifecycle, "proposed");
+                tunnel_id
+            }
+            other => panic!("expected new proposed tunnel, got {other:?}"),
+        };
+        assert_eq!(store.all_tunnels().unwrap().len(), 1);
+        let tunnel = store.all_tunnels().unwrap().pop().unwrap();
+        assert_eq!((tunnel.source_wing, tunnel.source_room), ("memory".to_owned(), "source".to_owned()));
+        assert_eq!((tunnel.target_wing, tunnel.target_room), ("memory".to_owned(), "target".to_owned()));
+
+        let replay = store.atomic_file_conflict_proposal(&request(), NOW + 2).unwrap();
+        assert_eq!(
+            replay,
+            AtomicConflictProposalOutcome::Existing {
+                tunnel_id,
+                lifecycle: "proposed".to_owned(),
+            }
+        );
+        assert_eq!(store.all_tunnels().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn atomic_conflict_proposal_hunt_selected_then_withdrawn_is_stale_without_an_edge() {
+        use crate::drawer_store::{
+            conflict_proposal_digests, AtomicConflictProposalRequest,
+        };
+
+        fn never_suppress(_tier: u8, _renewal: &str, _history: &[(u8, String)]) -> bool {
+            false
+        }
+
+        let store = open_store();
+        let source_id = tid("atomic-conflict-withdrawn-source");
+        let target_id = tid("atomic-conflict-withdrawn-target");
+        let source = sample_drawer_with_nodes(
+            &store, &source_id, "memory", "source", "the service is enabled",
+        );
+        let target = sample_drawer_with_nodes(
+            &store, &target_id, "memory", "target", "the service is not enabled",
+        );
+        store.add_drawer(&source, NOW).unwrap();
+        store.add_drawer(&target, NOW).unwrap();
+
+        // The hunt selected this current pair. Its content digests remain
+        // valid after withdrawal, so filing must reject on the fresh raw
+        // state rather than replaying or inserting a contradiction edge.
+        let (source_digest, evidence_digest) =
+            conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
+        let request = AtomicConflictProposalRequest {
+            source_drawer_id: source_id.clone(),
+            target_drawer_id: target_id.clone(),
+            pair_key: conflict_pair_key(&source_id, &target_id),
+            tier: 2,
+            renewal_identity: "tier2:negation@1".to_owned(),
+            label: "tier2:negation@1".to_owned(),
+            replay_identity: "aria-v2:withdrawn-selection".to_owned(),
+            source_digest,
+            evidence_digest,
+            decline_suppresses: never_suppress,
+        };
+        store
+            .mutate_state(
+                &source_id,
+                State::Withdrawn,
+                RowVerb::Retract,
+                "test",
+                None,
+                NOW + 1,
+            )
+            .unwrap();
+
+        let outcome = store
+            .atomic_file_conflict_proposal(&request, NOW + 2)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::drawer_store::AtomicConflictProposalOutcome::Stale,
+            "withdrawn hunt-selected evidence must be stale"
+        );
+        assert!(
+            store.all_tunnels().unwrap().is_empty(),
+            "withdrawn hunt-selected evidence must not create a contradiction edge"
+        );
+    }
+
+    #[test]
+    fn atomic_conflict_proposal_malformed_room_endpoint_is_rejected_without_an_edge() {
+        use crate::drawer_store::{
+            conflict_proposal_digests, AtomicConflictProposalRequest,
+        };
+
+        fn never_suppress(_tier: u8, _renewal: &str, _history: &[(u8, String)]) -> bool {
+            false
+        }
+
+        let store = open_store();
+        let source_id = tid("atomic-conflict-malformed-room-source");
+        let target_id = tid("atomic-conflict-malformed-room-target");
+        let source = sample_drawer_with_nodes(
+            &store, &source_id, "memory", "source", "the service is enabled",
+        );
+        let target = sample_drawer_with_nodes(
+            &store, &target_id, "memory", "target", "the service is not enabled",
+        );
+        store.add_drawer(&source, NOW).unwrap();
+        store.add_drawer(&target, NOW).unwrap();
+        let (source_digest, evidence_digest) =
+            conflict_proposal_digests(&source, &target, 2, "tier2:negation@1");
+        let request = AtomicConflictProposalRequest {
+            pair_key: conflict_pair_key(&source_id, &target_id),
+            source_drawer_id: source_id,
+            target_drawer_id: target_id,
+            tier: 2,
+            renewal_identity: "tier2:negation@1".to_owned(),
+            label: "tier2:negation@1".to_owned(),
+            replay_identity: "aria-v2:malformed-room".to_owned(),
+            source_digest,
+            evidence_digest,
+            decline_suppresses: never_suppress,
+        };
+
+        let mut malformed_room = BTreeMap::new();
+        malformed_room.insert("depth".to_owned(), TypedValue::Int(1));
+        let updated = store
+            .storage()
+            .row_store()
+            .update(
+                T_NODES,
+                malformed_room,
+                &StoragePredicate::Eq(
+                    Column::new(T_NODES, "id"),
+                    TypedValue::Text(source.parent_node_id.clone()),
+                ),
+            )
+            .unwrap();
+        assert_eq!(updated, 1, "fixture must corrupt exactly the source room role");
+
+        let outcome = store
+            .atomic_file_conflict_proposal(&request, NOW + 1)
+            .unwrap();
+        assert_eq!(
+            outcome,
+            crate::drawer_store::AtomicConflictProposalOutcome::Stale,
+            "malformed source room must reject filing as stale"
+        );
+        assert!(
+            store.all_tunnels().unwrap().is_empty(),
+            "malformed source room must not create a contradiction edge"
+        );
     }
 
     #[test]
@@ -8806,6 +10249,7 @@ mod tests {
                 Some("GDPR delete request 2026-05-29"),
                 NOW + 500,
                 true,
+                crate::adjectives::AdjectiveSensitivity::Secret,
             )
             .unwrap();
 
@@ -8824,106 +10268,83 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Distilled representation (SPEC_DISTILLATION_STORAGE §4).
-    // Mirrors Swift DistilledRepresentationTests case-for-case
+    // Content-derived columns and the span index bit (Encoder Rerank
+    // Program). Mirrors Swift ContentDerivedColumnsTests case-for-case
     // (twin-parity gate).
     // -----------------------------------------------------------------
 
+    /// A fresh row carries no facts and bit 27 clear: it is span-index debt.
     #[test]
-    fn fresh_row_reads_none_representation() {
+    fn fresh_row_has_no_facts_and_is_span_index_debt() {
         let store = open_store();
         let d = sample_drawer("dr1", "w", "k", "some content");
         store.add_drawer(&d, NOW).unwrap();
         let loaded = store.get_drawer(&d.id).unwrap().unwrap();
-        assert!(loaded.distilled.is_none());
-        assert!(loaded.distilled_pipeline_version.is_none());
-        assert!(loaded.distilled_token_count.is_none());
-        assert!(loaded.distilled_at.is_none());
+        assert!(loaded.ssc_facts.is_none());
+        assert!(!loaded.is_span_indexed());
+        assert_eq!(store.count_span_index_debt().unwrap(), 1);
+        let debt = store.span_index_debt_batch(10, None).unwrap();
+        assert_eq!(debt.iter().map(|x| x.id.as_str()).collect::<Vec<_>>(), vec![d.id.as_str()]);
     }
 
+    /// set_ssc_facts writes the column; set_span_indexed sets bit 27 once
+    /// and leaves the debt queue. Failure mode: a port that stores facts
+    /// but never clears them, or that sets a different bit.
     #[test]
-    fn set_distilled_representation_populates_all_four_atomically() {
+    fn ssc_facts_and_span_index_write_and_read_back() {
         let store = open_store();
         let d = sample_drawer("dr2", "w", "k", "meeting moved thursday");
         store.add_drawer(&d, NOW).unwrap();
-        let updated = store
-            .set_distilled_representation(&d.id, "Meeting moved Thursday.", "p1", 4, NOW + 200)
-            .unwrap();
-        assert_eq!(updated, 1);
+        assert_eq!(store.set_ssc_facts(&d.id, Some("kind: meeting, when: thursday")).unwrap(), 1);
+        assert_eq!(store.set_span_indexed(&d.id).unwrap(), 1);
+        assert_eq!(store.set_span_indexed(&d.id).unwrap(), 0, "already set: no write");
         let loaded = store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(loaded.distilled.as_deref(), Some("Meeting moved Thursday."));
-        assert_eq!(loaded.distilled_pipeline_version.as_deref(), Some("p1"));
-        assert_eq!(loaded.distilled_token_count, Some(4));
-        assert_eq!(loaded.distilled_at, Some(NOW + 200));
-        // Content and lifecycle untouched by a representation write.
+        assert_eq!(loaded.ssc_facts.as_deref(), Some("kind: meeting, when: thursday"));
+        assert!(loaded.is_span_indexed());
+        assert_eq!(loaded.operational_bitmap & DrawerFeatureFlags::SPAN_INDEXED, 1 << 27);
+        assert_eq!(store.count_span_index_debt().unwrap(), 0);
+        // Content and lifecycle untouched by derived-column writes.
         assert_eq!(loaded.content, "meeting moved thursday");
         assert!(loaded.tombstoned_at.is_none());
+        // Clearing the facts is an explicit None write.
+        assert_eq!(store.set_ssc_facts(&d.id, None).unwrap(), 1);
+        assert!(store.get_drawer(&d.id).unwrap().unwrap().ssc_facts.is_none());
+        assert!(store.set_ssc_facts(&d.id, Some("")).is_err(), "empty facts are a caller bug");
+        assert_eq!(
+            store.set_ssc_facts("99999999-9999-4999-8999-999999999999", Some("x")).unwrap(),
+            0
+        );
     }
 
+    /// Expunge scrubs ssc_facts and clears bit 27 with the content: the
+    /// facts are content-derived text and the span rows describe erased
+    /// content (SPEC §2 destruction contract).
     #[test]
-    fn set_distilled_representation_replaces_prior() {
-        let store = open_store();
-        let d = sample_drawer("dr3", "w", "k", "content");
-        store.add_drawer(&d, NOW).unwrap();
-        store
-            .set_distilled_representation(&d.id, "first", "p1", 1, NOW + 200)
-            .unwrap();
-        store
-            .set_distilled_representation(&d.id, "second rendering", "p1", 2, NOW + 300)
-            .unwrap();
-        let loaded = store.get_drawer(&d.id).unwrap().unwrap();
-        assert_eq!(loaded.distilled.as_deref(), Some("second rendering"));
-        assert_eq!(loaded.distilled_token_count, Some(2));
-        assert_eq!(loaded.distilled_at, Some(NOW + 300));
-    }
-
-    #[test]
-    fn set_distilled_representation_unknown_id_updates_zero_rows() {
-        let store = open_store();
-        let updated = store
-            .set_distilled_representation(
-                "99999999-9999-4999-8999-999999999999",
-                "x",
-                "p1",
-                1,
-                NOW + 200,
-            )
-            .unwrap();
-        assert_eq!(updated, 0);
-    }
-
-    #[test]
-    fn expunge_clears_representation_with_content() {
+    fn expunge_clears_facts_and_span_index_with_content() {
         let store = open_store();
         let d = sample_drawer("dr4", "w", "k", "derivable content");
         store.add_drawer(&d, NOW).unwrap();
+        store.set_ssc_facts(&d.id, Some("kind: note")).unwrap();
+        store.set_span_indexed(&d.id).unwrap();
+        store.set_facts_extracted(&d.id).unwrap();
         store
-            .set_distilled_representation(&d.id, "derived text", "p1", 2, NOW + 200)
-            .unwrap();
-        store
-            .expunge_gated(&d.id, "alice", Some("erasure covers representation"), NOW + 500, true)
+            .expunge_gated(&d.id, "alice", Some("erasure covers derived columns"), NOW + 500, true, crate::adjectives::AdjectiveSensitivity::Secret)
             .unwrap();
         let after = store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.content, "");
-        // The representation is content-derived text: it must not outlive
-        // the erased content (SPEC §2 destruction contract).
-        assert!(after.distilled.is_none());
-        assert!(after.distilled_pipeline_version.is_none());
-        assert!(after.distilled_token_count.is_none());
-        assert!(after.distilled_at.is_none());
+        assert!(after.ssc_facts.is_none());
+        assert!(!after.is_span_indexed(), "bit 27 must clear with the content");
+        assert!(!after.are_facts_extracted(), "bit 28 must clear with the content");
     }
 
+    /// The shared content-write helper NULLs ssc_facts alongside the
+    /// subject trio, so every content write path clears it.
     #[test]
-    fn dataset_content_patch_clears_representation() {
+    fn content_write_helper_clears_facts() {
         let store = open_store();
         let d = sample_drawer("dr5", "w", "k", "{\"orig\":true}");
         store.add_drawer(&d, NOW).unwrap();
-        store
-            .set_distilled_representation(&d.id, "stale rendering", "p1", 2, NOW + 200)
-            .unwrap();
-        // patch_dataset_handle_content routes through Estate; exercise the
-        // same NULL-on-edit write shape directly at the row-store layer via
-        // the shared helper, then assert the row reads back cleared.
+        store.set_ssc_facts(&d.id, Some("kind: dataset")).unwrap();
         let row_store = store.storage().row_store();
         let mut values = BTreeMap::new();
         values.insert(
@@ -8943,10 +10364,8 @@ mod tests {
             .unwrap();
         let after = store.get_drawer(&d.id).unwrap().unwrap();
         assert_eq!(after.content, "{\"patched\":true}");
-        assert!(after.distilled.is_none());
-        assert!(after.distilled_pipeline_version.is_none());
-        assert!(after.distilled_token_count.is_none());
-        assert!(after.distilled_at.is_none());
+        assert!(after.ssc_facts.is_none());
+        assert!(after.subject.is_none());
     }
 
     #[test]
@@ -8967,6 +10386,7 @@ mod tests {
                 None,
                 NOW + 500,
                 true,
+                crate::adjectives::AdjectiveSensitivity::Secret,
             )
             .unwrap();
         let after = store
@@ -9006,6 +10426,7 @@ mod tests {
                 None,
                 NOW + 200,
                 true,
+                crate::adjectives::AdjectiveSensitivity::Secret,
             )
             .unwrap_err();
         match err {
@@ -9042,6 +10463,7 @@ mod tests {
                 None,
                 NOW + 100,
                 true,
+                crate::adjectives::AdjectiveSensitivity::Secret,
             )
             .unwrap_err();
         match err {
@@ -9102,7 +10524,7 @@ mod tests {
         );
         store.add_kg_fact(&f).unwrap();
         // Retire the fact: transitions state to Withdrawn (≥ 7).
-        store.withdraw_kg_fact(&tid("f2"), NOW + 1).unwrap();
+        store.withdraw_kg_fact(&tid("f2"), "test-actor", None, NOW + 1).unwrap();
 
         // all_kg_facts (active-only) must NOT see it.
         let active = store.all_kg_facts().unwrap();
@@ -9137,7 +10559,7 @@ mod tests {
         );
         store.add_kg_fact(&f_active).unwrap();
         store.add_kg_fact(&f_retired).unwrap();
-        store.withdraw_kg_fact(&tid("fr"), NOW + 2).unwrap();
+        store.withdraw_kg_fact(&tid("fr"), "test-actor", None, NOW + 2).unwrap();
 
         let timeline = store.all_kg_facts_including_retired().unwrap();
         assert_eq!(timeline.len(), 2, "timeline must include both active and retired");
@@ -9489,6 +10911,14 @@ mod tests {
         fn current_schema_version(&self) -> persistence_kit::error::StorageResult<i32> {
             self.inner.current_schema_version()
         }
+        fn rename_schema_kit(
+            &self,
+            old_kit_id: &str,
+            new_kit_id: &str,
+        ) -> persistence_kit::error::StorageResult<persistence_kit::storage::SchemaKitRenameOutcome>
+        {
+            self.inner.rename_schema_kit(old_kit_id, new_kit_id)
+        }
         fn migrate(
             &self,
             schema: &persistence_kit::schema::SchemaDeclaration,
@@ -9551,5 +10981,179 @@ mod tests {
             events.iter().all(|e| e.verb != "setSubject"),
             "no setSubject custody event may survive the rollback"
         );
+    }
+
+    // ── A2/A3 audit markers (benchmark reset 2026-08-13) ────────────────
+    // Twin of Swift `EncodeMarkerTests` case-for-case.
+
+    /// A2: the encode-completion marker seals verb/actor/reason on the
+    /// anchor row with before == after bitmaps (informational, no gate).
+    #[test]
+    fn encode_marker_seals_event() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        let id = tid("marker-a2");
+        let mut d = Drawer::new(
+            &id,
+            "Marker test content: one drawer standing in for a drain unit.",
+            "test-parent",
+            "bilby",
+            NOW,
+            "test-v1",
+        );
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, NOW).unwrap();
+        let before = store.audit_events_for_row(&id).unwrap().len();
+
+        store
+            .append_encode_complete_marker(&id, 37, "unit-abc", NOW + 100)
+            .unwrap();
+
+        let events = store.audit_events_for_row(&id).unwrap();
+        assert_eq!(events.len(), before + 1);
+        let marker = events.last().unwrap();
+        assert_eq!(marker.verb, ENCODE_COMPLETE_VERB);
+        assert_eq!(marker.actor, ENCODE_WORKER_ACTOR);
+        assert_eq!(marker.reason.as_deref(), Some("session=unit-abc rows=37"));
+        assert_eq!(marker.before_bitmaps, Some(marker.after_bitmaps));
+    }
+
+    /// A2: an absent drawer row is a silent no-op — the row may be expunged
+    /// between encode completion and the marker write, and a marker must
+    /// never fail the drain worker.
+    #[test]
+    fn encode_marker_absent_row_no_op() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        let ghost = Uuid::new_v4().to_string();
+        store
+            .append_encode_complete_marker(&ghost, 1, "unit-x", NOW + 100)
+            .unwrap();
+        assert!(store.audit_events_for_row(&ghost).unwrap().is_empty());
+    }
+
+    /// A2: an empty session id is refused — the marker's whole purpose is
+    /// the session bracket.
+    #[test]
+    fn encode_marker_empty_session_refused() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        let id = tid("marker-a2-empty");
+        let mut d = Drawer::new(&id, "content", "test-parent", "bilby", NOW, "test-v1");
+        d.udc_code = "001".to_string();
+        store.add_drawer(&d, NOW).unwrap();
+        assert!(store
+            .append_encode_complete_marker(&id, 1, "", NOW + 100)
+            .is_err());
+    }
+
+    /// A3: dream brackets share a session id on the estate anchor row,
+    /// start before end under HLC ordering.
+    #[test]
+    fn dream_brackets_share_session() {
+        let estate_uuid = Uuid::new_v4();
+        let storage = Arc::new(InMemoryStorage::with_estate(estate_uuid));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+
+        store
+            .append_dream_cycle_marker("dreamStart", "cycle-7", NOW + 1_000)
+            .unwrap();
+        store
+            .append_dream_cycle_marker("dreamEnd", "cycle-7", NOW + 61_000)
+            .unwrap();
+
+        // Query by the store's own estate uuid (the anchor the marker used)
+        // rather than re-deriving it from the fixture value.
+        let events = store
+            .audit_events_for_row(&store.estate_uuid.to_string())
+            .unwrap();
+        let brackets: Vec<_> = events
+            .iter()
+            .filter(|e| e.reason.as_deref() == Some("session=cycle-7"))
+            .collect();
+        assert_eq!(brackets.len(), 2);
+        assert_eq!(brackets[0].verb, "dreamStart");
+        assert_eq!(brackets[1].verb, "dreamEnd");
+        assert!(brackets.iter().all(|e| e.actor == "dreaming_daemon"));
+        assert!(brackets[0].hlc.physical_time < brackets[1].hlc.physical_time);
+    }
+
+    /// AV-01 (Codex finding, commit dc0f362): the dream-marker write path
+    /// specifically cannot write an arbitrary verb — this is the store-layer
+    /// boundary shared by SQLite, in-memory, and Postgres, and it must
+    /// reject before ever touching the audit log.
+    #[test]
+    fn dream_cycle_marker_rejects_arbitrary_verb() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+
+        let err = store
+            .append_dream_cycle_marker("dreamHijacked", "cycle-evil", NOW + 1_000)
+            .unwrap_err();
+        assert!(
+            matches!(err, LocusKitError::InvalidContent(ref msg) if msg.contains("dreamHijacked")),
+            "expected InvalidContent naming the rejected verb, got: {err:?}"
+        );
+
+        // The rejected write must not have landed anything on the estate
+        // anchor row — a rejected verb is a rejected write, not a
+        // silently-substituted one.
+        let events = store
+            .audit_events_for_row(&store.estate_uuid.to_string())
+            .unwrap();
+        assert!(events.iter().all(|e| e.verb != "dreamHijacked"));
+    }
+
+    /// AV-01: every currently-defined dream-cycle verb still writes after
+    /// the validator lands — the fix must not be a false-positive trap.
+    #[test]
+    fn dream_cycle_marker_accepts_every_defined_verb() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        for verb in crate::estate_verbs::audit_verbs::DREAM_CYCLE {
+            store
+                .append_dream_cycle_marker(verb, "cycle-defined", NOW + 1_000)
+                .unwrap_or_else(|e| panic!("defined verb {verb:?} was rejected: {e:?}"));
+        }
+        let events = store
+            .audit_events_for_row(&store.estate_uuid.to_string())
+            .unwrap();
+        let written: Vec<&str> = events
+            .iter()
+            .filter(|e| e.reason.as_deref() == Some("session=cycle-defined"))
+            .map(|e| e.verb.as_str())
+            .collect();
+        assert_eq!(written.len(), crate::estate_verbs::audit_verbs::DREAM_CYCLE.len());
+    }
+
+    /// C3: the reindex-completion marker seals verb/actor/reason on the
+    /// ESTATE anchor row with before == after bitmaps (informational).
+    #[test]
+    fn reindex_marker_seals_event_on_estate_row() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+
+        store
+            .append_reindex_complete_marker(512, "reindex-9", NOW + 5_000)
+            .unwrap();
+
+        let events = store
+            .audit_events_for_row(&store.estate_uuid.to_string())
+            .unwrap();
+        let marker = events.last().unwrap();
+        assert_eq!(marker.verb, "reindexComplete");
+        assert_eq!(marker.actor, "reindex_worker");
+        assert_eq!(marker.reason.as_deref(), Some("session=reindex-9 rows=512"));
+        assert_eq!(marker.before_bitmaps, Some(marker.after_bitmaps));
+    }
+
+    /// C3: an empty session id is refused, same contract as the A2 marker.
+    #[test]
+    fn reindex_marker_empty_session_refused() {
+        let storage = Arc::new(InMemoryStorage::with_estate(Uuid::new_v4()));
+        let store = DrawerStoreCore::new(storage, NOW, None).unwrap();
+        assert!(store
+            .append_reindex_complete_marker(1, "", NOW + 100)
+            .is_err());
     }
 }

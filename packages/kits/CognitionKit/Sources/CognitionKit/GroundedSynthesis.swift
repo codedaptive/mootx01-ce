@@ -58,9 +58,8 @@ public struct GroundedSynthesis: Recipe {
         /// pool; the cap bounds the synthesizer's work while the cue-pool
         /// bound keeps the ranking lane wide.
         public let cap: Int?
-        /// Raw query text for the SCORED second lane (BM25 + vector via
-        /// the GLK `.unionBest`/`.raw` request — the lane PreciseRecall's
-        /// coarse grab uses). The scored lane reaches relevant rows that
+        /// Raw query text for the SCORED second lane (BM25 + vector through
+        /// a GLK `.unionBest` request). The scored lane reaches relevant rows that
         /// share NO cue terms with the question — the semantic gap that
         /// capped the lexical-only pool at 34/50 misses in trial 4. nil =
         /// lexical-only grounding (previous behaviour).
@@ -69,6 +68,10 @@ public struct GroundedSynthesis: Recipe {
         /// MCP read surfaces enable this because recall-frame sensitivity
         /// filters cover the adjective axis, not provenance bits 30...35.
         public let excludeProvenanceSensitive: Bool
+        /// Scoring used by the optional query lane. `.raw` preserves the
+        /// historical recipe contract; selected ARIA v2 requests matrix-aware
+        /// relevance so recency cannot outrank an older exact match.
+        public let scoredLaneScoring: GLKRecallScoring
 
         public init(
             frame: RecallFrame,
@@ -76,7 +79,8 @@ public struct GroundedSynthesis: Recipe {
             cueTerms: [String] = [],
             cap: Int? = nil,
             query: String? = nil,
-            excludeProvenanceSensitive: Bool = false
+            excludeProvenanceSensitive: Bool = false,
+            scoredLaneScoring: GLKRecallScoring = .raw
         ) {
             self.frame = frame
             self.tuning = tuning
@@ -84,6 +88,7 @@ public struct GroundedSynthesis: Recipe {
             self.cap = cap
             self.query = query
             self.excludeProvenanceSensitive = excludeProvenanceSensitive
+            self.scoredLaneScoring = scoredLaneScoring
         }
     }
 
@@ -94,18 +99,25 @@ public struct GroundedSynthesis: Recipe {
     /// what feeds synthesis, not this.
     public static let groundingPoolBound = 200
 
-    /// Recipe output: the synthesized context document and the number
-    /// of drawers it was grounded on.
+    /// Recipe output: the synthesized context document, the number of
+    /// drawers it was grounded on, and the grounded pool's drawer IDs in
+    /// rank order.
     public struct Output: Sendable {
         /// The synthesized, provenance-grounded context document. Never
         /// persisted (NeuronKit C-9) — handed to a foundation model.
         public let context: ContextDocument
         /// How many recalled drawers fed the synthesis.
         public let drawerCount: Int
+        /// Drawer IDs of the ranked, capped, provenance-gated pool that fed
+        /// the synthesis, in rank order (ARIA_MCP_SPEC 2.0.0 § 8.7: the
+        /// candidate section renders THIS pool — the two-lane ranking is a
+        /// guarantee the presentation layer must not re-derive).
+        public let rankedIDs: [String]
 
-        public init(context: ContextDocument, drawerCount: Int) {
+        public init(context: ContextDocument, drawerCount: Int, rankedIDs: [String]) {
             self.context = context
             self.drawerCount = drawerCount
+            self.rankedIDs = rankedIDs
         }
     }
 
@@ -191,7 +203,8 @@ public struct GroundedSynthesis: Recipe {
                 scoredLane = ScoredLane(
                     frame: laneBFrame,
                     queryText: query,
-                    traceLimit: input.cap ?? input.tuning.pageSize)
+                    traceLimit: input.cap ?? input.tuning.pageSize,
+                    scoring: input.scoredLaneScoring)
             }
         }
 
@@ -219,9 +232,30 @@ public struct GroundedSynthesis: Recipe {
             pages.append(page)
         }
         let recalledRows = pages.flatMap { $0.rows }
-        let allRows = input.excludeProvenanceSensitive
-            ? recalledRows.filter { $0.sensitivity != .restricted && $0.sensitivity != .secret }
+        let admittedRows = input.excludeProvenanceSensitive
+            ? recalledRows.filter { Self.publicCaptureProvenance($0.provenance) }
             : recalledRows
+
+        // Grounding is a ranking guarantee: a row that carries an explicit
+        // cue term is presented before every row that carries none. The
+        // scored lane may admit broad semantic candidates, but the fused
+        // order it hands back depends on which evidence that lane yielded,
+        // and the two ports' scored lanes do not yield identical evidence
+        // on identical estates. The stable partition keeps the hybrid order
+        // inside each bucket and makes the cue-first contract hold in both
+        // ports by construction. Twin of the partition in the Rust
+        // `run_grounded_synthesis_impl`; the Rust and Swift twin tests
+        // `selected_synthesis_ranks_cue_matches_before_unrelated_rows` and
+        // `testGroundedSynthesisQueryRanksCueMatchesFirst` pin it.
+        let normalizedCues = input.cueTerms.map { $0.lowercased() }
+        let carriesCue = { (content: String) -> Bool in
+            let lowered = content.lowercased()
+            return normalizedCues.contains { lowered.contains($0) }
+        }
+        let allRows = normalizedCues.isEmpty
+            ? admittedRows
+            : admittedRows.filter { carriesCue($0.content) }
+                + admittedRows.filter { !carriesCue($0.content) }
 
         // Apply cap BEFORE synthesis so the synthesizer's work is bounded
         // by the user limit, not the pool size. Cap is applied after reranking:
@@ -253,6 +287,17 @@ public struct GroundedSynthesis: Recipe {
         // the output whether monitoring is on or off (C-Det: additive telemetry).
         emitRecipeComplete(name: name, stepCount: rowsToSynthesize.count, ts: startTs)
 
-        return Output(context: context, drawerCount: rowsToSynthesize.count)
+        return Output(
+            context: context,
+            drawerCount: rowsToSynthesize.count,
+            rankedIDs: rowsToSynthesize.map(\.id))
+    }
+
+    /// Public synthesis admits only the two explicitly public provenance
+    /// sensitivity encodings. Unknown/reserved encodings fail closed rather
+    /// than inheriting `Drawer.sensitivity`'s compatibility fallback.
+    static func publicCaptureProvenance(_ provenance: Int64) -> Bool {
+        let raw = (provenance >> 30) & 0x3f
+        return raw == 0 || raw == 16
     }
 }

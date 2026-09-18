@@ -50,7 +50,7 @@ use genius_locus_kit::recall::{
 use genius_locus_kit::EstateCoordinator;
 use locus_kit::filter::{Filter, HydrationLevel, Ordering, RecallFrame};
 use neuron_kit::{
-    named_composition, reduce_late, ReductionCandidate, ReductionQuery, DEFAULT_SURVIVOR_MULTIPLE,
+    reduce_late, ReductionCandidate, ReductionQuery, DEFAULT_SURVIVOR_MULTIPLE,
 };
 
 use crate::error::{RecipeRunError, SubstrateError};
@@ -84,7 +84,8 @@ pub struct PreciseMatch {
 /// `PreciseRecall.run`.
 ///
 /// - `composition`: the named reduction composition from `CompositionGrid`
-///   (e.g. "hamming+tokenExact", "dense-fused", "weighted-all"). `None` ⇒ the
+///   (e.g. "hamming+tokenExact", "weighted-all"; "dense-fused" only with the
+///   the whole-record float lane. `None` ⇒ the
 ///   default `text` — the original `query_precision` behavior — so an
 ///   unspecified or unknown name reproduces today's recipe.
 ///
@@ -147,6 +148,17 @@ pub fn run(
         // matches the Swift `GLKRecallRequest` initializer here, which carries
         // no `recallShape` argument (the field defaults to no shape).
         recall_shape: None,
+        // W2.5 Track R(a): recipes are internal-origin — no trace rows are
+        // written, so door/composition stay None.
+        door: None,
+        composition: None,
+        frontier_k: None,
+        // §11.18: internal recall — no anomalous-flag filter applied.
+        anomalous_filter: None,
+        // Sub-span scoring is an additive-cost stage this recipe does not
+        // request; every caller names the switch (ruling 2026-09-07).
+        sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
+        rerank_directive: None,
     };
     let result = coord
         .recall_scored(handle, request, now)
@@ -156,8 +168,29 @@ pub fn run(
     //    carried from GLK) into a ReductionCandidate. The candidate's coarse-pool
     //    index is its tie-break rank. The query arrives as plain text with no
     //    lattice anchor (the `lattice` signal is therefore neutral here).
-    let comp = named_composition(composition);
-    let reduction_query = ReductionQuery::new(query);
+    //
+    //    W4 recall_tuning consumption: read the estate-provisioned manifest so
+    //    named_with_tuning can apply the tuned mmr_lambda when the estate has a
+    //    non-default tuning envelope. Failure (unprovisioned estate or I/O error)
+    //    falls back to default — byte-identical to the pre-W4 path.
+    //    named_with_tuning is a no-op when manifest == default, so an absent or
+    //    default-valued manifest never changes results.
+    let recall_tuning = coord.provisioned_recall_tuning(handle).unwrap_or_default();
+    let comp = neuron_kit::composition_grid::named_with_tuning(composition, &recall_tuning);
+    // Query-side §8.3 lattice anchor (W2.5 Track S): lets lattice-bearing
+    // compositions fire; the default text composition never reads it.
+    //
+    // M4 single-derivation: the anchor was derived exactly once inside the
+    // GLK recall director (recall_scored_multi_lane) and carried on the result.
+    // Read it here; do NOT call query_anchor again on the same text — that
+    // would violate the single-derivation doctrine and add a redundant call.
+    // When the query was unanchorable, query_lattice_anchor is None and both
+    // fields default to "" (lattice signal stays neutral, same as before M4).
+    let mut reduction_query = ReductionQuery::new(query);
+    reduction_query.udc_code = result.query_lattice_anchor
+        .as_ref().map(|(udc, _)| udc.clone()).unwrap_or_default();
+    reduction_query.qid = result.query_lattice_anchor
+        .as_ref().map(|(_, qid)| qid.clone()).unwrap_or_default();
 
     // Build the body map (id → content) from the .full pool, then form a
     // BODY-FREE candidate set so reduce_late drives the same narrow-then-hydrate
@@ -318,5 +351,84 @@ mod tests {
         let node_names = HashMap::new();
         let matches = run(&coord, &h, "one", Filter::Unconfirmed, 5, 1, None, NOW, &node_names).expect("run");
         assert!(matches.len() >= 1);
+    }
+
+    // PR-4: absent manifest (never provisioned) is byte-identical to the default
+    // manifest path. Running run() on an estate with no provisioned recall_tuning
+    // must produce the same match content in the same order as a second
+    // identically-seeded estate — pins that the W4 consumption wire is a no-op
+    // on unprovisioned estates.
+    //
+    // NOTE: InMemoryDrawerStore has no meta-manifest table so
+    // provisioned_recall_tuning() returns Err (no manifest key) for both
+    // estates, which unwrap_or_default() handles identically.
+    #[test]
+    fn pr4_absent_manifest_byte_identical_to_default() {
+        let (coord_a, h_a) = coord_with_rows(&[
+            "the war indemnity imposed by the treaty was 11 million gold marks",
+            "the war indemnity imposed by the treaty was 46 million gold marks",
+            "the war indemnity imposed by the treaty was 23 million gold marks",
+        ]);
+        let (coord_b, h_b) = coord_with_rows(&[
+            "the war indemnity imposed by the treaty was 11 million gold marks",
+            "the war indemnity imposed by the treaty was 46 million gold marks",
+            "the war indemnity imposed by the treaty was 23 million gold marks",
+        ]);
+        let node_names = HashMap::new();
+        let matches_a = run(
+            &coord_a, &h_a,
+            "the war indemnity was 46 million marks",
+            Filter::Unconfirmed, 10, DEFAULT_POOL, Some("text+mmr"), NOW, &node_names,
+        )
+        .expect("run A");
+        let matches_b = run(
+            &coord_b, &h_b,
+            "the war indemnity was 46 million marks",
+            Filter::Unconfirmed, 10, DEFAULT_POOL, Some("text+mmr"), NOW, &node_names,
+        )
+        .expect("run B");
+        // IDs differ (InMemory assigns new UUIDs per capture); compare content
+        // as the position-independent parity signal.
+        assert_eq!(
+            matches_a.len(), matches_b.len(),
+            "both unprovisioned estates must return the same count"
+        );
+        for (a, b) in matches_a.iter().zip(matches_b.iter()) {
+            assert_eq!(
+                a.content, b.content,
+                "absent-manifest estates must rank the same content at each position"
+            );
+        }
+    }
+
+    // PR-5: named_with_tuning is called and changes the composition when the
+    // manifest differs from default. Verifies the routing logic introduced by
+    // the W4 consumption wire — that named_with_tuning is reachable and produces
+    // a different mmr_lambda than the bare named_composition path.
+    #[test]
+    fn pr5_named_with_tuning_changes_composition_for_nondefault_manifest() {
+        use genius_locus_kit::RecallTuningManifest;
+        let base = neuron_kit::composition_grid::named_with_tuning(
+            Some("text+mmr"),
+            &RecallTuningManifest::default(),
+        );
+        let nondefault = RecallTuningManifest {
+            rrf_k: 60,
+            mmr_lambda: 0.01,
+            rrf_bm25_weight: 0.3,
+            rrf_vector_weight: 0.7,
+            // Packager fields not under test — use defaults.
+            ..RecallTuningManifest::default()
+        };
+        let tuned = neuron_kit::composition_grid::named_with_tuning(
+            Some("text+mmr"),
+            &nondefault,
+        );
+        assert!(
+            (tuned.mmr_lambda - base.mmr_lambda).abs() > 0.001,
+            "named_with_tuning with mmr_lambda=0.01 must produce a composition \
+             with a different mmr_lambda than the default (base={}, tuned={})",
+            base.mmr_lambda, tuned.mmr_lambda
+        );
     }
 }

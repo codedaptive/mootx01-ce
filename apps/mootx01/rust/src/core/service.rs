@@ -1,4 +1,5 @@
 //! core/service.rs — service-manager backends (spec §6).
+//! Diagnostics: Linux `journalctl --user -u mootx01`; Windows Event Viewer, Application, source MOOTx01 (fatal exits).
 //!
 //! Pure generators (input → file content string) so the unit contract is
 //! testable on any platform; the register/unregister wiring shells out to
@@ -19,6 +20,12 @@
 //! out of task metadata and loaded by moot-mgr from its user-local token file.
 //! SCM services are out of scope for v1 (spec §6). macOS is Swift territory
 //! (launchd, LaunchAgent.swift).
+//!
+//! The service generator functions (`daemon_unit`, `mgr_unit`,
+//! `daemon_task_command`, `mgr_task_command`) return unit or command content
+//! as plain strings, keeping them testable on any platform. The platform
+//! registration wrappers (`register`, `register_task`) shell out to the
+//! service manager and are runtime-guarded.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -32,101 +39,40 @@ pub const DAEMON_TASK: &str = "mootx01";
 pub const MGR_TASK: &str = "mootx01-mgr";
 
 // ---------------------------------------------------------------------------
-// Path-safety validators — fail CLOSED before interpolation
-// ---------------------------------------------------------------------------
-
-/// Returns `true` when the string can be safely embedded in a Windows
-/// `cmd.exe` command string of the form `cmd /c "set VAR=VALUE&& ..."`.
-/// cmd.exe interprets `&`, `|`, `<`, `>`, `^`, `%`, `"`, `;`, and
-/// CR/LF as command operators or string terminators. No legitimate Windows
-/// data-directory path contains these characters; an attacker who can set
-/// MOOTX01_DATA_DIR to an adversarial value would be able to inject
-/// arbitrary cmd.exe commands without this gate.
-pub fn is_cmd_safe(s: &str) -> bool {
-    !s.chars()
-        .any(|c| matches!(c, '&' | '|' | '<' | '>' | '^' | '%' | '"' | ';' | '\n' | '\r'))
-}
-
-/// Returns `true` when the string can be safely embedded in a systemd
-/// `Environment=` directive. A newline terminates the directive and allows
-/// a following line to be injected as a new stanza (e.g. `ExecStart=`).
-/// No legitimate Linux data-directory path contains CR or LF; this gate
-/// closes the injection window from a crafted MOOTX01_DATA_DIR value.
-pub fn is_systemd_safe(s: &str) -> bool {
-    !s.contains('\n') && !s.contains('\r')
-}
-
-// ---------------------------------------------------------------------------
 // Windows Task Scheduler backend
 // ---------------------------------------------------------------------------
 
 /// The logon-task action for the daemon: (execute, argument). Always uses a
-/// `cmd /c "set …&& …"` wrapper to bake `MOOTX01_VAULT` (and optionally
-/// `MOOTX01_DATA_DIR`) into the task since Task Scheduler has no per-task
-/// environment block. `vault_on` governs `MOOTX01_VAULT`: true → "1"
-/// (vault surface enabled), false → "0" (vault surface hidden).
-///
-/// Returns `Err` when `data_dir_override` contains characters that would
-/// allow cmd.exe command injection (planned hardening — fails CLOSED).
-pub fn daemon_task_command(
-    binary_path: &str,
-    data_dir_override: Option<&str>,
-    vault_on: bool,
-) -> Result<(String, String), String> {
-    if let Some(d) = data_dir_override {
-        if !is_cmd_safe(d) {
-            return Err(format!(
-                "MOOTX01_DATA_DIR value contains characters unsafe for cmd.exe interpolation: {d:?}"
-            ));
-        }
-    }
+/// `cmd /c "set …&& …"` wrapper to bake `MOOTX01_VAULT` into the task since
+/// Task Scheduler has no per-task environment block. `vault_on` governs
+/// `MOOTX01_VAULT`: true → "1" (vault surface enabled), false → "0" (vault
+/// surface hidden). The daemon finds its estate through the catalog in the
+/// platform configuration directory; nothing about the estate travels in the
+/// task.
+pub fn daemon_task_command(binary_path: &str, vault_on: bool) -> (String, String) {
     let vault_val = if vault_on { "1" } else { "0" };
     // We always bake MOOTX01_VAULT so the daemon starts with the right
     // vault posture regardless of the parent shell's environment.
-    let data_set = data_dir_override
-        .map(|d| format!("set MOOTX01_DATA_DIR={d}&& "))
-        .unwrap_or_default();
-    Ok((
+    (
         "cmd.exe".to_string(),
-        format!("/c \"{data_set}set MOOTX01_VAULT={vault_val}&& \"{binary_path}\" serve --http auto\""),
-    ))
+        format!("/c \"set MOOTX01_VAULT={vault_val}&& \"{binary_path}\" serve --http auto\""),
+    )
 }
 
 /// The logon-task action for the mgr: (execute, argument). The bearer token is
 /// intentionally not embedded in the action; moot-mgr reads it from the
-/// user-local token file written during Windows install. A cmd wrapper is used
-/// only when a non-secret data-dir override must be supplied.
-///
-/// Returns `Err` when `data_dir_override` contains characters that would
-/// allow cmd.exe command injection (planned hardening — fails CLOSED).
-pub fn mgr_task_command(
-    mgr_binary_path: &str,
-    _control_token: &str,
-    data_dir_override: Option<&str>,
-) -> Result<(String, String), String> {
-    match data_dir_override {
-        Some(d) => {
-            if !is_cmd_safe(d) {
-                return Err(format!(
-                    "MOOTX01_DATA_DIR value contains characters unsafe for cmd.exe interpolation: {d:?}"
-                ));
-            }
-            Ok((
-                "cmd.exe".to_string(),
-                format!("/c \"set MOOTX01_DATA_DIR={d}&& \"{mgr_binary_path}\" serve\""),
-            ))
-        }
-        None => Ok((mgr_binary_path.to_string(), "serve".to_string())),
-    }
+/// user-local token file written during Windows install.
+pub fn mgr_task_command(mgr_binary_path: &str, _control_token: &str) -> (String, String) {
+    (mgr_binary_path.to_string(), "serve".to_string())
 }
 
+/// The moot-mgr control token file: `<configuration>/moot-mgr/control.token`,
+/// beside the manager's store, where moot-mgr reads its default token.
 #[cfg(target_os = "windows")]
 pub fn mgr_control_token_file() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("USERPROFILE").map(|h| PathBuf::from(h).join("AppData").join("Local")))
-        .unwrap_or_else(|_| PathBuf::from("."));
-    base.join("com.mootx01.ce").join("moot-mgr").join("control.token")
+    genius_locus_kit::EstateCatalog::configuration_directory()
+        .join("moot-mgr")
+        .join("control.token")
 }
 
 #[cfg(target_os = "windows")]
@@ -170,13 +116,9 @@ fn powershell(command: &str) -> Result<String, String> {
 /// launches it.
 #[cfg(target_os = "windows")]
 fn write_hidden_launcher(task_name: &str, execute: &str, argument: &str) -> Result<String, String> {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|_| {
-            std::env::var("USERPROFILE").map(|h| PathBuf::from(h).join("AppData").join("Local"))
-        })
-        .unwrap_or_else(|_| PathBuf::from("."));
-    let dir = base.join("MOOTx01");
+    // The launcher lives in the product's configuration directory
+    // (`%LOCALAPPDATA%\com.mootx01.ce`), the one folder the install owns.
+    let dir = genius_locus_kit::EstateCatalog::configuration_directory();
     std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     let vbs_path = dir.join(format!("{task_name}.vbs"));
     // The command line the task would otherwise run directly. Quote the
@@ -317,31 +259,15 @@ pub fn restart_task(task_name: &str) -> Result<(), String> {
 }
 
 /// The daemon unit: runs `mootx01 serve --http auto` (§3 hunting form).
-/// `data_dir_override` bakes an MOOTX01_DATA_DIR Environment= line when set.
 /// `vault_on` bakes MOOTX01_VAULT=1 (vault surface enabled, the default) or
 /// MOOTX01_VAULT=0 (vault surface hidden, installed with --vault-off).
 /// MOOTX01_VAULT is always written so the resident daemon's posture is explicit
 /// and independent of whatever the launching shell's environment happens to carry.
-///
-/// Returns `Err` when `data_dir_override` contains CR or LF, which would allow
-/// injection of additional systemd directives (planned hardening — fails CLOSED).
-pub fn daemon_unit(
-    binary_path: &str,
-    data_dir_override: Option<&str>,
-    vault_on: bool,
-) -> Result<String, String> {
-    if let Some(d) = data_dir_override {
-        if !is_systemd_safe(d) {
-            return Err(format!(
-                "MOOTX01_DATA_DIR value contains newline characters unsafe for systemd Environment= interpolation: {d:?}"
-            ));
-        }
-    }
-    let env_data = data_dir_override
-        .map(|d| format!("Environment=MOOTX01_DATA_DIR={d}\n"))
-        .unwrap_or_default();
+/// The daemon finds its estate through the catalog in the platform
+/// configuration directory; nothing about the estate travels in the unit.
+pub fn daemon_unit(binary_path: &str, vault_on: bool) -> String {
     let vault_val = if vault_on { "1" } else { "0" };
-    Ok(format!(
+    format!(
         "[Unit]\n\
          Description=mootx01 resident daemon (ARIA MCP server + autonomic governor)\n\
          After=default.target\n\
@@ -351,35 +277,17 @@ pub fn daemon_unit(
          Restart=on-failure\n\
          RestartSec=2\n\
          Environment=MOOTX01_VAULT={vault_val}\n\
-         {env_data}\
          \n\
          [Install]\n\
          WantedBy=default.target\n"
-    ))
+    )
 }
 
 /// The mgr unit: runs `moot-mgr serve`. The control channel requires a
 /// bearer token (>=16 chars); registration generates one and bakes it into
 /// the unit, which is written 0600.
-///
-/// Returns `Err` when `data_dir_override` contains CR or LF, which would allow
-/// injection of additional systemd directives (planned hardening — fails CLOSED).
-pub fn mgr_unit(
-    mgr_binary_path: &str,
-    control_token: &str,
-    data_dir_override: Option<&str>,
-) -> Result<String, String> {
-    if let Some(d) = data_dir_override {
-        if !is_systemd_safe(d) {
-            return Err(format!(
-                "MOOTX01_DATA_DIR value contains newline characters unsafe for systemd Environment= interpolation: {d:?}"
-            ));
-        }
-    }
-    let env_data = data_dir_override
-        .map(|d| format!("Environment=MOOTX01_DATA_DIR={d}\n"))
-        .unwrap_or_default();
-    Ok(format!(
+pub fn mgr_unit(mgr_binary_path: &str, control_token: &str) -> String {
+    format!(
         "[Unit]\n\
          Description=moot-mgr resident host (dashboard + control channel)\n\
          After=mootx01.service\n\
@@ -389,11 +297,10 @@ pub fn mgr_unit(
          Restart=on-failure\n\
          RestartSec=2\n\
          Environment=MOOT_MGR_CONTROL_TOKEN={control_token}\n\
-         {env_data}\
          \n\
          [Install]\n\
          WantedBy=default.target\n"
-    ))
+    )
 }
 
 /// `~/.config/systemd/user/`
@@ -574,50 +481,34 @@ mod tests {
 
     #[test]
     fn daemon_unit_shape() {
-        let u = daemon_unit("/home/u/.mootx01/bin/mootx01", None, true).unwrap();
+        let u = daemon_unit("/home/u/.mootx01/bin/mootx01", true);
         assert!(u.contains("ExecStart=/home/u/.mootx01/bin/mootx01 serve --http auto"));
         assert!(u.contains("Restart=on-failure"));
         assert!(u.contains("WantedBy=default.target"));
-        assert!(!u.contains("Environment=MOOTX01_DATA_DIR"));
+        // Inherit systemd's journal stdout and inherited stderr defaults.
+        assert!(!u.contains("StandardOutput="));
+        assert!(!u.contains("StandardError="));
+        // Nothing about the estate travels in the unit: the catalog names it.
+        assert!(!u.contains("MOOTX01_DATA_DIR"));
         // vault-on baked explicitly
         assert!(u.contains("Environment=MOOTX01_VAULT=1"));
     }
 
     #[test]
-    fn daemon_unit_bakes_data_dir_override() {
-        let u = daemon_unit("/b", Some("/srv/moot"), true).unwrap();
-        assert!(u.contains("Environment=MOOTX01_DATA_DIR=/srv/moot"));
-        assert!(u.contains("Environment=MOOTX01_VAULT=1"));
-    }
-
-    #[test]
     fn daemon_unit_vault_off() {
-        let u = daemon_unit("/b", None, false).unwrap();
+        let u = daemon_unit("/b", false);
         assert!(u.contains("Environment=MOOTX01_VAULT=0"));
         assert!(!u.contains("MOOTX01_VAULT=1"));
     }
 
     #[test]
-    fn daemon_unit_rejects_newline_in_data_dir() {
-        // A CR or LF in MOOTX01_DATA_DIR would allow injecting additional
-        // systemd directives after the Environment= line.
-        assert!(daemon_unit("/b", Some("/srv/moot\nExecStart=/bin/evil"), true).is_err());
-        assert!(daemon_unit("/b", Some("/srv/moot\rExecStart=/bin/evil"), true).is_err());
-        // Legitimate paths with spaces or hyphens are safe.
-        assert!(daemon_unit("/b", Some("/srv/my-moot data"), true).is_ok());
-    }
-
-    #[test]
     fn mgr_unit_carries_token_and_ordering() {
-        let u = mgr_unit("/b/moot-mgr", "0123456789abcdef0123456789abcdef", None).unwrap();
+        let u = mgr_unit("/b/moot-mgr", "0123456789abcdef0123456789abcdef");
         assert!(u.contains("After=mootx01.service"));
         assert!(u.contains("Environment=MOOT_MGR_CONTROL_TOKEN=0123456789abcdef0123456789abcdef"));
         assert!(u.contains("ExecStart=/b/moot-mgr serve"));
-    }
-
-    #[test]
-    fn mgr_unit_rejects_newline_in_data_dir() {
-        assert!(mgr_unit("/b/moot-mgr", "token", Some("/srv\nExecStart=/bin/evil")).is_err());
+        assert!(!u.contains("StandardOutput="));
+        assert!(!u.contains("StandardError="));
     }
 
     #[test]
@@ -631,78 +522,28 @@ mod tests {
 
     #[test]
     fn daemon_task_command_shapes() {
-        // vault-on, no data override: cmd wrapper for MOOTX01_VAULT=1
-        let (exe, arg) = daemon_task_command(r"C:\Users\b\AppData\Local\Programs\mootx01\mootx01.exe", None, true).unwrap();
+        // vault-on: cmd wrapper for MOOTX01_VAULT=1
+        let (exe, arg) = daemon_task_command(r"C:\Users\b\AppData\Local\Programs\mootx01\mootx01.exe", true);
         assert_eq!(exe, "cmd.exe");
         assert!(arg.contains("set MOOTX01_VAULT=1"));
         assert!(arg.contains("serve --http auto"));
-
-        // vault-on with data override
-        let (exe, arg) = daemon_task_command(r"C:\p\mootx01.exe", Some(r"D:\moot"), true).unwrap();
-        assert_eq!(exe, "cmd.exe");
-        assert!(arg.contains(r"set MOOTX01_DATA_DIR=D:\moot&&"));
-        assert!(arg.contains("set MOOTX01_VAULT=1"));
+        // Nothing about the estate travels in the task: the catalog names it.
+        assert!(!arg.contains("MOOTX01_DATA_DIR"));
 
         // vault-off
-        let (_, arg_off) = daemon_task_command(r"C:\p\mootx01.exe", None, false).unwrap();
+        let (_, arg_off) = daemon_task_command(r"C:\p\mootx01.exe", false);
         assert!(arg_off.contains("set MOOTX01_VAULT=0"));
         assert!(!arg_off.contains("MOOTX01_VAULT=1"));
     }
 
     #[test]
-    fn daemon_task_command_rejects_cmd_injection() {
-        // & and | are cmd.exe command separators; a crafted MOOTX01_DATA_DIR
-        // containing these would allow arbitrary command execution.
-        assert!(daemon_task_command(r"C:\p\mootx01.exe", Some("D:\\moot&& evil.exe"), true).is_err());
-        assert!(daemon_task_command(r"C:\p\mootx01.exe", Some("D:\\moot|evil.exe"), true).is_err());
-        assert!(daemon_task_command(r"C:\p\mootx01.exe", Some("D:\\moot\nevil"), true).is_err());
-        // Paths with plain backslashes, spaces, and hyphens are safe.
-        assert!(daemon_task_command(r"C:\p\mootx01.exe", Some(r"D:\my data\moot"), true).is_ok());
-    }
-
-    #[test]
     fn mgr_task_command_does_not_embed_token() {
         let token = "0123456789abcdef0123456789abcdef";
-        let (exe, arg) = mgr_task_command(r"C:\p\moot-mgr.exe", token, None).unwrap();
+        let (exe, arg) = mgr_task_command(r"C:\p\moot-mgr.exe", token);
         assert_eq!(exe, r"C:\p\moot-mgr.exe");
         assert_eq!(arg, "serve");
         assert!(!exe.contains(token));
         assert!(!arg.contains(token));
         assert!(!arg.contains("MOOT_MGR_CONTROL_TOKEN"));
-
-        let (with_data_exe, with_data) = mgr_task_command(r"C:\p\moot-mgr.exe", token, Some(r"D:\moot")).unwrap();
-        assert_eq!(with_data_exe, "cmd.exe");
-        assert!(with_data.starts_with(r#"/c "set MOOTX01_DATA_DIR=D:\moot&& "#));
-        assert!(with_data.contains(r#""C:\p\moot-mgr.exe" serve"#));
-        assert!(!with_data.contains(token));
-        assert!(!with_data.contains("MOOT_MGR_CONTROL_TOKEN"));
-    }
-
-    #[test]
-    fn mgr_task_command_rejects_cmd_injection() {
-        let token = "0123456789abcdef0123456789abcdef";
-        assert!(mgr_task_command(r"C:\p\moot-mgr.exe", token, Some("D:\\moot&evil.exe")).is_err());
-        assert!(mgr_task_command(r"C:\p\moot-mgr.exe", token, Some("D:\\moot\nevil")).is_err());
-    }
-
-    #[test]
-    fn is_cmd_safe_rejects_injection_chars() {
-        // Verify each dangerous cmd.exe metacharacter is caught individually.
-        for ch in ['&', '|', '<', '>', '^', '%', '"', ';', '\n', '\r'] {
-            let s = format!("C:\\data{ch}evil");
-            assert!(!is_cmd_safe(&s), "expected is_cmd_safe to reject char {ch:?}");
-        }
-        // Normal Windows paths must pass.
-        assert!(is_cmd_safe(r"C:\Users\Alice\AppData\Local\Programs\mootx01"));
-        assert!(is_cmd_safe(r"D:\my data\moot dir"));
-    }
-
-    #[test]
-    fn is_systemd_safe_rejects_newlines() {
-        assert!(!is_systemd_safe("/srv/moot\nExecStart=/bin/evil"));
-        assert!(!is_systemd_safe("/srv/moot\r\nExecStart=/bin/evil"));
-        // Normal Linux paths must pass.
-        assert!(is_systemd_safe("/home/alice/.local/share/mootx01"));
-        assert!(is_systemd_safe("/srv/my-moot data dir"));
     }
 }

@@ -40,6 +40,7 @@ let package = Package(
             targets: ["CognitionKit"]
         ),
     ],
+    traits: [],
     dependencies: [
         .package(path: "../GeniusLocusKit"),
         .package(path: "../NeuronKit"),
@@ -104,7 +105,7 @@ let package = Package(
             // Shared conformance vectors — one artifact read by the Swift
             // CognitionVectorConformanceTests suite AND by
             // rust/tests/cognition_conformance.rs (BYCOPY_MIGRATION_001).
-            resources: [.copy("Fixtures")]
+            resources: [.copy("Fixtures")],
         ),
     ]
 )

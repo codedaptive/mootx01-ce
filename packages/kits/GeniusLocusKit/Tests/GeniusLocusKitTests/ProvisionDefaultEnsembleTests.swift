@@ -7,9 +7,9 @@
 // CorpusEnsemble.defaultEnsemble(). THIS test proves the production seam: that
 // `GeniusLocusKit.provision(...)` — called with NO explicit embedding argument,
 // exactly as every production caller (EstateAdmin, the ARIA_MCP server's
-// provision path) calls it — now wires the Corpus on the five-signal ensemble.
+// provision path) calls it — now wires the Corpus on the default ensemble (RI-only by default, plan 70BC55F3, 2026-09-05).
 //
-// If the provision default ever silently regresses to a single provider, the
+// If the provision default ever silently changes, the
 // per-signal provenance assertion below fails immediately.
 //
 // Determinism: `now` is fixed; all five providers are deterministic. No Date()
@@ -19,11 +19,12 @@ import Testing
 import Foundation
 import LocusKit
 import CorpusKit
+import CorpusKitWholeRecordDense
 import PersistenceKit
 import PersistenceKitSQLite
 @testable import GeniusLocusKit
 
-@Suite("Provision wires the five-signal default ensemble", .serialized)
+@Suite("Provision wires the configured default ensemble", .serialized)
 struct ProvisionDefaultEnsembleTests {
 
     private let now = Date(timeIntervalSince1970: 1_700_000_000)
@@ -99,19 +100,18 @@ struct ProvisionDefaultEnsembleTests {
         return (corpus, clusters)
     }
 
-    // The provisioned Corpus must hold ALL FIVE default signals — proving the
-    // provision default is the ensemble, not a single provider.
-    @Test("provision default wires all five honest signals")
-    func provisionWiresFiveSignals() async throws {
+    // Verify that the provision default wires the expected default ensemble:
+    // RI and LSA are both always-on.
+    @Test("provision default wires the configured default ensemble")
+    func provisionWiresDefaultEnsemble() async throws {
         let kit = GeniusLocusKit()
         let (corpus, _) = try await provisionAndTrain(kit)
 
-        let perSignal = await corpus.floatNearestPerSignal(
-            query: "orbit spacecraft mission", limit: 3)
-        let modelIDs = perSignal.map(\.modelID)
+        // The held provider slots, in slot order, as the engine reports them.
+        let modelIDs = await corpus.providerGenerations().map(\.modelID)
         #expect(
-            modelIDs == ["random-indexing-v1", "ppmi-v1", "lsa-v1", "nmf-v1", "fdc-v1"],
-            "provision default must wire the five-signal ensemble, got \(modelIDs)")
+            modelIDs == ["random-indexing-v1", "lsa-v1"],
+            "provision default must wire RI + LSA (always-on ensemble), got \(modelIDs)")
     }
 
     // Recall un-pins through the provision path: varied queries → distinct top hits.

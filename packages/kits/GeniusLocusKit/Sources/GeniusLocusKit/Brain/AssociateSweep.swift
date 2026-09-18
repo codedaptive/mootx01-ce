@@ -9,8 +9,8 @@
 //
 // ProximityScanCore encapsulates the two-lane kNN scan (drawer-keyed lane
 // under the caller's modelID, corpus lane under the corpus's own modelID),
-// within-pass symmetric pair dedup, and weight computation. It is the shared
-// inner loop that replaces the duplicated scan in VectorSimilaritySignal.
+// and within-pass symmetric pair dedup. It is the shared inner loop that
+// replaces the duplicated scan in VectorSimilaritySignal.
 //
 // associateSweep drives ProximityScanCore and then:
 //   - loads all existing active associations upfront → settled set
@@ -20,7 +20,7 @@
 
 import Foundation
 import LocusKit
-import VectorKit
+import SynapseKit
 import CorpusKit
 
 // MARK: - Report
@@ -45,6 +45,21 @@ public struct AssociateSweepReport: Sendable {
     public let written: Int
     /// Pairs skipped because an active association already existed.
     public let deduplicated: Int
+    /// (probe, lane) scans whose ENTIRE ladder pool was one distance tie
+    /// group (Bob ladder ruling 2026-08-26, rung 4): no clean cut exists,
+    /// so the probe contributed zero pairs from that lane rather than a
+    /// run-dependent subset. Non-zero values are surfaced on the dream
+    /// association line — the disclosure, not a silent absorption.
+    public let nonUniqueProbes: Int
+
+    public init(probed: Int, candidatePairs: Int, written: Int,
+                deduplicated: Int, nonUniqueProbes: Int = 0) {
+        self.probed = probed
+        self.candidatePairs = candidatePairs
+        self.written = written
+        self.deduplicated = deduplicated
+        self.nonUniqueProbes = nonUniqueProbes
+    }
 }
 
 // MARK: - Shared proximity scan core
@@ -93,8 +108,9 @@ internal enum ProximityScanCore {
     ///   - proximityThreshold: Maximum Hamming distance (0-256) for a pair to qualify.
     ///   - corpus: Optional corpus engine for Lane 2. `nil` scans Lane 1 only.
     ///   - neighboursPerProbe: kNN k value. Defaults to `ProximityScanCore.neighboursPerProbe`.
-    /// - Returns: Unique candidate pairs `(a: String, b: String, weight: Double)`, sorted
-    ///   with a < b. Weight = 1 − (distance / 256).
+    /// - Returns: Unique candidate pairs `(a: String, b: String)` sorted with
+    ///   a < b, plus the count of (probe, lane) scans abandoned as non-unique
+    ///   (ladder rung 4 — see `ladderNeighbours`).
     static func candidates(
         in vectorStore: VectorStore,
         itemIDs: [String],
@@ -102,8 +118,9 @@ internal enum ProximityScanCore {
         proximityThreshold: Int,
         corpus: CorpusContentEngine?,
         neighboursPerProbe: Int = ProximityScanCore.neighboursPerProbe
-    ) async -> [(a: String, b: String, weight: Double)] {
-        var result: [(a: String, b: String, weight: Double)] = []
+    ) async -> (pairs: [(a: String, b: String)], nonUniqueProbes: Int) {
+        var result: [(a: String, b: String)] = []
+        var nonUniqueProbes = 0
         // Track seen pairs as canonical-key strings to deduplicate (A,B) vs
         // (B,A) from symmetric findNearest results. Both lanes key on DRAWER ids.
         var seenPairs: Set<String> = []
@@ -116,12 +133,13 @@ internal enum ProximityScanCore {
             guard let probeEngram = try? await vectorStore.getVector(
                 itemID: itemID, modelID: modelID) else { continue }
 
-            guard let matches = try? await vectorStore.findNearest(
-                probe: probeEngram,
-                modelID: modelID,
-                limit: neighboursPerProbe) else { continue }
+            let ladder = await ladderNeighbours(units: neighboursPerProbe) { limit in
+                try await vectorStore.findNearest(
+                    probe: probeEngram, modelID: modelID, limit: limit)
+            }
+            if ladder.nonUnique { nonUniqueProbes += 1 }
 
-            for match in matches {
+            for match in ladder.matches {
                 guard match.itemID != itemID else { continue }
                 guard match.distance <= proximityThreshold else { continue }
 
@@ -130,18 +148,9 @@ internal enum ProximityScanCore {
                 let key = pairKey(itemID, match.itemID)
                 guard seenPairs.insert(key).inserted else { continue }
 
-                // Weight: 1 − distance/256. Identical vectors → 1.0.
-                // ADMIN — weight is derived free from the already-computed
-                // proximity-gate Hamming distance (no extra origin-side work
-                // to obtain it). It is carried on the AssociationFrame but
-                // VESTIGIAL past the `associate` verb, which has no weight
-                // column to persist it into. Retained on purpose — a pre-2.0
-                // gauntlet experiment will test whether weight improves recall.
-                let weight = 1.0 - Double(match.distance) / 256.0
                 result.append(
                     (a: min(itemID, match.itemID),
-                     b: max(itemID, match.itemID),
-                     weight: weight))
+                     b: max(itemID, match.itemID)))
             }
         }
 
@@ -154,24 +163,81 @@ internal enum ProximityScanCore {
             for itemID in itemIDs {
                 guard let probeEngram = try? await vectorStore.getVector(
                     itemID: itemID, modelID: corpusModelID) else { continue }
-                guard let matches = try? await vectorStore.findNearest(
-                    probe: probeEngram,
-                    modelID: corpusModelID,
-                    limit: neighboursPerProbe) else { continue }
-                for match in matches {
+                let ladder = await ladderNeighbours(units: neighboursPerProbe) { limit in
+                    try await vectorStore.findNearest(
+                        probe: probeEngram, modelID: corpusModelID, limit: limit)
+                }
+                if ladder.nonUnique { nonUniqueProbes += 1 }
+                for match in ladder.matches {
                     guard match.itemID != itemID,
                           match.distance <= proximityThreshold else { continue }
                     let key = pairKey(itemID, match.itemID)
                     guard seenPairs.insert(key).inserted else { continue }
                     result.append(
                         (a: min(itemID, match.itemID),
-                         b: max(itemID, match.itemID),
-                         weight: 1.0 - Double(match.distance) / 256.0))
+                         b: max(itemID, match.itemID)))
                 }
             }
         }
 
-        return result
+        return (result, nonUniqueProbes)
+    }
+
+    /// Ladder cut (Bob ruling 2026-08-26): a per-probe neighbour list whose
+    /// truncation NEVER lands inside a distance tie group, so the pair set is
+    /// identical across estate provisionings even when candidates carry
+    /// byte-identical vectors (a distance+vecHash tie falls to the per-run
+    /// random UUID — the ordering is per-run stable but not cross-run stable,
+    /// REPLAY_DRIFT_RCA final addendum).
+    ///
+    /// Rungs, with `units` = the caller's neighbour budget:
+    ///   1. Fetch units×3; cut at the FIRST distance boundary at or after
+    ///      `units` (keep everything above the cut).
+    ///   2. No boundary there → fetch units×6; look again.
+    ///   3. Still none → cut at the LAST distance boundary INSIDE `units`
+    ///      (the longest determinate prefix, shorter than the budget).
+    ///   4. No boundary anywhere (the whole pool is one tie group) → return
+    ///      NOTHING and flag non-unique; the caller surfaces the count. Zero
+    ///      pairs beats a run-dependent subset.
+    /// A pool the store exhausts (fewer rows than requested) is complete —
+    /// nothing was cut, so it is returned whole. Every rung is deterministic
+    /// because the underlying order is (distance, vecHash, key) and cuts land
+    /// only on distance boundaries.
+    /// `fetch` runs the lane's `findNearest` at the given limit — a closure
+    /// so this file never spells the ambiguous `Engram` name (see the
+    /// type-resolution note in the file header).
+    static func ladderNeighbours(
+        units: Int,
+        fetch: (Int) async throws -> [VectorMatch]
+    ) async -> (matches: [VectorMatch], nonUnique: Bool) {
+        // Rung 1 (units×3), rung 2 (units×6).
+        for factor in [3, 6] {
+            let limit = units * factor
+            guard let matches = try? await fetch(limit) else {
+                return ([], false)
+            }
+            // Exhausted pool: the store returned everything it has — the
+            // result is complete, no cut happened, nothing to disambiguate.
+            if matches.count < limit { return (matches, false) }
+            // First distance boundary at or after `units`.
+            for i in units..<matches.count
+            where matches[i].distance != matches[i - 1].distance {
+                return (Array(matches[..<i]), false)
+            }
+            // No boundary in this rung's pool — climb (or fall through to
+            // rung 3 after the ×6 attempt).
+            if factor == 6 {
+                // Rung 3: the longest determinate prefix INSIDE `units`.
+                for i in stride(from: units - 1, through: 1, by: -1)
+                where matches[i].distance != matches[i - 1].distance {
+                    return (Array(matches[..<i]), false)
+                }
+                // Rung 4: one giant tie group — non-unique neighbourhood.
+                return ([], true)
+            }
+        }
+        // Unreachable: the loop always returns on factor == 6.
+        return ([], true)
     }
 }
 
@@ -194,8 +260,12 @@ public extension GeniusLocusKit {
     /// has no stochastic steps. Probe order is `ORDER BY filed_at DESC, item_id ASC`
     /// from `VectorStore.recentItemIDs(limit:)` — a total order (no tied sort
     /// keys survive: filed_at ties break on item_id). `findNearest` returns
-    /// `(distance ASC, itemID ASC)` — a total order documented in
-    /// `VectorStore.swift`. `settledSet` is checked, never iterated.
+    /// `(distance ASC, vecHash ASC, itemID ASC)` — SYNAPSEKIT_SPEC 1.9.0's
+    /// content-stable total order, so the k-cut keeps the SAME neighbours
+    /// across independent provisionings of the same content (a UUID-only
+    /// tie-break varied per estate build and made the association graph —
+    /// and the matrix priors derived from it — drift between replay runs;
+    /// REPLAY_DRIFT_RCA 2026-08-26). `settledSet` is checked, never iterated.
     /// Zero calls to shuffle/randomElement/arc4random in this file or in
     /// `VectorSimilaritySignal.swift`. Same-seed estate + same vector store →
     /// identical association output on repeated calls, subject to INSERT-OR-IGNORE
@@ -251,7 +321,7 @@ public extension GeniusLocusKit {
         // modelID default: "minilm-v6" — the drawer-keyed lane default, same as
         // huntContradictions. Corpus lane 2 mined when a corpus is registered.
         let modelID = "minilm-v6"
-        let candidates = await ProximityScanCore.candidates(
+        let scan = await ProximityScanCore.candidates(
             in: vectorStore,
             itemIDs: itemIDs,
             modelID: modelID,
@@ -259,6 +329,7 @@ public extension GeniusLocusKit {
             corpus: corpusKits[handle],
             neighboursPerProbe: ProximityScanCore.neighboursPerProbe
         )
+        let candidates = scan.pairs
 
         var written = 0
         var deduplicated = 0
@@ -269,7 +340,9 @@ public extension GeniusLocusKit {
             } else {
                 // Write directly through the estate verb surface (B-1 compliant).
                 // LocusKit.AssociateFrame disambiguated from GeniusLocusKit.AssociateFrame.
-                let frame = LocusKit.AssociateFrame(a: pair.a, b: pair.b, weight: pair.weight)
+                // Weight: 0.0 — no weight column exists in the associations table;
+                // the verb accepts and discards the field.
+                let frame = LocusKit.AssociateFrame(a: pair.a, b: pair.b, weight: 0.0)
                 do {
                     _ = try await estate.associate(frame, now: now)
                     written += 1
@@ -289,6 +362,7 @@ public extension GeniusLocusKit {
             candidatePairs: candidates.count,
             written: written,
             deduplicated: deduplicated
-        )
+        ,
+            nonUniqueProbes: scan.nonUniqueProbes)
     }
 }

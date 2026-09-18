@@ -17,7 +17,7 @@
 //
 // METRIC NAMESPACE
 // All metrics are under `geniuslocus.estate.*` to distinguish these per-estate
-// rollups from per-kit metrics emitted by LocusKit, VectorKit, and CorpusKit
+// rollups from per-kit metrics emitted by LocusKit, SynapseKit, and CorpusKit
 // (which use `locus.*`, `vector.*`, `corpus.*` respectively).
 //
 // CALLER-SUPPLIED TIMESTAMPS
@@ -74,14 +74,14 @@ enum GLKMetricName {
     /// Tagged: `estate_id`, `verb`.
     static let verbError = "geniuslocus.estate.verb_error"
 
-    /// The dense float lane (Lane D) was dark for a recall query.
+    /// The whole-record dense float lane was dark for a recall query
+    /// (whole-record float lane).
     ///
-    /// Emitted by Step 4.5 of the RecallDirector when `floatNearest` returns
-    /// any outcome other than `.hits`. The `reason` tag carries the dark-lane
-    /// classification: `providerOptOut`, `noFloatRows`, or `storeError`. Use
-    /// this counter to detect misconfigured estates where the dense lane is
-    /// expected but consistently dark (e.g. provider not wired up after ingest).
-    /// Tagged: `estate_id`, `reason`.
+    /// Emitted by Step 4.5 of the RecallDirector when a held signal's
+    /// per-signal outcome is anything other than `.hits`. The `reason` tag
+    /// carries the dark-lane classification: `providerOptOut`, `noFloatRows`,
+    /// `vocabMiss`, or `storeError`; `model_id` names the signal.
+    /// Tagged: `estate_id`, `reason`, `model_id`.
     static let denseLaneDark = "glk.recall.dense_lane_dark"
 
     // MARK: — Stage-degradation counters (P1 fail-loud degradation contract)
@@ -166,6 +166,21 @@ enum GLKMetricName {
     /// equal-weight RRF fusion across lane scores; it fell back to the raw
     /// (`buffer.final`) lane-normalised score. Tagged: `estate_id`.
     static let unionBestRRFFallback = "glk.recall.unionBest.rrf_degraded"
+
+    /// `discriminative` was requested for the `locusOnly` lane, which has no
+    /// dense corpus lane for discrimination factor computation; the lane returned
+    /// raw bitmap-evaluator ordering. Tagged: `estate_id`.
+    static let locusOnlyDiscriminativeFallback = "glk.recall.locusOnly.discriminative_degraded"
+
+    /// `discriminative` was requested for the `corpusOnly` lane, which does not
+    /// compute the discrimination factor in this path; the lane fell back to RRF
+    /// fusion of BM25 + vector. Tagged: `estate_id`.
+    static let corpusOnlyDiscriminativeFallback = "glk.recall.corpusOnly.discriminative_degraded"
+
+    /// `discriminative` was requested for the `hybrid` lane, which does not
+    /// compute the discrimination factor in this path; the lane fell back to
+    /// three-way RRF fusion. Tagged: `estate_id`.
+    static let hybridDiscriminativeFallback = "glk.recall.hybrid.discriminative_degraded"
 }
 
 // MARK: - Shared emit helper

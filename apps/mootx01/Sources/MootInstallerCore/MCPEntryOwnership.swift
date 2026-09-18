@@ -13,9 +13,11 @@
 // name and path and never auto-removed; silently deleting someone's
 // dev-rig wiring is worse than leaving a stale entry behind.
 //
-// This file is the single, shared classification used by both the CLI
-// installer's act-mode dedupe (Installer.dedupeDirectEntry, InstallCommand)
-// and its ownership-aware uninstall path (Installer.uninstall). The plugin's
+// This file is the single, shared classification used by the CLI
+// installer's act-mode dedupe (Installer.dedupeDirectEntry, InstallCommand),
+// its ownership-aware uninstall path (Installer.uninstall), and the
+// upgrade's Codex direct-entry cleanup
+// (Installer.cleanupRedundantCodexDirectEntry). The plugin's
 // SessionStart hook (tools/moot-packager/Data/canonical/hooks/moot_hooks.py,
 // EE) implements the same "our server name present" detection independently
 // in Python — it is read-only and never edits config, so it does not need
@@ -43,12 +45,6 @@ public enum MCPEntryOwnership: Equatable, Sendable {
 /// access; callers resolve the entry's presence/absence and hand the decoded
 /// object (or env map) to `classify`.
 public enum MCPEntryClassifier {
-    /// Env keys whose presence on an existing entry marks it as pointing at
-    /// a non-default database: `serve` resolves the default
-    /// data dir unless one of these overrides it, so an entry carrying
-    /// neither is on the default database by construction.
-    public static let overrideEnvKeys: [String] = ["MOOTX01_DATA_DIR", "ARIA_MCP_SQLITE_PATH"]
-
     /// Classify a JSON-decoded `mcpServers.<name>` entry (the object value,
     /// e.g. `{"command":...,"args":[...],"env":{...}}` or
     /// `{"type":"http","url":...}`). Callers pass only entries already known
@@ -65,37 +61,24 @@ public enum MCPEntryClassifier {
     /// before its env is even considered; anything else is `.foreign` —
     /// reported by name, never removed — regardless of its env block.
     ///
-    /// Once the shape check passes: HTTP entries (no `env` key at all in
-    /// every shape this installer writes) cannot disagree about the
-    /// database — they reach whatever estate the resident daemon holds
-    /// — so the absence of an `env` map is itself
-    /// `.oursDefault`. Command/stdio entries (the proxy bridge, or a legacy
-    /// bare `serve`) are `.oursDefault` only when their `env` carries
-    /// neither override key.
+    /// Once the shape check passes, the one way an entry selects a
+    /// non-default estate is the `--db` argument: the estate catalog names
+    /// every estate, and no environment value selects one, so an entry's
+    /// `env` block never bears on which estate it reaches. HTTP entries reach
+    /// whatever estate the resident daemon holds. Everything that passes the
+    /// shape check without `--db` is `.oursDefault`.
     public static func classify(entry: [String: Any]) -> MCPEntryOwnership {
         guard looksLikeOurs(entry) else {
             return .foreign(reason: "entry shape does not resolve to the mootx01 binary or the loopback daemon endpoint")
         }
-        // Args-level override (#67): `serve --db <name>` selects a non-default
-        // estate without using either env key. Removing such an entry silently
-        // collapses the user's estate isolation into the default estate. Check
-        // args BEFORE env so both override mechanisms are honoured.
-        if let args = entry["args"] as? [String], args.contains("--db") {
+        // `serve --db <value>` selects another estate. Removing such an entry
+        // would silently collapse the user's estate isolation into the
+        // default estate. Both ArgumentParser spellings count: the
+        // space-separated `--db <value>` (a standalone "--db" element) and the
+        // equals form `--db=<value>` (a single element).
+        if let args = entry["args"] as? [String],
+           args.contains(where: { $0 == "--db" || $0.hasPrefix("--db=") }) {
             return .foreign(reason: "args override: --db")
-        }
-        guard let env = entry["env"] as? [String: Any] else { return .oursDefault }
-        return classify(env: env)
-    }
-
-    /// Classify from an already-extracted env map (used by the TOML/YAML
-    /// merge paths, whose entries are not decoded through JSONSerialization).
-    /// Callers of this overload have already established the entry's shape
-    /// out of band (there is no raw entry object to shape-check here) — see
-    /// `classify(entry:)` for the shape-checked JSON entry point.
-    public static func classify(env: [String: Any]) -> MCPEntryOwnership {
-        let overriding = overrideEnvKeys.filter { env[$0] != nil }
-        guard overriding.isEmpty else {
-            return .foreign(reason: "env override: \(overriding.joined(separator: ", "))")
         }
         return .oursDefault
     }
@@ -146,6 +129,63 @@ public enum MCPEntryClassifier {
 /// Detects whether a Claude-Code-family plugin is installed, by reading the
 /// user's own plugin registry. Read-only — never writes.
 public enum PluginDetector {
+    /// Codex keeps plugin enablement in config.toml and materializes marketplace
+    /// packages under ~/.codex/plugins/cache/<marketplace>/<name>/<version>.
+    /// Both signals are required before the installer lets the plugin own MCP.
+    public static func isCodexPluginEnabled(pluginID: String, homeDirectory: URL) -> Bool {
+        let config = homeDirectory.appendingPathComponent(".codex/config.toml")
+        guard let text = try? String(contentsOf: config, encoding: .utf8) else { return false }
+        let acceptedHeaders = ["[plugins.\"\(pluginID)\"]", "[plugins.'\(pluginID)']"]
+        var inTable = false
+        for line in text.components(separatedBy: "\n") {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("[") && trimmed.hasSuffix("]") {
+                inTable = acceptedHeaders.contains(trimmed)
+                continue
+            }
+            guard inTable, !trimmed.hasPrefix("#"), let equal = trimmed.firstIndex(of: "=") else { continue }
+            let key = trimmed[..<equal].trimmingCharacters(in: .whitespaces)
+            let value = trimmed[trimmed.index(after: equal)...].trimmingCharacters(in: .whitespaces)
+            if key == "enabled" { return value == "true" }
+        }
+        return false
+    }
+
+    public static func codexInstalledVersion(
+        pluginID: String = "mootx01@mootx01", homeDirectory: URL
+    ) -> String? {
+        let parts = pluginID.split(separator: "@", maxSplits: 1).map(String.init)
+        guard parts.count == 2 else { return nil }
+        let root = homeDirectory
+            .appendingPathComponent(".codex/plugins/cache", isDirectory: true)
+            .appendingPathComponent(parts[1], isDirectory: true)
+            .appendingPathComponent(parts[0], isDirectory: true)
+        guard let versions = try? FileManager.default.contentsOfDirectory(
+            at: root, includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]) else { return nil }
+        return versions.compactMap { directory -> String? in
+            // Codex can install a shared marketplace whose historical source
+            // exposes only the Claude discovery manifest. Prefer the native
+            // Codex manifest, but recognize that installed legacy package so
+            // upgrade-time ownership dedupe can converge it safely.
+            for relative in [".codex-plugin/plugin.json", ".claude-plugin/plugin.json"] {
+                let manifest = directory.appendingPathComponent(relative)
+                guard let data = try? Data(contentsOf: manifest),
+                      let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+                else { continue }
+                if let version = object["version"] as? String { return version }
+            }
+            return nil
+        }.sorted(by: versionGreaterThan).first
+    }
+
+    public static func ownsCodexConnection(
+        pluginID: String, homeDirectory: URL
+    ) -> Bool {
+        isCodexPluginEnabled(pluginID: pluginID, homeDirectory: homeDirectory)
+            && codexInstalledVersion(pluginID: pluginID, homeDirectory: homeDirectory) != nil
+    }
+
     /// Returns `true` when `pluginID` (e.g. `"mootx01@mootx01"`) has at
     /// least one installed entry in `~/.claude/plugins/installed_plugins.json`.
     ///
@@ -211,7 +251,22 @@ public enum PluginDetector {
         installedEntry(pluginID: pluginID, homeDirectory: homeDirectory)?["version"] as? String
     }
 
-    private static func installedEntry(pluginID: String, homeDirectory: URL) -> [String: Any]? {
+    /// True only when `~/.claude/settings.json` records an EXPLICIT
+    /// `enabledPlugins[pluginID] = false`. An absent file, absent map or
+    /// absent entry is not a recorded decision and reads `false` here —
+    /// this answers "did the user turn it off", not "is it on", which is
+    /// `isPluginEnabled`'s question. The cache refresh reads this before it
+    /// reinstalls and puts the disable back afterwards.
+    public static func recordedPluginDisable(pluginID: String, homeDirectory: URL) -> Bool {
+        let path = homeDirectory.appendingPathComponent(".claude/settings.json", isDirectory: false)
+        guard let data = try? Data(contentsOf: path),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let enabled = root["enabledPlugins"] as? [String: Any]
+        else { return false }
+        return (enabled[pluginID] as? Bool) == false
+    }
+
+    static func installedEntry(pluginID: String, homeDirectory: URL) -> [String: Any]? {
         let path = homeDirectory
             .appendingPathComponent(".claude/plugins/installed_plugins.json", isDirectory: false)
         guard let data = try? Data(contentsOf: path),
@@ -221,6 +276,21 @@ public enum PluginDetector {
               let first = entries.first as? [String: Any]
         else { return nil }
         return first
+    }
+
+    private static func versionGreaterThan(_ a: String, _ b: String) -> Bool {
+        func parts(_ value: String) -> [Int] {
+            value.split(separator: ".").map {
+                Int($0.prefix(while: \.isNumber)) ?? 0
+            }
+        }
+        let lhs = parts(a), rhs = parts(b)
+        for index in 0..<max(lhs.count, rhs.count) {
+            let l = index < lhs.count ? lhs[index] : 0
+            let r = index < rhs.count ? rhs[index] : 0
+            if l != r { return l > r }
+        }
+        return a > b
     }
 }
 

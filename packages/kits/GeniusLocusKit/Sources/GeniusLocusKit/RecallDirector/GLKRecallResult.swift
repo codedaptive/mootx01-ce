@@ -12,6 +12,11 @@ public struct GLKRecallResult: Sendable {
     /// Hits in the order the active lane and scoring returned them.
     public let hits: [RecallHit]
 
+    /// Primary rows excluded only by LocusKit's default-injected sensitivity
+    /// ceiling. An explicit sensitivity filter disables the default, so its
+    /// value is then zero. The excluded rows never leave LocusKit.
+    public let withheldBySensitivity: Int
+
     /// Dense float lane (Lane D) status for this query. Non-nil when the lane
     /// was dark (did not contribute hits), carrying the observable reason as a
     /// short string. Nil when the lane ran and returned hits (`.unionBest` only)
@@ -104,6 +109,117 @@ public struct GLKRecallResult: Sendable {
     /// stream for per-estate health dashboards.
     public let degradedStages: [String]
 
+    /// Per-lane 1-based rank of every candidate the active lane(s) surfaced,
+    /// keyed by drawer id, then by lane key ("locus", "bm25", "hamming",
+    /// "dense" — `RecallTraceItem.laneRankOrder`). Rank is the candidate's
+    /// position in that lane's final ranked candidate list BEFORE fusion.
+    /// An id absent from a lane's list has no entry under that lane key.
+    ///
+    /// Consumed by the director's external-origin trace write (W2.5 Track
+    /// R(a)): the surfaced hits' entries are packed into
+    /// `recall_trace.laneRanks` so the optimizer can attribute a used
+    /// trace to the lane(s) that found it without re-running the query.
+    /// Empty for lanes that collect no per-lane candidates.
+    public let laneRanks: [String: [String: Int]]
+
+    /// The §8.3 lattice anchor derived from `request.queryText` by
+    /// `QueryLatticeAnchor.derive(from:)` inside the Recall Director's
+    /// query-sketch compiler (M4: single-derivation point).
+    ///
+    /// Non-nil when `queryText` was non-blank AND the derivation produced
+    /// a non-empty anchor (a recognised FDC code or Wikidata Q-ID). nil when
+    /// `queryText` is nil, blank, or unanchorable.
+    ///
+    /// This is the canonical read point for the query's lattice anchor.
+    /// Callers (CognitionKit's PreciseRecall and TemporalRecall) MUST read
+    /// it here rather than calling `QueryLatticeAnchor.derive(from:)` on the
+    /// original query text — the doctrine is one seam, never parallel paths
+    /// to the same leaf.
+    ///
+    /// Not populated by the `locusOnly` and `nodeTreeNative` lanes (nil). The
+    /// corpus, hybrid, and unionBest lanes always populate it when a non-blank
+    /// query text was present. Passthrough constructions (anomalous-filter,
+    /// trace-failure) carry it through unchanged.
+    public let queryLatticeAnchor: QueryLatticeAnchor.Anchor?
+
+    /// What the cross-encoder stage did for this request
+    /// (`CrossEncoderStage`), or nil when the request carried no
+    /// `rerankDirective`. Bypass and degrade are reported here too; a
+    /// degraded apply also appends `recall.cross_encoder_degraded` to
+    /// `degradedStages`.
+    public let crossEncoder: CrossEncoderReport?
+
+    /// The preference key of the recall route that transformed this request,
+    /// or nil when no route fired. Day one: `"cross_encoder_routing"` when
+    /// Route 1 applied its degradable rerank directive; nil for all other
+    /// recalls.
+    public let route: String?
+
+    /// Typed evidence for a strict transcript rerank request. Generic recalls
+    /// remain nil and retain the existing cross-encoder report contract.
+    public var strictTranscriptRerank: StrictTranscriptRerankOutcome? {
+        crossEncoder?.strictTranscript
+    }
+
     /// Convenience accessor — the hydrated `Drawer` for each hit that has one.
     public var drawers: [LocusKit.Drawer] { hits.compactMap(\.drawer) }
+
+    /// Memberwise initializer. Callers above the GLK layer (e.g. the
+    /// AriaMcpKit packager wiring path) use this to construct a synthetic
+    /// result without going through the Recall Director. `denseLaneStatus`
+    /// defaults to nil when the float lane did not run.
+    public init(
+        request: GLKRecallRequest,
+        plan: RecallPlan,
+        unionProfile: RecallUnionProfile?,
+        hits: [RecallHit],
+        withheldBySensitivity: Int = 0,
+        denseLaneStatus: String? = nil,
+        degradedStages: [String],
+        laneRanks: [String: [String: Int]],
+        queryLatticeAnchor: QueryLatticeAnchor.Anchor?,
+        crossEncoder: CrossEncoderReport? = nil,
+        route: String? = nil
+    ) {
+        self.request = request
+        self.plan = plan
+        self.unionProfile = unionProfile
+        self.hits = hits
+        self.withheldBySensitivity = withheldBySensitivity
+        self.denseLaneStatus = denseLaneStatus
+        self.degradedStages = degradedStages
+        self.laneRanks = laneRanks
+        self.queryLatticeAnchor = queryLatticeAnchor
+        self.crossEncoder = crossEncoder
+        self.route = route
+    }
+    /// A copy of this result with `request`, `hits`, `degradedStages`,
+    /// `withheldBySensitivity`, `crossEncoder`, and/or `route` replaced, with
+    /// every other field (including the WholeRecordDense lane status, when
+    /// compiled) carried over. The director's filter, cross-encoder,
+    /// trace-failure and degradation paths and the ARIA anchor-exclusion path
+    /// derive results through this so no caller has to spell the
+    /// trait-dependent field.
+    ///
+    /// `route` uses the double-optional pattern: pass `nil` to keep the
+    /// current value (default), `.some(nil)` to clear it, or `.some("key")`
+    /// to set a new value. This matches the `crossEncoder` parameter.
+    public func replacing(
+        request: GLKRecallRequest? = nil,
+        hits: [RecallHit]? = nil,
+        degradedStages: [String]? = nil,
+        withheldBySensitivity: Int? = nil,
+        crossEncoder: CrossEncoderReport?? = nil,
+        route: String?? = nil
+    ) -> GLKRecallResult {
+        GLKRecallResult(
+            request: request ?? self.request, plan: plan, unionProfile: unionProfile,
+            hits: hits ?? self.hits,
+            withheldBySensitivity: withheldBySensitivity ?? self.withheldBySensitivity,
+            denseLaneStatus: denseLaneStatus,
+            degradedStages: degradedStages ?? self.degradedStages,
+            laneRanks: laneRanks, queryLatticeAnchor: queryLatticeAnchor,
+            crossEncoder: crossEncoder ?? self.crossEncoder,
+            route: route ?? self.route)
+    }
 }

@@ -8,6 +8,10 @@
 //   3. Legacy recall shim returns the same result as explicit locusOnly request
 //   4. locusOnly lane populates only .locusBitmap in each hit's sources
 //   5. corpusOnly throws recallLaneUnavailable when failClosed + no corpus registered
+//
+// M4 (GLKRecallResult.queryLatticeAnchor — single-derivation doctrine):
+//  33. locusOnly carries nil queryLatticeAnchor (no sketch compiled)
+//  34. unionBest (no corpus) carries the pre-computed anchor in queryLatticeAnchor
 //   6. corpusOnly calls only CorpusKit and vector lanes (no locusBitmap)
 //   7. hybrid hits contain both locus and corpus sources on a seeded estate
 //   8. frontierK never exceeds 256 in any mode
@@ -40,6 +44,14 @@
 //  28. allFiveBufferColumnsNonZeroWhenAllSignalSourcesRegistered — combined proof that fieldFit/coOccurrence/
 //      temporal (step 5.6) and graph/preference (step 5.7) buffer columns all carry non-zero evidence when a
 //      seeded MatrixTier + ConstantGraphCache + ConstantPreferenceStore are registered on the same estate.
+//
+// RecallDirectorDiscriminativeScoringTests (M3 discriminative mode):
+//  29. glkRecallScoringHasFourCases — CaseIterable now covers raw, rrf, matrixAware, discriminative
+//  30. discriminativeScoringSucceedsAndReturnsHits — discriminative on unionBest with locus-only lane succeeds
+//  31. discriminativeScoringDiffersFromRrfOnSaturatedDenseLane — when identical-content items saturate the
+//      dense lane (denseDiscriminationFactor < 1), discriminative scores ≤ rrf scores with at least one strictly <
+//  32. rrfScoringUnchangedByDiscriminativeModeAddition — rrf scores on an estate without a dense lane
+//      equal discriminative scores (factor=1.0 when no discrimination data available)
 
 import Testing
 import Foundation
@@ -47,7 +59,7 @@ import LocusKit
 import CorpusKit
 import PersistenceKit
 import PersistenceKitInMemory
-import VectorKit
+import SynapseKit
 import SubstrateTypes
 @testable import GeniusLocusKit
 
@@ -169,11 +181,11 @@ struct RecallDirectorTests {
 
     // MARK: - 2. GLKRecallScoring Codable round-trip
 
-    /// All three `GLKRecallScoring` cases must survive a JSON encode/decode round-trip.
+    /// All four `GLKRecallScoring` cases must survive a JSON encode/decode round-trip.
     @Test
     func glkRecallScoringDecodesAllThreeCases() throws {
-        // Verify CaseIterable covers exactly 3 cases.
-        #expect(GLKRecallScoring.allCases.count == 3)
+        // Verify CaseIterable covers exactly 4 cases (raw, rrf, matrixAware, discriminative).
+        #expect(GLKRecallScoring.allCases.count == 4)
 
         let encoder = JSONEncoder()
         let decoder = JSONDecoder()
@@ -188,7 +200,7 @@ struct RecallDirectorTests {
     // MARK: - 3. Legacy shim returns same result as explicit locusOnly request
 
     /// Calling `recall(_ handle:, _ frame:)` (legacy shim) and
-    /// `recall(_ handle:, GLKRecallRequest(mode:.locusOnly, ...))` must
+    /// `recall(_ handle:, GLKRecallRequest(mode:.locusOnly, scoring:.raw, limit:50, fallback:.failClosed, origin:.internal))` must
     /// return identical drawer arrays for the same frame.
     ///
     /// This pins the shim's contract: it is a thin adapter, not an
@@ -207,7 +219,8 @@ struct RecallDirectorTests {
             mode: .locusOnly,
             scoring: .raw,
             limit: 50,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let directorResult = try await kit.recall(handle, request)
 
@@ -229,7 +242,8 @@ struct RecallDirectorTests {
             mode: .locusOnly,
             scoring: .raw,
             limit: 50,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -263,7 +277,8 @@ struct RecallDirectorTests {
             mode: .corpusOnly,
             scoring: .raw,
             limit: 50,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         do {
             _ = try await kit.recall(handle, request)
@@ -288,7 +303,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 50,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "corpusOnly should return at least one hit for seeded content")
@@ -316,7 +332,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 50,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "hybrid should return at least one hit for seeded estate")
@@ -344,7 +361,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 1000,
             fallback: .failClosed,
-            queryText: "fruit mango"
+            queryText: "fruit mango",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(result.plan.frontierK <= 256,
@@ -356,7 +374,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 1,
             fallback: .failClosed,
-            queryText: "fruit"
+            queryText: "fruit",
+            origin: .internal
         )
         let resultSmall = try await kit.recall(handle, requestSmall)
         #expect(resultSmall.plan.frontierK >= 64,
@@ -378,7 +397,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         let expectedFrontierK = min(max(limit * 4, 64), 256)
@@ -404,7 +424,8 @@ struct RecallDirectorTests {
             mode: .corpusOnly,
             scoring: .raw,
             limit: 50,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         // Must not throw; must return at least one hit from the locus lane.
@@ -432,7 +453,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 10,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "unionBest should return at least one hit for seeded estate")
@@ -457,7 +479,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: 10,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         let ids = result.hits.map(\.id)
@@ -480,7 +503,8 @@ struct RecallDirectorTests {
             scoring: .raw,
             limit: limit,
             fallback: .failClosed,
-            queryText: "fruit mango recall"
+            queryText: "fruit mango recall",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(result.hits.count <= limit,
@@ -679,7 +703,8 @@ struct RecallDirectorDenseSignalTests {
             scoring: .rrf,
             limit: 10,
             fallback: .failClosed,
-            queryText: "mango fruit recall"
+            queryText: "mango fruit recall",
+            origin: .internal
         )
     }
 
@@ -934,7 +959,8 @@ struct RecallDirector004Tests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 3,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -967,7 +993,8 @@ struct RecallDirector004Tests {
             mode: .corpusOnly,
             scoring: .raw,
             limit: 10,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         // Degraded to locusOnly — must return the captured drawer.
@@ -1058,7 +1085,8 @@ struct RecallDirector004Tests {
                 mode: .unionBest,
                 scoring: .matrixAware,
                 limit: limit,
-                fallback: .allowDegraded
+                fallback: .allowDegraded,
+                origin: .internal
             )
             let result = try await kit.recall(handle, request)
             #expect(result.hits.count <= limit,
@@ -1121,7 +1149,8 @@ struct RecallDirector004Tests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 2,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -1190,7 +1219,8 @@ struct RecallDirector004Tests {
         let plan = RecallPlan(effectiveMode: .unionBest, frontierK: 64, weights: .uniform)
 
         let lines = explainer.explain(hit: hit, sketch: sketch,
-                                      plan: plan, scoring: .matrixAware)
+                                      plan: plan, scoring: .matrixAware,
+                                      agreement: 0.02)
 
         // Must return exactly 4 lines per the spec output format.
         #expect(lines.count == 4, "explain must return 4 lines, got \(lines.count)")
@@ -1201,6 +1231,10 @@ struct RecallDirector004Tests {
         // Score line must mention non-zero components.
         #expect(lines[1].contains("locus="),    "score line must include locus component")
         #expect(lines[1].contains("bm25="),     "score line must include bm25 component")
+        // COL-1: every column renders, zero or not, plus the agreement bonus and the final.
+        #expect(lines[1].contains("temporal=0.00"), "score line must render zero columns")
+        #expect(lines[1].contains("agreement=0.02"), "score line must include the agreement bonus")
+        #expect(lines[1].contains("final=0.780"), "score line must include the fused final")
         #expect(lines[1].contains("fieldFit="), "score line must include fieldFit component")
         // Mode line must include both mode and scoring.
         #expect(lines[2].contains("unionBest"),   "mode line must include effectiveMode")
@@ -1303,7 +1337,8 @@ struct RecallDirectorSafetyTests {
             scoring: .raw,
             limit: 10,
             fallback: .failClosed,
-            queryText: "apple mango tombstone"
+            queryText: "apple mango tombstone",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -1363,7 +1398,8 @@ struct RecallDirectorSafetyTests {
             mode: .unionBest,
             scoring: .raw,
             limit: 10,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -1420,7 +1456,8 @@ struct RecallDirectorSafetyTests {
             mode: .unionBest,
             scoring: .raw,
             limit: 10,
-            fallback: .allowDegraded
+            fallback: .allowDegraded,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
 
@@ -1471,7 +1508,8 @@ struct RecallDirectorSafetyTests {
                     filterChain: [.unconfirmed], hydrationLevel: level,
                     limit: 5, ordering: .byCaptureTimeDesc),
                 mode: .unionBest, scoring: .raw, limit: 5,
-                fallback: .allowDegraded)
+                fallback: .allowDegraded,
+                origin: .internal)
             return try await kit.recall(handle, request).hits
         }
 
@@ -1539,7 +1577,8 @@ struct RecallAPI001Tests {
             mode: .locusOnly,
             scoring: .raw,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "locusOnly recall should return at least one hit")
@@ -1590,7 +1629,8 @@ struct RecallAPI001Tests {
             mode: .locusOnly,
             scoring: .rrf,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         // Must not throw; .rrf on a single lane degrades to raw ordering.
         let result = try await kit.recall(handle, request)
@@ -1662,7 +1702,8 @@ struct RecallDirectorGraphShingleTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         // With a registered GraphCache returning 0.8, every hit's graph score
@@ -1699,7 +1740,8 @@ struct RecallDirectorGraphShingleTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty)
@@ -1749,7 +1791,8 @@ struct RecallDirectorGraphShingleTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 2,  // ask for only 2: shingle should suppress one near-dup
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(result.hits.count == 2, "limit=2 must yield exactly 2 hits")
@@ -1795,7 +1838,8 @@ struct RecallDirectorGraphShingleTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         // Must not throw or crash. With bitmapOnly, content is "" so
         // sourceMask Jaccard fallback is used. All hits must have empty content.
@@ -1965,7 +2009,8 @@ struct RecallDirectorAdaptiveLambdaTests {
             mode: .unionBest,
             scoring: .rrf,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let rrfResult = try await kit.recall(handle, rrfRequest)
         #expect(!rrfResult.hits.isEmpty, ".rrf scoring on unionBest must return hits")
@@ -1977,7 +2022,8 @@ struct RecallDirectorAdaptiveLambdaTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let matrixResult = try await kit.recall(handle, matrixRequest)
         #expect(!matrixResult.hits.isEmpty, ".matrixAware scoring on unionBest must return hits")
@@ -2031,8 +2077,12 @@ struct RecallDirectorAdaptiveLambdaTests {
         let d2Op = UInt64(bitPattern: (allDrawers.first(where: { $0.id == d2.id })?.operationalBitmap ?? 0))
         var matrixSeeded = false
         if d1Op != 0, d2Op != 0, d1Op != d2Op {
-            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
-            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            // locusSlice orders by filedAt DESC, so d2 (captured last) is first
+            // and becomes the recall query. Seed T[d2Op → d1Op] so that the
+            // scorer's T[(queryCoord=d2Op, candidateCoord=d1Op, lag)] lookup
+            // finds the prior and returns a non-zero temporal score.
+            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
             matrix.applyTemporalEvent(source: src, target: tgt, deltaMinutes: 2, delta: 1000)
             matrixSeeded = true
         }
@@ -2044,7 +2094,8 @@ struct RecallDirectorAdaptiveLambdaTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 2,
-            fallback: .failClosed
+            fallback: .failClosed,
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "matrixAware scoring on unionBest must return hits")
@@ -2111,13 +2162,17 @@ struct RecallDirectorAdaptiveLambdaTests {
         // feedAuditLog removed: auditLog(for:) reads directly from storage.
         let auditLog = try await kit.auditLog(for: handle)
 
-        // rebuildTemporal is the method under test: it uses
-        // TemporalCausalityFold to produce T-matrix deltas from the audit log.
-        var matrix = MatrixTier.rebuildTemporal(from: auditLog)
+        // fullRebuild runs rebuild (F/O/C + liveRowCount) then rebuildTemporal
+        // (T + temporalWatermarkHLC) in one call. The test validates both the
+        // temporal watermark and the temporal scoring pipeline:
+        //   - liveRowCount must be > 0 so the scorer's normalization guard
+        //     does not short-circuit to 0 (rebuildTemporal alone leaves it 0).
+        //   - temporalWatermarkHLC must advance to confirm the T fold ran.
+        var matrix = MatrixTier.fullRebuild(from: auditLog)
 
         // The watermark must advance — at minimum past .zero.
         #expect(matrix.temporalWatermarkHLC > HLC.zero,
-            "rebuildTemporal must advance temporalWatermarkHLC when log is non-empty")
+            "fullRebuild must advance temporalWatermarkHLC when log is non-empty")
 
         // Inject a strong temporal prior matching the captured drawers'
         // operational bitmaps (non-zero + distinct). This gives the recall
@@ -2128,8 +2183,12 @@ struct RecallDirectorAdaptiveLambdaTests {
 
         var matrixSeeded = false
         if d1Op != 0, d2Op != 0, d1Op != d2Op {
-            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
-            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            // locusSlice orders by filedAt DESC, so d2 (captured last) is first
+            // and becomes the recall query. Seed T[d2Op → d1Op] so that the
+            // scorer's T[(queryCoord=d2Op, candidateCoord=d1Op, lag)] lookup
+            // finds the prior and returns a non-zero temporal score.
+            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
             // Seed count of 1000 ensures a dominant prior signal in the scorer.
             matrix.applyTemporalEvent(source: src, target: tgt, deltaMinutes: 2, delta: 1000)
             matrixSeeded = true
@@ -2146,7 +2205,8 @@ struct RecallDirectorAdaptiveLambdaTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 2,
-            fallback: .failClosed)
+            fallback: .failClosed,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         #expect(!result.hits.isEmpty,
@@ -2285,7 +2345,8 @@ struct RecallByIDHydrationEquivalenceTests {
             scoring: .rrf,
             limit: 50,
             fallback: .failClosed,
-            queryText: "mango recall fruit"
+            queryText: "mango recall fruit",
+            origin: .internal
         )
         let result = try await kit.recall(handle, request)
         #expect(!result.hits.isEmpty, "hybrid recall must return seeded frontier hits")
@@ -2335,7 +2396,8 @@ struct RecallByIDHydrationEquivalenceTests {
             scoring: .rrf,
             limit: 50,
             fallback: .failClosed,
-            queryText: "mango recall fruit"
+            queryText: "mango recall fruit",
+            origin: .internal
         )
         let first = try await kit.recall(handle, request)
         let second = try await kit.recall(handle, request)
@@ -2448,8 +2510,12 @@ struct RecallDirectorMatrixConformanceTests {
         // the temporal assertion (it correctly stays 0.0 — no prior found).
         var temporalWasSeeded = false
         if d1Op != 0, d2Op != 0, d1Op != d2Op {
-            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
-            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            // locusSlice orders by filedAt DESC, so d2 (captured last) is first
+            // and becomes the recall query. Seed T[d2Op → d1Op] so that the
+            // scorer's T[(queryCoord=d2Op, candidateCoord=d1Op, lag)] lookup
+            // finds the prior and returns a non-zero temporal score.
+            let src = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d2Op))
+            let tgt = MatrixValueCoord(fieldPath: "operational", value: .bitmap(d1Op))
             matrix.applyTemporalEvent(source: src, target: tgt, deltaMinutes: 2, delta: 1000)
             temporalWasSeeded = true
         }
@@ -2474,7 +2540,8 @@ struct RecallDirectorMatrixConformanceTests {
             mode: .unionBest,
             scoring: .matrixAware,
             limit: 10,
-            fallback: .failClosed)
+            fallback: .failClosed,
+            origin: .internal)
         let result = try await kit.recall(handle, request)
 
         #expect(!result.hits.isEmpty,
@@ -2594,6 +2661,23 @@ struct RecallDirectorLocusRankDeterminismTests {
         #expect(r.last?.id == dMid.id,
                 "middle-content drawer must be rank 1 after sort-then-cap")
     }
+
+    /// The locus ramp divides by the frontier size, not by the slice length:
+    /// three rows at frontierK 64 score 1.0, 63/64, 62/64 (each exact in
+    /// Float), never 1, 2/3, 1/3. Twin of Rust
+    /// `locus_rank_score_divides_by_frontier_k_not_slice_length`.
+    @Test
+    func locusRankScoreDividesByFrontierKNotSliceLength() {
+        let sliceLen = 3
+        let scores = (0..<sliceLen).map { GeniusLocusKit.locusRankScore(rank: $0, frontierK: 64) }
+        #expect(scores == [1.0, 0.984375, 0.96875])
+        // The slice-length ramp: a different shape, not a constant multiple.
+        let bySlice = (0..<sliceLen).map { Float(sliceLen - $0) / Float(sliceLen) }
+        #expect(scores != bySlice)
+        // Total on the inputs the clamps cover.
+        #expect(GeniusLocusKit.locusRankScore(rank: 0, frontierK: 0) == 0)
+        #expect(GeniusLocusKit.locusRankScore(rank: 5, frontierK: 4) == 0)
+    }
 }
 
 // MARK: - RRF fusion determinism tests (MXE-JI-7)
@@ -2670,5 +2754,317 @@ struct RRFFuseNDeterminismTests {
         #expect(r.count == 2)
         #expect(r[0].id == "aaa", "id fallback: aaa < zzz so aaa must rank first on a tie")
         #expect(r[1].id == "zzz")
+    }
+}
+
+/// W2.5 Track R(b) — provisioned lane-weight seam.
+@Suite("Provisioned lane weights (W2.5 R(b))")
+struct ProvisionedLaneWeightsTests {
+
+    @Test("merge precedence: shape-explicit > provisioned > neutral 1.0")
+    func mergePrecedence() {
+        let shape = RecallShape(laneWeights: ["bm25": 2.0])
+        let provisioned: [String: Float] = ["bm25": 0.25, "hamming": 0.5]
+        let merged = GeniusLocusKit.mergedLaneWeights(
+            shape: shape, provisioned: provisioned,
+            laneKeys: ["locus", "bm25", "hamming"])
+        #expect(merged == [1.0, 2.0, 0.5])
+    }
+
+    @Test("no shape and no provision keeps the empty fast path")
+    func fastPathPreserved() {
+        let merged = GeniusLocusKit.mergedLaneWeights(
+            shape: nil, provisioned: [:], laneKeys: ["bm25", "hamming"])
+        #expect(merged.isEmpty)
+    }
+
+    @Test("no shape with a provision resolves provisioned defaults")
+    func provisionAloneApplies() {
+        let merged = GeniusLocusKit.mergedLaneWeights(
+            shape: nil, provisioned: ["hamming": 0.5], laneKeys: ["bm25", "hamming"])
+        #expect(merged == [1.0, 0.5])
+    }
+}
+
+// MARK: - RecallDirectorDiscriminativeScoringTests (M3)
+
+/// Covers the `discriminative` scoring mode added in M3.
+///
+/// Tests:
+///  29. GLKRecallScoring.allCases.count == 4 (pinned count with discriminative)
+///  30. discriminative succeeds and returns hits on a locus-only estate
+///  31. discriminative scores ≤ rrf scores when the dense lane is saturated
+///  32. rrf scores are byte-identical to discriminative when no dense lane is present
+@Suite("RecallDirector M3 discriminative scoring mode", .serialized)
+struct RecallDirectorDiscriminativeScoringTests {
+
+    // MARK: - 29. Case count pin
+
+    /// CaseIterable must cover exactly four cases after M3. This is a compile-time
+    /// structural pin: if any future commit drops or renames a case the test fails.
+    @Test("GLKRecallScoring.allCases.count == 4 after discriminative added")
+    func glkRecallScoringHasFourCases() {
+        #expect(GLKRecallScoring.allCases.count == 4,
+                "Expected raw, rrf, matrixAware, discriminative — got \(GLKRecallScoring.allCases.count)")
+        let names = Set(GLKRecallScoring.allCases.map { $0.rawValue })
+        #expect(names.contains("discriminative"), "discriminative case must be present")
+    }
+
+    // MARK: - 30. Discriminative succeeds on a locus-only estate
+
+    /// `.discriminative` on a `unionBest` recall must not throw and must return
+    /// hits when a drawer exists. No corpus registered — discrimination factor is
+    /// 1.0 (no dense lane = no spreads to average), so scores equal buffer.final.
+    @Test("discriminative scoring on unionBest locus-only estate succeeds")
+    func discriminativeScoringSucceedsAndReturnsHits() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "test-disc-basic-\(UUID())")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        let frame = CaptureFrame(content: "discriminative basic test content",
+                                 channel: .typed, room: "disc-test",
+                                 latticeAnchor: .udc("000"),
+                                 addedBy: "disc-test", embeddingModelID: "test-v1")
+        _ = try await kit.capture(handle, frame)
+
+        let request = GLKRecallRequest(
+            frame: RecallFrame(filterChain: [.unconfirmed],
+                               hydrationLevel: .structured,
+                               ordering: .byCaptureTimeDesc),
+            mode: .unionBest,
+            scoring: .discriminative,
+            limit: 10,
+            fallback: .failClosed,
+            origin: .internal
+        )
+        let result = try await kit.recall(handle, request)
+        #expect(!result.hits.isEmpty,
+                ".discriminative scoring on unionBest must return hits when a drawer exists")
+        try await kit.close(handle)
+    }
+
+    // MARK: - 31. Discriminative differs from rrf on saturated dense lane
+
+    /// When every seeded item has identical content (deterministic embedding →
+    /// identical vectors → cosine spread ≈ 0), `denseDiscriminationFactor` ≈ 0
+    /// and `.discriminative` scores are ≈ 0 × buffer.final ≈ 0, while `.rrf`
+    /// scores equal buffer.final > 0.  At least one discriminative score must
+    /// be strictly less than the corresponding rrf score.
+    ///
+    /// Uses `EmbeddingModel.deterministic` (the FNV-1a + FloatSimHash model)
+    /// so embeddings are consistent across runs without a CoreML dependency.
+    @Test("discriminative scores < rrf scores when dense lane is saturated")
+    func discriminativeScoringDiffersFromRrfOnSaturatedDenseLane() async throws {
+        // Set up an estate with corpus and vector so the dense lane is live.
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "test-disc-saturated-\(UUID())")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Build a standalone corpus + vector store (same pattern as DenseSignalTests).
+        let corpusStorage = InMemoryStorage(configuration:
+            EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        let corpus = try await CorpusContentEngine(
+            standaloneOn: corpusStorage, models: [.deterministic])
+        let vsStorage = InMemoryStorage(configuration:
+            EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        try await vsStorage.migrate(to: VectorStore.schemaDeclaration)
+        let vectorStore = VectorStore(storage: vsStorage)
+        let modelID = await corpus.modelID
+        let now = Date(timeIntervalSinceReferenceDate: 1_500_000)
+
+        // File five items with IDENTICAL content so their embeddings are
+        // identical and cosine similarities collapse to a single value
+        // (maxSim == minSim → spread = 0 → denseDiscriminationFactor = 0).
+        let identicalContent = "saturated dense test content identical"
+        for _ in 0..<5 {
+            let captureFrame = CaptureFrame(
+                content: identicalContent, channel: .typed,
+                room: "disc-saturated", latticeAnchor: .udc("000"),
+                addedBy: "disc-test", embeddingModelID: modelID)
+            let drawer = try await kit.capture(handle, captureFrame)
+            try await corpus.ingest(identicalContent, contentID: drawer.id, now: now)
+            let engram = try await corpus.embed(identicalContent)
+            try await vectorStore.addVector(
+                itemID: drawer.id, engram: engram,
+                modelID: modelID, modelVersion: "1.0", filedAt: now)
+        }
+        await kit.registerCorpus(corpus, for: handle)
+        await kit.registerVectorStore(vectorStore, for: handle)
+
+        let baseFrame = RecallFrame(filterChain: [.unconfirmed],
+                                    hydrationLevel: .structured,
+                                    ordering: .byCaptureTimeDesc)
+
+        // Run .rrf (baseline: uses buffer.final, unmodified by discrimination factor).
+        let rrfRequest = GLKRecallRequest(
+            frame: baseFrame, mode: .unionBest, scoring: .rrf,
+            limit: 10, fallback: .failClosed, queryText: identicalContent,
+            origin: .internal)
+        let rrfResult = try await kit.recall(handle, rrfRequest)
+
+        // Run .discriminative on the same estate.
+        let discRequest = GLKRecallRequest(
+            frame: baseFrame, mode: .unionBest, scoring: .discriminative,
+            limit: 10, fallback: .failClosed, queryText: identicalContent,
+            origin: .internal)
+        let discResult = try await kit.recall(handle, discRequest)
+
+        #expect(!rrfResult.hits.isEmpty, "rrf must return hits")
+        #expect(!discResult.hits.isEmpty, "discriminative must return hits")
+        #expect(rrfResult.hits.count == discResult.hits.count,
+                "hit count must be the same (only ranking differs)")
+
+        // Build score maps by id for comparison. Explicit [RowID: Float] annotation
+        // is required — Swift 6's strict concurrency mode cannot infer Key/Value when
+        // the closure body accesses a protocol-typed property chain.
+        let rrfScoreByID: [RowID: Float] = Dictionary(uniqueKeysWithValues:
+            rrfResult.hits.map { ($0.id, $0.score.final) })
+        let discScoreByID: [RowID: Float] = Dictionary(uniqueKeysWithValues:
+            discResult.hits.map { ($0.id, $0.score.final) })
+
+        // Every discriminative score must be ≤ the corresponding rrf score.
+        var foundStrictlyLess = false
+        for (id, rrfScore) in rrfScoreByID {
+            if let discScore = discScoreByID[id] {
+                #expect(discScore <= rrfScore + 1e-6,
+                        "discriminative score must be ≤ rrf score for id \(id): disc=\(discScore) rrf=\(rrfScore)")
+                if discScore < rrfScore - 1e-6 {
+                    foundStrictlyLess = true
+                }
+            }
+        }
+        // On a saturated dense lane (identical content), at least one score must be strictly less.
+        #expect(foundStrictlyLess,
+                "at least one discriminative score must be strictly < rrf on a saturated dense lane")
+
+        try await kit.close(handle)
+    }
+
+    // MARK: - 32. rrf unchanged when no dense lane
+
+    /// Without a corpus registered, `denseDiscriminationFactor` stays 1.0
+    /// (no discrimination spreads to average). In that case `.discriminative`
+    /// computes `1.0 × buffer.final == buffer.final`, which equals `.rrf`.
+    /// This pins that the `.rrf` code path is byte-identical post-M3.
+    @Test("rrf and discriminative are equal when no dense lane (factor=1.0)")
+    func rrfScoringUnchangedByDiscriminativeModeAddition() async throws {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "test-rrf-unchanged-\(UUID())")
+        let storage = InMemoryStorage(
+            configuration: EstateConfiguration(estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+
+        // Two drawers, no corpus registered — locus-only lane.
+        for content in ["rrf-parity-alpha content", "rrf-parity-beta content"] {
+            let f = CaptureFrame(content: content, channel: .typed,
+                                 room: "rrf-parity", latticeAnchor: .udc("000"),
+                                 addedBy: "rrf-parity", embeddingModelID: "test-v1")
+            _ = try await kit.capture(handle, f)
+        }
+
+        let baseFrame = RecallFrame(filterChain: [.unconfirmed],
+                                    hydrationLevel: .structured,
+                                    ordering: .byCaptureTimeDesc)
+
+        let rrfResult = try await kit.recall(handle, GLKRecallRequest(
+            frame: baseFrame, mode: .unionBest, scoring: .rrf,
+            limit: 10, fallback: .failClosed, origin: .internal))
+        let discResult = try await kit.recall(handle, GLKRecallRequest(
+            frame: baseFrame, mode: .unionBest, scoring: .discriminative,
+            limit: 10, fallback: .failClosed, origin: .internal))
+
+        #expect(!rrfResult.hits.isEmpty, "rrf must return hits")
+        #expect(rrfResult.hits.count == discResult.hits.count,
+                "hit count must match")
+
+        // Scores must be equal (factor 1.0 → discriminative == rrf).
+        for (rrfHit, discHit) in zip(rrfResult.hits, discResult.hits) {
+            #expect(rrfHit.id == discHit.id,
+                    "hit order must match: rrf=\(rrfHit.id) disc=\(discHit.id)")
+            #expect(abs(rrfHit.score.final - discHit.score.final) < 1e-6,
+                    "rrf and discriminative scores must be equal when no dense lane: rrf=\(rrfHit.score.final) disc=\(discHit.score.final)")
+        }
+        try await kit.close(handle)
+    }
+}
+
+// MARK: - M4 — GLKRecallResult.queryLatticeAnchor single-derivation tests
+
+/// Verifies that `GLKRecallResult.queryLatticeAnchor` is populated by the Recall
+/// Director rather than by callers, enforcing the single-derivation doctrine.
+///
+/// Tests 33–34 from the file header.
+@Suite("M4 GLKRecallResult.queryLatticeAnchor (single-derivation)")
+struct RecallDirectorLatticeAnchorTests {
+
+    /// Open a bare in-memory estate with one drawer, no corpus or vector store.
+    private func openBareEstate() async throws -> (GeniusLocusKit, EstateHandle) {
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "owner-m4-anchor-tests")
+        let config = EstateConfiguration(estateID: UUID(), backend: .inMemory)
+        let storage = InMemoryStorage(configuration: config)
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        let frame = CaptureFrame(
+            content: "rio de janeiro travel trip brazil",
+            channel: .typed,
+            room: "m4-anchor-tests",
+            latticeAnchor: .udc("000"),
+            addedBy: "m4-anchor-tests",
+            embeddingModelID: "test-model-v1"
+        )
+        _ = try await kit.capture(handle, frame)
+        return (kit, handle)
+    }
+
+    /// Test 33: locusOnly carries nil — no sketch is compiled for pure bitmap recalls.
+    @Test("locusOnly lane: queryLatticeAnchor is nil (no sketch compiled)")
+    func locusOnlyCarriesNilAnchor() async throws {
+        let (kit, handle) = try await openBareEstate()
+        let frame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc)
+        let result = try await kit.recall(handle, GLKRecallRequest(
+            frame: frame, mode: .locusOnly, scoring: .raw,
+            limit: 10, fallback: .failClosed,
+            queryText: "Where is Rio de Janeiro?",
+            origin: .internal))
+        // locusOnly compiles no sketch — anchor derivation never runs.
+        #expect(result.queryLatticeAnchor == nil)
+        try await kit.close(handle)
+    }
+
+    /// Test 34: unionBest (no corpus registered) still compiles the no-corpus sketch
+    /// path and derives the anchor exactly once inside the director.
+    ///
+    /// GOLDEN PIN (M4 — cross-port): "Where is Rio de Janeiro?" anchors to QID Q8678.
+    /// The Rust twin asserts the same in
+    /// genius_locus_kit/tests/m4_lattice_anchor_parity.rs.
+    @Test("unionBest (no corpus): queryLatticeAnchor carries pre-computed anchor")
+    func unionBestPopulatesAnchor() async throws {
+        let (kit, handle) = try await openBareEstate()
+        let frame = RecallFrame(
+            filterChain: [.unconfirmed],
+            hydrationLevel: .structured,
+            ordering: .byCaptureTimeDesc)
+        let result = try await kit.recall(handle, GLKRecallRequest(
+            frame: frame, mode: .unionBest, scoring: .raw,
+            limit: 10, fallback: .allowDegraded,
+            // Golden-pin query: "rio de janeiro" is a phrase in QIDFacts → Q8678.
+            queryText: "Where is Rio de Janeiro?",
+            origin: .internal))
+        // The no-corpus sketch path runs QueryLatticeAnchor.derive once and stores
+        // the result. "rio de janeiro" matches QIDFacts → Q8678 (cross-port pin).
+        #expect(result.queryLatticeAnchor != nil)
+        #expect(result.queryLatticeAnchor?.qid == "Q8678")
+        #expect(result.queryLatticeAnchor?.udcCode == "")
+        try await kit.close(handle)
     }
 }

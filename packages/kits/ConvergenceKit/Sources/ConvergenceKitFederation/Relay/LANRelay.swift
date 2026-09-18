@@ -58,17 +58,18 @@
 //   Apple-only for F1. Rust LANRelay is F2 scope (FED-OD-16).
 //
 // Spec references:
-//   - docs/analysis/FED_OD_CHARTER.md §V1, §V2 (Kong review, 2026-07-18)
+//   - FED_OD_CHARTER §V1, §V2 (Kong review, 2026-07-18)
 //   - docs/reference/CONVERGENCEKIT_INTERFACE.md §4 Relay abstraction
 // Pairing and synchronization remain on-demand and explicitly authorized.
 
 import Foundation
+import MootProductIdentity
 import ConvergenceKit
 import os
 
 private let logger = Logger(
-    subsystem: "com.mootx01.synckit.federation",
-    category: "LANRelay"
+    subsystem: MootProductIdentity.Logging.subsystem,
+    category: "ConvergenceKitFederation.LANRelay"
 )
 
 // MARK: - LANRelayTransport (seam)

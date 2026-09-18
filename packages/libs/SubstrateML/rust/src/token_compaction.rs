@@ -10,10 +10,6 @@
 // map. See the Swift file for the full rule rationale (§5.3 priority
 // order; conservative drop tables; fidelity guards).
 
-/// The Phase 1 distillation format + pipeline contract identifier
-/// (SPEC §4). Mirrors Swift `DistillationPipelineVersion.current`.
-pub const DISTILLATION_PIPELINE_VERSION: &str = "p1";
-
 /// Single-word drops (rule 2), matched against the lowercase word core.
 /// MUST stay identical to Swift `TokenCompaction.stopwords`.
 const STOPWORDS: &[&str] = &[

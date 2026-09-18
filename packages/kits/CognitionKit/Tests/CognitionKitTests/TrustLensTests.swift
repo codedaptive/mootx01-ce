@@ -150,7 +150,7 @@ struct TrustLensTests {
             content: "the substrate is local-first; sync is optional via ConvergenceKit",
             sourceType: .canonical)
         let c2 = try await capture(kit, handle,
-            content: "vector storage uses sqlite-vec; embeddings live in VectorKit",
+            content: "vector storage uses sqlite-vec; embeddings live in SynapseKit",
             sourceType: .canonical)
         // One derived drawer — lower trust, but still in the recall set.
         _ = try await capture(kit, handle,

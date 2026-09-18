@@ -16,14 +16,11 @@
 // `.deny` (nested under a `permissions` object), NOT top-level `allowedTools`.
 //
 // Each tool name takes the MCP prefix form: `mcp__mootx01__<tool_name>`,
-// e.g. `mcp__mootx01__moot_memory_search`. Since the v1.0.15 plugin-owned
-// connection, Claude Code ALSO routes calls made through the
-// installed plugin under a second, distinct namespace:
-// `mcp__plugin_mootx01_mootx01__<tool_name>` (empirically confirmed against
-// a live `~/.claude/settings.json` carrying both prefixes side by side —
-// the plugin prefix shape is `mcp__plugin_<marketplace>_<plugin>__`, and
-// this installer's marketplace and plugin are both named `mootx01`, see
-// `registerClaudeCodeMarketplace`). A rule written for only one namespace
+// e.g. `mcp__mootx01__moot_memory_search`. Claude Code ALSO routes calls made
+// through the installed plugin under a second, distinct namespace:
+// `mcp__plugin_mootx01_memory__<tool_name>` (v1.1.0+: the plugin registers
+// its server under the key `"memory"`, giving the concrete prefix
+// `mcp__plugin_mootx01_memory__`). A rule written for only one namespace
 // matches zero calls made through the other connection — the exact "moot is
 // unusable from permission prompts" defect this file now fixes: BOTH
 // namespaces must carry every tier entry, or whichever connection Claude
@@ -53,6 +50,7 @@
 // entry the user explicitly placed in `deny` (see its doc comment).
 
 import Foundation
+import AriaMCP
 
 /// Manages the Claude Code permissions lists for ARIA tools.
 public enum PermissionsWriter {
@@ -64,23 +62,55 @@ public enum PermissionsWriter {
     public static let mcpPrefix = "mcp__mootx01__"
 
     /// The MCP tool prefix Claude Code uses for calls routed through the
-    /// installed plugin (plugin-owned MCP connections, v1.0.15). Shape:
-    /// `mcp__plugin_<marketplace>__<plugin>__` — empirically confirmed
-    /// against a live settings.json (both this installer's marketplace and
-    /// plugin are named `mootx01`, so the concrete prefix is
-    /// `mcp__plugin_mootx01_mootx01__`). A settings file with rules ONLY
+    /// installed plugin (v1.1.0+: the plugin registers its server under the
+    /// key `"memory"`, giving the concrete prefix
+    /// `mcp__plugin_mootx01_memory__`). A settings file with rules ONLY
     /// under `mcpPrefix` matches nothing for a plugin-routed call — every
     /// tier write in this file must cover BOTH prefixes.
-    public static let pluginMcpPrefix = "mcp__plugin_mootx01_mootx01__"
+    public static let pluginMcpPrefix = "mcp__plugin_mootx01_memory__"
+
+    /// Pre-v1.1.0 plugin prefix. The plugin registered its server under
+    /// `"mootx01"` before this release. Kept ONLY in the remove list so
+    /// `remove` migrates away existing allow/deny entries on upgrade; never
+    /// written by any grant path.
+    public static let legacyPluginMcpPrefix = "mcp__plugin_mootx01_mootx01__"
 
     /// Every namespace prefix a tool name must be written under.
     public static let allPrefixes = [mcpPrefix, pluginMcpPrefix]
+
+    /// Prefixes consulted when READING a tool's existing tier for
+    /// cross-namespace inheritance — `allPrefixes` plus the legacy
+    /// pre-v1.1.0 plugin prefix. A user's explicit allow/ask/deny recorded
+    /// under the legacy prefix (before the plugin's server key renamed to
+    /// `"memory"`) is a decision about the capability, not about a string
+    /// that happened to change; `mergeTiered`'s inheritance must see it or
+    /// the legacy decision is silently overridden by the classifier
+    /// default on the current prefixes. This is READ-only: `allPrefixes`
+    /// remains the WRITE set, so a grant path never creates a new legacy
+    /// entry — only `remove` still strips one that already exists.
+    public static let allReadPrefixes = allPrefixes + [legacyPluginMcpPrefix]
+
+    /// Tool names retired from the installer authorization inventory. This is a
+    /// defensive floor applied to whatever tool list is injected at the call site
+    /// (both production call sites inject the in-process linked projection, which
+    /// does not carry a retired name today). The filter guards against a future
+    /// regression where a retired name re-enters the projection by mistake.
+    public static let retiredToolNames: Set<String> = [
+        "moot_file_packet",
+        "moot_packet_get",
+        "moot_packet_list",
+        "moot_packet_lineage",
+    ]
+
+    private static func authorizedToolNames(from toolNames: [String]) -> [String] {
+        toolNames.filter { !retiredToolNames.contains($0) }
+    }
 
     /// `mcp__mootx01__<name>` for each injected tool name (direct namespace
     /// only — used by the allow-all `merge`, which historically only wrote
     /// this one prefix; see `mergeTiered` for the both-namespaces writer).
     public static func permissionEntries(toolNames: [String]) -> [String] {
-        toolNames.map { "\(mcpPrefix)\($0)" }
+        authorizedToolNames(from: toolNames).map { "\(mcpPrefix)\($0)" }
     }
 
     // MARK: - Tier classification
@@ -111,14 +141,32 @@ public enum PermissionsWriter {
     /// what it can reach — the tool call itself is a read).
     private static let readTools: Set<String> = [
         "moot_estate_status", "moot_estate_ping", "moot_drain_status",
+        // C3/A6: audit-derived timing metrics — pure audit-log read.
+        "moot_timing_report",
         "moot_list_lenses", "moot_list_recipes",
+        // Grounded synthesis reads candidates and generates text; it writes
+        // no drawer, packet, journal, meta, trace or reward (FRZ-3 read set).
+        "moot_synthesize",
         "moot_vault_status", "moot_vault_job",
         "moot_memory_search", "moot_memory_get", "moot_memory_list",
-        "moot_recall_precise", "moot_recall_shaped", "moot_recall_distilled",
-        "moot_recall_vague",
+        "moot_recall_precise", "moot_recall_connected", "moot_recall_shaped",
+        "moot_recall_distilled", "moot_recall_vague",
+        // D10 walk ladder + temporal recall: read-only recall recipes, same
+        // class as their recall_* siblings above (Rust twin: permissions.rs).
+        "moot_recall_walk", "moot_recall_temporal",
         "moot_fact_search", "moot_fact_timeline",
         "moot_connection_search", "moot_connection_map",
-        "moot_estate_map", "moot_read_journal", "moot_federated_search",
+        "moot_estate_map", "moot_read_journal",
+        // Grant-authorized federated read.
+        "moot_federated_recall",
+        // Surface help: capability discovery, always a pure read.
+        "moot_help",
+        // Transcript recall: reads session transcript, no estate writes.
+        "moot_memory_recall_transcript",
+        // Similar recall: nearest drawers by whole-record vector, no estate writes.
+        "moot_recall_similar",
+        // Monitoring inspection: reads daemon telemetry state without changing it.
+        "moot_monitoring_status",
         // Dataset reads (MX-TAB-7): query rows / column stats are read-only.
         "moot_dataset_query", "moot_dataset_stats",
         "moot_lens_anticipate", "moot_lens_apriori", "moot_lens_associations", "moot_lens_bias",
@@ -127,46 +175,22 @@ public enum PermissionsWriter {
         "moot_lens_keystones", "moot_lens_latent_themes", "moot_lens_moment", "moot_lens_node_motion",
         "moot_lens_overlap", "moot_lens_partial_cue", "moot_lens_precedence", "moot_lens_rhythm",
         "moot_lens_successors", "moot_lens_theme_weather", "moot_lens_trust_synthesis",
+        // Maintenance read (M-REBUILD-1): reports derived-state rebuild progress.
+        // Read-only; safe to poll while moot_reindex settles.
+        "moot_rebuild_status",
     ]
 
-    /// Additive-unconfirmed writes: create NEW content; nothing already
-    /// committed is changed, moved, or removed. Same risk class as a read
-    /// from the user's perspective — undoable by withdrawing/retiring the
-    /// new row, never a mutation of prior state.
-    private static let additiveWriteTools: Set<String> = [
-        "moot_file_memory", "moot_file_fact", "moot_write_journal", "moot_link_memories",
-    ]
-
-    /// Mutations of existing state: something already committed changes
-    /// shape, is superseded, moves, or a background process alters
-    /// estate-wide indexes/consolidation state. Prompts — this is the
-    /// bucket the pre-re-tier default put EVERYTHING (except diagnostics)
-    /// into, producing 55 ask rules on a real machine including every pure
-    /// read; this table exists so only genuine mutations land here.
-    private static let mutationTools: Set<String> = [
-        "moot_update_memory", "moot_move_memory", "moot_withdraw_memory", "moot_confirm_memory",
-        "moot_retire_fact", "moot_confirm_migration", "moot_run_migration",
-        "moot_reindex", "moot_reclassify_fdc", "moot_dream", "moot_distill", "moot_synthesize",
-        "moot_palace_import", "moot_vault_import", "moot_vault_export", "moot_vault_reconcile",
-        // Seed-file JSON import (MXE-JI-1): reads a seed file from the
-        // filesystem and bulk-writes the estate — same Ask posture as
-        // palace/vault import.
-        "moot_json_import",
-        // Dataset import (MX-TAB-7): creates a backend table and can read a
-        // csv_path from the filesystem — same Ask posture as palace/vault import.
-        "moot_file_dataset",
-        // Monitoring flag mutation: sets daemon telemetry state
-        // when `enabled` is supplied. Ask tier because it changes daemon behaviour.
-        "moot_monitoring_status",
-        // Contradiction hunter: estate-wide sweep that persists PROPOSED
-        // contradicts tunnels (same sweep runs inside moot_dream, already ask
-        // tier). Review settles a proposed tunnel's lifecycle — a mutation
-        // of committed state, and rejection is durable (never re-proposed).
-        "moot_hunt_contradictions", "moot_review_tunnel",
-    ]
-
-    /// Destructive, irreversible: hard-deletes content from the estate.
-    private static let destructiveTools: Set<String> = ["moot_erase_memory"]
+    /// The additive-write, mutation and destructive sets live in AriaMcpKit
+    /// (`ToolMutationInventory`), the kit that owns the tool surface: the
+    /// tiered installer default here and the frozen serve posture in the
+    /// dispatcher read the same tables, so a new mutating tool is triaged
+    /// once. Only the read table is installer-local.
+    ///
+    /// The allow tier holds `moot_file_memory` without a confirmation prompt
+    /// because the server, not the host, enforces the sensitivity tier: a
+    /// memory filed while a restricted or secret grant is live takes the
+    /// grant's tier when the caller names none and refuses a lower one, so
+    /// no prompt is needed to stop a handoff downgrading granted material.
 
     /// Every tool name this module has explicitly triaged into a tier.
     /// Exposed so a test can assert this set equals the REAL tool inventory
@@ -176,7 +200,10 @@ public enum PermissionsWriter {
     /// already fixed once for a hardcoded allow-all list; this is the same
     /// discipline applied to the tiered default).
     public static var explicitlyClassifiedTools: Set<String> {
-        readTools.union(additiveWriteTools).union(mutationTools).union(destructiveTools)
+        readTools
+            .union(ToolMutationInventory.additiveWriteTools)
+            .union(ToolMutationInventory.mutationTools)
+            .union(ToolMutationInventory.destructiveTools)
     }
 
     /// Classify a bare tool name (no MCP prefix) into its default tier.
@@ -190,17 +217,17 @@ public enum PermissionsWriter {
     /// name pattern the way "ends in _status" can (nothing about the string
     /// "moot_dream" says "mutation", and nothing about "moot_recall_shaped"
     /// says "read" via suffix alone), so the source of truth here is the
-    /// explicit `readTools` / `additiveWriteTools` / `mutationTools` /
-    /// `destructiveTools` tables, not a pattern match.
+    /// explicit `readTools` / `ToolMutationInventory.additiveWriteTools` / `.mutationTools` /
+    /// `.destructiveTools` tables, not a pattern match.
     ///
     /// A tool absent from all four tables (a brand-new addition to the
     /// surface not yet triaged) still lands in `ask`, the safe middle — but
     /// `explicitlyClassifiedTools` lets a test catch that omission instead
     /// of shipping it silently.
     public static func classify(_ tool: String) -> Tier {
-        if destructiveTools.contains(tool) { return .deny }
-        if mutationTools.contains(tool) { return .ask }
-        if readTools.contains(tool) || additiveWriteTools.contains(tool) { return .allow }
+        if ToolMutationInventory.destructiveTools.contains(tool) { return .deny }
+        if ToolMutationInventory.mutationTools.contains(tool) { return .ask }
+        if readTools.contains(tool) || ToolMutationInventory.additiveWriteTools.contains(tool) { return .allow }
         // Untriaged tool — safe middle; see explicitlyClassifiedTools.
         return .ask
     }
@@ -229,7 +256,7 @@ public enum PermissionsWriter {
     ///
     /// Backfilling at the classifier default instead would bypass a user's
     /// `deny`: someone who denies `mcp__mootx01__moot_memory_get` would get
-    /// `mcp__plugin_mootx01_mootx01__moot_memory_get` added to `allow` on
+    /// `mcp__plugin_mootx01_memory__moot_memory_get` added to `allow` on
     /// the next install or upgrade, because that exact string is "genuinely
     /// absent". A deny is a decision about a capability, not about a string
     /// prefix the user has never seen and cannot be expected to know exists.
@@ -274,14 +301,17 @@ public enum PermissionsWriter {
         }
 
         var added = (allow: 0, ask: 0, deny: 0)
-        for tool in toolNames {
+        for tool in authorizedToolNames(from: toolNames) {
             // Computed from the pre-existing state, once per tool and before
-            // either entry is appended. Scanning every prefix rather than
-            // only "the other one" is equivalent here and stays correct if a
+            // either entry is appended. Scanning every READ prefix (current
+            // namespaces plus the legacy plugin prefix) rather than only
+            // "the other one" is equivalent here and stays correct if a
             // third namespace is ever added: a prefix whose entry is absent
             // contributes nothing, and one whose entry is present is exactly
-            // a sibling to inherit from.
-            let inherited = allPrefixes
+            // a sibling to inherit from. The legacy prefix is read-only here
+            // — it can supply an inherited tier but is never a write target
+            // in the loop below, which iterates `allPrefixes` only.
+            let inherited = allReadPrefixes
                 .compactMap { existingTier["\($0)\(tool)"] }
                 .max { $0.restrictiveness < $1.restrictiveness }
             let tier = inherited ?? classify(tool)
@@ -371,7 +401,7 @@ public enum PermissionsWriter {
         // foreign tool, or a non-MCP permission string, is never a
         // candidate key and is never inspected, let alone moved.
         var moved = 0
-        for tool in toolNames {
+        for tool in authorizedToolNames(from: toolNames) {
             let targetTier = classify(tool)
             for prefix in allPrefixes {
                 let entry = "\(prefix)\(tool)"
@@ -440,7 +470,8 @@ public enum PermissionsWriter {
         var allow = permissions["allow"] as? [String] ?? []
 
         let existing = Set(allow)
-        let entries = toolNames.flatMap { tool in allPrefixes.map { "\($0)\(tool)" } }
+        let entries = authorizedToolNames(from: toolNames)
+            .flatMap { tool in allPrefixes.map { "\($0)\(tool)" } }
         for entry in entries where !existing.contains(entry) {
             allow.append(entry)
         }
@@ -452,15 +483,15 @@ public enum PermissionsWriter {
 
     // MARK: - Remove
 
-    /// Remove every `mcp__mootx01__*` AND `mcp__plugin_mootx01_mootx01__*`
-    /// entry from all three permission lists.
+    /// Remove every `mcp__mootx01__*`, `mcp__plugin_mootx01_memory__*`, and
+    /// `mcp__plugin_mootx01_mootx01__*` (pre-v1.1.0 plugin prefix) entry from
+    /// all three permission lists.
     ///
     /// Prefix-based (no name list needed) so uninstall cleans up even tools
-    /// that were renamed or removed since they were granted, and both
-    /// namespaces (direct + plugin — see the file header) so an uninstall
-    /// after this fix does not strand the plugin-prefixed twin entries
-    /// `mergeTiered`/`merge` now write. No-ops gracefully if the file is
-    /// absent or nothing of ours is present.
+    /// that were renamed or removed since they were granted. The legacy prefix
+    /// is included so an upgrade on a machine installed before v1.1.0 migrates
+    /// away existing allow/deny entries rather than stranding them.
+    /// No-ops gracefully if the file is absent or nothing of ours is present.
     ///
     /// - Parameter settingsURL: path to the `settings.json` file.
     public static func remove(from settingsURL: URL) throws {
@@ -471,10 +502,13 @@ public enum PermissionsWriter {
         }
         guard var permissions = root["permissions"] as? [String: Any] else { return }
 
+        // All prefixes to strip: current direct, current plugin, and the
+        // pre-v1.1.0 plugin prefix for migration.
+        let removePrefixes = allPrefixes + [legacyPluginMcpPrefix]
         for key in ["allow", "ask", "deny"] {
             guard var list = permissions[key] as? [String] else { continue }
             list = list.filter { entry in
-                !allPrefixes.contains { entry.hasPrefix($0) }
+                !removePrefixes.contains { entry.hasPrefix($0) }
             }
             permissions[key] = list.isEmpty ? nil : list
         }

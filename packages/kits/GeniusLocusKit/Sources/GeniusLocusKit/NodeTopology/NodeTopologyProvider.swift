@@ -6,7 +6,7 @@ import Foundation
 /// The substrate stores nothing about the host tree. Ids and shape are
 /// host-owned; the substrate reads them once per recall start (G1) and
 /// discards the snapshot when the recall completes. The tree never enters
-/// any LocusKit, VectorKit, or CorpusKit table.
+/// any LocusKit, SynapseKit, or CorpusKit table.
 ///
 /// Topology boundary invariant (G4): this protocol declares EXACTLY three
 /// methods — `parentID`, `childIDs`, and `treeEdges`. No content accessor

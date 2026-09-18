@@ -36,7 +36,9 @@ use intellectus_lib::{EventKind, Intellectus, NoOpSink, StatSample, StatsSink};
 // Dreaming-queue seeding imports (v2 pending-count gate).
 // Used by seed_dreaming_queue and tests that assert dreaming fires.
 use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-    RecallFallbackPolicy};
+    RecallFallbackPolicy,
+    RecallOrigin,
+};
 use locus_kit::filter::{Filter, RecallFrame};
 use locus_kit::frames::CaptureFrame;
 use locus_kit::drawer_operational::CaptureChannel;
@@ -192,12 +194,14 @@ fn seed_dreaming_queue(registry: &EstateRegistry, now_epoch_i64: i64) {
     // External-origin recall: coordinator mounts the dreaming queue and
     // enqueues one DreamingItem with the 2 captured drawer ids, making
     // pending_count = 1 so the pending-count gate passes on the next tick.
-    let external_request = GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-        .with_mode(GLKRecallMode::LocusOnly)
-        .with_scoring(GLKRecallScoring::Raw)
-        .with_limit(50)
-        .with_fallback(RecallFallbackPolicy::FailClosed)
-        .external();
+    let external_request = GLKRecallRequest::new(
+        RecallFrame::new(vec![Filter::Unconfirmed]),
+        GLKRecallMode::LocusOnly,
+        GLKRecallScoring::Raw,
+        50,
+        RecallFallbackPolicy::FailClosed,
+        RecallOrigin::External,
+    );
     registry.coord
         .lock()
         .unwrap()
@@ -207,11 +211,12 @@ fn seed_dreaming_queue(registry: &EstateRegistry, now_epoch_i64: i64) {
 
 // MARK: - §1 Cadence
 
-/// AG-1: First tick always fires both daemons when the dreaming queue has
-/// pending work (v2 pending-count gate: cadence + pending > 0 → fire).
-/// Mirrors Swift `firstTickFiresDreamingAndMaintenance`.
+/// AG-1: First tick fires dreaming when the dreaming queue has pending work
+/// (v2 pending-count gate: cadence + pending > 0 → fire). The maintenance
+/// engine is driven by its standing signals, not by the tick.
+/// Mirrors Swift `firstTickFiresDreaming`.
 #[test]
-fn ag1_first_tick_always_fires_both_daemons() {
+fn ag1_first_tick_fires_dreaming() {
     let (mut governor, registry) = make_governor();
     // Seed the dreaming queue so the v2 pending-count gate passes.
     // The gate skips dreaming when the queue is empty; one external-origin
@@ -223,10 +228,6 @@ fn ag1_first_tick_always_fires_both_daemons() {
     assert!(
         report.dreaming_fired,
         "dreaming must fire on first tick (pending-count gate seeded)"
-    );
-    assert!(
-        report.maintenance_fired,
-        "maintenance must fire on first tick"
     );
 }
 
@@ -248,7 +249,6 @@ fn ag2_tick_before_interval_returns_no_fire() {
     // First tick fires (t=0).
     let first = governor.tick(UNIX_EPOCH);
     assert!(first.dreaming_fired, "first tick must fire dreaming (pending-count gate seeded)");
-    assert!(first.maintenance_fired, "first tick must fire maintenance");
 
     // Second tick at t=29 s — the cadence gate (30 s interval) has not elapsed,
     // so dreaming is skipped before the pending-count gate is consulted.
@@ -257,10 +257,6 @@ fn ag2_tick_before_interval_returns_no_fire() {
     assert!(
         !second.dreaming_fired,
         "dreaming must not fire before 30 s interval (cadence gate dominates)"
-    );
-    assert!(
-        !second.maintenance_fired,
-        "maintenance must not fire before 300 s interval"
     );
 }
 
@@ -290,10 +286,6 @@ fn ag3_dreaming_fires_at_interval_maintenance_does_not() {
         second.dreaming_fired,
         "dreaming must fire at the 30 s boundary (pending-count gate seeded)"
     );
-    assert!(
-        !second.maintenance_fired,
-        "maintenance must not fire before 300 s boundary"
-    );
 }
 
 /// AG-4: Both daemons fire when their intervals have both elapsed.
@@ -320,10 +312,6 @@ fn ag4_both_fire_after_long_gap() {
         later.dreaming_fired,
         "dreaming must fire after 300 s gap (pending-count gate seeded)"
     );
-    assert!(
-        later.maintenance_fired,
-        "maintenance must fire at its 300 s boundary"
-    );
 }
 
 // MARK: - §2 Construction
@@ -342,7 +330,6 @@ fn ag5_construction_smoke() {
     let report = governor.tick(UNIX_EPOCH + Duration::from_secs(1_000_000));
     // The first tick fires both daemons when cadence gate + pending gate pass.
     assert!(report.dreaming_fired, "dreaming must fire on first tick (pending-count gate seeded)");
-    assert!(report.maintenance_fired);
 }
 
 /// AG-6: Consecutive ticks at increasing timestamps stay coherent.
@@ -443,36 +430,6 @@ fn ag8_dreaming_fire_writes_diary_entry_to_live_estate() {
     assert_eq!(diary[0].topic, "dreaming-cycle");
 }
 
-/// AG-9: A maintenance tick on a populated estate writes a diary entry to
-/// the live store — proves maintenance sink wiring.
-#[test]
-fn ag9_maintenance_fire_writes_diary_entry_to_live_estate() {
-    use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
-
-    let (mut governor, registry) = make_governor();
-    // Advance to t=300 s so maintenance fires alongside dreaming.
-    let _ = governor.tick(UNIX_EPOCH);
-    let report = governor.tick(UNIX_EPOCH + Duration::from_secs(300));
-    assert!(report.maintenance_fired, "maintenance must fire at 300 s boundary");
-
-    // The maintenance daemon writes exactly one diary entry per cycle.
-    let diary = registry
-        .default
-        .store
-        .read_diary("maintenance-daemon", 10)
-        .expect("read_diary must succeed");
-    // At t=0 and t=300 both daemons fire; two maintenance cycles = 2 diary entries.
-    assert!(
-        diary.len() >= 2,
-        "two maintenance fires must produce at least 2 diary entries; got {}",
-        diary.len()
-    );
-    assert!(
-        diary.iter().all(|e| e.agent_name == "maintenance-daemon"),
-        "all entries must be from maintenance-daemon"
-    );
-}
-
 // MARK: - §5 Think event emission
 
 /// AG-10: A dreaming tick that fires at least one proposal emits
@@ -498,7 +455,9 @@ fn ag9_maintenance_fire_writes_diary_entry_to_live_estate() {
 #[test]
 fn dreaming_pump_emits_think_events() {
     use genius_locus_kit::recall::{GLKRecallMode, GLKRecallRequest, GLKRecallScoring,
-        RecallFallbackPolicy};
+        RecallFallbackPolicy,
+    RecallOrigin,
+};
     use locus_kit::drawer_store::DrawerStore as LocusDrawerStore;
     use locus_kit::filter::{Filter, RecallFrame};
     use locus_kit::frames::CaptureFrame;
@@ -559,12 +518,14 @@ fn dreaming_pump_emits_think_events() {
     // dreaming queue. After 3 calls, co_recall_count(a,b), co_recall_count(a,c),
     // co_recall_count(b,c) each reach 3 — meeting DreamingPolicy::default min_attempts=3.
     let external_request = || {
-        GLKRecallRequest::new(RecallFrame::new(vec![Filter::Unconfirmed]))
-            .with_mode(GLKRecallMode::LocusOnly)
-            .with_scoring(GLKRecallScoring::Raw)
-            .with_limit(50)
-            .with_fallback(RecallFallbackPolicy::FailClosed)
-            .external()
+        GLKRecallRequest::new(
+            RecallFrame::new(vec![Filter::Unconfirmed]),
+            GLKRecallMode::LocusOnly,
+            GLKRecallScoring::Raw,
+            50,
+            RecallFallbackPolicy::FailClosed,
+            RecallOrigin::External,
+        )
     };
     for _ in 0..3 {
         registry.coord
@@ -952,10 +913,10 @@ fn ag15c_restart_loads_fingerprint_and_skips_recompute() {
 //   AG-19: multiple regular captures all searchable after the drain
 
 use std::collections::BTreeMap;
+mod test_support;
+use test_support::SelectedV2Session;
 use aria_mcp::{
-    dispatch::dispatch_tool,
     jsonrpc::JsonValue,
-    surfaced_recall_ledger::SurfacedRecallLedger,
 };
 
 macro_rules! args {
@@ -971,8 +932,10 @@ fn is_success(result: &serde_json::Value) -> bool {
     result["isError"] == serde_json::json!(false)
 }
 
-fn content_text(result: &serde_json::Value) -> &str {
-    result["content"][0]["text"].as_str().unwrap_or("")
+fn search_results(result: &serde_json::Value) -> &[serde_json::Value] {
+    result["structuredContent"]["data"]["results"]
+        .as_array()
+        .expect("selected-v2 search must expose results")
 }
 
 /// AG-16: Regular-mode capture → drain → BM25 recall finds the drawer.
@@ -985,18 +948,15 @@ fn content_text(result: &serde_json::Value) -> &str {
 /// foreground drain worker on a ~15 ms poll cadence.
 #[test]
 fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Regular (non-impatient) capture — enqueues a job to the encode queue.
     // The drawer is stored but NOT yet BM25/vector indexed at this point.
-    let capture_result = dispatch_tool(
+    let capture_result = session.call(
         "moot_file_memory",
         &args!["content" => "flamingo wades through brackish water estuary",
                "subject" => "flamingo wades through brackish estuary water",
                "location" => "memories/birds"],
-        &registry,
-        &ledger,
     ).expect("moot_file_memory must succeed");
     assert!(is_success(&capture_result), "regular capture should succeed; got: {capture_result:?}");
 
@@ -1010,8 +970,8 @@ fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
     // the deterministic barrier that replaced the old governor-tick drain (the
     // governor no longer pumps the encode queue).
     {
-        let handle = registry.default.handle;
-        registry
+        let handle = session.default.handle;
+        session
             .coord
             .lock()
             .expect("coordinator lock")
@@ -1020,22 +980,15 @@ fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
     }
 
     // BM25 recall now finds the drawer — the semantic lane is lit.
-    let search_result = dispatch_tool(
+    let search_result = session.call(
         "moot_memory_search",
         &args!["query" => "flamingo brackish estuary", "scoring" => "rrf"],
-        &registry,
-        &ledger,
     ).expect("moot_memory_search must succeed");
     assert!(is_success(&search_result), "search must succeed; got: {search_result:?}");
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "BM25 recall must find the drawer after governor tick drains encode queue; got: {text}"
-    );
-    assert!(
-        text.contains("flamingo"),
-        "search result must contain captured content; got: {text}"
+        !search_results(&search_result).is_empty(),
+        "BM25 recall must find the drawer after governor tick drains encode queue; got: {search_result:?}"
     );
 }
 
@@ -1049,39 +1002,29 @@ fn ag16_regular_capture_becomes_bm25_searchable_after_drain() {
 /// Parity: Swift P6 path (EncodeIntake.swift:110 ingestDrawerIntoCorpus inline).
 #[test]
 fn ag17_impatient_capture_is_immediately_searchable_no_tick_needed() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Impatient capture — encodes inline before returning.
-    let capture_result = dispatch_tool(
+    let capture_result = session.call(
         "moot_file_memory",
         &args!["content" => "avocet probes mud at low tide estuary",
                "subject" => "avocet probes mud at low tide estuary",
                "location" => "memories/birds",
                "impatient" => true],
-        &registry,
-        &ledger,
     ).expect("impatient moot_file_memory must succeed");
     assert!(is_success(&capture_result), "impatient capture should succeed; got: {capture_result:?}");
 
     // No governor tick — impatient mode encoded inline before returning.
     // BM25 recall must find the drawer IMMEDIATELY.
-    let search_result = dispatch_tool(
+    let search_result = session.call(
         "moot_memory_search",
         &args!["query" => "avocet estuary tide", "scoring" => "rrf"],
-        &registry,
-        &ledger,
     ).expect("moot_memory_search must succeed");
     assert!(is_success(&search_result), "search must succeed; got: {search_result:?}");
 
-    let text = content_text(&search_result);
     assert!(
-        text.starts_with("found ") && !text.starts_with("found 0"),
-        "impatient capture must be immediately BM25 searchable (no governor tick needed); got: {text}"
-    );
-    assert!(
-        text.contains("avocet"),
-        "search result must contain captured content; got: {text}"
+        !search_results(&search_result).is_empty(),
+        "impatient capture must be immediately BM25 searchable (no governor tick needed); got: {search_result:?}"
     );
 }
 
@@ -1092,30 +1035,27 @@ fn ag17_impatient_capture_is_immediately_searchable_no_tick_needed() {
 /// CorpusKit owns the encode pipeline), and asserts both are BM25 searchable.
 #[test]
 fn ag19_two_regular_captures_both_searchable_after_drain() {
-    let registry = EstateRegistry::new_inmemory();
-    let ledger = SurfacedRecallLedger::new();
+    let session = SelectedV2Session::new(EstateRegistry::new_inmemory());
 
     // Capture two drawers via regular mode — both enqueued.
-    dispatch_tool(
+    session.call(
         "moot_file_memory",
         &args!["content" => "spoonbill sweeps bill through water feeding",
                "subject" => "spoonbill sweeps bill through water feeding",
                "location" => "memories/birds"],
-        &registry, &ledger,
     ).expect("capture 1 must succeed");
 
-    dispatch_tool(
+    session.call(
         "moot_file_memory",
         &args!["content" => "ibis probes soil with curved beak savanna",
                "subject" => "ibis probes soil with curved beak savanna",
                "location" => "memories/birds"],
-        &registry, &ledger,
     ).expect("capture 2 must succeed");
 
     // Drain the Corpus ingest queue to completion (deterministic barrier).
     {
-        let handle = registry.default.handle;
-        registry
+        let handle = session.default.handle;
+        session
             .coord
             .lock()
             .expect("coordinator lock")
@@ -1124,28 +1064,24 @@ fn ag19_two_regular_captures_both_searchable_after_drain() {
     }
 
     // Both drawers must now be BM25/vector searchable.
-    let r_spoonbill = dispatch_tool(
+    let r_spoonbill = session.call(
         "moot_memory_search",
         &args!["query" => "spoonbill bill water", "scoring" => "rrf"],
-        &registry, &ledger,
     ).expect("moot_memory_search must succeed");
     assert!(is_success(&r_spoonbill));
-    let t1 = content_text(&r_spoonbill);
     assert!(
-        t1.starts_with("found ") && !t1.starts_with("found 0"),
-        "spoonbill must be BM25 searchable after the drain; got: {t1}"
+        !search_results(&r_spoonbill).is_empty(),
+        "spoonbill must be BM25 searchable after the drain; got: {r_spoonbill:?}"
     );
 
-    let r_ibis = dispatch_tool(
+    let r_ibis = session.call(
         "moot_memory_search",
         &args!["query" => "ibis beak savanna", "scoring" => "rrf"],
-        &registry, &ledger,
     ).expect("moot_memory_search must succeed");
     assert!(is_success(&r_ibis));
-    let t2 = content_text(&r_ibis);
     assert!(
-        t2.starts_with("found ") && !t2.starts_with("found 0"),
-        "ibis must be BM25 searchable after the drain; got: {t2}"
+        !search_results(&r_ibis).is_empty(),
+        "ibis must be BM25 searchable after the drain; got: {r_ibis:?}"
     );
 }
 

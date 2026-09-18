@@ -1,21 +1,21 @@
 // DistilledRecall.swift
 //
-// Distilled-payload recall recipe — SPEC_DISTILLATION_STORAGE §10.3.
+// Distilled-payload recall recipe.
 //
 // `moot_recall_distilled` is EXACT-SEARCH GEOMETRY over originals +
-// distilled-representation hydration of the hits: the same recall
+// inline distilled-representation hydration of the hits: the same recall
 // request `moot_memory_search` runs (unionBest, matrixAware fusion,
-// query text), with the §10.1 hydration selector pinned to `distilled`.
-// Ranking is therefore identical to exact search BY CONSTRUCTION; only
-// the payloads differ (smaller). Per-hit response metadata carries
-// `distilled_token_count` (§6 context budgeting) and the §10.2
-// served-from-content fallback marker.
+// query text), with the hydration selector pinned to `distilled`.
+// Ranking is identical to exact search BY CONSTRUCTION; only the
+// payloads differ (smaller). Per-hit response metadata carries
+// `token_count` (context budgeting). Every row renders inline — there is
+// no sweep, no "not yet distilled" state, and no fallback marker.
 //
-// The previous implementation — Hamming NN over the fingerprint lane
-// returning factoid drawers, DistilledHeader post-processing,
-// confidence-based injection depth — retired with the factoid tier
-// (§11.3, §10.3). The distillation-features-v1 lane remains populated
-// (§8) but is a Phase 2 consolidation substrate, not a recall route.
+// Each match also carries `originalTokenCount`, the estimator over the
+// record's full content. The recipe does not sum the pair: the ARIA v2
+// surface applies `DistilledSavings` over the rows it actually emits,
+// after its row cap and privacy projection (ARIA_V2_CONTRACT.md,
+// "Distilled recall savings").
 //
 // Layer discipline B-1/B-2: one GLK recall call. Read-only (B-6, I-6).
 
@@ -33,7 +33,7 @@ import SubstrateML
 /// because AriaMcpKit is downstream of CognitionKit and cannot be
 /// imported here. Thresholds: HIGH_MARGIN = 0.25, LOW_MARGIN = 0.05,
 /// LOW_SPREAD = 0.15. Computed over the SEARCH scores (the exact-search
-/// geometry's ranking signal — §10.3), not any distillation metadata.
+/// geometry's ranking signal), not any distillation metadata.
 public enum DistilledDiscriminationLevel: Sendable, Equatable {
     /// Fewer than two results — nothing to compare.
     case single
@@ -46,20 +46,20 @@ public enum DistilledDiscriminationLevel: Sendable, Equatable {
 }
 
 /// One hit from distilled recall: an ORIGINAL drawer (exact-search
-/// geometry), hydrated with its distilled representation.
+/// geometry), hydrated with its inline distilled representation.
 public struct DistilledMatch: Sendable, Equatable, Codable {
     /// SOURCE drawer UUID from the estate (the item itself — there is no
     /// factoid tier; `moot_memory_get` on this id returns the full body).
     public let id: String
-    /// The hydrated payload: the row's `distilled` rendering, or the
-    /// verbatim content when the row is not yet distilled (§10.2).
+    /// The hydrated payload: the inline distilled rendering of the row's
+    /// verbatim content, produced at read time by ContextDistillLib.
     public let text: String
-    /// §10.2 fallback marker: true when `text` is the verbatim content
-    /// because no representation exists yet. A response field, not state.
-    public let servedFromContent: Bool
-    /// `distilled_token_count` for context budgeting (§6). Nil on
-    /// fallback rows (no representation, no stored count).
-    public let tokenCount: Int64?
+    /// Per-hit token estimate for context budgeting. Always present —
+    /// every row renders inline, so there is no fallback without a count.
+    public let tokenCount: Int64
+    /// Estimator over the record's full `content`: the original-body cost
+    /// the ARIA surface sums over the rows it emits. Never summed here.
+    public let originalTokenCount: Int64
     /// The exact-search fusion score that ranked this hit.
     public let score: Double
     /// The room node id of the source drawer (callers resolve display
@@ -69,15 +69,15 @@ public struct DistilledMatch: Sendable, Equatable, Codable {
     public init(
         id: String,
         text: String,
-        servedFromContent: Bool,
-        tokenCount: Int64?,
+        tokenCount: Int64,
+        originalTokenCount: Int64,
         score: Double,
         parentNodeId: String
     ) {
         self.id = id
         self.text = text
-        self.servedFromContent = servedFromContent
         self.tokenCount = tokenCount
+        self.originalTokenCount = originalTokenCount
         self.score = score
         self.parentNodeId = parentNodeId
     }
@@ -85,7 +85,7 @@ public struct DistilledMatch: Sendable, Equatable, Codable {
 
 // MARK: - Recipe
 
-/// Distilled-payload recall: exact-search geometry, distilled hydration.
+/// Distilled-payload recall: exact-search geometry, inline distilled hydration.
 ///
 /// RecipeCatalog registration is present.
 public struct DistilledRecall: Recipe {
@@ -149,7 +149,7 @@ public struct DistilledRecall: Recipe {
     ) async throws -> Output {
         // The exact-search request shape (`moot_memory_search`): unionBest
         // mode, matrixAware fusion, full hydration. The selector affects
-        // only payloads, never matching or ranking (§9/§10.1).
+        // only payloads, never matching or ranking.
         let request = GLKRecallRequest(
             frame: RecallFrame(
                 filterChain: [input.filter],
@@ -159,28 +159,35 @@ public struct DistilledRecall: Recipe {
             scoring: .matrixAware,
             limit: input.limit,
             fallback: .allowDegraded,
-            queryText: input.query
-            // origin stays internal (B-10a): only the ARIA boundary marks
-            // requests external; the recipe layer never does (the
-            // PreciseRecall/ShapedRecall precedent).
+            queryText: input.query,
+            // origin: .internal — B-10a: recipe layer is never external;
+            // only the ARIA_MCP boundary passes .external.
+            origin: .internal,
+            // Sub-span scoring is an additive-cost stage this recipe does not
+            // request; every caller names the switch (ruling 2026-09-07).
+            subSpanScoring: .off
         )
         let result = try await kit.recall(estate, request)
 
-        // Hydrate each hit through the §10.1 selector pinned to .distilled.
+        // Hydrate each hit through the hydration selector pinned to .distilled.
+        // Every row renders inline via ContextDistillLib — no stored columns,
+        // no sweep dependency, no fallback path. Each match carries the
+        // estimator over its distilled text and over its full content; the
+        // ARIA surface sums both over the rows it emits.
         var matches: [DistilledMatch] = []
         for hit in result.hits {
             guard let drawer = hit.drawer else { continue }
-            let hydrated = HydrationRepresentation.distilled.resolve(for: drawer)
+            let text = HydrationRepresentation.distilled.resolve(for: drawer)
             matches.append(DistilledMatch(
                 id: drawer.id,
-                text: hydrated.text,
-                servedFromContent: hydrated.servedFromContent,
-                tokenCount: hydrated.servedFromContent ? nil : drawer.distilledTokenCount,
+                text: text,
+                tokenCount: GeniusLocusKit.estimatedTokenCount(of: text),
+                originalTokenCount: GeniusLocusKit.estimatedTokenCount(of: drawer.content),
                 score: Double(hit.score.final),
                 parentNodeId: drawer.parentNodeId))
         }
 
-        // Discrimination over the exact-search scores (§10.3 ranking signal).
+        // Discrimination over the exact-search scores.
         return Output(
             matches: matches,
             discrimination: classifyDistilledDiscrimination(matches.map { $0.score }))

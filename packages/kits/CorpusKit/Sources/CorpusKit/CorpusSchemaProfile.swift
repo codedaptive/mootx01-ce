@@ -54,8 +54,10 @@ public enum CorpusOperatingMode: Sendable, Equatable {
     case attached
 }
 
-/// Validated (mode, index-unit) configuration — the constructor-time gate
-/// that rejects invalid combinations BEFORE anything is written.
+/// Validated (mode, index-unit) configuration: the constructor-time gate
+/// that rejects invalid combinations BEFORE anything is written. Every
+/// engine indexes one composition: the content plus its `ssc_facts`
+/// supplement.
 public struct CorpusContentConfiguration: Sendable, Equatable {
     public let mode: CorpusOperatingMode
     public let indexUnit: CorpusIndexUnitPolicy
@@ -65,7 +67,10 @@ public struct CorpusContentConfiguration: Sendable, Equatable {
     ///     production, passage identities, and legacy chunk APIs are dark
     ///     in attached mode);
     ///   - a non-positive token budget → `invalidConfiguration`.
-    public init(mode: CorpusOperatingMode, indexUnit: CorpusIndexUnitPolicy) throws {
+    public init(
+        mode: CorpusOperatingMode,
+        indexUnit: CorpusIndexUnitPolicy
+    ) throws {
 #if CORPUSKIT_STANDALONE_PASSAGES
         switch (mode, indexUnit) {
         case (.attached, .tokenWindows):

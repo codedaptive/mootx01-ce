@@ -42,20 +42,6 @@
 
 import Foundation
 
-/// The Phase 1 distillation format + pipeline contract identifier
-/// (SPEC §4). Stored in `distilled_pipeline_version`; a row whose stored
-/// value differs from this constant is a regeneration candidate for the
-/// sweep. Bump this string whenever the rendering contract changes
-/// (compaction tables, Stage 5 ordering, estimator formula) — stored
-/// renderings regenerate lazily against the new contract.
-public enum DistillationPipelineVersion {
-    /// Phase 1 contract: TokenCompaction tables v1 + Stage 5 core-first
-    /// ordering + the (3B + 16W + 12)/24 token estimator, all pinned to
-    /// `DistillationPipeline.defaultExtractor` (the extractor present and
-    /// bit-identical on both legs).
-    public static let current = "p1"
-}
-
 /// The §7.6 token-compaction transform and §6 token estimator. No
 /// instances — a namespace of pure functions.
 public enum TokenCompaction {

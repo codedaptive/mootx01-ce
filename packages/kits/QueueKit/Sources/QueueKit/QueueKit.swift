@@ -356,7 +356,9 @@ public final class QueueKit: Sendable {
 
     // MARK: - Maildir directory management (spec §5)
 
-    public static let maildirSubdirs = ["tmp", "new", "cur", "done"]
+    // claim/ holds in-progress two-step claims (new/ → claim/<32hex>-name →
+    // cur/name); see FilesystemBackend.claimEntry and QUEUEKIT_SPEC I-3.
+    public static let maildirSubdirs = ["tmp", "new", "cur", "claim", "done"]
 
     public static func ensureMaildir(root: URL) throws {
         let fm = FileManager.default
