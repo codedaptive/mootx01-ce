@@ -956,6 +956,32 @@ impl DrawerStoreCore {
         Ok(room_rows.iter().map(|r| string_value_of(r.get("id"))).collect())
     }
 
+    /// The active chest nodes (depth 3) under a room, in id order. Empty for a
+    /// room that has never been re-binned (ADR-026, spec § 12).
+    fn chest_node_ids_in_room(&self, room_id: &str) -> Result<Vec<String>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_NODES,
+                Some(&StoragePredicate::And(vec![
+                    StoragePredicate::Eq(
+                        Column::new(T_NODES, "parent_id"),
+                        TypedValue::Text(room_id.to_string()),
+                    ),
+                    StoragePredicate::Eq(Column::new(T_NODES, "depth"), TypedValue::Int(3)),
+                    StoragePredicate::IsNull(Column::new(T_NODES, "tombstoned_hlc")),
+                ])),
+                &[],
+                None,
+                None,
+            )
+            .map_err(map_storage_err)?;
+        let mut ids: Vec<String> = rows.iter().map(|r| string_value_of(r.get("id"))).collect();
+        ids.sort();
+        Ok(ids)
+    }
+
     /// Find a specific room node by wing name + room name.
     /// Returns the room node ID, or None if the pair doesn't exist.
     fn room_node_id(&self, wing: &str, room: &str) -> Result<Option<String>, LocusKitError> {
@@ -1032,12 +1058,29 @@ impl DrawerStoreCore {
         let room_rows = query_by_id_chunks(&*row_store, T_NODES, "id", &unique, &[])?;
         let mut room_map: BTreeMap<String, (String, String)> = BTreeMap::new();
         let mut wing_ids: BTreeSet<String> = BTreeSet::new();
+        // A parent at depth 3 is a chest (ADR-026): its room is one hop up. The
+        // chest resolves to its room's names, so every reader keyed by a
+        // drawer's parent still gets (wing, room).
+        let mut chest_room_ids: BTreeMap<String, String> = BTreeMap::new();
         for row in &room_rows {
             let id = string_value_of(row.get("id"));
             let display_name = string_value_of(row.get("display_name"));
             let parent_id = string_value_of(row.get("parent_id"));
+            if matches!(row.get("depth"), Some(TypedValue::Int(3))) {
+                chest_room_ids.insert(id, parent_id);
+                continue;
+            }
             wing_ids.insert(parent_id.clone());
             room_map.insert(id, (display_name, parent_id));
+        }
+        if !chest_room_ids.is_empty() {
+            let room_ids: BTreeSet<String> = chest_room_ids.values().cloned().collect();
+            for row in &query_by_id_chunks(&*row_store, T_NODES, "id", &room_ids, &[])? {
+                let id = string_value_of(row.get("id"));
+                let parent_id = string_value_of(row.get("parent_id"));
+                wing_ids.insert(parent_id.clone());
+                room_map.insert(id, (string_value_of(row.get("display_name")), parent_id));
+            }
         }
         let mut wing_names: BTreeMap<String, String> = BTreeMap::new();
         if !wing_ids.is_empty() {
@@ -1055,6 +1098,11 @@ impl DrawerStoreCore {
         for (room_id, (room_display, parent_id)) in &room_map {
             let wing_name = wing_names.get(parent_id).cloned().unwrap_or_default();
             result.insert(room_id.clone(), (wing_name, room_display.clone()));
+        }
+        for (chest_id, room_id) in &chest_room_ids {
+            if let Some(names) = result.get(room_id).cloned() {
+                result.insert(chest_id.clone(), names);
+            }
         }
         Ok(result)
     }
@@ -1586,31 +1634,40 @@ impl DrawerStore for DrawerStoreCore {
             Some(id) => id,
             None => return Ok(Vec::new()),
         };
-        let (rows, _skipped) = self
-            .storage
-            .row_store()
-            .query_skip_corrupt(
-                T_DRAWERS,
-                Some(&StoragePredicate::all(vec![
-                    StoragePredicate::Eq(
-                        Column::new(T_DRAWERS, "parent_node_id"),
-                        TypedValue::Text(room_id),
-                    ),
-                    StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
-                ])),
-                // Three-column stable sort: (filedAt ASC, content ASC, id ASC).
-                // Mirrors Swift DrawerStore.drawersIn(wing:room:) (SCORE-ORDERING 2026-08-24).
-                &[
-                    OrderClause::new(Column::new(T_DRAWERS, "filedAt"), OrderDirection::Ascending),
-                    OrderClause::new(Column::new(T_DRAWERS, "content"), OrderDirection::Ascending),
-                    OrderClause::new(Column::new(T_DRAWERS, "id"), OrderDirection::Ascending),
-                ],
-                None,
-                None,
-            )
-            .map_err(map_storage_err)?;
-        let drawers = decode_rows_skip_corrupt(&rows, "drawers_in_wing_room")?;
-
+        // The room's subtree: drawers parented to the room itself (a room never
+        // re-binned) and to every chest under it (ADR-026, spec § 12). One
+        // query per parent; the union is sorted once below.
+        let mut parents = vec![room_id.clone()];
+        parents.extend(self.chest_node_ids_in_room(&room_id)?);
+        let mut drawers: Vec<Drawer> = Vec::new();
+        for parent in &parents {
+            let (rows, _skipped) = self
+                .storage
+                .row_store()
+                .query_skip_corrupt(
+                    T_DRAWERS,
+                    Some(&StoragePredicate::all(vec![
+                        StoragePredicate::Eq(
+                            Column::new(T_DRAWERS, "parent_node_id"),
+                            TypedValue::Text(parent.clone()),
+                        ),
+                        StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+                    ])),
+                    &[],
+                    None,
+                    None,
+                )
+                .map_err(map_storage_err)?;
+            drawers.extend(decode_rows_skip_corrupt(&rows, "drawers_in_wing_room")?);
+        }
+        // Three-column stable sort: (filedAt ASC, content ASC, id ASC).
+        // Mirrors Swift DrawerStore.drawersIn(wing:room:) (SCORE-ORDERING 2026-08-24).
+        drawers.sort_by(|a, b| {
+            a.filed_at
+                .cmp(&b.filed_at)
+                .then_with(|| a.content.cmp(&b.content))
+                .then_with(|| a.id.cmp(&b.id))
+        });
         Ok(drawers)
     }
 

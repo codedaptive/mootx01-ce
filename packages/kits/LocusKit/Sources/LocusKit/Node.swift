@@ -3,7 +3,8 @@
 // Container node in the estate's containment tree.
 //
 // The estate is a fixed-depth tree: estate (depth 0), wing (depth 1),
-// room (depth 2). Drawers are leaf nodes and live in the `drawers`
+// room (depth 2), chest (depth 3, the internal container below a room,
+// ADR-026). Drawers are leaf nodes and live in the `drawers`
 // table, not the `nodes` table. Container nodes carry lifecycle state
 // (active/tombstoned) with HLC timestamps for temporal filtering,
 // supporting the as-of read surface (NT-P1).
@@ -37,7 +38,7 @@ public struct Node: Sendable, Equatable, Codable, Hashable {
     /// All resolution, uniqueness enforcement, and index keys use this field.
     public let lookupName: String
 
-    /// Tree depth: 0 = estate, 1 = wing, 2 = room. Write-once, no reparent.
+    /// Tree depth: 0 = estate, 1 = wing, 2 = room, 3 = chest. Write-once, no reparent.
     public let depth: Int
 
     /// Lifecycle state: 0 = active, 1 = tombstoned (§5).
