@@ -1,0 +1,578 @@
+{
+  "oracle": "tiktoken 0.14.0 cl100k_base",
+  "oracle_note": "Regenerated 2026-08-18 against tiktoken 0.14.0 (pip, venv). Every case's token_ids and token_count come from tiktoken.get_encoding('cl100k_base').encode(text). Hand-derived origin retired.",
+  "vocab_sha256": "223921b76ee99bde995b7ff738513eef100fb51d18c93597a113bcffe865b2a7",
+  "vocab_line_count": 100256,
+  "cases": [
+    {
+      "id": "empty",
+      "text": "",
+      "token_count": 0,
+      "token_ids": [],
+      "note": "empty string returns 0 tokens"
+    },
+    {
+      "id": "ascii-exclamation",
+      "text": "!",
+      "token_count": 1,
+      "token_ids": [
+        0
+      ],
+      "note": "single punct; rule 4; rank 0"
+    },
+    {
+      "id": "ascii-double-quote",
+      "text": "\"",
+      "token_count": 1,
+      "token_ids": [
+        1
+      ],
+      "note": "single punct; rule 4; rank 1"
+    },
+    {
+      "id": "ascii-digit-0",
+      "text": "0",
+      "token_count": 1,
+      "token_ids": [
+        15
+      ],
+      "note": "single digit; rule 3; rank 15"
+    },
+    {
+      "id": "ascii-capital-A",
+      "text": "A",
+      "token_count": 1,
+      "token_ids": [
+        32
+      ],
+      "note": "single letter; rule 2; rank 32"
+    },
+    {
+      "id": "ascii-lowercase-a",
+      "text": "a",
+      "token_count": 1,
+      "token_ids": [
+        64
+      ],
+      "note": "single letter; rule 2; rank 64"
+    },
+    {
+      "id": "newline",
+      "text": "\n",
+      "token_count": 1,
+      "token_ids": [
+        198
+      ],
+      "note": "rule 5; rank 198"
+    },
+    {
+      "id": "crlf",
+      "text": "\r\n",
+      "token_count": 1,
+      "token_ids": [
+        319
+      ],
+      "note": "rule 5; CRLF pair is single vocab token rank 319"
+    },
+    {
+      "id": "digits-123",
+      "text": "123",
+      "token_count": 1,
+      "token_ids": [
+        4513
+      ],
+      "note": "rule 3: 1-3 digits one pre-token; rank 4513"
+    },
+    {
+      "id": "digits-1234-split",
+      "text": "1234",
+      "token_count": 2,
+      "token_ids": [
+        4513,
+        19
+      ],
+      "note": "rule 3: '123' + '4'; two pre-tokens → two tokens"
+    },
+    {
+      "id": "word-Hello",
+      "text": "Hello",
+      "token_count": 1,
+      "token_ids": [
+        9906
+      ],
+      "note": "rule 2; BPE → rank 9906"
+    },
+    {
+      "id": "word-hello",
+      "text": "hello",
+      "token_count": 1,
+      "token_ids": [
+        15339
+      ],
+      "note": "rule 2; BPE → rank 15339"
+    },
+    {
+      "id": "space-the",
+      "text": " the",
+      "token_count": 1,
+      "token_ids": [
+        279
+      ],
+      "note": "rule 2 with space prefix; rank 279"
+    },
+    {
+      "id": "space-is",
+      "text": " is",
+      "token_count": 1,
+      "token_ids": [
+        374
+      ],
+      "note": "rule 2 with space prefix; rank 374"
+    },
+    {
+      "id": "sentence-hello-world",
+      "text": "Hello world",
+      "token_count": 2,
+      "token_ids": [
+        9906,
+        1917
+      ],
+      "note": "Hello + ' world' = two pre-tokens"
+    },
+    {
+      "id": "sentence-hello-comma-world",
+      "text": "Hello, world!",
+      "token_count": 4,
+      "token_ids": [
+        9906,
+        11,
+        1917,
+        0
+      ],
+      "note": "4 pre-tokens: Hello + , + ' world' + !"
+    },
+    {
+      "id": "contraction-its",
+      "text": "it's",
+      "token_count": 2,
+      "token_ids": [
+        275,
+        596
+      ],
+      "note": "rule 1: 'it' + \"'s\" → [275, 596]"
+    },
+    {
+      "id": "contraction-Im",
+      "text": "I'm",
+      "token_count": 2,
+      "token_ids": [
+        40,
+        2846
+      ],
+      "note": "rule 1: 'I' + \"'m\""
+    },
+    {
+      "id": "contraction-well",
+      "text": "we'll",
+      "token_count": 2,
+      "token_ids": [
+        906,
+        3358
+      ],
+      "note": "rule 1: 'we' + \"'ll\""
+    },
+    {
+      "id": "two-spaces",
+      "text": "  ",
+      "token_count": 1,
+      "token_ids": [
+        256
+      ],
+      "note": "rule 6 or 7; rank 256"
+    },
+    {
+      "id": "three-spaces",
+      "text": "   ",
+      "token_count": 1,
+      "token_ids": [
+        262
+      ],
+      "note": "rule 6 or 7; rank 262"
+    },
+    {
+      "id": "ellipsis",
+      "text": "...",
+      "token_count": 1,
+      "token_ids": [
+        1131
+      ],
+      "note": "rule 4: punct cluster; 3 dots as one pre-token"
+    },
+    {
+      "id": "comma-space",
+      "text": ", ",
+      "token_count": 2,
+      "token_ids": [
+        11,
+        220
+      ],
+      "note": "rule 4+7: ',' then ' '"
+    },
+    {
+      "id": "golden-pin-sentence",
+      "text": "The quick brown fox",
+      "token_count": 4,
+      "token_ids": [
+        791,
+        4062,
+        14198,
+        39935
+      ],
+      "note": "4 pre-tokens → 4 tokens; golden pin"
+    },
+    {
+      "id": "word-newline",
+      "text": "hello\n",
+      "token_count": 2,
+      "token_ids": [
+        15339,
+        198
+      ],
+      "note": "rule 2 + rule 5: hello + newline"
+    },
+    {
+      "id": "two-lines",
+      "text": "line1\nline2",
+      "token_count": 5,
+      "token_ids": [
+        1074,
+        16,
+        198,
+        1074,
+        17
+      ],
+      "note": "word + newline + word = 3 pre-tokens"
+    },
+    {
+      "id": "digits-then-words",
+      "text": "42 items",
+      "token_count": 2,
+      "token_ids": [
+        2983,
+        3673
+      ],
+      "note": "rule 3 + rule 2: 42 + ' items'"
+    },
+    {
+      "id": "digits-100",
+      "text": "100",
+      "token_count": 1,
+      "token_ids": [
+        1041
+      ],
+      "note": "rule 3: 3 digits → one pre-token"
+    },
+    {
+      "id": "digits-1000-split",
+      "text": "1000",
+      "token_count": 2,
+      "token_ids": [
+        1041,
+        15
+      ],
+      "note": "rule 3: '100' + '0' → two pre-tokens"
+    },
+    {
+      "id": "cjk-single",
+      "text": "你",
+      "token_count": 1,
+      "token_ids": [
+        57668
+      ],
+      "note": "CJK char; UTF-8 3 bytes; BPE → rank 57668"
+    },
+    {
+      "id": "accented-e",
+      "text": "é",
+      "token_count": 1,
+      "token_ids": [
+        978
+      ],
+      "note": "U+00E9; UTF-8 C3A9; BPE → rank 978"
+    },
+    {
+      "id": "emoji-grinning",
+      "text": "😀",
+      "token_count": 2,
+      "token_ids": [
+        76460,
+        222
+      ],
+      "note": "U+1F600; UTF-8 4 bytes; BPE → 2 tokens"
+    },
+    {
+      "id": "prose-sentence",
+      "text": "The quick brown fox jumps over the lazy dog.",
+      "token_count": 10,
+      "token_ids": [
+        791,
+        4062,
+        14198,
+        39935,
+        35308,
+        927,
+        279,
+        16053,
+        5679,
+        13
+      ],
+      "note": "full ASCII sentence (tiktoken oracle)"
+    },
+    {
+      "id": "contractions",
+      "text": "I'll say we've done what they're expecting, isn't it?",
+      "token_count": 15,
+      "token_ids": [
+        40,
+        3358,
+        2019,
+        584,
+        3077,
+        2884,
+        1148,
+        814,
+        2351,
+        23132,
+        11,
+        4536,
+        956,
+        433,
+        30
+      ],
+      "note": "contraction rule coverage (tiktoken oracle)"
+    },
+    {
+      "id": "digits-run",
+      "text": "In 2026 there were 13137 items and 100000 rows.",
+      "token_count": 16,
+      "token_ids": [
+        644,
+        220,
+        2366,
+        21,
+        1070,
+        1051,
+        220,
+        9263,
+        1806,
+        3673,
+        323,
+        220,
+        1041,
+        931,
+        7123,
+        13
+      ],
+      "note": "1-3 digit chunking (tiktoken oracle)"
+    },
+    {
+      "id": "punct-cluster",
+      "text": "wait... what?! (really) [ok] {fine} -- done.",
+      "token_count": 16,
+      "token_ids": [
+        11748,
+        1131,
+        1148,
+        27074,
+        320,
+        54760,
+        8,
+        510,
+        564,
+        60,
+        314,
+        63157,
+        92,
+        1198,
+        2884,
+        13
+      ],
+      "note": "punct clusters with spaces (tiktoken oracle)"
+    },
+    {
+      "id": "whitespace-run",
+      "text": "a    b\t\tc\n\n   d",
+      "token_count": 8,
+      "token_ids": [
+        64,
+        262,
+        293,
+        197,
+        1470,
+        271,
+        256,
+        294
+      ],
+      "note": "mixed whitespace runs (tiktoken oracle)"
+    },
+    {
+      "id": "crlf-mix",
+      "text": "line one\r\nline two\r\n\r\nline three",
+      "token_count": 8,
+      "token_ids": [
+        1074,
+        832,
+        319,
+        1074,
+        1403,
+        881,
+        1074,
+        2380
+      ],
+      "note": "CRLF handling (tiktoken oracle)"
+    },
+    {
+      "id": "cjk-run",
+      "text": "记忆宫殿是一种记忆方法",
+      "token_count": 14,
+      "token_ids": [
+        41914,
+        26203,
+        228,
+        8676,
+        104,
+        36149,
+        123,
+        21043,
+        15120,
+        87502,
+        41914,
+        26203,
+        228,
+        41007
+      ],
+      "note": "CJK letter run (tiktoken oracle)"
+    },
+    {
+      "id": "accented-run",
+      "text": "café naïve résumé Zürich",
+      "token_count": 10,
+      "token_ids": [
+        936,
+        59958,
+        95980,
+        588,
+        9517,
+        1264,
+        978,
+        1901,
+        5297,
+        718
+      ],
+      "note": "accented latin words (tiktoken oracle)"
+    },
+    {
+      "id": "emoji-mix",
+      "text": "great job 👍🎉 well done",
+      "token_count": 9,
+      "token_ids": [
+        47991,
+        2683,
+        62904,
+        235,
+        9468,
+        236,
+        231,
+        1664,
+        2884
+      ],
+      "note": "emoji between words (tiktoken oracle)"
+    },
+    {
+      "id": "cyrillic-run",
+      "text": "память дворец метод",
+      "token_count": 8,
+      "token_ids": [
+        8164,
+        24697,
+        94975,
+        74254,
+        9239,
+        1532,
+        10589,
+        56729
+      ],
+      "note": "cyrillic letter run (tiktoken oracle)"
+    },
+    {
+      "id": "mixed-script",
+      "text": "moot记忆test123!",
+      "token_count": 8,
+      "token_ids": [
+        76,
+        1944,
+        41914,
+        26203,
+        228,
+        1985,
+        4513,
+        0
+      ],
+      "note": "mixed scripts, digits, punct, no spaces (tiktoken oracle)"
+    },
+    {
+      "id": "leading-space-word",
+      "text": " hello world",
+      "token_count": 2,
+      "token_ids": [
+        24748,
+        1917
+      ],
+      "note": "leading space attaches to word (tiktoken oracle)"
+    },
+    {
+      "id": "trailing-spaces",
+      "text": "hello   ",
+      "token_count": 2,
+      "token_ids": [
+        15339,
+        262
+      ],
+      "note": "trailing space run (tiktoken oracle)"
+    },
+    {
+      "id": "json-snippet",
+      "text": "{\"key\": \"value\", \"n\": 42}",
+      "token_count": 12,
+      "token_ids": [
+        5018,
+        798,
+        794,
+        330,
+        970,
+        498,
+        330,
+        77,
+        794,
+        220,
+        2983,
+        92
+      ],
+      "note": "structured text (tiktoken oracle)"
+    },
+    {
+      "id": "long-word",
+      "text": "antidisestablishmentarianism",
+      "token_count": 6,
+      "token_ids": [
+        519,
+        85342,
+        34500,
+        479,
+        8997,
+        2191
+      ],
+      "note": "single long word BPE merge depth (tiktoken oracle)"
+    }
+  ]
+}
