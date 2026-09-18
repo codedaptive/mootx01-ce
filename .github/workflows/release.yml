@@ -10,9 +10,11 @@ on:
       # are stable-only channels that auto-upgrade every installed user.
       # Ordinary betas still ship via candidate.yml from candidate/1.1.x; a
       # release candidate comes through here so the signed, notarized path is
-      # the one being proved.
+      # the one being proved. The exclusion that used to sit on the next line,
+      # '!v*-*', is what the guard replaces: it kept qualifier tags out by
+      # never building them, at the cost of never proving this path before a
+      # stable tag ran it for the first time.
       - 'v*'
-      - '!v*-*'
   # Manual debug trigger: COMPILE-ONLY. Builds a chosen platform from a branch
   # to catch build breaks fast, without tagging or the slow legs. It NEVER
   # signs, notarizes, uploads artifacts, or publishes: every Apple Developer ID
