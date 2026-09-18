@@ -2041,8 +2041,8 @@ pub(crate) fn with_resident_serving<T>(
 /// 2. The process is alive:
 ///    - Linux/macOS: `kill(pid, 0)` returns 0 (signallable) or EPERM
 ///      (live but owned by another user — the identity gate will reject it).
-///    - Windows: `kill(pid, 0)` via the CRT (post-v1: `OpenProcess` with
-///      `PROCESS_QUERY_LIMITED_INFORMATION`).
+///    - Windows: `OpenProcess` with `PROCESS_QUERY_LIMITED_INFORMATION`
+///      returns a handle only when a process holds the id.
 /// 3. The executable image starts with "mootx01":
 ///    - Linux: `/proc/<pid>/comm` (kernel 15-char truncated executable name).
 ///    - macOS: `proc_pidpath(2)` (full executable path; last path component
@@ -2083,11 +2083,22 @@ fn is_live_mootx01(pid: i32) -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        // Windows CRT kill(pid, 0) returns 0 when the process exists and the
-        // caller has PROCESS_QUERY_INFORMATION access; returns -1 otherwise.
-        // Full QueryFullProcessImageName identity check is post-v1.
-        let alive = unsafe { libc::kill(pid, 0) };
-        alive == 0
+        // There is no kill() in the MSVC CRT, so existence is asked directly:
+        // OpenProcess returns a null handle when no process holds the id, and a
+        // real handle when one does and the caller may query it. The handle is
+        // closed immediately — this asks a question, it does not hold the
+        // process open. Full QueryFullProcessImageName identity check is
+        // post-v1, same as before.
+        use windows_sys::Win32::Foundation::CloseHandle;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32) };
+        if handle.is_null() {
+            return false;
+        }
+        unsafe { CloseHandle(handle) };
+        true
     }
     #[cfg(target_os = "macos")]
     {
