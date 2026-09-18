@@ -201,14 +201,53 @@ public enum SpanEncodeDuty {
         let spec = encoder.spec
         var encoded = 0, skipped = 0, failed = 0
 
+        // ADR-028 E1: the encoder sees the batch once. Every drawer's spans
+        // are planned first and their texts laid end to end in drawer order;
+        // one `encodeSpans` call covers them all (the encoder chunks the list
+        // itself) and the vectors are dealt back to each drawer by its range.
+        // The vectors are exactly what one call per drawer produces; only the
+        // number of round trips through the model host changes.
+        var plans: [(item: SpanDrawerItem, bounds: [(start: Int, end: Int)], range: Range<Int>)] = []
+        var allTexts: [String] = []
         for item in pending {
-            guard !item.content.isEmpty else {
+            guard !item.content.isEmpty, let plan = spanPlan(content: item.content, spec: spec) else {
                 skipped += 1
                 continue
             }
+            let start = allTexts.count
+            allTexts.append(contentsOf: plan.texts)
+            plans.append((item, plan.bounds, start..<allTexts.count))
+        }
+
+        // One batch call. When the batch as a whole fails, every drawer is
+        // encoded on its own below, so one bad drawer costs itself, not the
+        // batch.
+        var batchVectors: [[Float]]? = nil
+        if !allTexts.isEmpty {
             do {
-                let inputs = try await buildSpanInputs(id: item.id, content: item.content, spec: spec, encoder: encoder)
-                guard !inputs.isEmpty else { skipped += 1; continue }
+                let vectors = try await encoder.encodeSpans(allTexts)
+                if vectors.count == allTexts.count {
+                    batchVectors = vectors
+                } else {
+                    log.warning("spanEncode: batch encoder returned \(vectors.count, privacy: .public) vectors for \(allTexts.count, privacy: .public) spans — encoding per drawer")
+                }
+            } catch {
+                log.warning("spanEncode: batch encode failed (\(error, privacy: .public)) — encoding per drawer")
+            }
+        }
+
+        for plan in plans {
+            let item = plan.item
+            do {
+                let vectors: [[Float]]
+                if let batchVectors {
+                    vectors = Array(batchVectors[plan.range])
+                } else {
+                    vectors = try await encoder.encodeSpans(Array(allTexts[plan.range]))
+                    precondition(vectors.count == plan.bounds.count,
+                        "encoder returned \(vectors.count) vectors for \(plan.bounds.count) spans")
+                }
+                let inputs = spanInputs(content: item.content, bounds: plan.bounds, vectors: vectors)
 
                 // SECURITY: liveness recheck (destruction contract). The
                 // pending snapshot was read before this drawer was encoded;
@@ -253,46 +292,50 @@ public enum SpanEncodeDuty {
         return SpanEncodeBatchResult(encoded: encoded, skipped: skipped, failed: failed)
     }
 
-    // MARK: - Span input builder
+    // MARK: - Span planning
 
-    private static func buildSpanInputs(
-        id: String,
+    /// The span plan for one drawer: the word bounds of each span and the
+    /// text the encoder sees for it. `nil` when the content has no words or
+    /// yields no spans.
+    private static func spanPlan(
         content: String,
-        spec: EncoderModelSpec,
-        encoder: any SpanEncoder
-    ) async throws -> [SpanVectorInput] {
+        spec: EncoderModelSpec
+    ) -> (bounds: [(start: Int, end: Int)], texts: [String])? {
         let wordList = Spanner.words(content)
-        guard !wordList.isEmpty else { return [] }
+        guard !wordList.isEmpty else { return nil }
 
-        let spanBounds = Spanner.spans(
+        let bounds = Spanner.spans(
             wordCount: wordList.count,
             windowWords: spec.windowWords,
             overlapDivisor: spec.overlapDivisor,
             maxSpans: spec.maxSpans)
-        guard !spanBounds.isEmpty else { return [] }
+        guard !bounds.isEmpty else { return nil }
 
-        // Build span texts: apply doc prefix (empty prefix → no prepend).
         // The encoder applies the model's document prefix itself (contract
         // sheet §7: prefixes belong to the contract layer, never to callers).
-        let spanTexts = spanBounds.map { bounds in
-            wordList[bounds.start..<bounds.end].joined(separator: " ")
-        }
+        let texts = bounds.map { wordList[$0.start..<$0.end].joined(separator: " ") }
+        return (bounds, texts)
+    }
 
-        let floatVecs = try await encoder.encodeSpans(spanTexts)
-        precondition(floatVecs.count == spanBounds.count,
-            "encoder returned \(floatVecs.count) vectors for \(spanBounds.count) spans")
-
-        return zip(spanBounds.enumerated(), floatVecs).map { (enumBounds, fv) in
-            let (idx, bounds) = enumBounds
+    /// The span rows for one drawer from its plan and the vectors the encoder
+    /// returned for it, quantized to int8.
+    private static func spanInputs(
+        content: String,
+        bounds: [(start: Int, end: Int)],
+        vectors: [[Float]]
+    ) -> [SpanVectorInput] {
+        // Existing rows use FNV-1a 64-bit over UTF-8 content bytes.
+        let contentVersion = SpanContentVersion.fnv1a64(content)
+        return zip(bounds.enumerated(), vectors).map { (enumBounds, fv) in
+            let (idx, span) = enumBounds
             let (q, scale) = Int8Vec.quantize(fv)
             return SpanVectorInput(
                 index: UInt32(idx),
                 int8: q,
                 scale: scale,
-                startWord: bounds.start,
-                endWord: bounds.end,
-                // Existing rows use FNV-1a 64-bit over UTF-8 content bytes.
-                contentVersion: SpanContentVersion.fnv1a64(content))
+                startWord: span.start,
+                endWord: span.end,
+                contentVersion: contentVersion)
         }
     }
 
