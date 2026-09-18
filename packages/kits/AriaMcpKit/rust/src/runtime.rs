@@ -427,16 +427,82 @@ pub fn run(
             // which holds the coordinator only around the claim and the row
             // write. The two on-demand duties are drained when something queued
             // them, never enqueued here.
+            //
+            // The coordinator is a mutex, not an actor: a batch that runs
+            // under it blocks every other worker for its whole length. The
+            // anomaly sweep scores rooms O(n²) in their size, minutes on a
+            // room of thousands of drawers, so its worker below claims and
+            // settles under the lock but scores with the lock RELEASED, the
+            // way the Swift resident's `scoreRoom` detaches its pairwise loop
+            // off the actor. Observed 2026-09-18 on the LongMemEval
+            // aggregate (2,598 drawers in one room): the sweep held the lock
+            // for over eleven minutes and span encoding sat at 64 of 19,195.
             {
                 use genius_locus_kit::brain::duty_queue::DutyKind;
                 use genius_locus_kit::brain::signals::SpanEncodeSignal;
                 let fast = SpanEncodeSignal::DEFAULT_CADENCE_SECONDS.max(1);
                 let cadence = duty_settings.duty_fact_extraction_cadence_seconds.max(1);
                 let now_millis = || SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis() as i64;
+                {
+                    let worker_coord = Arc::clone(&coord_for_hnsw);
+                    let worker_handle = handle_for_hnsw.clone();
+                    std::thread::spawn(move || loop {
+                        let kind = DutyKind::AnomalySweep;
+                        // Under the lock: queue the owed duty, claim its jobs,
+                        // and resolve the rooms this batch will score.
+                        let claimed = match worker_coord.lock() {
+                            Ok(coord) => {
+                                let now_ms = now_millis();
+                                let claim = coord
+                                    .enqueue_duty(&worker_handle, kind, now_ms)
+                                    .and_then(|_| coord.claim_duty_jobs(&worker_handle, kind, now_ms));
+                                match claim {
+                                    Ok(jobs) if jobs.is_empty() => None,
+                                    Ok(jobs) => {
+                                        let limit = coord.duty_limits(&worker_handle).anomaly_sweep_rooms;
+                                        match coord.anomaly_sweep_prepare(&worker_handle, limit, now_ms) {
+                                            Ok(work) => Some((jobs, work)),
+                                            Err(e) => {
+                                                for job in &jobs { coord.complete_duty_job(&worker_handle, job, false); }
+                                                eprintln!("AriaResident duty {} failed: {e:?}", kind.wire_name());
+                                                None
+                                            }
+                                        }
+                                    }
+                                    Err(e) => { eprintln!("AriaResident duty {} failed: {e:?}", kind.wire_name()); None }
+                                }
+                            }
+                            Err(_) => None,
+                        };
+                        if let Some((jobs, work)) = claimed {
+                            // No coordinator mutex is held while the rooms are scored.
+                            let now_ms = now_millis();
+                            let scored = genius_locus_kit::brain::anomaly_flag_sweep::anomaly_sweep_score(&work, now_ms);
+                            if let Ok(coord) = worker_coord.lock() {
+                                let paid = match &scored {
+                                    Ok(rooms) => coord.anomaly_sweep_settle(&worker_handle, rooms, now_ms).unwrap_or(0),
+                                    Err(_) => 0,
+                                };
+                                for job in &jobs { coord.complete_duty_job(&worker_handle, job, scored.is_ok()); }
+                                let remaining = coord.duty_debt(&worker_handle, kind).unwrap_or(0);
+                                // Carry the work forward, as `drain_duty` does: a batch
+                                // that paid something and left debt queues the next one.
+                                if paid > 0 && remaining > 0 {
+                                    let _ = coord.enqueue_duty(&worker_handle, kind, now_ms);
+                                }
+                                match scored {
+                                    Ok(_) => eprintln!(
+                                        "AriaResident duty {}: {} paid, {} remaining", kind.wire_name(), paid, remaining),
+                                    Err(e) => eprintln!("AriaResident duty {} failed: {e:?}", kind.wire_name()),
+                                }
+                            }
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(cadence));
+                    });
+                }
                 for (kind, seconds, enqueues) in [
                     (DutyKind::SpanEncode, fast, true),
                     (DutyKind::SubjectBackfill, cadence, true),
-                    (DutyKind::AnomalySweep, cadence, true),
                     (DutyKind::FactsBackfill, fast, false),
                     (DutyKind::RetrainBasis, fast, false),
                 ] {
