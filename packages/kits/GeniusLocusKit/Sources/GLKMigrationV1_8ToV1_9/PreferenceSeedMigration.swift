@@ -56,7 +56,10 @@ public extension GeniusLocusKit {
     /// `.factExtraction` (seeded by the 1.7 → 1.8 capsule) and `.factExtractor`
     /// (absent reads as `.nuextract`; no seeding capsule for the extractor choice).
     static var preferenceSeedKeys: [EstatePreferenceKey] {
-        EstatePreferenceKey.allCases.filter { $0 != .factExtraction && $0 != .factExtractor }
+        // The switches that default on. `fact_extraction` has its own
+        // capsule, `fact_extractor` is an engine choice, and the chest
+        // switches (ADR-027) default off and are never seeded.
+        EstatePreferenceKey.allCases.filter { $0 != .factExtraction && $0.defaultValue == .on }
     }
 
     /// Run the GLK 1.8 → 1.9 preference-seed migration for an estate.
