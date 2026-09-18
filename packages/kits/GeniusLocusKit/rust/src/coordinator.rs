@@ -5266,16 +5266,30 @@ impl EstateCoordinator {
         threshold: f32,
         now: i64,
     ) -> Result<usize, VerbDispatchError> {
+        // The whole-estate form: every container rescored whole, every
+        // roster replaced (ADR-026). The resident pays the incremental duty
+        // instead.
         let estate = self.estate_for_verb(handle)?;
+        let checkpoints = self.fact_checkpoints(handle).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "anomaly_flag_sweep".to_string(), reason: format!("checkpoints: {e:?}"),
+            })
+        })?;
         let rooms = estate
             .room_level_fingerprints()
             .map_err(|e| remap("anomaly_flag_sweep", "", e))?;
         let mut changed: usize = 0;
         for entry in &rooms {
-            changed += crate::brain::anomaly_flag_sweep::score_room(
-                &estate, &entry.wing, &entry.room, threshold, now,
-            )
-            .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
+            let containers = crate::brain::anomaly_flag_sweep::containers_of(estate, &entry.wing, &entry.room)
+                .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
+            for (container, _) in containers {
+                changed += crate::brain::anomaly_flag_sweep::score_container(
+                    estate, &checkpoints, &container, threshold, true, now,
+                )
+                .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                    verb: "anomaly_flag_sweep".to_string(), reason: format!("{e:?}"),
+                }))?;
+            }
         }
         Ok(changed)
     }
@@ -8102,12 +8116,19 @@ impl EstateCoordinator {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let prior_room = if moves_room {
+        // The anomaly sweep's unit is the container a drawer sits in
+        // (ADR-026): the one it leaves is readable only before the move.
+        let container_of = |parent: &str| -> Option<crate::brain::anomaly_flag_sweep::AnomalyContainer> {
+            let names = crate::brain::anomaly_flag_sweep::resolve_room_names(&estate, std::iter::once(parent));
+            let (wing, room) = names.get(parent)?;
+            Some(crate::brain::anomaly_flag_sweep::AnomalyContainer {
+                node_id: parent.to_string(), wing: wing.clone(), room: room.clone(),
+            })
+        };
+        let prior_container = if moves_room {
             estate.get_drawers(&[row_id]).ok().and_then(|drawers| {
                 let drawer = drawers.into_iter().next()?;
-                let names = crate::brain::anomaly_flag_sweep::resolve_room_names(
-                    &estate, std::iter::once(drawer.parent_node_id.as_str()));
-                names.get(&drawer.parent_node_id).cloned()
+                container_of(&drawer.parent_node_id)
             })
         } else {
             None
@@ -8118,15 +8139,13 @@ impl EstateCoordinator {
         if moves_room {
             if let Ok(drawers) = estate.get_drawers(&[row_id]) {
                 if let Some(drawer) = drawers.into_iter().next() {
-                    let names = crate::brain::anomaly_flag_sweep::resolve_room_names(
-                        &estate, std::iter::once(drawer.parent_node_id.as_str()));
-                    if let Some((new_wing, new_room)) = names.get(&drawer.parent_node_id) {
-                        let _ = self.mark_anomaly_sweep_room_dirty(handle, new_wing, new_room, now);
+                    if let Some(container) = container_of(&drawer.parent_node_id) {
+                        let _ = self.mark_anomaly_sweep_container_dirty(handle, &container, now);
                     }
                 }
             }
-            if let Some((old_wing, old_room)) = prior_room {
-                let _ = self.mark_anomaly_sweep_room_dirty(handle, &old_wing, &old_room, now);
+            if let Some(container) = prior_container {
+                let _ = self.mark_anomaly_sweep_container_dirty(handle, &container, now);
             }
         }
         Ok(())
