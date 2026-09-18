@@ -44,7 +44,8 @@ impl Estate {
         let mut rooms: HashMap<Uuid, i64> = HashMap::new();
         for id in drawer_ids {
             if let Some(drawer) = self.store.get_drawer(id)? {
-                if let Ok(room) = Uuid::parse_str(&drawer.parent_node_id) {
+                // The parent may be a chest (ADR-026); roots are kept per room.
+                if let Some(room) = self.room_id_for_parent(&drawer.parent_node_id) {
                     let entry = rooms.entry(room).or_insert(drawer.filed_at);
                     if drawer.filed_at > *entry {
                         *entry = drawer.filed_at;
@@ -105,10 +106,17 @@ impl Estate {
     /// of adjectiveBitmap (mask 0x3F). Including withdrawn drawers in the
     /// snapshot would allow retrieval of content that the user retracted,
     /// violating snapshot completeness (WS2-F1, fixed 2026-06-28).
-    fn compute_room_merkle_root(
+    pub(crate) fn compute_room_merkle_root(
         &self,
         room_node_id: Uuid,
     ) -> Result<MerkleRoot, LocusKitError> {
+        // The room's subtree: drawers on the room itself and in every chest
+        // under it (ADR-026, spec § 12). A chest has no root of its own; the
+        // room's root covers it, so re-binning never changes a room's root.
+        let mut parents = vec![TypedValue::Text(room_node_id.to_string())];
+        for chest in self.node_store_ref()?.active_chests(room_node_id)? {
+            parents.push(TypedValue::Text(chest.id.to_string()));
+        }
         let rows = self
             .store
             .storage().ok_or_else(|| LocusKitError::DatabaseUnavailable("no storage".to_string()))?
@@ -116,10 +124,7 @@ impl Estate {
             .query(
                 "drawers",
                 Some(&StoragePredicate::And(vec![
-                    StoragePredicate::Eq(
-                        Column::new("drawers", "parent_node_id"),
-                        TypedValue::Text(room_node_id.to_string()),
-                    ),
+                    StoragePredicate::In(Column::new("drawers", "parent_node_id"), parents),
                     // Exclude tombstoned drawers (irreversible deletion).
                     StoragePredicate::IsNull(Column::new("drawers", "tombstonedAt")),
                     // Exclude withdrawn drawers (state 18, bits 0-5 of adjectiveBitmap).
@@ -309,7 +314,7 @@ impl Estate {
 /// Parses as UUID when possible; otherwise derives a stable UUID from
 /// SHA-256 of the string (first 16 bytes with UUID v5 version and
 /// variant bits set). Mirrors Swift `Estate.deterministicUUID(from:)`.
-fn deterministic_uuid(string_id: &str) -> Uuid {
+pub(crate) fn deterministic_uuid(string_id: &str) -> Uuid {
     if let Ok(uuid) = Uuid::parse_str(string_id) {
         return uuid;
     }

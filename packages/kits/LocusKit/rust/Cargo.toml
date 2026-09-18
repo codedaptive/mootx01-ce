@@ -33,6 +33,8 @@ substrate-lib = { path = "../../../libs/SubstrateLib/rust" }
 substrate-types = { path = "../../../libs/SubstrateTypes/rust" }
 substrate-kernel = { path = "../../../libs/SubstrateKernel/rust" }
 substrate-ml = { path = "../../../libs/SubstrateML/rust" }
+# The chest placement key (`chest_placement`, `MortonKey`; ADR-026, spec § 12).
+engram-lib = { path = "../../../libs/EngramLib/rust" }
 uuid = { version = "1", features = ["v4", "serde"] }  # serde feature required for DatasetHandleContent.dataset_id (MX-TAB-4)
 # Ed25519 keypair generation for the federation signing identity minted at
 # first open. Mirrors Swift's CryptoKit Curve25519.Signing.PrivateKey().

@@ -58,7 +58,8 @@ extension Estate {
         var rooms: [UUID: Date] = [:]
         let drawers = try await store.getDrawers(ids: drawerIds)
         for drawer in drawers {
-            guard let room = UUID(uuidString: drawer.parentNodeId) else { continue }
+            // The parent may be a chest (ADR-026); roots are kept per room.
+            guard let room = try await roomNodeId(forParent: drawer.parentNodeId) else { continue }
             if let existing = rooms[room] {
                 if drawer.filedAt > existing { rooms[room] = drawer.filedAt }
             } else {
@@ -125,11 +126,15 @@ extension Estate {
     /// snapshot would allow retrieval of content that the user retracted,
     /// violating snapshot completeness (WS2-F1, fixed 2026-06-28).
     func computeRoomMerkleRoot(roomNodeId: UUID) async throws -> MerkleRoot {
+        // The room's subtree: drawers on the room itself and in every chest
+        // under it (ADR-026, spec § 12). A chest has no root of its own; the
+        // room's root covers it, so re-binning never changes a room's root.
+        let parents: [TypedValue] = ([roomNodeId] + (try await nodeStore.activeChests(roomId: roomNodeId)).map(\.id))
+            .map { .text($0.uuidString) }
         let rows = try await store.storage.rowStore.query(
             table: "drawers",
             where: .and([
-                .eq(Column(table: "drawers", name: "parent_node_id"),
-                    .text(roomNodeId.uuidString)),
+                .in(Column(table: "drawers", name: "parent_node_id"), parents),
                 // Exclude tombstoned drawers (irreversible deletion).
                 .isNull(Column(table: "drawers", name: "tombstonedAt")),
                 // Exclude withdrawn drawers (state 18, bits 0-5 of adjectiveBitmap).

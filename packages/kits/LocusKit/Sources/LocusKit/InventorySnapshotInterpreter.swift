@@ -76,7 +76,8 @@ public enum LocusInventorySnapshotInterpreter {
         }
         var activeNames = Set<String>()
         for node in nodes {
-            guard (0...2).contains(node.depth) else {
+            // 0 estate, 1 wing, 2 room, 3 chest (ADR-026, spec § 12).
+            guard (0...NodeStore.chestDepth).contains(node.depth) else {
                 throw LocusInventorySnapshotError.invalidTopology(reason: "node \(node.id) has unsupported depth \(node.depth)")
             }
             guard !node.displayName.isEmpty,
@@ -124,8 +125,22 @@ public enum LocusInventorySnapshotInterpreter {
     }
 
     private static func ancestry(for drawer: Drawer, nodes: [UUID: Node]) throws -> [Node] {
-        guard let roomID = UUID(uuidString: drawer.parentNodeId),
-              let room = nodes[roomID], room.depth == 2,
+        // The parent is a room, or a chest under a room (ADR-026, spec § 12).
+        // Chests are internal, so the reported ancestry is root, wing, room
+        // either way; a chest's own lifecycle is checked through `room`
+        // because a chest is only ever tombstoned by a re-bin that moved
+        // every drawer out of it.
+        guard let parentID = UUID(uuidString: drawer.parentNodeId),
+              let parent = nodes[parentID] else {
+            throw LocusInventorySnapshotError.invalidTopology(reason: "drawer \(drawer.id) does not resolve to room, wing, and root")
+        }
+        let roomID: UUID
+        if parent.depth == NodeStore.chestDepth, let chestRoom = parent.parentId {
+            roomID = chestRoom
+        } else {
+            roomID = parentID
+        }
+        guard let room = nodes[roomID], room.depth == 2,
               let wingID = room.parentId, let wing = nodes[wingID], wing.depth == 1,
               let rootID = wing.parentId, let root = nodes[rootID], root.depth == 0,
               root.parentId == nil else {

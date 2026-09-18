@@ -21,7 +21,8 @@ const NODES: &str = "nodes";
 pub struct InventorySnapshotDrawer {
     pub id: String,
     pub lineage_id: Uuid,
-    pub parent_room_id: Uuid,
+    /// The drawer's parent node: its room, or a chest under its room (ADR-026).
+    pub parent_node_id: Uuid,
     pub filed_at: i64,
     pub tombstoned_at: Option<i64>,
     pub provenance: i64,
@@ -109,7 +110,19 @@ pub fn decode_inventory_snapshot(
         .iter()
         .map(|row| {
             let drawer = decode_drawer_row(row)?;
-            let room = require_role(&node_by_id, drawer.parent_room_id, 2, "room", &drawer.id)?;
+            // The parent is a room, or a chest under a room (ADR-026, spec
+            // § 12). Chests are internal, so the proven chain is room, wing,
+            // root either way.
+            let room_id = match node_by_id.get(&drawer.parent_node_id) {
+                Some(node) if node.depth == crate::node_store::NodeStore::CHEST_DEPTH => {
+                    node.parent_id.ok_or_else(|| InventorySnapshotDecodeError::InvalidAncestry {
+                        drawer_id: drawer.id.clone(),
+                        detail: "chest has no room parent".to_string(),
+                    })?
+                }
+                _ => drawer.parent_node_id,
+            };
+            let room = require_role(&node_by_id, room_id, 2, "room", &drawer.id)?;
             let wing_id = room.parent_id.ok_or_else(|| InventorySnapshotDecodeError::InvalidAncestry {
                 drawer_id: drawer.id.clone(),
                 detail: "room has no wing parent".to_string(),
@@ -152,7 +165,7 @@ pub fn decode_drawer_row(
         return invalid(DRAWERS, "id", "must not be empty");
     }
     let lineage_id = required_uuid(DRAWERS, "lineageID", row)?;
-    let parent_room_id = required_uuid(DRAWERS, "parent_node_id", row)?;
+    let parent_node_id = required_uuid(DRAWERS, "parent_node_id", row)?;
     let filed_at = required_timestamp(DRAWERS, "filedAt", row)?;
     let tombstoned_at = optional_timestamp(DRAWERS, "tombstonedAt", row)?;
     let provenance = required_bitmap(DRAWERS, "provenance", row)?;
@@ -162,7 +175,7 @@ pub fn decode_drawer_row(
     Ok(InventorySnapshotDrawer {
         id,
         lineage_id,
-        parent_room_id,
+        parent_node_id,
         filed_at,
         tombstoned_at,
         provenance,
@@ -186,8 +199,9 @@ pub fn decode_node_row(
         return invalid(NODES, "lookup_name", "does not normalize from display_name");
     }
     let depth = required_i32(NODES, "depth", row)?;
-    if !(0..=2).contains(&depth) {
-        return invalid(NODES, "depth", "must be 0, 1, or 2");
+    // 0 estate, 1 wing, 2 room, 3 chest (ADR-026, spec § 12).
+    if !(0..=crate::node_store::NodeStore::CHEST_DEPTH).contains(&depth) {
+        return invalid(NODES, "depth", "must be 0, 1, 2, or 3");
     }
     let lifecycle = required_i32(NODES, "lifecycle", row)?;
     if !matches!(lifecycle, 0 | 1) {

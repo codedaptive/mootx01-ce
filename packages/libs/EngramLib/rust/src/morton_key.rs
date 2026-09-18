@@ -16,14 +16,35 @@
 //! module reads the key's bits, so the swap is confined here if it is ever
 //! measured to matter. Do not add a third ordering.
 
-use substrate_types::fingerprint256::Fingerprint256;
-
 /// A 512-bit placement key, eight words, most significant word first. The
 /// derived `Ord` on the array is lexicographic by word, so it is the
 /// numeric order of the 512-bit value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct MortonKey {
     pub words: [u64; 8],
+}
+
+impl MortonKey {
+    /// The key as 128 lowercase hex characters, most significant word first:
+    /// the form a chest node is named by (LocusKit spec § 12). Fixed width
+    /// and lowercase so string order equals key order, which is what lets a
+    /// room's chests be sorted by name.
+    pub fn hex(&self) -> String {
+        self.words.iter().map(|w| format!("{w:016x}")).collect()
+    }
+
+    /// The key a `hex` name denotes; `None` unless it is exactly 128 hex
+    /// characters (either case).
+    pub fn from_hex(hex: &str) -> Option<MortonKey> {
+        if hex.len() != 128 || !hex.is_ascii() {
+            return None;
+        }
+        let mut words = [0u64; 8];
+        for (i, word) in words.iter_mut().enumerate() {
+            *word = u64::from_str_radix(&hex[i * 16..(i + 1) * 16], 16).ok()?;
+        }
+        Some(MortonKey { words })
+    }
 }
 
 /// One chest's key range after a deal: every key in `low..=high` belongs to

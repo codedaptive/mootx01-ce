@@ -201,6 +201,23 @@ fn morton_key_single_bit_and_permutation_bijection() {
 }
 
 #[test]
+fn morton_key_hex_round_trips_and_orders_like_the_key() {
+    use engram_lib::morton_key::MortonKey;
+    let key = MortonKey { words: [0x0153494B6173682F, 0xC097888FA0B6F9BE, 0xFBACB3B49B8D9791, 0x3F2937711F490711,
+                                  0x15BB05FB15FA01FE, 0x11FE01BE11BE10FE, 0x88DC989C889C99D8, 0x89D8D9D8C9D989C9] };
+    let hex = key.hex();
+    assert_eq!(hex.len(), 128);
+    assert!(hex.starts_with("0153494b6173682fc097888fa0b6f9be"));
+    assert_eq!(MortonKey::from_hex(&hex), Some(key));
+    assert_eq!(MortonKey::from_hex(&hex.to_uppercase()), Some(key));
+    assert_eq!(MortonKey::from_hex(&hex[..127]), None);
+    assert_eq!(MortonKey::from_hex(&"g".repeat(128)), None);
+    let zero = MortonKey { words: [0; 8] };
+    assert_eq!(zero.hex(), "0".repeat(128));
+    assert!(zero.hex() < hex && zero < key);
+}
+
+#[test]
 fn deal_and_range_index() {
     let keys: Vec<u32> = (0..10).collect();
     let ranges = chest_placement::deal(&keys, 4);

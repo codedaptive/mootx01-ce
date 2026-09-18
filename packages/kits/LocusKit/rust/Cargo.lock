@@ -370,6 +370,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "engram-lib"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "substrate-kernel",
+ "substrate-types",
+]
+
+[[package]]
 name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -730,6 +739,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "ed25519-dalek",
+ "engram-lib",
  "intellectus-lib",
  "lattice-lib",
  "persistence-kit",
