@@ -1,9 +1,9 @@
 ---
 title: SubstrateML Specification
-version: 1.7.1
+version: 1.10.0
 status: active
-date: 2026-08-26
-description: "Behavioral specification for SubstrateML: invariants, conformance requirements, and the contract it guarantees."
+date: 2026-09-15
+description: "Behavior and invariants for SUBSTRATEML."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -185,7 +185,7 @@ This specification defines:
   recipe surface lives in `CognitionKit` (`FormalConcepts.Output.implications`).
 - **Jacobi SVD** (`SVDResult`, `JacobiSVD`) — deterministic one-sided
   cyclic Jacobi SVD for real matrices (m × n, m ≥ n). Used by
-  CorpusKit's `LsaProvider` for LSA distributional embeddings. Bit-identical
+  the optional `LsaProvider` contract. It is outside default recall. Bit-identical
   across ports via fixed sweep count, fixed tournament column-pair order,
   scalar Float32, and a canonical sign convention.
 - **Distillation pipeline** (`DistillationFeatureType`, `TypedDecayWeighting`,
@@ -196,7 +196,7 @@ This specification defines:
   DISTILLATION_MATH_SSA.md §1–7 and DISTILLATION_MATH_DIFFUSION.md §1–8.
   Feature extraction is injected by the caller. Stage 2.5 rescues CONVERGENT
   and MONOTONE features via `DeltaFeatureExtractor`. Consumed by NeuronKit's
-  `distillCluster` and CognitionKit's `DistilledRecall` and `Recollect` recipes.
+  `distillCluster`. Inline recall hydration uses ContextDistillLib.
 - **ConflictCue** (`ConflictCueKind`, `ConflictCueResult`, `ConflictCue`) —
   deterministic pairwise text-conflict screen with three cues (valueDivergence,
   negationAsymmetry, markerRevision). Backed by `ShingleSimilarity`. Consumed
@@ -236,7 +236,7 @@ This specification does NOT define:
 **Depends on:** `SubstrateTypes`, `SubstrateKernel`.
 
 **Consumed by:** `SubstrateLib` (audit-log fold, matrix decay called
-from the verb mechanics), `VectorKit` (one site: SimHash projection
+from the verb mechanics), `SynapseKit` (one site: SimHash projection
 for content embedding), `CorpusKit` (FloatSimHash for provider
 embeddings; lattice distance for corpus indexing), `LocusKit`
 (AuditLogFold for projection at HLC, MatrixDecay for adjective-aging,
@@ -1269,7 +1269,33 @@ monitoring enabled versus disabled, for the same inputs and seed. This is
 verified by the `conformance*` tests in `VizGraphSignalsTests.swift` and
 `viz_graph_signals_tests.rs`.
 
+## Security repair contract
+
+### Cooperative decomposition cancellation
+
+Jacobi decomposition admits a caller-owned cancellation predicate. Cancellation
+checks occur outside parallel column-pair rounds and never change completed
+arithmetic. Partial factors are discarded; uncancelled output remains identical
+between the cancellable and non-cancellable entry points in both ports.
+
 ## Changelog
+
+### 1.10.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 1.9.0 -- 2026-09-04
+
+- Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
+
+### 1.8.0 -- 2026-09-02
+
+`DistillationPipelineVersion` is removed (CDL-02). The identity of the stored
+distilled representation is the ContextDistillLib converter ID, owned by
+GeniusLocusKit (`distillationConverterID`); SubstrateML no longer names a
+rendering contract. The intra-item pipeline and the token estimator are
+unchanged.
 
 ### 1.7.1 -- 2026-08-26
 
@@ -1322,3 +1348,8 @@ Established under VERSIONING.md: version number removed from the filename; front
 - **v1.3.0 (2026-08-20)** — DistillationPipelineVersion.current: "p1" → "p2-det" (rendering contract now includes the GLK categorizer trailer; the constant lives here, the stage lives in GeniusLocusKit). Version-mismatch sweeps re-distill all estates lazily.
 
 
+
+### 1.9.1 -- 2026-09-06
+
+Corrected consumers of the mathematical distillation pipeline. Identified
+the optional record-vector caller of Jacobi SVD.

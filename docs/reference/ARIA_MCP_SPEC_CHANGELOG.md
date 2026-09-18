@@ -1,15 +1,75 @@
 ---
-version: 2.0.1
-date: 2026-08-26
-description: >
-  Complete changelog of ARIA_MCP_SPEC.md, one entry per version. The
-  specification body carries only a recent-changes summary; this file is
-  the full history. Requirements never live here — every requirement
-  introduced by a changelog entry is integrated into the specification
-  body of the version that introduced it.
+version: 4.5.1
+date: 2026-09-15
+description: "Historical changes to the ARIA MCP SPEC document."
+status: active
 ---
 
 # ARIA MCP Specification — Changelog
+
+### 4.5.1 -- 2026-09-15
+
+Memory-get distilled output uses v23-attributed in both ports and retained
+dispatch paths, replacing the v2 prefix-truncation defect. Authorization and
+Skim are unchanged; converter identity comes from the executed selection.
+
+### 4.3.0 -- 2026-09-13
+
+Added explicit memory-get Skim: authorized complete distillation followed by
+source-order preview at a fixed 512 UTF-8 byte target. Documented the
+`budgetHonored` and `complete` flags, the savings line, and exclusion of the
+omitted tail.
+No stored schema, ranking, or other hydration-depth behavior changes.
+
+### 4.2.0 -- 2026-09-13
+
+Added the default-off report_withheld modifier, conditional sensitivity-only meta
+count, ranked topK keystones hydration definition, and unchanged-schema contract.
+
+### 4.1.0 -- 2026-09-12
+
+§ 12.4 gains the mutation-gate invariant. Every write verb that names a
+memory (`moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`,
+`moot_confirm_memory`, `moot_move_memory`, `moot_link_memories`,
+`moot_review_tunnel`) resolves its target through the read path's
+sensitivity gate; an above-ceiling target is refused with the absent-id
+envelope and nothing is written; `moot_link_memories` gates both endpoints;
+`correct_sensitivity` may raise a readable row's tier and cannot reach an
+unreadable one. Records behaviour shipped in both ports; no new argument.
+
+### 4.0.0 -- 2026-09-11 (BREAKING)
+
+The four work-packet operations are retired from the ARIA surface. §12.4's
+filing-floor rule no longer names `moot_file_packet` among the verbs a
+sensitivity argument applies to. Stored packet drawers already committed
+to an estate are unaffected; this is a surface retirement, not a schema
+change, and no `mootx01 upgrade` step is introduced. See
+`ARIA_MCP_INTERFACE_CHANGELOG.md` 4.0.0 for the full removed-operation
+list, deleted source files, and new tool counts.
+
+### 3.5.2 -- 2026-09-10
+
+§12.5 coaching triggers are now active on the v2 dispatch path in both ports.
+All six triggers from the §12.5 table are implemented in `AriaV2Coach` (Swift)
+and `v2::coach` (Rust). The v2 result envelope gains a hint slot as specified
+in `ARIA_MCP_INTERFACE.md §3.10.2`: `structuredContent["hint"]` and an
+appended `"\nhint: <text>"` line in `content[0].text`. Estate-provisioned
+`coaching_calls` and `sticky_enabled` are applied on the first dispatch call of
+each session. Full wire contract details are in the interface document.
+
+### 3.2.0 -- 2026-09-07
+
+§ 12.4: the filing floor covers every filing verb, with a sensitivity
+argument (`moot_file_memory`, `moot_file_packet`: omitted files at the
+ceiling, lower explicit refused) or without one (the `memory` adapter's
+content-bearing writes file at the higher of their own tier and the
+ceiling). Full entry in ARIA_MCP_SPEC.md § Changelog.
+
+### 3.1.0 -- 2026-09-07
+
+§ 12.4: a live sensitivity grant floors filings as well as lifting reads;
+an omitted sensitivity files at the grant's tier, a lower explicit tier is
+refused with the ceiling named. Full entry in ARIA_MCP_SPEC.md § Changelog.
 
 ### 2.0.1 -- 2026-08-26
 
@@ -1964,3 +2024,11 @@ seam for the graph-centrality / Bradley-Terry tracks. Swift behavior unchanged.
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+## Changelog
+
+### 3.0.0 -- 2026-09-06
+
+Removed stale adornment and stored-distillation contracts from the living
+document. Aligned candidate rows and hydration with the schema-19 source.
+The earlier entries remain historical records.

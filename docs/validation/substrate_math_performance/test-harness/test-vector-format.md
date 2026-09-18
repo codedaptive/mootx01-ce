@@ -904,7 +904,7 @@ content-integrity extension to the I-27 seal surface. It pins the
 canonical byte contract for:
 
 - leaf payloads over drawer UUID, NFC UTF-8 content, and optional
-  VectorKit sidecar vectors;
+  SynapseKit sidecar vectors;
 - interior roots over sorted child roots;
 - tombstone roots;
 - the empty subtree root;

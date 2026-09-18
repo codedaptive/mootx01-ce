@@ -1,9 +1,9 @@
 ---
 title: Reference Directory Index
-version: 1.0.3
+version: 2.1.0
 status: active
-date: 2026-07-23
-description: Index of the reference contract surface — the SPEC and INTERFACE documents for every kit, lib, protocol, and canonical encoder.
+date: 2026-09-11
+description: Index of the current reference contract surface — the SPEC and INTERFACE documents for every active kit, lib, protocol, and canonical encoder, including the first-party provider.
 authors: MOOTx01 maintainers
 relates_to:
   - VERSIONING.md
@@ -30,6 +30,7 @@ The catalog is ordered bottom-up, mirroring the kit stack in
 | SubstrateTypes | [SPEC](SUBSTRATETYPES_SPEC.md) | [INTERFACE](SUBSTRATETYPES_INTERFACE.md) | Value types (HLC, Fingerprint256, Row, the matrix carriers) plus algebra primitives (SimHash, Hamming, ORReduce, FNV). Zero-dependency. |
 | SubstrateKernel | [SPEC](SUBSTRATEKERNEL_SPEC.md) | [INTERFACE](SUBSTRATEKERNEL_INTERFACE.md) | Kernel dispatch over hardware backends: scalar, SIMD, NEON, Metal, BNNS. |
 | SubstrateML | [SPEC](SUBSTRATEML_SPEC.md) | [INTERFACE](SUBSTRATEML_INTERFACE.md) | Learning and graph algorithms (Bradley-Terry, NMF, FFT, centrality, anomaly) plus the ambient-signal extractors. |
+| ContextDistillLib | [SPEC](CONTEXTDISTILLLIB_SPEC.md) | [INTERFACE](CONTEXTDISTILLLIB_INTERFACE.md) | Complete post-retrieval Distiller, retained v23.2 recipe, and separately invoked prototype orderReducer and Skim. |
 | SubstrateLib | [SPEC](SUBSTRATELIB_SPEC.md) | [INTERFACE](SUBSTRATELIB_INTERFACE.md) | Orchestration: the audit write-gate, G-Set audit log, fold/decay, SHA-256, HammingNN. |
 | AriaLexiconLib | [SPEC](ARIALEXICONLIB_SPEC.md) | [INTERFACE](ARIALEXICONLIB_INTERFACE.md) | The reified ARIA grammar — one noun, nine verbs, four adjectives, and the verb-noun acceptance matrix. Zero-dependency. |
 | IntellectusLib | [SPEC](INTELLECTUSLIB_SPEC.md) | [INTERFACE](INTELLECTUSLIB_INTERFACE.md) | The telemetry/stat primitives the observability surfaces emit through. |
@@ -52,7 +53,7 @@ The catalog is ordered bottom-up, mirroring the kit stack in
 | Package | Spec | Interface | What it is |
 |---|---|---|---|
 | LocusKit | [SPEC](LOCUSKIT_SPEC.md) | [INTERFACE](LOCUSKIT_INTERFACE.md) | Spatial memory and the knowledge graph for one estate — the four nouns, bitmap state, full audit trail. |
-| VectorKit | [SPEC](VECTORKIT_SPEC.md) | [INTERFACE](VECTORKIT_INTERFACE.md) | On-device model-tagged vector storage and nearest-neighbour machinery. |
+| SynapseKit | [SPEC](SYNAPSEKIT_SPEC.md) | [INTERFACE](SYNAPSEKIT_INTERFACE.md) | On-device model-tagged vector storage and nearest-neighbour machinery. |
 | CorpusKit | [SPEC](CORPUSKIT_SPEC.md) | [INTERFACE](CORPUSKIT_INTERFACE.md) | Standalone-capable RAG database; in GLK, derived indexing over the canonical LocusKit Drawer source. |
 
 ## Composition and brain
@@ -69,8 +70,9 @@ The catalog is ordered bottom-up, mirroring the kit stack in
 | Surface | Spec | Interface | What it is |
 |---|---|---|---|
 | aria-mcp | [SPEC](ARIA_MCP_SPEC.md) | [INTERFACE](ARIA_MCP_INTERFACE.md) | The external access surface — the ARIA language projected onto MCP primitives (tools, resources, prompts, sampling, elicitation). |
+| FirstPartyProvider | [SPEC](FIRST_PARTY_PROVIDER_SPEC.md) | [INTERFACE](FIRST_PARTY_PROVIDER_INTERFACE.md) | The fixed authenticated native operation provider, independently versioned from the v2-only public MCP catalog. |
 | moot-mgr | [SPEC](MOOT_MGR_SPEC.md) | — | The GUI control and monitor surface for the headless mootx01 daemon. |
-| MOOTx01-App | — | [Developer guide](../../apps/Mootx01-App/README.md) | The native macOS, iOS, and iPadOS presentation layer: embedded estate, Apple intelligence and automation, opt-in sync, LAN serving, and on-demand federation. |
+| MOOTx01-App | [SPEC](MOOTX01_APP_SPEC.md) | [INTERFACE](MOOTX01_APP_INTERFACE.md) | The Pro native macOS, iOS, and iPadOS presentation layer and its embedded/resident-provider boundary. |
 | mootx01 CLI | — | [INTERFACE](INSTALLER_INTERFACE.md) | The Swift CLI / host that installs and runs a MOOTx01 estate. |
 
 ## Cross-cutting specifications
@@ -79,6 +81,13 @@ The catalog is ordered bottom-up, mirroring the kit stack in
 the authoritative substrate architecture: estate model, verb surface,
 bitmap layouts, audit trail, standing signals, conformance rules. The
 contract every conforming implementation must satisfy. Read this first.
+
+**[`CROSSENCODER_SPEC.md`](CROSSENCODER_SPEC.md)** /
+**[`CROSSENCODER_INTERFACE.md`](CROSSENCODER_INTERFACE.md)** — the
+retrieval-time cross encoder: the packaged ms-marco-MiniLM-L-6-v2 pair
+classifier, the pair-scoring contract in CorpusKit, and the GeniusLocusKit
+stage that scores the head of the final recall list on an explicit `apply`
+directive and fuses by reciprocal rank. Both ports.
 
 **[`FDC_ENCODER_CANONICAL.md`](FDC_ENCODER_CANONICAL.md)** — the
 deterministic linguistic pipeline that maps text to a Free Decimal
@@ -105,3 +114,33 @@ renaming a spec means updating those code citations.
 Reference documents define what is required; decision records explain
 why; engineering documents describe how. When in doubt, add the contract
 here and the reasoning to [`../decisions/`](../decisions/).
+
+## Changelog
+
+### 2.1.0 -- 2026-09-12
+
+Added the independently versioned FirstPartyProvider specification and interface
+pair, plus the native-app specification and interface. The provider's fixed
+26-operation contract is separate from ARIA MCP's v2-only public catalog.
+
+### 2.0.0 -- 2026-09-12
+
+Removed the retired WorkPacketKit pair from the current reference catalog.
+The preserved historical documents live in `../archive/`; the current
+no-replacement retirement record is [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+
+### 1.0.7 -- 2026-09-11
+Removed WorkPacketKit from the kit table before its historical documents moved
+to the archive.
+
+### 1.0.6 -- 2026-09-08
+Added cross-encoder spec and interface entry: `CROSSENCODER_SPEC.md` /
+`CROSSENCODER_INTERFACE.md` — the retrieval-time ms-marco-MiniLM-L-6-v2 pair
+classifier, pair-scoring contract in CorpusKit, and the GeniusLocusKit stage.
+
+### 1.0.5 -- 2026-09-08
+
+Index the ContextDistillLib spec/interface pair and its native TokenSaver APIs.
+
+### 1.0.4 -- 2026-09-04
+SynapseKit row updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md. The kit was renamed from VectorKit to SynapseKit because the name VectorKit collides with an Apple private framework in MapKit.

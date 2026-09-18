@@ -140,7 +140,7 @@ in the family — it is the foundation.
 only (Swift: `Foundation`; Rust: `std`, `serde` for the wire format).
 
 **Consumed by:** SubstrateKernel, SubstrateML, SubstrateLib, every
-storage-using kit (PersistenceKit, LocusKit, VectorKit, CorpusKit,
+storage-using kit (PersistenceKit, LocusKit, SynapseKit, CorpusKit,
 EngramLib, ConvergenceKit, QueueKit, GeniusLocusKit, NeuronKit).
 
 ## § 4 — Invariants

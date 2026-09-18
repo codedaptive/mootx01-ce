@@ -1,10 +1,10 @@
 ---
 title: moot-mgr Specification
-version: 1.1.1
+version: 1.2.0
 status: active
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-08-26
+date: 2026-09-09
 description: Specification for moot-mgr, the GUI control and monitor surface for the headless mootx01 daemon — store ownership, the global monitoring switch, retention, the CLI read/status surface, and the read-plane wire deltas.
 relates_to:
   - docs/engineering/STANDARD_CODE_AUTHORING_PRACTICE.md#dependency-manifest-rule
@@ -63,17 +63,19 @@ the package-dependency rule. Zero external (third-party) Swift dependencies.
 ## 3. Store ownership
 
 `moot-mgr` provisions and owns exactly one `ObserverSink.StatsStore` (SQLite).
-The store path resolves from the environment:
+The store path resolves from:
 
-| Env var | Meaning | Default |
-|---|---|---|
-| `MOOT_MGR_STORE` | Stats-store file path (verbatim) | `<app-support>/com.mootx01.ce/moot-mgr/stats.sqlite` |
+| Source | Key / path |
+|---|---|
+| `daemon.stats_store` in `<config-dir>/config.json` | Operator-settable; `mootx01 install` seeds this to the computed default when the key is absent. |
+| Computed default (fallback) | `<config-dir>/moot-mgr/stats.sqlite` |
 
-The default reuses the `com.mootx01.ce` data-dir convention so manager data sits
-with other MOOTx01 CE data. `MootManager.start()` creates the parent directory,
-constructs the `StatsStore`, and calls `open()`, which applies the schema and
-seeds the control rows **only if absent** (so an operator-set monitoring flag
-survives a manager restart).
+where `<config-dir>` is the platform configuration directory (the same directory
+the daemon, AriaResident, and EstateCatalog use). No environment variable
+overrides the store path — the setting in `config.json` is the variable.
+`MootManager.start()` creates the parent directory, constructs the `StatsStore`,
+and calls `open()`, which applies the schema and seeds the control rows **only if
+absent** (so an operator-set monitoring flag survives a manager restart).
 
 The store schema (four tables: `metric_samples`, `event_samples`, `control`,
 `topology_snapshots`) is owned by `ObserverSink` and documented in
@@ -83,6 +85,39 @@ generated_at TEXT NOT NULL (ISO-8601), payload TEXT NOT NULL (GraphPayload JSON)
 The autonomic governor upserts this row on each topology duty cycle; moot-mgr's
 `GET /api/graph` reads it. Consumers write their dropbox rows **directly** into
 this store; SQLite WAL handles concurrent writers.
+
+## 3a. Fact-extraction config keys (EE, FACT_EXTRACTION_WIRE §2b)
+
+The resident daemon reads three optional keys from the `fact_extraction` object
+in `<config-dir>/config.json` to provision the CoreAI NuExtract extractor:
+
+```json
+{
+  "daemon": { "stats_store": "…" },
+  "fact_extraction": {
+    "coreai_asset":     "/Volumes/llm_models/coreai/nuextract-tiny-v1.5-v11s-8k-b1-q8.aimodel",
+    "coreai_tokenizer": "/Volumes/llm_models/gguf/nuextract-tiny-v1.5/tokenizer.json",
+    "model_version":    "1.5"
+  }
+}
+```
+
+| Key | Type | Required | Description |
+|---|---|---|---|
+| `fact_extraction.coreai_asset` | `string` | No | Absolute path to the `.aimodel` directory for CoreAI NuExtract. An empty string is treated as absent. |
+| `fact_extraction.coreai_tokenizer` | `string` | No | Absolute path to the `tokenizer.json` file. An empty string is treated as absent. |
+| `fact_extraction.model_version` | `string` | No | Version label used in the recipe ID (`providerID:modelID:modelVersion`). Defaults to `"1.0"` when absent. |
+
+When both `coreai_asset` and `coreai_tokenizer` are present and the files are
+reachable on disk, the resident daemon activates the CoreAI NuExtract
+extractor at estate open. When either is absent, the daemon falls back to the
+Apple Foundation Models extractor (EE builds, macOS 27+) or leaves Signal 14
+inert.
+
+These keys are read by `MootProductIdentity.Settings.load()` and are
+parsed as part of the settings resolution done by the resident daemon at
+startup. They are not seeded by `mootx01 install` — the operator adds them
+manually when deploying CoreAI assets.
 
 ## 4. The global monitoring on/off switch
 
@@ -161,24 +196,26 @@ print to stderr and exit `1`; success prints to stdout and exits `0`.
 
 ## 8. One real consumer wired end-to-end (headless aria-mcp)
 
-A headless aria-mcp server is wired as the first real
-consumer. The wiring is **executable-only and opt-in**: when
-`ARIA_MCP_STATS_STORE` is set, the server opens the manager's store, installs a
+A headless aria-mcp server is wired as the first real consumer. The wiring is
+**always active**: `mootx01 install` seeds `daemon.stats_store` in
+`<config-dir>/config.json` to the computed default path before any client is
+wired, so the key is present on every fresh install. When the resident daemon
+starts in HTTP mode, `AriaResident.statsStorePath` reads `daemon.stats_store`
+from `config.json` and opens that store unconditionally. It installs a
 `PersistenceStatsSink`, drives `Intellectus.setEnabled` from the store flag, and
-emits a startup metric. When the env var is unset, the MCP wire surface is
-unchanged. The AriaMcpKit JSON-RPC library is untouched. (A finer-grained
-per-tool-call metric is a follow-up.)
+emits a startup metric. No reader consults any environment variable for the store
+path; the setting is the only override (W-6 ruling, 2026-09-09). The AriaMcpKit
+JSON-RPC library is untouched. (A finer-grained per-tool-call metric is a
+follow-up.)
 
-**Resident-daemon note.** The consumer that
-matters for an installed user is the **resident `mootx01` HTTP daemon** —
-`mootx01` is the headless server that wraps the full stack and triggers its own
-autonomic governor (ARIA_MCP_SPEC.md §17). It carries the
-same env-gated self-report wiring, and `mootx01 install` sets
-`ARIA_MCP_STATS_STORE` to this manager's store path so the daemon is observable
-out of the box. Because the daemon is resident, its self-report is continuous
-rather than per-session — which is what makes the dashboard's "observed estates"
-view populate. The off-by-default monitoring flag still governs whether any
-sample flows.
+**Resident-daemon note.** The consumer that matters for an installed user is the
+**resident `mootx01` HTTP daemon** — `mootx01` is the headless server that wraps
+the full stack and triggers its own autonomic governor (ARIA_MCP_SPEC.md §17).
+`mootx01 install` seeds `daemon.stats_store` in `<config-dir>/config.json` to the
+computed default path so the daemon is observable out of the box. Because the
+daemon is resident, its self-report is continuous rather than per-session — which
+is what makes the dashboard's "observed estates" view populate. The monitoring
+flag in the store governs whether any sample flows.
 
 ## 9. Verification
 
@@ -347,6 +384,32 @@ the user's AI session under its own authorization, never through this
 console. Content-safety boundary is unchanged; no API surface.
 
 ## Changelog
+
+### 1.2.0 -- 2026-09-14
+
+§3a: Documents the three `fact_extraction` config keys
+(`coreai_asset`, `coreai_tokenizer`, `model_version`) read by the resident
+daemon at estate open to provision the CoreAI NuExtract extractor
+(FACT_EXTRACTION_WIRE §2b). Describes priority order (CoreAI → Apple FM →
+inert), recipe ID formula, and the three-case activation contract.
+
+### 1.1.3 -- 2026-09-09
+
+§8: Restate wiring as always-active: `mootx01 install` seeds `daemon.stats_store`
+before any client is wired, so the key is present on every fresh install and the
+resident daemon opens the store unconditionally. No reader consults any env var
+for the store path; the setting is the only override (W-6 ruling, 2026-09-09).
+Removes the phrase "executable-only and opt-in" that implied wiring was optional.
+
+### 1.1.2 -- 2026-09-09
+
+§3: Replace `MOOT_MGR_STORE` env-var resolution table with `daemon.stats_store`
+in `config.json` (R6 ruling 2026-09-09). No env override for the store path;
+`mootx01 install` seeds the computed default when the key is absent.
+
+§8: Replace `ARIA_MCP_STATS_STORE` env-var wiring description with the
+settings-file wiring path that `AriaResident.statsStorePath` and `mootx01
+install` implement.
 
 ### 1.1.1 -- 2026-08-26
 

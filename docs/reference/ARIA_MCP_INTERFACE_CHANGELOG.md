@@ -1,11 +1,158 @@
 ---
 title: aria-mcp Interface — Changelog
-version: 2.0.1
-date: 2026-08-26
-description: "Externalized full changelog history of ARIA_MCP_INTERFACE.md (entries 1.0.0 through 1.59.0 verbatim from the pre-2.0.0 document; 2.0.0 onward appended here)."
+version: 4.7.1
+date: 2026-09-15
+description: "Historical changes to the ARIA MCP INTERFACE document."
+status: active
 ---
 
 # aria-mcp Interface — Changelog
+
+### 4.7.1 -- 2026-09-15
+
+Documented v23-attributed memory-get distillation parity and the product
+`--version` hydration/recall converter identity lines. No wire schema change.
+
+### 4.7.0 -- 2026-09-15
+
+`moot_drain_status` always lists the `fact_extraction` lane: `pending` is
+the count of drawers still owed fact extraction for the active recipe
+(bit 28 clear), `state` is `draining` while any drawer is owed and `idle`
+once none are. The report shape is unchanged. Both ports.
+
+### 4.2.0 -- 2026-09-13
+
+Added `moot_memory_get(depth: "skim")` and its preview-only `skim` object:
+`text`, `complete`, `budgetHonored`, and `savings`. Retains id and full-fetch
+reference. Corrected the public get argument names to `memory_id`/`memory_ids`.
+
+### 4.1.0 -- 2026-09-13
+
+Added the default-off report_withheld modifier, conditional sensitivity-only meta
+count, ranked topK keystones hydration definition, and unchanged-schema contract.
+
+### 4.0.0 -- 2026-09-11 (BREAKING)
+
+The four work-packet operations retired from the ARIA surface, both ports:
+`moot_file_packet` (§6.1, Tier 1 — Intake), `moot_packet_get`,
+`moot_packet_list`, and `moot_packet_lineage` (§10, Utility family). Deleted
+source: `PacketTools.swift`, `AriaV2PacketOperations.swift`,
+`AriaMcpKit/rust/src/v2/packets.rs`. The `WorkPacketKit` dependency is
+removed from `AriaMcpKit/Package.swift`; the Rust port never carried a
+packet implementation, so no Rust source was removed there beyond the
+catalog/surface/dispatch entries naming the four tools. `.interface`
+provenance (§4.2) and the capture-family summary (§6) no longer mention
+packet tools. Tool count moves from 84/77 (vault-on/off) to 80/73. Stored
+packet drawers already committed to an estate are unaffected — this is a
+surface retirement, not a schema change; no `mootx01 upgrade` step is
+introduced. The capability digest changes accordingly (both ports compute
+and agree on the same new value, pinned in `Registry/aria-v2-selected-release.json`
+and both ports' `AriaV2CapabilityDigestTests`/`aria_v2_capability_digest_tests.rs`).
+
+### 3.10.2 -- 2026-09-10
+
+§12.5 coaching triggers wired to the v2 surface. `AriaV2Coach` (Swift) and
+`v2::coach` (Rust) implement all six triggers from the §12.5 table. The v2
+result envelope gains a hint slot: `structuredContent["hint"]` is set when a
+trigger fires (string, sibling of `data` and `meta`, absent when no trigger
+fires), and a `"\nhint: <text>"` line is appended to `content[0].text` after
+the 512 Unicode-scalar clamp of the operation body (the hint line itself is
+never clamped). Hints never attach to `isError: true` results. The first
+matching trigger wins. The periodic coaching block (§12.4) is appended after
+any hint line, preserving hint-before-block ordering. Estate-provisioned
+`coaching_calls` and `sticky_enabled` are applied on the first dispatch call
+of each session only (guarded by the `configuredFromEstate` once-flag).
+
+Lens scope: the zero-results hint applies to `Recall`-family variants only
+(`moot_recall_precise`, `moot_recall_temporal`, `moot_recall_connected`,
+`moot_recall_shaped`, `moot_recall_distilled`, `moot_recall_vague`,
+`moot_recall_walk`). `moot_federated_recall` and `moot_memory_recall_transcript`
+route to separate enum variants (`FederatedRecall`, `TranscriptRecall`) and
+never receive the zero-results hint. This is an intentional boundary documented
+in §12.5.
+
+### 3.7.0 -- 2026-09-07
+
+The `moot_recall_shaped` roster under the dark switches, both ports (37 names
+with `DenseFamilies`, 39 with `LSA`, 26 in the product build), and the
+`mootx01 upgrade` whole-record vacuum line, byte-identical in both ports.
+Full entry in ARIA_MCP_INTERFACE.md § Changelog.
+
+### 3.6.0 -- 2026-09-07
+
+The discrimination cap reads the span rerank stage alone, both ports; the
+whole-record dense lane and its presets compile only under the
+`WholeRecordDense` trait. Full entry in ARIA_MCP_INTERFACE.md § Changelog.
+
+### 3.5.0 -- 2026-09-07
+
+The live sensitivity grant ceiling floors `moot_file_packet` (new optional
+`sensitivity` argument in the `moot_file_memory` shape; Swift only) and the
+opt-in `memory` adapter's `create`, `str_replace` and `insert` (no
+argument; both ports). Omitted tiers file at the grant's tier, an explicit
+lower tier on `moot_file_packet` is refused with the `moot_file_memory`
+text, and the replies name the tier while a grant is live. No change with
+no grant live. Full entry in ARIA_MCP_INTERFACE.md § Changelog.
+
+### 3.4.0 -- 2026-09-07
+
+`moot_file_memory` files at the live sensitivity grant ceiling, both
+ports: an omitted `sensitivity` takes the grant's tier, a lower explicit
+tier returns `isError: true` naming the ceiling and writes nothing, and
+the reply adds `sensitivity: <tier>` while a grant is live. No change
+with no grant live. Full entry in ARIA_MCP_INTERFACE.md § Changelog.
+
+### 3.1.0 -- 2026-09-06
+
+`moot_memory_search` answer block parity (answer:always|auto), both ports.
+The Rust reply renders the lines Swift `runMemorySearch` renders:
+`confidence: confident|intermediate`, `citations:` with up to five ids, and
+`signals: margin=<m1> lane_agreement=<m2> dense_spread=<m3>
+containment=<m4>` in shortest two-decimal form. The Rust port composes no
+answer text, so its `answer:` line stays absent. Rust reads m4 as false
+with no composed answer and its citation ids are the first five hydrated
+drawer ids (GENIUSLOCUSKIT_INTERFACE 3.1.0). Full entry in
+ARIA_MCP_INTERFACE.md § Changelog.
+
+### 2.13.0 -- 2026-09-05
+
+ARIA-MSG-2: `moot_file_fact` with a `subject` that is empty or exceeds
+120 characters after trimming now returns `isError: true` with the
+contract message `"subject must be 1–120 characters (got N). One
+telegraphic sentence in the AI-facing register — compress, don't
+truncate."`, both ports. Previously the oversize subject reached the
+generic catch wrapper and produced `"unexpected error in moot_file_fact:
+invalidContent(…)"`, discarding the instructive text. Tests:
+`fileFactOversizeSubjectReturnsContractError` and
+`fileFactOversizeSubjectMessageMatchesRustPort` (Swift);
+`file_fact_oversize_subject_returns_contract_error` and
+`file_fact_oversize_subject_message_matches_swift_port` (Rust).
+
+### 2.12.0 -- 2026-09-05
+
+PAR-1: `moot_memory_search` reply parity, both ports. The Rust reply goes
+through the shared S1 composer: adornment text in column 5 (no separate
+`adornment:` line), structured rows carrying `score` / `eventTime` /
+`firstSentence` / `adornment` / `adornments` / `room`, the removed
+`recall_provenance:` line gone from the Rust reply, and the advertised
+`explain` argument honoured in both ports with the explanation block
+documented in §11.2 and pinned by the shared
+`recall_explainer_fixture.json`.
+
+### 2.11.0 -- 2026-09-04
+Subject-length contract violations on `moot_file_memory` and `moot_update_memory` (`mutation=setSubject`) surface as `isError: true` results carrying the contract text instead of bare JSON-RPC `invalidParams` errors, both ports; a missing `subject` stays `invalidParams`.
+
+### 2.9.1 -- 2026-09-03
+
+Frozen posture (FRZ-3): `moot_synthesize` reclassified from the refused set
+to the read set (`frozenReadTools` / `FROZEN_READ_TOOLS`) in both ports.
+Grounded synthesis reads candidates via recall and generates text; it writes
+no drawer, packet, journal, meta, trace, or reward, so a frozen serve must
+answer it. The `moot_synthesize` entry gains the "Available under a frozen
+serve" note. Both ports carry a new test `frozenSynthesizeProceedsAndEstateIsUnchanged`
+/ `frozen_synthesize_proceeds_and_estate_is_unchanged` that verifies the
+dispatcher lets the call through and the estate is byte-identical before and
+after.
 
 ### 2.1.1 -- 2026-08-26
 
@@ -1787,3 +1934,11 @@ Reconciled the `.recipe` provenance tool count: the §`Recipe and lens tools` bo
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+## Changelog
+
+### 3.0.0 -- 2026-09-06
+
+Removed stale adornment and stored-distillation contracts from the living
+document. Aligned candidate rows and hydration with the schema-19 source.
+The earlier entries remain historical records.

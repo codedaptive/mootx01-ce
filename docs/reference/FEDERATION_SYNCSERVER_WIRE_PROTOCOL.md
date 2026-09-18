@@ -8,7 +8,7 @@ reviewer: Bob
 relates_to:
   - docs/reference/CONVERGENCEKIT_INTERFACE.md (§ 4 Relay abstraction)
   - docs/reference/CONVERGENCEKIT_SPEC.md (I-7, I-8, I-9, B-7, B-10, B-11)
-  - docs/analysis/CVK_WAVEC_FEDERATION_CHARTER.md (WC7 verdict)
+  - CVK_WAVEC_FEDERATION_CHARTER (WC7 verdict)
 ---
 
 # Federation SyncServer Wire Protocol

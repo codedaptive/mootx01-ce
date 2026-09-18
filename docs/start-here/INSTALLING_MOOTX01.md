@@ -352,7 +352,7 @@ lives at:
 
 - **macOS** — `~/Library/Application Support/com.mootx01.ce/`
 - **Linux** — `~/.local/share/mootx01/` (or `$XDG_DATA_HOME/mootx01/`)
-- **Windows** — `%LOCALAPPDATA%\MOOTx01\`
+- **Windows** — `%LOCALAPPDATA%\com.mootx01.ce\`
 
 A full uninstall run from a terminal then **offers** to remove that data (the
 estate databases and the moot-mgr history). Removal always requires typing

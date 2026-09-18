@@ -1,11 +1,11 @@
 ---
 title: GeniusLocus Architecture Specification
-version: 1.2.0
+version: 1.3.0
 description: "Authoritative architecture specification for the GeniusLocus substrate: estate model, Brain layer, recall pipeline, and audit reconstruction."
 status: accepted-1.1-target
 spec_type: kit
 authors: MOOTx01 maintainers
-date: 2026-08-17
+date: 2026-09-04
 relates_to:
   - the recorded engineering rule-05-07.md (lattice decision)
   - the provenance-bitmap contract (provenance bitmap decision)
@@ -87,7 +87,7 @@ The following invariants hold for every conforming GeniusLocus. An implementatio
 
 **I-11. Bitmap layouts within a published version are stable.** Once a bitmap layout is published in a versioned manifest, the layout is not mutated. New layouts produce new manifest versions; old data is readable via the manifest's `bitmap_layout_version` value.
 
-**I-12. The substrate provides storage; applications do not bring their own.** GeniusLocusKit composes LocusKit (canonical content and KG), VectorKit (vector machinery), and CorpusKit (RAG/index machinery over an injected content source). The application calls verbs against the kit; the kit owns the database files and composition adapters.
+**I-12. The substrate provides storage; applications do not bring their own.** GeniusLocusKit composes LocusKit (canonical content and KG), SynapseKit (vector machinery), and CorpusKit (RAG/index machinery over an injected content source). The application calls verbs against the kit; the kit owns the database files and composition adapters.
 
 **I-13. Federation is not a substrate concern.** Multi-estate operation is mediated by a separate access surface (aria-mcp). The substrate does not communicate with other substrates.
 
@@ -1669,9 +1669,9 @@ Full canonical evaluation is in § 7.9.7.
 A GeniusLocus is produced by composing kits:
 
 - **LocusKit** — a standalone semantic database and the canonical content + KG owner in GLK. Drawers, tunnels, KG facts, diary, manifest, audit.
-- **VectorKit** — standalone-capable vector storage and nearest-neighbor machinery. In GLK every Corpus-derived vector row is keyed by canonical `Drawer.id`; other vector lanes retain explicit independent ownership.
+- **SynapseKit** — standalone-capable vector storage and nearest-neighbor machinery. In GLK every Corpus-derived vector row is keyed by canonical `Drawer.id`; other vector lanes retain explicit independent ownership.
 - **CorpusKit** — a standalone-capable RAG database. Standalone it owns documents and may optionally index token-budgeted passage ranges. In GLK it receives LocusKit Drawers through a GLK-owned content-source adapter and stores only derived BM25/vector/provider/checkpoint state. Passage production is disabled.
-- **GeniusLocusKit** — the GLK Super System: LocusKit + VectorKit + CorpusKit + the Brain layer. It composes three independently usable kit capabilities over one canonical Drawer dataset, so every lane retrieves the same object and deduplication is by identity rather than content reconciliation.
+- **GeniusLocusKit** — the GLK Super System: LocusKit + SynapseKit + CorpusKit + the Brain layer. It composes three independently usable kit capabilities over one canonical Drawer dataset, so every lane retrieves the same object and deduplication is by identity rather than content reconciliation.
 - **aria-mcp** — MCP access surface. Composes one or more underlying kit configurations.
 
 Applications use a kit; the kit owns its database files. There is no application-supplied substrate adapter.
@@ -1961,6 +1961,9 @@ versioning discipline makes this possible additively.
 *End of Addendum A.*
 
 ## Changelog
+
+### 1.3.0 -- 2026-09-04
+Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
 
 ### 1.2.0 -- 2026-08-17
 
