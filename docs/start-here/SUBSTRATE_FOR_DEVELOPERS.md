@@ -45,7 +45,7 @@ Every row has a 256-bit signature in four equal blocks. Rows that are similar en
 
 The four blocks each capture a different aspect of the row: the bitmap state, the lattice neighborhood, the lineage and time, and the provenance. Recall can weight the blocks differently depending on what the user is asking for, which is how a single signature serves "find similar," "find recent," and "find from the same source."
 
-SubstrateLib produces the fingerprint. LocusKit builds the per-block inputs. VectorKit uses the fingerprint alongside vector embeddings.
+SubstrateLib produces the fingerprint. LocusKit builds the per-block inputs. SynapseKit uses the fingerprint alongside vector embeddings.
 
 # 5. OR-reduction: skip rooms you do not need to read
 
@@ -93,7 +93,7 @@ When a query runs, candidates come back ranked by a composite score. The score b
 
 We chose this because no single distance captures relevance on its own. The composite gets us all three signals. The learning gets us the weights without having to tune them by hand.
 
-VectorKit holds the composite. NeuronKit holds the preference update.
+SynapseKit holds the composite. NeuronKit holds the preference update.
 
 # 11. Federation: estates that compare without merging
 
