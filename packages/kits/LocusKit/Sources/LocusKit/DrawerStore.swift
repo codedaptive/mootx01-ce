@@ -689,10 +689,12 @@ public actor DrawerStore {
                 resultCount: 0, estateTag: estateUuid.uuidString, queryLabel: "wing")
             return []
         }
+        // The wing's subtree: its rooms and every chest under them (ADR-026).
+        let parents = roomNodeIds + (try await chestNodeIds(roomNodeIds: roomNodeIds))
         let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: .and([
-                .in(Column(table: "drawers", name: "parent_node_id"), roomNodeIds.map { TypedValue.text($0) }),
+                .in(Column(table: "drawers", name: "parent_node_id"), parents.map { TypedValue.text($0) }),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
             orderBy: [
@@ -2071,7 +2073,11 @@ public actor DrawerStore {
                         displayName: resolvedWing, parentId: root.id, now: now)
                     let roomNode = try await nodeStore.createNode(
                         displayName: resolvedRoom, parentId: wingNode.id, now: now)
-                    updateValues["parent_node_id"] = .text(roomNode.id.uuidString)
+                    // Chest placement (ADR-026, spec § 12): a moved drawer is
+                    // filed by its content key under the target room.
+                    let parentNodeId = try await nodeStore.placementParent(
+                        roomId: roomNode.id, content: Self.string(row["content"]))
+                    updateValues["parent_node_id"] = .text(parentNodeId.uuidString)
                 }
             }
 
@@ -2360,13 +2366,27 @@ public actor DrawerStore {
         for drawer: Drawer,
         in transaction: any StorageTransaction
     ) async throws -> (wing: String, room: String)? {
-        guard let roomID = UUID(uuidString: drawer.parentNodeId) else { return nil }
-        let roomRows = try await transaction.rowStore.query(
+        guard let parentID = UUID(uuidString: drawer.parentNodeId) else { return nil }
+        let parentRows = try await transaction.rowStore.query(
             table: "nodes",
-            where: .eq(Column(table: "nodes", name: "id"), .uuid(roomID)),
+            where: .eq(Column(table: "nodes", name: "id"), .uuid(parentID)),
             orderBy: [], limit: 1, offset: nil, columns: nil)
-        guard let room = roomRows.first,
-              activeNode(room, depth: 2),
+        guard let parent = parentRows.first else { return nil }
+        // The parent is the room, or an active chest under it (ADR-026,
+        // spec § 12); the endpoint is always the room.
+        let room: StorageRow
+        if activeNode(parent, depth: Int64(NodeStore.chestDepth)) {
+            guard let roomID = nodeUUID(parent["parent_id"]) else { return nil }
+            let roomRows = try await transaction.rowStore.query(
+                table: "nodes",
+                where: .eq(Column(table: "nodes", name: "id"), .uuid(roomID)),
+                orderBy: [], limit: 1, offset: nil, columns: nil)
+            guard let r = roomRows.first else { return nil }
+            room = r
+        } else {
+            room = parent
+        }
+        guard activeNode(room, depth: 2),
               let wingID = nodeUUID(room["parent_id"]),
               !Self.string(room["display_name"]).isEmpty else {
             return nil
@@ -3986,10 +4006,12 @@ public actor DrawerStore {
             let roomIds = roomRows.map { Self.string($0["id"]) }
             var drawerCount = 0
             if !roomIds.isEmpty {
+                // Rooms and their chests (ADR-026): a wing's count is its subtree.
+                let parents = roomIds + (try await chestNodeIds(roomNodeIds: roomIds))
                 let drawerRows = try await storage.rowStore.query(
                     table: "drawers",
                     where: .and([
-                        .in(Column(table: "drawers", name: "parent_node_id"), roomIds.map { TypedValue.text($0) }),
+                        .in(Column(table: "drawers", name: "parent_node_id"), parents.map { TypedValue.text($0) }),
                         .isNull(Column(table: "drawers", name: "tombstonedAt"))
                     ])
                 )
@@ -4038,10 +4060,12 @@ public actor DrawerStore {
             for roomRow in roomRows {
                 let roomId = Self.string(roomRow["id"])
                 let roomName = Self.string(roomRow["display_name"])
+                // The room and its chests (ADR-026): a room's count is its subtree.
+                let parents: [TypedValue] = ([roomId] + (try await chestNodeIds(roomNodeId: roomId))).map { .text($0) }
                 let drawerRows = try await storage.rowStore.query(
                     table: "drawers",
                     where: .and([
-                        .eq(Column(table: "drawers", name: "parent_node_id"), .text(roomId)),
+                        .in(Column(table: "drawers", name: "parent_node_id"), parents),
                         .isNull(Column(table: "drawers", name: "tombstonedAt"))
                     ])
                 )
@@ -4217,6 +4241,25 @@ public actor DrawerStore {
             ])
         )
         return roomRows.first.map { Self.string($0["id"]) }
+    }
+
+    /// The active chest nodes (depth 3) under any of `roomNodeIds`, in id
+    /// order, in one query. A room's subtree is the room plus these; every
+    /// room-set read joins drawers on both (ADR-026, spec § 12).
+    func chestNodeIds(roomNodeIds: [String]) async throws -> [String] {
+        guard !roomNodeIds.isEmpty else { return [] }
+        let roomValues: [TypedValue] = roomNodeIds.map { id in
+            UUID(uuidString: id).map { .uuid($0) } ?? .text(id)
+        }
+        let rows = try await storage.rowStore.query(
+            table: "nodes",
+            where: .and([
+                .in(Column(table: "nodes", name: "parent_id"), roomValues),
+                .eq(Column(table: "nodes", name: "depth"), .int(3)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+            ])
+        )
+        return rows.map { Self.string($0["id"]) }.sorted()
     }
 
     /// The active chest nodes (depth 3) under a room, in id order. Empty for a
