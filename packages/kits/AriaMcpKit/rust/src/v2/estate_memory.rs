@@ -346,6 +346,9 @@ impl V2CoreMemoryService for EstateV2MemoryService<'_> {
             if self.posture.is_frozen() { RecallOrigin::Internal } else { RecallOrigin::External },
         ).with_query_text(query).with_trace_limit(request.limit);
         recall.door = Some("memory_search".to_owned());
+        // ADR-027 D3: the per-call `chest_diversity` modifier, `None` when
+        // the call carried none (the estate preference decides).
+        recall.chest_diversity = super::chest_diversity::value();
 
         // Optional `frontier_k`: per-call candidate-pool depth override.
         // The GLK engine clamps to [64, 256]; we do not clamp or reject here.

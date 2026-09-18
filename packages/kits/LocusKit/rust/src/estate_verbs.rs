@@ -481,15 +481,6 @@ impl Estate {
         Ok(ranges.len())
     }
 
-    /// The room a drawer's parent denotes, or `None` when the id is not a
-    /// room or a chest (ADR-026: a parent may be a chest, a room's internal
-    /// container; every per-room computation resolves through here).
-    pub(crate) fn room_id_for_parent(&self, parent: &str) -> Option<Uuid> {
-        let id = Uuid::parse_str(parent).ok()?;
-        let ns = self.node_store.as_ref()?;
-        ns.room_node_for_parent(id).ok().flatten().map(|n| n.id)
-    }
-
     // -----------------------------------------------------------------------
     // capture
     // -----------------------------------------------------------------------
@@ -2434,10 +2425,11 @@ impl Estate {
             Some(reason.unwrap_or("withdrawn via Estate.withdraw")),
             now,
         )?;
-        // NT-L3: Merkle rollup after state change. The parent may be a
-        // chest; the rollup is per room.
-        if let Some(room_uuid) = self.room_id_for_parent(&drawer.parent_node_id) {
-            let _ = self.rollup_merkle_roots(room_uuid, now);
+        // NT-L3: Merkle rollup after state change, from the drawer's
+        // container: its chest, or the room when the room holds it directly
+        // (ADR-027 D1).
+        if let Ok(container) = Uuid::parse_str(&drawer.parent_node_id) {
+            let _ = self.rollup_merkle_roots(container, now);
         }
         Ok(())
     }
@@ -2518,25 +2510,26 @@ impl Estate {
         } else {
             lineage_ids.iter().map(String::as_str).collect()
         };
-        let mut affected_room_ids: std::collections::HashSet<Uuid> =
+        // Each member's container: its chest, or the room when the room
+        // holds it directly (ADR-027 D1).
+        let mut affected_container_ids: std::collections::HashSet<Uuid> =
             std::collections::HashSet::new();
         for id in &ids_to_fetch {
             if let Ok(Some(d)) = self.store.get_drawer(id) {
-                // The parent may be a chest (ADR-026); roots are kept per room.
-                if let Some(room_uuid) = self.room_id_for_parent(&d.parent_node_id) {
-                    affected_room_ids.insert(room_uuid);
+                if let Ok(container) = Uuid::parse_str(&d.parent_node_id) {
+                    affected_container_ids.insert(container);
                 }
             }
         }
 
         let outcome = self.store
             .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit, sensitivity_ceiling)?;
-        // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
-        // contained any lineage member — not just the room of the
+        // NT-L3: Merkle rollup after expunge. Roll up ALL containers that
+        // held any lineage member — not just the container of the
         // initiating drawer — so cross-room lineage expunge keeps every
         // affected room's root correct (WS2-F2, fixed 2026-06-28).
-        for room_uuid in affected_room_ids {
-            let _ = self.rollup_merkle_roots(room_uuid, now);
+        for container in affected_container_ids {
+            let _ = self.rollup_merkle_roots(container, now);
         }
         // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling
         // is not a success, and a layer that summarises it as one is the
@@ -4225,7 +4218,18 @@ mod tests {
             assert!(chest_ids.contains(&d.parent_node_id));
             assert_eq!(d.parent_node_id, expected_chest(&d.content, &chests));
         }
-        assert_eq!(estate.compute_room_merkle_root(room_id).unwrap(), root_before, "chesting does not change the room root");
+        // ADR-027 D1: each chest carries its own root and the room folds
+        // them, so the room root changes shape at the first re-bin; the
+        // incremental rollup and the full recompute must then agree.
+        estate.recompute_all_merkle_roots(1_700_000_101).unwrap();
+        for chest in &chests {
+            let node = ns.get_node(Uuid::parse_str(&chest.chest_node_id).unwrap()).unwrap().unwrap();
+            assert!(node.merkle_root.is_some(), "a chest carries its own Merkle root");
+            assert_eq!(node.merkle_root.unwrap(), estate.compute_chest_merkle_root(node.id).unwrap());
+        }
+        let room_root = estate.compute_room_merkle_root(room_id).unwrap();
+        assert_ne!(room_root, root_before, "the room root folds its chests' roots");
+        assert_eq!(ns.get_node(room_id).unwrap().unwrap().merkle_root.unwrap(), room_root);
         // Every room-set read and count covers the chests.
         assert_eq!(estate.store.drawers_in_wing("w").unwrap().len(), 600);
         assert_eq!(estate.store.list_wings().unwrap().iter().map(|w| w.drawer_count).collect::<Vec<_>>(), vec![600]);
