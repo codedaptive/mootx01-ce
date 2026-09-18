@@ -14,10 +14,11 @@ import PackageDescription
 
 let package = Package(
     name: "Mootx01-Setup",
-    // Platform floor matches apps/mootx01 (MootInstallerCore lives in that
-    // package and inherits its platform constraint).
+    // Platform floor matches apps/mootx01, where MootInstallerCore lives: this
+    // package links that product, so a lower floor here does not build. Spelled
+    // the same way as apps/mootx01 so the two read as the pair they are.
     platforms: [
-        .macOS(.v26),
+        .macOS("27.0"),
     ],
     dependencies: [
         .package(name: "mootx01", path: "../mootx01"),
