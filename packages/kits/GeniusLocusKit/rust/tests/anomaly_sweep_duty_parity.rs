@@ -149,3 +149,38 @@ fn anomaly_duty_owes_both_rooms_after_a_cross_room_move() {
         "the destination room must be owed a rescoring — {owed_after_move:?}"
     );
 }
+
+/// The resident scores rooms with the coordinator lock released: the batch
+/// is three phases, and the middle one (`anomaly_sweep_score`) takes only
+/// the work the prepare phase handed out, never the coordinator. Proves the
+/// split form pays exactly what the inline batch pays: the same rooms
+/// scored, the same outlier flagged, the same debt settled to zero. Twin of
+/// the Swift resident's detached `scoreRoom` loop.
+#[test]
+fn anomaly_sweep_split_phases_pay_the_same_as_the_inline_batch() {
+    let (coord, handle) = provision();
+    for content in COHORT {
+        capture(&coord, &handle, content);
+    }
+    let outlier = capture(&coord, &handle, OUTLIER);
+    let owed = coord.anomaly_sweep_owed_rooms(&handle, NOW).expect("owed");
+    assert!(owed.iter().any(|(w, r)| w == WING && r == ROOM), "{owed:?}");
+
+    let work = coord.anomaly_sweep_prepare(&handle, owed.len(), NOW).expect("prepare");
+    assert_eq!(work.rooms, owed, "prepare hands out exactly the owed rooms");
+    // Nothing here touches `coord`: the scoring runs on the cloned estate.
+    let scored = genius_locus_kit::brain::anomaly_flag_sweep::anomaly_sweep_score(&work, NOW).expect("score");
+    assert_eq!(scored, owed, "every prepared room is scored, in order");
+    assert_eq!(coord.anomaly_sweep_settle(&handle, &scored, NOW).expect("settle"), owed.len());
+
+    let estate = coord.estate_for(&handle).expect("estate");
+    let flagged: Vec<String> = estate
+        .drawers_in_wing_room(WING, ROOM)
+        .expect("room")
+        .into_iter()
+        .filter(|d| d.is_anomalous())
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(flagged, vec![outlier], "the split form flags the same outlier as the batch");
+    assert_eq!(coord.duty_debt(&handle, DutyKind::AnomalySweep).expect("debt"), 0, "settle clears the debt");
+}
