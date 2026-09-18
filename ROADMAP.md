@@ -216,7 +216,9 @@ leverage (see ADR-026):
 - a first cut for search on very large rooms;
 - finer change detection for sync and drift, a chest at a time;
 - a topology view over chest clusters instead of every memory;
-- a room-health summary on the estate map: how big, how tight.
+- a room-health summary on the estate map: how big, how tight;
+- a chest vector, the centre of a chest's memories, as a first stage for
+  vector search on very large rooms.
 
 ## Version 1.3 — PGlite, pgMOOT, and Postgres anywhere
 
