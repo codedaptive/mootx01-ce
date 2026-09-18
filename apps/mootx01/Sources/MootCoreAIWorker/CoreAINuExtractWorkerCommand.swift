@@ -30,10 +30,6 @@ public struct CoreAINuExtractWorkerCommand: AsyncParsableCommand {
     public init() {}
 
     public mutating func run() async throws {
-        guard #available(macOS 27.0, *) else {
-            throw ValidationError(
-                "coreai-nuextract-worker requires macOS 27 or newer")
-        }
         let worker = try CoreAINuExtractWorkerConfiguration(
             assetURL: URL(fileURLWithPath: assetPath),
             tokenizerURL: URL(fileURLWithPath: tokenizerPath),
