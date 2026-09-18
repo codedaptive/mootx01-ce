@@ -10,7 +10,7 @@
 //     are invisible to resolution (§5 no-resurrection guard).
 //   - CRUD: getNode, childNodes (active only), tombstoneNode, rootNode.
 //   - Invariant enforcement at write time: I-NT-1 single root,
-//     I-NT-2 depth consistency (parent.depth + 1, max 2),
+//     I-NT-2 depth consistency (parent.depth + 1, max 3; depth 3 = chest, ADR-026),
 //     I-NT-4 name uniqueness within parent (active only),
 //     I-NT-5 referential integrity on parent_id.
 //
@@ -78,7 +78,7 @@ public actor NodeStore {
     /// returns the existing node (first-casing wins). If absent, creates
     /// a new node. Tombstoned nodes are invisible to resolution (§5).
     ///
-    /// Enforces: I-NT-2 (depth = parent.depth + 1, max 2),
+    /// Enforces: I-NT-2 (depth = parent.depth + 1, max 3),
     /// I-NT-4 (no duplicate active lookupName under same parent),
     /// I-NT-5 (parent must exist).
     ///
@@ -100,11 +100,13 @@ public actor NodeStore {
                 "NodeStore: parent node \(parentId) does not exist (I-NT-5)")
         }
 
-        // I-NT-2: depth = parent.depth + 1, max 2.
+        // I-NT-2: depth = parent.depth + 1, max 3. Depth 3 is a chest, the
+        // internal container below a room (ADR-026, LocusKit spec § 12);
+        // chests never nest, so nothing sits below depth 3.
         let childDepth = parent.depth + 1
-        if childDepth > 2 {
+        if childDepth > 3 {
             throw LocusKitError.invalidContent(
-                "NodeStore: depth \(childDepth) exceeds maximum 2 (I-NT-2)")
+                "NodeStore: depth \(childDepth) exceeds maximum 3 (I-NT-2)")
         }
 
         // Resolution: find active node by lookupName under this parent.
