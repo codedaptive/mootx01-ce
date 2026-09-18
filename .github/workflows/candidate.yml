@@ -185,6 +185,12 @@ jobs:
           rm -f ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
 
       - name: Package tarball
+        # The model fetch reads release assets through the GitHub API.
+        # Anonymous calls share one per-IP hourly budget with every other
+        # runner on the host, which is how a build died on HTTP 403 while
+        # downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cp "$MOOT_BIN" mootx01
           cp "$MGR_BIN"  moot-mgr
@@ -330,6 +336,12 @@ jobs:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
       - name: Build
+        # The model fetch reads release assets through the GitHub API.
+        # Anonymous calls share one per-IP hourly budget with every other
+        # runner on the host, which is how a build died on HTTP 403 while
+        # downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml
