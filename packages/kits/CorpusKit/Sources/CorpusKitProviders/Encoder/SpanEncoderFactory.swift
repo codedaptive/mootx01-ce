@@ -26,15 +26,17 @@ public enum SpanEncoderFactory {
     /// 1. directory and `vocab.txt` present → else `modelUnavailable`;
     /// 2. `sha256(vocab.txt) == spec.tokenizerHash` → else `tokenizerMismatch`;
     /// 3. vocabulary parses (four special tokens) → else `loadFailed`;
-    /// 4. CoreML model present and loadable → else `modelUnavailable` /
-    ///    `loadFailed`; on a platform without CoreML → `modelUnavailable`.
+    /// 4. on macOS 27 / iOS 27 with an `.aimodel` in the directory, the Core
+    ///    AI seam (ADR-028 E4) → else the CoreML model, present and loadable
+    ///    → else `modelUnavailable` / `loadFailed`; on a platform without
+    ///    CoreML → `modelUnavailable`.
     ///
     /// - Parameter batchSize: spans per inference batch (`encoder_batch`).
     public static func make(
         spec: EncoderModelSpec,
         modelDirectory: URL,
         batchSize: Int = ProviderSpanEncoder.defaultBatchSize
-    ) throws -> any SpanEncoder {
+    ) async throws -> any SpanEncoder {
         let vocabURL = modelDirectory.appendingPathComponent(vocabularyFileName)
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: modelDirectory.path, isDirectory: &isDirectory),
@@ -55,6 +57,16 @@ public enum SpanEncoderFactory {
         } catch {
             throw EncoderError.loadFailed("\(vocabURL.path): \(error)")
         }
+#if canImport(CoreAI)
+        // ADR-028 E4: the batched Core AI seam when the framework is present
+        // and the directory carries the `.aimodel`; the CoreML seam below is
+        // the floor for older systems and for a directory without it.
+        if #available(macOS 27.0, iOS 27.0, *), CoreAISpanInference.assetExists(in: modelDirectory) {
+            let inference = try await CoreAISpanInference(
+                modelDirectory: modelDirectory, spec: spec, tokenizer: tokenizer)
+            return ProviderSpanEncoder(spec: spec, inference: inference, batchSize: batchSize)
+        }
+#endif
 #if canImport(CoreML)
         let inference = try CoreMLSpanInference.make(
             modelDirectory: modelDirectory, spec: spec, padTokenID: tokenizer.padTokenID)

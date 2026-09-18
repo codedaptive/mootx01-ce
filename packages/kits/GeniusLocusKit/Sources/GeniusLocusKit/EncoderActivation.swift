@@ -324,7 +324,7 @@ public extension GeniusLocusKit {
         }
         let batch = await provisionedEncoderBatch(for: handle)
         do {
-            let encoder = try SpanEncoderFactory.make(spec: spec, modelDirectory: directory, batchSize: batch)
+            let encoder = try await SpanEncoderFactory.make(spec: spec, modelDirectory: directory, batchSize: batch)
             registerSpanEncoder(encoder, for: handle)
             // The recall stage reads spans from the estate's VectorStore under
             // the encoder's model id; without a registered store there is

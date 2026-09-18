@@ -83,7 +83,7 @@ enum SpanEncodeBackfill {
             overlapDivisor: row.overlapDivisor, maxSpans: row.maxSpans, maxSequence: row.maxSequence)
         let encoder: any SpanEncoder
         do {
-            encoder = try SpanEncoderFactory.make(spec: spec, modelDirectory: modelDirectory)
+            encoder = try await SpanEncoderFactory.make(spec: spec, modelDirectory: modelDirectory)
         } catch {
             return .modelUnavailable("\(error)")
         }

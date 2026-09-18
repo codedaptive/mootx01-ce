@@ -208,7 +208,7 @@ struct ArcticFactoryProofTests {
                     .resolvingSymlinksInPath().standardizedFileURL)
 
         let loadStarted = ContinuousClock.now
-        let encoder = try SpanEncoderFactory.make(
+        let encoder = try await SpanEncoderFactory.make(
             spec: spec,
             modelDirectory: resolvedModelDirectory)
         let coldLoadMS = elapsedMS(since: loadStarted)
