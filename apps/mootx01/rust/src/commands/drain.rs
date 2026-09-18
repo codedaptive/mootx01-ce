@@ -122,7 +122,9 @@ pub fn run(db: Option<String>) -> ExitCode {
         let now_ms = (aria_mcp::dream_runner::wall_now_epoch_secs() * 1000.0) as i64;
         match reg.coord.lock() {
             Ok(mut coord) => {
-                for kind in [DutyKind::SpanEncode, DutyKind::SubjectBackfill, DutyKind::AnomalySweep] {
+                // The re-bin settles before the sweep so no container the
+                // sweep would skip (at or above capacity) is left standing.
+                for kind in [DutyKind::SpanEncode, DutyKind::SubjectBackfill, DutyKind::ChestRebin, DutyKind::AnomalySweep] {
                     let outcome = coord.pay_duty_until_settled_with(&handle, kind, now_ms, |report| {
                         eprintln!("mootx01 drain: {} — {} paid, {} remaining",
                             kind.wire_name(), report.units_paid, report.remaining_debt);

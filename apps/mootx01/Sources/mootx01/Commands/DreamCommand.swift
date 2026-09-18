@@ -297,15 +297,28 @@ struct DreamCommand: AsyncParsableCommand {
                     Logging.stderr.log("mootx01 dream warning: subject backfill error: \(error) — continuing")
                 }
             }
-            // One anomaly-sweep batch per pass: rooms touched since their last
-            // scoring, `DutyLimits.anomalySweepRooms` of them; the settle loop
-            // is `mootx01 drain`.
+            // One chest re-bin batch per pass (rooms with a container at
+            // capacity, `DutyLimits.chestRebinBatch` of them), then one
+            // anomaly-sweep batch: containers touched since their last
+            // scoring, `DutyLimits.anomalySweepChests` of them; the settle
+            // loop is `mootx01 drain`.
+            do {
+                _ = try await kit.enqueueDuty(.chestRebin, in: handle, now: cycleNow)
+                let rebin = try await kit.drainDuty(.chestRebin, in: handle, now: cycleNow)
+                if rebin.jobsRun > 0 {
+                    Logging.stderr.log(
+                        "mootx01 dream: chest re-bin — \(rebin.unitsPaid) room(s) re-binned, "
+                        + "\(rebin.remainingDebt) remaining")
+                }
+            } catch {
+                Logging.stderr.log("mootx01 dream warning: chest re-bin error: \(error) — continuing")
+            }
             do {
                 _ = try await kit.enqueueDuty(.anomalySweep, in: handle, now: cycleNow)
                 let sweep = try await kit.drainDuty(.anomalySweep, in: handle, now: cycleNow)
                 if sweep.jobsRun > 0 {
                     Logging.stderr.log(
-                        "mootx01 dream: anomaly sweep — \(sweep.unitsPaid) room(s) scored, "
+                        "mootx01 dream: anomaly sweep — \(sweep.unitsPaid) container(s) scored, "
                         + "\(sweep.remainingDebt) remaining")
                 }
             } catch {
