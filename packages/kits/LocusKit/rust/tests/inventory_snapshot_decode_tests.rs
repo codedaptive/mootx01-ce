@@ -56,6 +56,29 @@ fn decodes_verified_active_drawer_room_wing_root_chain() {
 }
 
 #[test]
+fn a_drawer_in_a_chest_reports_its_room_wing_and_root() {
+    // ADR-026: a chest (depth 3) is internal; the proven chain is still room, wing, root.
+    let root = Uuid::from_u128(1);
+    let wing = Uuid::from_u128(2);
+    let room = Uuid::from_u128(3);
+    let chest = Uuid::from_u128(4);
+    let entries = decode_inventory_snapshot(
+        &[drawer("drawer-1", chest)],
+        &[
+            node(root, None, "Estate", 0),
+            node(wing, Some(root), "Wing", 1),
+            node(room, Some(wing), "Room", 2),
+            node(chest, Some(room), &"0".repeat(128), 3),
+        ],
+    )
+    .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].room, "Room");
+    assert_eq!(entries[0].wing, "Wing");
+    assert_eq!(entries[0].root, "Estate");
+}
+
+#[test]
 fn rejects_reserved_sensitivity_instead_of_defaulting_to_normal() {
     let root = Uuid::from_u128(1);
     let wing = Uuid::from_u128(2);
