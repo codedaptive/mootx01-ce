@@ -24,7 +24,7 @@ import PackageDescription
 
 let package = Package(
     name: "moot-math-speedtest",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS("27.0")],
     products: [
         .executable(name: "stress-test", targets: ["StressTest"]),
         .executable(name: "topk-bench",  targets: ["TopKBench"]),

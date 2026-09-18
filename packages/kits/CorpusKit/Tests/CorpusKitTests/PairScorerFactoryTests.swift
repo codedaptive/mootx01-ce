@@ -1,7 +1,7 @@
 // PairScorerFactoryTests.swift
 //
 // The factory's failure contract (same order as the span encoder factory),
-// the CoreML input preparation for pairs, the fixedLength clamp branch with
+// the Core AI batch input planning for pairs, the fixedLength clamp branch with
 // a fake inference (no model files needed), and, when the packaged assets are
 // present, the loaded classifier's logits against the lab's reference fixture.
 // Assets are never in git: set `MOOT_CROSS_ENCODER_ASSETS` to a build-all
@@ -37,11 +37,11 @@ private var packagedAppleDirectory: URL? {
 struct PairScorerFactoryTests {
 
     @Test("missing model directory is modelUnavailable")
-    func missingDirectory() {
+    func missingDirectory() async {
         let missing = FileManager.default.temporaryDirectory
             .appendingPathComponent("pair-factory-missing-\(UUID().uuidString)")
         do {
-            _ = try PairScorerFactory.make(profile: .minilmL6, modelDirectory: missing)
+            _ = try await PairScorerFactory.make(profile: .minilmL6, modelDirectory: missing)
             Issue.record("factory must throw for a missing directory")
         } catch let error as EncoderError {
             guard case .modelUnavailable = error else {
@@ -53,13 +53,13 @@ struct PairScorerFactoryTests {
     }
 
     @Test("vocab hash disagreement is tokenizerMismatch carrying the real digest")
-    func hashMismatch() throws {
+    func hashMismatch() async throws {
         let dir = try scratchDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let vocab = Data("[PAD]\n[UNK]\n[CLS]\n[SEP]\nhello\n".utf8)
         try vocab.write(to: dir.appendingPathComponent("vocab.txt"))
         do {
-            _ = try PairScorerFactory.make(profile: .minilmL6, modelDirectory: dir)
+            _ = try await PairScorerFactory.make(profile: .minilmL6, modelDirectory: dir)
             Issue.record("factory must throw on a hash mismatch")
         } catch let error as EncoderError {
             #expect(error == .tokenizerMismatch(
@@ -71,7 +71,7 @@ struct PairScorerFactoryTests {
     }
 
     @Test("matching vocab hash but no compiled classifier is modelUnavailable (hash check runs first)")
-    func matchingHashNoModel() throws {
+    func matchingHashNoModel() async throws {
         let dir = try scratchDirectory()
         defer { try? FileManager.default.removeItem(at: dir) }
         let vocab = Data("[PAD]\n[UNK]\n[CLS]\n[SEP]\nhello\n".utf8)
@@ -81,7 +81,7 @@ struct PairScorerFactoryTests {
             tokenizerHash: SpanEncoderFactory.hexDigest(of: vocab),
             maxSequence: 512, pool: 50, head: 30, spans: 3, rrfK: 60)
         do {
-            _ = try PairScorerFactory.make(profile: matching, modelDirectory: dir)
+            _ = try await PairScorerFactory.make(profile: matching, modelDirectory: dir)
             Issue.record("factory must throw when no model file exists")
         } catch let error as EncoderError {
             guard case .modelUnavailable = error else {
@@ -93,12 +93,11 @@ struct PairScorerFactoryTests {
     }
 }
 
-#if canImport(CoreML)
 // MARK: - Clamp branch (fake inference, no model files needed)
 
 /// A fake `PairInference` that reports a fixed sequence length. Instantiated
 /// with the tokenizer the factory chose after applying the clamp, so the test
-/// can verify the clamped `maxTokens` without loading a real CoreML model.
+/// can verify the clamped `maxTokens` without loading a real model.
 private final class FakePairInferenceForClamp: PairInference, @unchecked Sendable {
     /// Advertised compiled sequence length — triggers the factory clamp when
     /// this value is below the profile's `maxSequence`.
@@ -117,7 +116,7 @@ private final class FakePairInferenceForClamp: PairInference, @unchecked Sendabl
 struct PairScorerFactoryFakeClampTests {
 
     @Test("fixedLength=128 below maxSequence=512 clamps the scorer's tokenizer maxTokens to 128")
-    func clampBranchFakeInference() throws {
+    func clampBranchFakeInference() async throws {
         // Drives `PairScorerFactory.make` with an injectable inference whose
         // fixedLength is 128 (below the profile's maxSequence=512). The factory
         // must detect the clamp and call the seam a second time with a tokenizer
@@ -127,11 +126,11 @@ struct PairScorerFactoryFakeClampTests {
         // causes the seam to be called only once (with maxTokens=512), so the
         // assertion fails with 512 instead of 128.
         //
-        // Swift reads the ceiling from the CoreML `input_ids` shape constraint.
-        // Rust reads `max_position_embeddings` from config.json.
-        // Both are applied as min(profile.maxSequence, fixedLength).
+        // An injected inference may report a compiled ceiling; the Core AI asset
+        // is dynamic and reports nil. Rust reads `max_position_embeddings` from
+        // config.json. Both are applied as min(profile.maxSequence, fixedLength).
         var lastInference: FakePairInferenceForClamp? = nil
-        let scorer = try PairScorerFactory.make(
+        let scorer = try await PairScorerFactory.make(
             profile: .minilmL6,
             modelDirectory: FileManager.default.temporaryDirectory,
             makeInference: { _, tokenizer in
@@ -151,59 +150,48 @@ struct PairScorerFactoryFakeClampTests {
     }
 }
 
-// MARK: - Asset-gated clamping test
+// MARK: - Asset-gated seam test
 
-/// Verifies that `CoreMLPairInference` exposes `fixedLength` (I6-2) and that
-/// `PairScorerFactory.make` successfully builds a scorer for the packaged asset.
-/// The packaged MinilmL6 model compiles to a fixed 512-token shape, which equals
-/// `profile.maxSequence = 512`, so no clamping occurs for the current asset.
-/// The clamp logic guards future profiles where `fixedLength < maxSequence`.
-@Suite("PairScorerFactory maxSequence clamping (MOOT_CROSS_ENCODER_ASSETS)")
-struct PairScorerFactoryClampTests {
+/// The packaged asset loads through the Core AI seam, which is dynamic in
+/// both axes: no compiled fixed length, so the tokenizer's `maxTokens` is the
+/// profile's `maxSequence` unclamped.
+@Suite("PairScorerFactory packaged seam (MOOT_CROSS_ENCODER_ASSETS)")
+struct PairScorerFactorySeamTests {
 
     @Test(
-        "CoreMLPairInference exposes fixedLength and scorer builds without error",
+        "the packaged classifier loads through CoreAIPairInference with no fixed length",
         .enabled(if: packagedAppleDirectory != nil, "MOOT_CROSS_ENCODER_ASSETS not set — skipping asset-gated test")
     )
-    func fixedLengthIsExposed() throws {
+    func seamIsCoreAI() async throws {
         guard let dir = packagedAppleDirectory else { return }
-        let scorer = try PairScorerFactory.make(profile: .minilmL6, modelDirectory: dir)
-        let ps = try #require(scorer as? ProviderPairScorer,
-            "factory must return ProviderPairScorer on CoreML path")
-        guard let coreml = ps.inference as? CoreMLPairInference else {
-            Issue.record("inference is not CoreMLPairInference"); return
-        }
-        // fixedLength must be non-nil and must not exceed maxSequence.
-        if let fl = coreml.fixedLength {
-            #expect(fl <= CrossEncoderProfile.minilmL6.maxSequence,
-                "model fixedLength \(fl) exceeds profile maxSequence — tokenizer would overflow")
-        }
-        // Tokenizer's maxTokens must equal the smaller of fixedLength and maxSequence.
-        let expectedMax = coreml.fixedLength.map { min(CrossEncoderProfile.minilmL6.maxSequence, $0) }
-            ?? CrossEncoderProfile.minilmL6.maxSequence
-        #expect(coreml.tokenizer.maxTokens == expectedMax)
+        let scorer = try await PairScorerFactory.make(profile: .minilmL6, modelDirectory: dir)
+        let ps = try #require(scorer as? ProviderPairScorer, "factory must return ProviderPairScorer")
+        let seam = try #require(ps.inference as? CoreAIPairInference, "inference is not CoreAIPairInference")
+        #expect(seam.fixedLength == nil)
+        #expect(seam.backend == "coreai")
+        #expect(seam.tokenizer.maxTokens == CrossEncoderProfile.minilmL6.maxSequence)
     }
 }
 
-@Suite("CoreMLPairInference input preparation")
-struct CoreMLPairInferenceInputTests {
+@Suite("CoreAIPairInference batch input planning")
+struct CoreAIPairInferenceInputTests {
 
-    @Test("a fixed shape pads ids with [PAD], segments with 0 and masks the padding")
-    func fixedShape() {
-        let pair = PairTokens(ids: [101, 7, 102, 9, 102], tokenTypeIDs: [0, 0, 0, 1, 1])
-        let prepared = CoreMLPairInference.prepareInputs(pair: pair, padTokenID: 0, fixedLength: 8)
-        #expect(prepared.ids == [101, 7, 102, 9, 102, 0, 0, 0])
-        #expect(prepared.tokenTypeIDs == [0, 0, 0, 1, 1, 0, 0, 0])
-        #expect(prepared.attentionMask == [1, 1, 1, 1, 1, 0, 0, 0])
+    @Test("rows pad to the chunk's longest pair: ids with [PAD], segments with 0, mask 0")
+    func rowsPadToLongest() {
+        let long = PairTokens(ids: [101, 7, 102, 9, 102], tokenTypeIDs: [0, 0, 0, 1, 1])
+        let short = PairTokens(ids: [101, 102, 3, 102], tokenTypeIDs: [0, 0, 1, 1])
+        let batch = CoreAIPairInference.batchInputs(pairs: [long, short], padTokenID: 0)
+        #expect(batch.rows == 2)
+        #expect(batch.length == 5)
+        #expect(batch.ids == [101, 7, 102, 9, 102, 101, 102, 3, 102, 0])
+        #expect(batch.types == [0, 0, 0, 1, 1, 0, 0, 1, 1, 0])
+        #expect(batch.mask == [1, 1, 1, 1, 1, 1, 1, 1, 1, 0])
     }
 
-    @Test("a flexible shape keeps the real length")
-    func flexibleShape() {
-        let pair = PairTokens(ids: [101, 7, 102, 9, 102], tokenTypeIDs: [0, 0, 0, 1, 1])
-        let prepared = CoreMLPairInference.prepareInputs(pair: pair, padTokenID: 0, fixedLength: nil)
-        #expect(prepared.ids == pair.ids)
-        #expect(prepared.tokenTypeIDs == pair.tokenTypeIDs)
-        #expect(prepared.attentionMask == [1, 1, 1, 1, 1])
+    @Test("an empty pair becomes one masked pad position")
+    func emptyPair() {
+        let batch = CoreAIPairInference.batchInputs(pairs: [PairTokens(ids: [], tokenTypeIDs: [])], padTokenID: 5)
+        #expect(batch == CoreAIPairInference.BatchInputs(rows: 1, length: 1, ids: [5], mask: [0], types: [0]))
     }
 }
 
@@ -221,7 +209,7 @@ struct PackagedCrossEncoderTests {
         // Read texts from the shared fixture so there is one source of truth
         // for the input strings (the same JSON the Rust test reads).
         let fixture = try loadTokenizerParityFixture()
-        let scorer = try PairScorerFactory.make(profile: .minilmL6, modelDirectory: dir)
+        let scorer = try await PairScorerFactory.make(profile: .minilmL6, modelDirectory: dir)
         // Reference logits from PyTorch FP32, CPU.
         let reference: [(query: String, span: String, logit: Float)] = [
             (fixture.texts["capital"]!, fixture.texts["paris0"]!, 8.089582443237305),
@@ -246,4 +234,3 @@ struct PackagedCrossEncoderTests {
         #expect(abs(batch[2] - -3.6770708560943604) < 1e-3)
     }
 }
-#endif

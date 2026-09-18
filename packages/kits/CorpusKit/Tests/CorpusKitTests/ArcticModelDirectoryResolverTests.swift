@@ -13,7 +13,7 @@ struct ArcticModelDirectoryResolverTests {
 
     private func writeArcticModelDirectory(_ modelDirectory: URL) throws {
         let compiledModel = modelDirectory
-            .appendingPathComponent("ArcticEmbedS.mlmodelc", isDirectory: true)
+            .appendingPathComponent("ArcticEmbedS.aimodel", isDirectory: true)
         try FileManager.default.createDirectory(at: compiledModel, withIntermediateDirectories: true)
         let fixtureDirectory = try #require(
             Bundle.module.resourceURL?.appendingPathComponent(
@@ -158,7 +158,7 @@ struct ArcticModelDirectoryResolverTests {
             .appendingPathComponent(EncoderModelSeed.modelID, isDirectory: true)
         try writeArcticModelDirectory(modelDirectory)
         try FileManager.default.removeItem(
-            at: modelDirectory.appendingPathComponent("ArcticEmbedS.mlmodelc"))
+            at: modelDirectory.appendingPathComponent("ArcticEmbedS.aimodel"))
 
         #expect(ModelDirectoryResolver.encoderModelDirectory(
             for: EncoderModelSeed.modelID,

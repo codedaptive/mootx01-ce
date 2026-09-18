@@ -94,7 +94,7 @@ private func openFullyWiredEstate(
     let corpusStorage = InMemoryStorage(configuration: EstateConfiguration(
         estateID: UUID(), backend: .inMemory))
     // Use a deterministic provider so tests are bit-identical across runs and
-    // do not depend on a CoreML model.
+    // do not depend on a model asset.
     let corpus = try await CorpusContentEngine(
         standaloneOn: corpusStorage,
         models: [.lsa(provider: HashFloatProvider(modelID: "test-miniLM-v1"))]
