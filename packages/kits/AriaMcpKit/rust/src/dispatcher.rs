@@ -429,6 +429,7 @@ impl Dispatcher {
 
     fn tools_call(&self, params: Option<&JsonValue>) -> Result<serde_json::Value, JSONRPCError> {
         let _withheld_call = crate::v2::report_withheld::CallGuard::new();
+        let _chest_diversity_call = crate::v2::chest_diversity::CallGuard::new();
         let obj = params.and_then(|p| p.as_object()).ok_or_else(|| {
             JSONRPCError::new(
                 JSONRPCErrorCode::INVALID_PARAMS,

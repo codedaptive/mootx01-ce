@@ -1168,8 +1168,8 @@ pub fn subcommand_usage(cmd: &str) -> String {
             \n\
             USAGE: mootx01 preference <list|get|set> [--db <name>|<dir>/<name>]\n\
             \n\
-            Values: on, off for the switches; fact_extractor takes nuextract or apple. A key that has never been set reads as its default (on; nuextract for fact_extractor). A change takes effect without a daemon restart.\n\
-            Keys: fact_extraction, consolidation, contradiction_sweep, cross_encoder_routing, maintenance, adaptive_recall, fact_extractor.\n\
+            Values: on, off for the switches; fact_extractor takes nuextract or apple. A key that has never been set reads as its default (on; off for chest_contradiction_candidates and chest_recall_diversity; nuextract for fact_extractor). A change takes effect without a daemon restart.\n\
+            Keys: fact_extraction, consolidation, contradiction_sweep, cross_encoder_routing, maintenance, adaptive_recall, fact_extractor, chest_contradiction_candidates, chest_recall_diversity.\n\
             \n\
             SUBCOMMANDS:\n\
             \x20 list                                Print every preference key with its current value.\n\

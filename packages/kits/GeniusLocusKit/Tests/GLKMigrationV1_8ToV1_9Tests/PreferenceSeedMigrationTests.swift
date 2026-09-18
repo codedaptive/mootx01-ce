@@ -135,3 +135,26 @@ func chainFromV1_8EstateReachesCurrentFormat() async throws {
 }
 
 #endif
+
+// MARK: - ADR-027: the chest switches are never seeded and read .off when absent
+
+@Test("chest_contradiction_candidates and chest_recall_diversity are unseeded and default off")
+func chestSwitchesAreUnseededAndDefaultOff() async throws {
+    let (kit, handle, _) = try await makeEstate()
+    let chestKeys: [EstatePreferenceKey] = [.chestContradictionCandidates, .chestRecallDiversity]
+    for key in chestKeys {
+        #expect(key.defaultValue == .off)
+        #expect(key.allowedValues == [.on, .off])
+        #expect(!GeniusLocusKit.preferenceSeedKeys.contains(key), "\(key.rawValue) is never seeded")
+    }
+    try await kit.runPreferenceSeedMigration(handle: handle, now: testNow)
+    for key in chestKeys {
+        let raw = try? await kit.estate(for: handle).meta(key: key.rawValue)
+        #expect(raw == nil, "the migration leaves \(key.rawValue) absent")
+        #expect(try await kit.provisionedPreference(key, for: handle) == .off)
+    }
+    // Setting one on is an ordinary preference write; the other stays off.
+    try await kit.provisionPreference(.chestRecallDiversity, .on, for: handle)
+    #expect(try await kit.provisionedPreference(.chestRecallDiversity, for: handle) == .on)
+    #expect(try await kit.provisionedPreference(.chestContradictionCandidates, for: handle) == .off)
+}

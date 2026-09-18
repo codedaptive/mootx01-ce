@@ -592,7 +592,10 @@ public struct AriaV2GeniusLocusMemoryBackend: AriaV2MemoryBackend {
             origin: context.recallOrigin,
             door: "memory_search",
             frontierK: request.frontierK.map { Int($0) },
-            subSpanScoring: .off
+            subSpanScoring: .off,
+            // ADR-027 D3: the per-call `chest_diversity` modifier, nil when
+            // the call carried none (the estate preference decides).
+            chestDiversity: await AriaV2ChestDiversity.value
         ))
         // Exclude the near: anchor from the hit list before the packager so that
         // gate signals (m1 top-margin, m3 span cosine spread) are computed on the

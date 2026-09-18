@@ -1238,6 +1238,13 @@ pub struct GLKRecallRequest {
     /// Mirrors Swift `GLKRecallRequest.anomalousFilter`.
     pub anomalous_filter: Option<bool>,
 
+    /// ADR-027 D3: the per-call override of the `chest_recall_diversity`
+    /// estate preference. `Some(true)` makes the diversity rerank treat two
+    /// candidates in one container as one topic for this call, `Some(false)`
+    /// switches that off for this call, `None` (the default) reads the
+    /// preference. Set from ARIA's `chest_diversity` global modifier.
+    pub chest_diversity: Option<bool>,
+
     /// Whether the step 5.8 sub-span dense refinement runs for this request.
     ///
     /// `Off` (what `new()` sets) leaves the dense column as the dense lane
@@ -1290,6 +1297,7 @@ impl GLKRecallRequest {
             composition: None,
             frontier_k: None,
             anomalous_filter: None,
+            chest_diversity: None,
             sub_span_scoring: GLKSubSpanScoring::Off,
             rerank_directive: None,
         }

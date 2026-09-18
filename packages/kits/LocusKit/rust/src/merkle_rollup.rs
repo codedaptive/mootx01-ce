@@ -1,7 +1,10 @@
 //! Merkle content-integrity rollup: room → wing → estate (NT-L3).
 //!
 //! After a drawer write, the rollup recomputes the affected subtree:
-//!   1. Room root: MerkleHash.interior over the room's active drawers.
+//!   0. Chest root (ADR-027 D1), when the drawer sits in a chest:
+//!      MerkleHash.interior over the chest's active drawers.
+//!   1. Room root: MerkleHash.interior over the room's direct drawers, or
+//!      the fold over its chests' stored roots when it has chests.
 //!   2. Wing root: MerkleHash.interior over the wing's room roots.
 //!   3. Estate root: MerkleHash.interior over the wing roots.
 //!
@@ -40,36 +43,56 @@ impl Estate {
     /// from its own drawers' `filed_at`, never a wall clock.
     pub fn rollup_rooms_for_drawers(&self, drawer_ids: &[String]) -> Result<(), LocusKitError> {
         use std::collections::HashMap;
-        // room node id → latest filed_at among this batch's drawers in that room.
-        let mut rooms: HashMap<Uuid, i64> = HashMap::new();
+        // container node id → latest filed_at among this batch's drawers in
+        // it. The container is the drawer's parent: its chest, or the room
+        // when the room holds it directly (ADR-027 D1).
+        let mut containers: HashMap<Uuid, i64> = HashMap::new();
         for id in drawer_ids {
             if let Some(drawer) = self.store.get_drawer(id)? {
-                // The parent may be a chest (ADR-026); roots are kept per room.
-                if let Some(room) = self.room_id_for_parent(&drawer.parent_node_id) {
-                    let entry = rooms.entry(room).or_insert(drawer.filed_at);
-                    if drawer.filed_at > *entry {
-                        *entry = drawer.filed_at;
-                    }
+                let Ok(container) = Uuid::parse_str(&drawer.parent_node_id) else { continue };
+                let entry = containers.entry(container).or_insert(drawer.filed_at);
+                if drawer.filed_at > *entry {
+                    *entry = drawer.filed_at;
                 }
             }
         }
-        for (room, now) in rooms {
-            self.rollup_merkle_roots(room, now)?;
+        for (container, now) in containers {
+            self.rollup_merkle_roots(container, now)?;
         }
         Ok(())
     }
 
-    /// Recompute Merkle roots up the containment tree from a room to
-    /// the estate root. Called after a drawer write to incrementally
-    /// update the affected subtree.
+    /// Recompute Merkle roots up the containment tree from a container (a
+    /// room, or a chest under it) to the estate root. Called after a drawer
+    /// write to incrementally update the affected subtree.
     pub fn rollup_merkle_roots(
         &self,
-        room_node_id: Uuid,
+        container_node_id: Uuid,
         now: i64,
     ) -> Result<(), LocusKitError> {
         let node_store = self.node_store_ref()?;
 
-        // Step 1: Room root — hash over active drawers in this room.
+        // ADR-027 D1: a chest carries its own root. When the write landed in
+        // a chest, hash that chest first (one container, not the room), then
+        // fold the room over its chests' stored roots.
+        let container = match node_store.get_node(container_node_id)? {
+            Some(n) => n,
+            None => return Ok(()),
+        };
+        let room_node_id = if container.depth == NodeStore::CHEST_DEPTH {
+            match container.parent_id {
+                Some(chest_room) => {
+                    let chest_root = self.compute_chest_merkle_root(container.id)?;
+                    node_store.update_merkle_root(container.id, &chest_root, now)?;
+                    chest_room
+                }
+                None => return Ok(()),
+            }
+        } else {
+            container.id
+        };
+
+        // Step 1: Room root — the room's direct drawers and its chests' roots.
         let room_root = self.compute_room_merkle_root(room_node_id)?;
         node_store.update_merkle_root(room_node_id, &room_root, now)?;
 
@@ -98,7 +121,8 @@ impl Estate {
         Ok(())
     }
 
-    /// Compute the Merkle root for a room by hashing its live drawers.
+    /// The leaf hashes of the live, non-withdrawn drawers filed directly
+    /// under one container node (a room or a chest).
     ///
     /// Excludes both tombstoned and withdrawn drawers from the snapshot.
     /// Tombstoned drawers have tombstonedAt IS NOT NULL. Withdrawn drawers
@@ -106,17 +130,10 @@ impl Estate {
     /// of adjectiveBitmap (mask 0x3F). Including withdrawn drawers in the
     /// snapshot would allow retrieval of content that the user retracted,
     /// violating snapshot completeness (WS2-F1, fixed 2026-06-28).
-    pub(crate) fn compute_room_merkle_root(
+    fn container_leaf_hashes(
         &self,
-        room_node_id: Uuid,
-    ) -> Result<MerkleRoot, LocusKitError> {
-        // The room's subtree: drawers on the room itself and in every chest
-        // under it (ADR-026, spec § 12). A chest has no root of its own; the
-        // room's root covers it, so re-binning never changes a room's root.
-        let mut parents = vec![TypedValue::Text(room_node_id.to_string())];
-        for chest in self.node_store_ref()?.active_chests(room_node_id)? {
-            parents.push(TypedValue::Text(chest.id.to_string()));
-        }
+        container_node_id: Uuid,
+    ) -> Result<Vec<([u8; 16], ContentHash)>, LocusKitError> {
         let rows = self
             .store
             .storage().ok_or_else(|| LocusKitError::DatabaseUnavailable("no storage".to_string()))?
@@ -124,7 +141,10 @@ impl Estate {
             .query(
                 "drawers",
                 Some(&StoragePredicate::And(vec![
-                    StoragePredicate::In(Column::new("drawers", "parent_node_id"), parents),
+                    StoragePredicate::Eq(
+                        Column::new("drawers", "parent_node_id"),
+                        TypedValue::Text(container_node_id.to_string()),
+                    ),
                     // Exclude tombstoned drawers (irreversible deletion).
                     StoragePredicate::IsNull(Column::new("drawers", "tombstonedAt")),
                     // Exclude withdrawn drawers (state 18, bits 0-5 of adjectiveBitmap).
@@ -171,7 +191,41 @@ impl Estate {
             child_hashes.push((uuid_to_be_bytes(drawer_uuid), content_hash));
         }
 
-        Ok(merkle_hash::interior(&child_hashes))
+        Ok(child_hashes)
+    }
+
+    /// ADR-027 D1: one chest's root, the interior hash over its live drawers.
+    pub(crate) fn compute_chest_merkle_root(
+        &self,
+        chest_node_id: Uuid,
+    ) -> Result<MerkleRoot, LocusKitError> {
+        Ok(merkle_hash::interior(&self.container_leaf_hashes(chest_node_id)?))
+    }
+
+    /// The room root. A room with no chests hashes its direct drawers as it
+    /// always did, so an estate never re-binned computes the same root it
+    /// did. A room with chests folds its chests' STORED roots (id order, the
+    /// same fold the wing applies over rooms) plus, when drawers sit on the
+    /// room directly, one entry under the room's own id for their interior
+    /// hash. Only the touched chest is rehashed by a rollup; the others are
+    /// read back.
+    pub(crate) fn compute_room_merkle_root(
+        &self,
+        room_node_id: Uuid,
+    ) -> Result<MerkleRoot, LocusKitError> {
+        let direct = self.container_leaf_hashes(room_node_id)?;
+        let chests = self.node_store_ref()?.active_chests(room_node_id)?;
+        if chests.is_empty() {
+            return Ok(merkle_hash::interior(&direct));
+        }
+        let mut child_roots: Vec<([u8; 16], MerkleRoot)> = chests
+            .iter()
+            .map(|chest| (uuid_to_be_bytes(chest.id), chest.merkle_root.unwrap_or(MerkleRoot::EMPTY)))
+            .collect();
+        if !direct.is_empty() {
+            child_roots.push((uuid_to_be_bytes(room_node_id), merkle_hash::interior(&direct)));
+        }
+        Ok(merkle_hash::interior_roots(&child_roots))
     }
 
     /// Compute the Merkle root for a wing or estate by hashing child
@@ -208,6 +262,11 @@ impl Estate {
         for wing in &wings {
             let rooms = node_store.child_nodes(wing.id)?;
             for room in &rooms {
+                // Chests first (ADR-027 D1), so the room fold reads fresh roots.
+                for chest in node_store.active_chests(room.id)? {
+                    let chest_root = self.compute_chest_merkle_root(chest.id)?;
+                    node_store.update_merkle_root(chest.id, &chest_root, now)?;
+                }
                 let room_root = self.compute_room_merkle_root(room.id)?;
                 node_store.update_merkle_root(room.id, &room_root, now)?;
             }

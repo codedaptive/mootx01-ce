@@ -173,3 +173,39 @@ fn g3_fact_extractor_absent_reads_nuextract_apple_accepted_on_refused() {
     );
     assert!(result.is_err(), "On must be refused for FactExtractor");
 }
+
+// ---------------------------------------------------------------------------
+// ADR-027: the chest switches are never seeded and read Off when absent
+// ---------------------------------------------------------------------------
+
+#[test]
+fn chest_switches_are_unseeded_and_default_off() {
+    let (coord, handle, _storage) = make_estate();
+    let chest_keys = [
+        EstatePreferenceKey::ChestContradictionCandidates,
+        EstatePreferenceKey::ChestRecallDiversity,
+    ];
+    for key in &chest_keys {
+        assert_eq!(key.default_value(), EstatePreferenceValue::Off);
+        assert_eq!(key.allowed_values(), &[EstatePreferenceValue::On, EstatePreferenceValue::Off]);
+        assert!(!preference_seed_keys().contains(key), "{} is never seeded", key.as_str());
+    }
+    coord.run_preference_seed_migration(&handle, NOW).expect("capsule succeeded");
+    for key in &chest_keys {
+        let raw = coord.estate_for(&handle).expect("estate open").meta(key.as_str()).expect("meta read");
+        assert!(raw.is_none(), "the migration leaves {} absent", key.as_str());
+        assert_eq!(coord.provisioned_preference(&handle, *key).expect("read"), EstatePreferenceValue::Off);
+    }
+    // Setting one on is an ordinary preference write; the other stays off.
+    coord
+        .provision_preference(&handle, EstatePreferenceKey::ChestRecallDiversity, EstatePreferenceValue::On)
+        .expect("provision");
+    assert_eq!(
+        coord.provisioned_preference(&handle, EstatePreferenceKey::ChestRecallDiversity).expect("read"),
+        EstatePreferenceValue::On
+    );
+    assert_eq!(
+        coord.provisioned_preference(&handle, EstatePreferenceKey::ChestContradictionCandidates).expect("read"),
+        EstatePreferenceValue::Off
+    );
+}

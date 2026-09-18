@@ -176,6 +176,13 @@ public struct GLKRecallRequest: Sendable {
     /// yet; internal callers pass it explicitly.
     public let rerankDirective: RerankDirective?
 
+    /// ADR-027 D3: the per-call override of the `chest_recall_diversity`
+    /// estate preference. `true` makes the diversity rerank treat two
+    /// candidates in one container as one topic for this call, `false`
+    /// switches that off for this call, `nil` (the default) reads the
+    /// preference. Set from ARIA's `chest_diversity` global modifier.
+    public let chestDiversity: Bool?
+
     /// Create a recall request with explicit lane, scoring, and policy.
     ///
     /// All five behavioural parameters are required — there are no defaults.
@@ -219,6 +226,8 @@ public struct GLKRecallRequest: Sendable {
     ///     expose it.
     ///   - rerankDirective: The cross-encoder directive. `nil` (the default)
     ///     is bypass with no report; `.apply` runs the stage.
+    ///   - chestDiversity: The per-call chest diversity override. `nil` (the
+    ///     default) reads the estate preference.
     public init(
         frame: LocusKit.RecallFrame,
         mode: GLKRecallMode,
@@ -234,7 +243,8 @@ public struct GLKRecallRequest: Sendable {
         frontierK: Int? = nil,
         anomalousFilter: Bool? = nil,
         subSpanScoring: GLKSubSpanScoring = .off,
-        rerankDirective: RerankDirective? = nil
+        rerankDirective: RerankDirective? = nil,
+        chestDiversity: Bool? = nil
     ) {
         self.frame = frame
         self.mode = mode
@@ -251,6 +261,7 @@ public struct GLKRecallRequest: Sendable {
         self.anomalousFilter = anomalousFilter
         self.subSpanScoring = subSpanScoring
         self.rerankDirective = rerankDirective
+        self.chestDiversity = chestDiversity
     }
 
     /// This request with `limit` replaced and every other field kept. The
@@ -263,7 +274,8 @@ public struct GLKRecallRequest: Sendable {
             queryText: queryText, traceLimit: traceLimit, origin: origin,
             recallShape: recallShape, door: door, composition: composition,
             frontierK: frontierK, anomalousFilter: anomalousFilter,
-            subSpanScoring: subSpanScoring, rerankDirective: rerankDirective)
+            subSpanScoring: subSpanScoring, rerankDirective: rerankDirective,
+            chestDiversity: chestDiversity)
     }
 
     /// This request with `rerankDirective` replaced and every other field kept.
@@ -275,6 +287,7 @@ public struct GLKRecallRequest: Sendable {
             queryText: queryText, traceLimit: traceLimit, origin: origin,
             recallShape: recallShape, door: door, composition: composition,
             frontierK: frontierK, anomalousFilter: anomalousFilter,
-            subSpanScoring: subSpanScoring, rerankDirective: rerankDirective)
+            subSpanScoring: subSpanScoring, rerankDirective: rerankDirective,
+            chestDiversity: chestDiversity)
     }
 }

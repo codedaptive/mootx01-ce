@@ -294,6 +294,47 @@ struct ContradictionHuntTests {
         #expect(Set([proposal.sourceDrawerID, proposal.targetDrawerID]) == Set([a.id, b.id]))
     }
 
+    @Test("ADR-027 D2: chest_contradiction_candidates pairs a probe with its container-mates")
+    func chestLanePairsContainerMates() async throws {
+        // The production shape: one corpus, its shared vector store, drawer-
+        // keyed rows. Three drawers in one room; the BM25 lane pairs only the
+        // two that share terms. With the chest lane on, every drawer of the
+        // container is a candidate, so all three pairs are screened; the
+        // proposal set is unchanged because the screen still decides.
+        let kit = GeniusLocusKit()
+        let owner = OwnerCredentials(ownerIdentifier: "hunt-tests-chest-lane")
+        let storage = InMemoryStorage(configuration: EstateConfiguration(
+            estateID: UUID(), backend: .inMemory))
+        _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
+        let handle = try await kit.open(storage: storage, owner: owner)
+        let corpus = try await CorpusContentEngine(standaloneOn: storage, models: [.deterministic])
+        await kit.registerCorpus(corpus, for: handle)
+        await kit.registerVectorStore(corpus.sharedVectorStore, for: handle)
+
+        let a = try await kit.capture(
+            handle, captureFrame(content: "the api timeout is 30 seconds", room: "study"))
+        let b = try await kit.capture(
+            handle, captureFrame(content: "the api timeout is 90 seconds", room: "study"))
+        let filler = try await kit.capture(
+            handle, captureFrame(content: "grocery list apples and oranges", room: "study"))
+        for drawer in [a, b, filler] {
+            try await corpus.ingest(drawer.content, contentID: drawer.id, now: Self.t0)
+        }
+
+        let off = try await kit.huntContradictions(in: handle, now: Self.t0)
+        #expect(off.vectorStoreAvailable)
+        #expect(off.pairsScreened == 1, "the lexical lane pairs only the two timeout drawers")
+
+        try await kit.provisionPreference(.chestContradictionCandidates, .on, for: handle)
+        let on = try await kit.huntContradictions(in: handle, now: Self.t0 + 1)
+        // Three pairs in the container: the settled timeout pair is
+        // deduplicated, the two filler pairs the lexical lane never surfaced
+        // are screened.
+        #expect(on.deduplicated == 1, "the timeout pair was settled by the first pass")
+        #expect(on.pairsScreened == 2, "the container-mate pairs are screened")
+        #expect(on.proposed.isEmpty)
+    }
+
     @Test("watermark skips pairs where both sides predate filedAfter")
     func watermarkSkipsOldPairs() async throws {
         let (kit, handle, vectorStore) = try await makeKit()

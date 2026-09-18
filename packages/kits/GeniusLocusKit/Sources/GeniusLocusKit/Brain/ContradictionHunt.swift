@@ -403,6 +403,29 @@ internal extension GeniusLocusKit {
             }
         }
 
+        // Lane 3 — chest-mates (ADR-027 D2), behind the estate preference
+        // `chest_contradiction_candidates` (default off). Each probe drawer is
+        // paired with every live drawer of its own container: two drawers in
+        // one chest already share content, which is where value divergence
+        // and negation sit. Bounded at the chest capacity per probe; the
+        // canonical-pair deduplication above applies unchanged.
+        if try await provisionedPreference(.chestContradictionCandidates, for: handle) == .on {
+            let probeDrawers = try await estate.getDrawers(ids: Array(Set(probeIDs)))
+            var seenContainers: Set<String> = []
+            for probe in probeDrawers where seenContainers.insert(probe.parentNodeId).inserted {
+                let mates = try await estate.drawersIn(containerNodeId: probe.parentNodeId)
+                // Every probe in this container pairs with every mate; probes
+                // sharing a container are covered by the one read.
+                let probesHere = probeDrawers.filter { $0.parentNodeId == probe.parentNodeId }
+                for p in probesHere {
+                    for mate in mates where mate.id != p.id {
+                        let key = Self.pairKey(p.id, mate.id)
+                        guard seenPairs.insert(key).inserted else { continue }
+                        candidatePairs.append((min(p.id, mate.id), max(p.id, mate.id)))
+                    }
+                }
+            }
+        }
         return ContradictionCandidateSet(
             vectorStoreAvailable: true, probeIDs: probeIDs, pairs: candidatePairs)
     }

@@ -1,6 +1,6 @@
 // ChestTests.swift — chests below rooms (ADR-026, LocusKit spec § 12):
 // placement on capture and reanchor, the whole-room re-bin, the room read
-// over the subtree, the room Merkle root's independence from chesting.
+// over the subtree, the per-chest Merkle roots and the room's fold over them (ADR-027 D1).
 // Twins of the Rust `chest_*` tests in estate_verbs.rs.
 import EngramLib
 import Foundation
@@ -41,7 +41,7 @@ struct ChestTests {
         return (below.last ?? chests.first!).chestNodeId
     }
 
-    @Test("re-bin deals sorted content keys into ⌈n/250⌉ chests with derived ids, one audit event, the room root unchanged, and is idempotent")
+    @Test("re-bin deals sorted content keys into ⌈n/250⌉ chests with derived ids, one audit event, a root per chest folded into the room root, and is idempotent")
     func rebinDealsSortedKeysIntoDerivedChests() async throws {
         let estate = try await makeEstate()
         let drawers = try await estate.captureBatch((0..<600).map { frame("note \($0) on topic \($0 % 7)") })
@@ -70,8 +70,18 @@ struct ChestTests {
             #expect(chestIds.contains(d.parentNodeId))
             #expect(d.parentNodeId == expectedChest(for: d.content, in: chests))
         }
-        #expect(try await estate.computeRoomMerkleRoot(roomNodeId: roomId) == rootBefore,
-                "the room's root covers its subtree, so chesting does not change it")
+        // ADR-027 D1: each chest carries its own root and the room folds
+        // them, so the room root changes shape at the first re-bin; the
+        // incremental rollup and the full recompute must then agree.
+        try await estate.recomputeAllMerkleRoots(now: Date(timeIntervalSince1970: 1_700_000_101))
+        for chest in chests {
+            let node = try await estate.nodeStore.getNode(id: UUID(uuidString: chest.chestNodeId)!)
+            #expect(node?.merkleRoot != nil, "a chest carries its own Merkle root")
+            #expect(node?.merkleRoot == (try await estate.computeChestMerkleRoot(chestNodeId: node!.id)))
+        }
+        let roomRoot = try await estate.computeRoomMerkleRoot(roomNodeId: roomId)
+        #expect(roomRoot != rootBefore, "the room root folds its chests' roots")
+        #expect(try await estate.nodeStore.getNode(id: roomId)?.merkleRoot == roomRoot)
         // Every room-set read and count covers the chests.
         #expect(try await estate.store.drawersIn(wing: "w").count == 600)
         #expect(try await estate.store.listWings().map(\.drawerCount) == [600])

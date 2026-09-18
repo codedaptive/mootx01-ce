@@ -175,6 +175,15 @@ pub(crate) fn aria_v2_pre_decode_registrations(
             }
             Ok(arguments)
         })),
+        // `chest_diversity` (ADR-027 D3): stripped here so the strict decoder
+        // never sees it; the recall operations read `chest_diversity::value()`
+        // and pass it to GLK as the request's `chest_diversity` override.
+        V2ChainRegistration::new("chest_diversity").with_transform(3, Arc::new(|_, mut arguments| {
+            if let JsonValue::Object(ref mut args) = arguments {
+                super::chest_diversity::configure(args.remove("chest_diversity"));
+            }
+            Ok(arguments)
+        })),
     ]
 }
 

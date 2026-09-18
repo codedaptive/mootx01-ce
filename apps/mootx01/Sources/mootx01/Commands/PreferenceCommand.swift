@@ -32,7 +32,7 @@ struct PreferenceCommand: AsyncParsableCommand {
         abstract: "Read or set an estate-wide preference.",
         discussion: """
         Keys: \(EstatePreferenceKey.allCases.map(\.rawValue).joined(separator: ", "))
-        Values: on, off for the switches; fact_extractor takes nuextract or apple. A key that has never been set reads as its default (on; nuextract for fact_extractor).
+        Values: on, off for the switches; fact_extractor takes nuextract or apple. A key that has never been set reads as its default (on; off for chest_contradiction_candidates and chest_recall_diversity; nuextract for fact_extractor).
         """,
         subcommands: [
             PreferenceListCommand.self,

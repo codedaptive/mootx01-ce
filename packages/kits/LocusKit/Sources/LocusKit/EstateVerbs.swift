@@ -643,23 +643,6 @@ public extension Estate {
         return ranges.count
     }
 
-    /// The room a drawer's parent denotes, or nil when the id is not a
-    /// room or a chest (ADR-026: a parent may be a chest, a room's internal
-    /// container; every per-room computation resolves through here).
-    func roomNodeId(forParent parent: String) async throws -> UUID? {
-        guard let id = UUID(uuidString: parent) else { return nil }
-        return try await nodeStore.roomNode(forParent: id)?.id
-    }
-
-    /// The distinct rooms a set of drawer parents denote.
-    func roomNodeIds(forParents parents: [String]) async throws -> Set<UUID> {
-        var rooms = Set<UUID>()
-        for parent in Set(parents) {
-            if let room = try await roomNodeId(forParent: parent) { rooms.insert(room) }
-        }
-        return rooms
-    }
-
     func addDrawerCovered(_ drawer: Drawer, now: Date) async throws {
         try await store.addDrawer(drawer, now: now)
         // Resolve wing/room display names from the node tree for the
@@ -1246,10 +1229,10 @@ public extension Estate {
             reason: reason ?? "withdrawn via Estate.withdraw",
             now: now
         )
-        // NT-L3: Merkle rollup after state change. The parent may be a
-        // chest; the rollup is per room.
-        if let roomNodeId = try await roomNodeId(forParent: drawer.parentNodeId) {
-            try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
+        // NT-L3: Merkle rollup after state change, from the drawer's
+        // container (its chest, or the room holding it directly; ADR-027 D1).
+        if let container = UUID(uuidString: drawer.parentNodeId) {
+            try await rollupMerkleRoots(containerNodeId: container, now: now)
         }
     }
 
@@ -1334,7 +1317,7 @@ public extension Estate {
         let lineageIds = try await store.lineageChain(for: rowID)
         let idsToFetch = lineageIds.isEmpty ? [rowID] : lineageIds
         let lineageDrawers = (try? await store.getDrawers(ids: idsToFetch)) ?? [drawer]
-        let affectedRoomIds = try await roomNodeIds(forParents: lineageDrawers.map(\.parentNodeId))
+        let affectedContainerIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
 
         let outcome = try await store.expungeGated(
             drawerId: rowID,
@@ -1348,8 +1331,8 @@ public extension Estate {
         // contained any lineage member — not just the room of the
         // initiating drawer — so cross-room lineage expunge keeps every
         // affected room's root correct (WS2-F2, fixed 2026-06-28).
-        for roomNodeId in affectedRoomIds {
-            try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
+        for container in affectedContainerIds {
+            try await rollupMerkleRoots(containerNodeId: container, now: now)
         }
         // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling
         // is not a success, and a layer that summarises it as one is the
@@ -1406,7 +1389,7 @@ public extension Estate {
         let lineageIds = try await store.lineageChain(for: rowID)
         let idsToFetch = lineageIds.isEmpty ? [rowID] : lineageIds
         let lineageDrawers = (try? await store.getDrawers(ids: idsToFetch)) ?? [drawer]
-        let affectedRoomIds = try await roomNodeIds(forParents: lineageDrawers.map(\.parentNodeId))
+        let affectedContainerIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
 
         let outcome = try await store.expungeGated(
             drawerId: rowID,
@@ -1418,8 +1401,8 @@ public extension Estate {
         )
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member (WS2-F2, fixed 2026-06-28).
-        for roomNodeId in affectedRoomIds {
-            try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
+        for container in affectedContainerIds {
+            try await rollupMerkleRoots(containerNodeId: container, now: now)
         }
         // Invariant (SPEC B-8b, MXE-FA): the whole outcome flows up —
         // unsealed event AND refusedSiblingIDs — so GLK can scope its
