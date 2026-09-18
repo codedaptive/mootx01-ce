@@ -174,3 +174,41 @@ fn match_ordering() {
     v.sort();
     assert_eq!(v.iter().map(|m| m.index).collect::<Vec<_>>(), vec![0, 1, 5]);
 }
+
+
+// ── Chest placement key (ADR-026), vectors shared with the Swift port ──────
+
+use engram_lib::chest_placement;
+
+#[test]
+fn morton_key_vectors() {
+    let fp = e(0x0123456789ABCDEF, 0xFEDCBA9876543210, 0x0F0F0F0F0F0F0F0F, 0xAAAAAAAAAAAAAAAA);
+    assert_eq!(chest_placement::key(&fp).words, [0x0153494B6173682F, 0xC097888FA0B6F9BE, 0xFBACB3B49B8D9791, 0x3F2937711F490711,
+                                                 0x15BB05FB15FA01FE, 0x11FE01BE11BE10FE, 0x88DC989C889C99D8, 0x89D8D9D8C9D989C9]);
+    assert_eq!(chest_placement::key(&e(0, 0, 0, 0)).words, [0u64; 8]);
+    assert_eq!(chest_placement::key(&e(u64::MAX, u64::MAX, u64::MAX, u64::MAX)).words, [u64::MAX; 8]);
+}
+
+#[test]
+fn morton_key_single_bit_and_permutation_bijection() {
+    // Fingerprint bit 0 → key bit 0 (ordering A) and key bit 2j+1 with permutation(j) == 0: j = 55, word 1 bit 16.
+    let one = e(1 << 63, 0, 0, 0);
+    assert_eq!(chest_placement::key(&one).words, [0x8000000000000000, 0x0000000000010000, 0, 0, 0, 0, 0, 0]);
+    assert_eq!(chest_placement::permutation(55), 0);
+    let mut seen = [false; 256];
+    for i in 0..256 { seen[chest_placement::permutation(i)] = true; }
+    assert!(seen.iter().all(|s| *s), "the permutation is a bijection on 0..256");
+}
+
+#[test]
+fn deal_and_range_index() {
+    let keys: Vec<u32> = (0..10).collect();
+    let ranges = chest_placement::deal(&keys, 4);
+    let shape: Vec<(u32, u32, usize)> = ranges.iter().map(|r| (r.low, r.high, r.count)).collect();
+    assert_eq!(shape, vec![(0, 3, 4), (4, 7, 4), (8, 9, 2)]);
+    assert_eq!(chest_placement::range_index(&5, &ranges), Some(1));
+    assert_eq!(chest_placement::range_index(&9, &ranges), Some(2));
+    assert_eq!(chest_placement::range_index(&11, &ranges), None);
+    assert!(chest_placement::deal::<u32>(&[], 4).is_empty());
+    assert_eq!((chest_placement::CAPACITY, chest_placement::FILL), (500, 250));
+}
