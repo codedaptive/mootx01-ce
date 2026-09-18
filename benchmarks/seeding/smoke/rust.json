@@ -1,0 +1,10 @@
+{
+  "port": "rust",
+  "sets": 2,
+  "units_per_set": 3,
+  "records_per_unit": 4,
+  "watchers": 2,
+  "bytes_per_estate_estimate": 8192,
+  "stale_seconds": 30,
+  "max_seconds": 300
+}
