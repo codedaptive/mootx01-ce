@@ -84,10 +84,15 @@ struct NodeStoreTests {
             displayName: "Wing", parentId: root.id, now: Date(timeIntervalSince1970: 1001))
         let room = try await store.createNode(
             displayName: "Room", parentId: wing.id, now: Date(timeIntervalSince1970: 1002))
+        // Depth 3 is a chest (ADR-026): admitted under a room.
+        let chest = try await store.createNode(
+            displayName: "Chest", parentId: room.id, now: Date(timeIntervalSince1970: 1003))
+        #expect(chest.depth == 3)
 
+        // Chests never nest: depth 4 is refused (I-NT-2 max 3).
         await #expect(throws: LocusKitError.self) {
             _ = try await store.createNode(
-                displayName: "Sub", parentId: room.id, now: Date(timeIntervalSince1970: 1003))
+                displayName: "Sub", parentId: chest.id, now: Date(timeIntervalSince1970: 1004))
         }
     }
 

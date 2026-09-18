@@ -111,11 +111,13 @@ impl NodeStore {
             ))
         })?;
 
-        // I-NT-2: depth = parent.depth + 1, max 2.
+        // I-NT-2: depth = parent.depth + 1, max 3. Depth 3 is a chest, the
+        // internal container below a room (ADR-026, LocusKit spec § 12);
+        // chests never nest, so nothing sits below depth 3.
         let child_depth = parent.depth + 1;
-        if child_depth > 2 {
+        if child_depth > 3 {
             return Err(LocusKitError::InvalidContent(format!(
-                "NodeStore: depth {} exceeds maximum 2 (I-NT-2)",
+                "NodeStore: depth {} exceeds maximum 3 (I-NT-2)",
                 child_depth
             )));
         }
@@ -587,8 +589,11 @@ pub(crate) mod tests {
         let root = store.create_root("Estate", 1000).unwrap();
         let wing = store.create_node("Wing", root.id, 1001).unwrap();
         let room = store.create_node("Room", wing.id, 1002).unwrap();
-        // Attempt depth 3 — should fail.
-        let err = store.create_node("Sub", room.id, 1003).unwrap_err();
+        // Depth 3 is a chest (ADR-026): admitted under a room.
+        let chest = store.create_node("Chest", room.id, 1003).unwrap();
+        assert_eq!(chest.depth, 3);
+        // Chests never nest: depth 4 is refused (I-NT-2 max 3).
+        let err = store.create_node("Sub", chest.id, 1004).unwrap_err();
         match err {
             LocusKitError::InvalidContent(msg) => {
                 assert!(msg.contains("I-NT-2"), "expected I-NT-2: {}", msg);
