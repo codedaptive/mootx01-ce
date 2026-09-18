@@ -36,6 +36,30 @@ public struct MortonKey: Hashable, Sendable, Comparable {
     public static func < (lhs: MortonKey, rhs: MortonKey) -> Bool {
         lhs.words.lexicographicallyPrecedes(rhs.words)
     }
+
+    /// The key as 128 lowercase hex characters, most significant word first:
+    /// the form a chest node is named by (LocusKit spec § 12). Fixed width
+    /// and lowercase so string order equals key order, which is what lets a
+    /// room's chests be sorted by name.
+    public var hex: String {
+        words.map { String(format: "%016llx", $0) }.joined()
+    }
+
+    /// The key a `hex` name denotes; nil unless it is exactly 128 hex
+    /// characters (either case).
+    public init?(hex: String) {
+        guard hex.count == 128 else { return nil }
+        var words: [UInt64] = []
+        words.reserveCapacity(8)
+        var rest = Substring(hex)
+        while !rest.isEmpty {
+            let chunk = rest.prefix(16)
+            guard let word = UInt64(chunk, radix: 16) else { return nil }
+            words.append(word)
+            rest = rest.dropFirst(16)
+        }
+        self.words = words
+    }
 }
 
 /// One chest's key range after a deal: every key in `low ... high` belongs
