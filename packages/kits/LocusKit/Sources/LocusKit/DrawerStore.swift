@@ -732,10 +732,13 @@ public actor DrawerStore {
                 resultCount: 0, estateTag: estateUuid.uuidString, queryLabel: "wing_room")
             return []
         }
+        // The room's subtree: drawers parented to the room itself (a room never
+        // re-binned) and to every chest under it (ADR-026, spec § 12).
+        let parents: [TypedValue] = ([roomNodeId] + (try await chestNodeIds(roomNodeId: roomNodeId))).map { .text($0) }
         let (rows, _) = try await storage.rowStore.querySkipCorrupt(
             table: "drawers",
             where: .and([
-                .eq(Column(table: "drawers", name: "parent_node_id"), .text(roomNodeId)),
+                .in(Column(table: "drawers", name: "parent_node_id"), parents),
                 .isNull(Column(table: "drawers", name: "tombstonedAt"))
             ]),
             orderBy: [
@@ -4216,6 +4219,21 @@ public actor DrawerStore {
         return roomRows.first.map { Self.string($0["id"]) }
     }
 
+    /// The active chest nodes (depth 3) under a room, in id order. Empty for a
+    /// room that has never been re-binned (ADR-026, spec § 12).
+    func chestNodeIds(roomNodeId: String) async throws -> [String] {
+        let roomValue: TypedValue = UUID(uuidString: roomNodeId).map { .uuid($0) } ?? .text(roomNodeId)
+        let rows = try await storage.rowStore.query(
+            table: "nodes",
+            where: .and([
+                .eq(Column(table: "nodes", name: "parent_id"), roomValue),
+                .eq(Column(table: "nodes", name: "depth"), .int(3)),
+                .isNull(Column(table: "nodes", name: "tombstoned_hlc"))
+            ])
+        )
+        return rows.map { Self.string($0["id"]) }.sorted()
+    }
+
     /// Extract a node `id` or `parent_id` column as a TypedValue suitable for
     /// predicate use. Nodes store these columns as `.uuid(UUID)`. Using
     /// `.uuid(UUID)` in predicates (rather than `.text(uuidString)`) keeps
@@ -4264,12 +4282,35 @@ public actor DrawerStore {
         )
         var roomMap: [String: (displayName: String, parentId: String)] = [:]
         var wingIds = Set<String>()
+        // A parent at depth 3 is a chest (ADR-026): its room is one hop up. The
+        // chest resolves to its room's names, so every reader keyed by a
+        // drawer's parent still gets (wing, room).
+        var chestRoomIds: [String: String] = [:]
         for row in roomRows {
             let id = Self.string(row["id"])
             let displayName = Self.string(row["display_name"])
             let parentId = Self.string(row["parent_id"])
+            if Self.int64(row["depth"]) == 3 {
+                chestRoomIds[id] = parentId
+                continue
+            }
             roomMap[id] = (displayName, parentId)
             wingIds.insert(parentId)
+        }
+        if !chestRoomIds.isEmpty {
+            let roomIdStrings = Set(chestRoomIds.values)
+            var roomValues = roomIdStrings.compactMap { UUID(uuidString: $0) }.map { TypedValue.uuid($0) }
+            if preservePhysicalUUIDSpellings { roomValues += roomIdStrings.map { .text($0) } }
+            let chestRoomRows = try await storage.rowStore.query(
+                table: "nodes",
+                where: .in(Column(table: "nodes", name: "id"), roomValues)
+            )
+            for row in chestRoomRows {
+                let id = Self.string(row["id"])
+                let parentId = Self.string(row["parent_id"])
+                roomMap[id] = (Self.string(row["display_name"]), parentId)
+                wingIds.insert(parentId)
+            }
         }
         var wingNames: [String: String] = [:]
         if !wingIds.isEmpty {
@@ -4291,6 +4332,9 @@ public actor DrawerStore {
                 wing: wingNames[info.parentId] ?? "",
                 room: info.displayName
             )
+        }
+        for (chestId, roomId) in chestRoomIds {
+            if let names = result[roomId] { result[chestId] = names }
         }
         return result
     }
