@@ -1,15 +1,14 @@
 //! Source-grounded KGFact extraction duty.
 
-use std::collections::HashSet;
 use std::sync::Arc;
 
 use fact_extraction_kit::contract::{
-    fact_source_chunks, FactAssertionKind, FactExtractionRequest, FactExtractor, FactExtractorKind,
+    FactAssertionKind, FactExtractor, FactExtractorKind,
     FactExtractorModelSpec, GroundedFactCandidate,
 };
-use fact_extraction_kit::grounding::{FactGroundingValidator, FactSearchProjection};
+use fact_extraction_kit::grounding::FactSearchProjection;
 use locus_kit::fact_extractor_model_store::{FactExtractorModelRow, FactExtractorModelStore};
-use locus_kit::kg_fact::{KGFact, KGFactExtractionMetadata, KGFactOrigin};
+use locus_kit::kg_fact::KGFactExtractionMetadata;
 use locus_kit::kg_fact_operational::{KGAssertionKind, KGConfidenceBand, KGExtractorClass};
 use substrate_kernel::bit_field;
 
@@ -23,6 +22,12 @@ pub struct FactExtractionBatchResult {
     pub candidates_rejected: usize,
     pub skipped_sources: usize,
     pub failed_sources: usize,
+    pub chunks_processed: usize,
+    pub scanned_sources: usize,
+    pub deferred_sources: usize,
+    pub inapplicable_sources: usize,
+    pub rejected_sources: usize,
+    pub made_progress: bool,
 }
 
 impl EstateCoordinator {
@@ -47,6 +52,8 @@ impl EstateCoordinator {
                     estate_uuid: handle.estate_uuid,
                 })?;
         let registry = FactExtractorModelStore::new(storage);
+        let recipe_id = super::fact_extraction_workflow::workflow_recipe(recipe_id, extractor.spec());
+        let recipe_id = recipe_id.as_str();
         let desired = model_row(recipe_id, extractor.spec());
         if registry
             .active()
@@ -79,207 +86,14 @@ impl EstateCoordinator {
         self.fact_extractors.get(handle).cloned()
     }
 
-    /// Run one bounded duty batch. Per-source model or storage failures leave
-    /// bit 28 clear and are reported rather than failing the product path.
-    pub fn run_fact_extraction_batch(
-        &self,
-        handle: &EstateHandle,
-        limit: usize,
-        now: i64,
-    ) -> Result<FactExtractionBatchResult, GeniusLocusKitError> {
-        if limit == 0 {
-            return Ok(FactExtractionBatchResult::default());
+    /// Compatibility entry; production prepares under the coordinator lock and
+    /// runs the returned work after releasing it.
+    pub fn run_fact_extraction_batch(&self, handle: &EstateHandle, limit: usize, now: i64)
+        -> Result<FactExtractionBatchResult, GeniusLocusKitError> {
+        match self.prepare_fact_extraction_batch(handle, limit, now)? {
+            Some(work) => work.run(),
+            None => Ok(FactExtractionBatchResult::default()),
         }
-        let Some(extractor) = self.fact_extractors.get(handle) else {
-            return Ok(FactExtractionBatchResult::default());
-        };
-        let Some(recipe_id) = self.fact_extractor_recipe_ids.get(handle) else {
-            return Ok(FactExtractionBatchResult::default());
-        };
-        let estate = self.estate_for_verb(handle).map_err(|error| {
-            GeniusLocusKitError::UnderlyingEstateFailure {
-                reason: format!("{error:?}"),
-            }
-        })?;
-        let pending = estate
-            .fact_extraction_debt_batch(limit, None)
-            .map_err(glk_error)?;
-        let mut result = FactExtractionBatchResult::default();
-
-        for drawer in pending {
-            let source = drawer.content.clone();
-            if source.is_empty() || drawer.tombstoned_at.is_some() {
-                result.skipped_sources += 1;
-                continue;
-            }
-            let mut rejected_on_failure = 0;
-            let outcome = (|| -> Result<(usize, usize), String> {
-                let digest = source_digest(&source);
-                let chunks = fact_source_chunks(
-                    &source,
-                    extractor.spec().maximum_input_characters,
-                    FactGroundingValidator::MAXIMUM_EVIDENCE_CHARACTERS,
-                );
-                let mut grounded_candidates = Vec::new();
-                let mut rejected = 0;
-                for chunk in chunks {
-                    let request = FactExtractionRequest {
-                        source_id: drawer.id.clone(),
-                        source_digest: digest.clone(),
-                        source_text: chunk.text,
-                        eligible_source_spans: vec![chunk.span],
-                        maximum_facts: extractor.spec().maximum_facts_per_source,
-                    };
-                    let response = extractor
-                        .extract(&request)
-                        .map_err(|error| error.to_string())?;
-                    let grounding = FactGroundingValidator::validate(
-                        &response,
-                        &request,
-                        &source,
-                        extractor.spec(),
-                    );
-                    rejected += grounding.rejected.len();
-                    rejected_on_failure = rejected;
-                    // Whatever the validator rejects is counted and the
-                    // source settles on what it accepted, which may be
-                    // nothing: the model's output for this content and
-                    // recipe is deterministic, so a source whose every
-                    // candidate failed grounding is a zero-fact source, not
-                    // debt to retry. Only extractor errors (worker or model
-                    // runtime failures) leave the source as debt.
-                    grounded_candidates.extend(grounding.accepted);
-                }
-                let mut seen_candidates = HashSet::new();
-                grounded_candidates.retain(|candidate| {
-                    seen_candidates.insert((
-                        candidate.subject.clone(),
-                        candidate.predicate.clone(),
-                        candidate.object.clone(),
-                        candidate.evidence_quote.clone(),
-                        candidate.evidence_span.start,
-                        candidate.evidence_span.end,
-                    ))
-                });
-                grounded_candidates.truncate(extractor.spec().maximum_facts_per_source);
-                let live = estate
-                    .get_drawers(&[drawer.id.as_str()])
-                    .map_err(|error| error.to_string())?;
-                if live
-                    .first()
-                    .map_or(true, |current| current.content != source)
-                {
-                    return Ok((0, rejected));
-                }
-
-                let history: Vec<KGFact> = estate
-                    .all_kg_facts_including_retired()
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .filter(|fact| fact.source_drawer_id == drawer.id)
-                    .collect();
-                let active: Vec<KGFact> = estate
-                    .all_kg_facts()
-                    .map_err(|error| error.to_string())?
-                    .into_iter()
-                    .filter(|fact| fact.source_drawer_id == drawer.id)
-                    .collect();
-                let mut desired_ids = HashSet::new();
-                let mut newly_filed = Vec::new();
-                let mut filed = 0;
-
-                for candidate in &grounded_candidates {
-                    let key = candidate_semantic_key(candidate, &digest, extractor.spec());
-                    if let Some(existing) =
-                        active.iter().find(|fact| fact_semantic_key(fact) == key)
-                    {
-                        desired_ids.insert(existing.id.clone());
-                        continue;
-                    }
-                    let base_id = distilled_fact_id(&drawer.id, recipe_id, &key);
-                    let id = if history.iter().any(|fact| fact.id == base_id) {
-                        let reactivation_ordinal = history
-                            .iter()
-                            .filter(|fact| fact_semantic_key(fact) == key)
-                            .count();
-                        distilled_fact_id(
-                            &drawer.id,
-                            recipe_id,
-                            &format!("{key}|reactivated|{reactivation_ordinal}"),
-                        )
-                    } else {
-                        base_id
-                    };
-                    let metadata = extraction_metadata(candidate, &digest, extractor.spec());
-                    self.add_kg_fact_with_id_origin_and_extraction(
-                        handle,
-                        &id,
-                        &candidate.subject,
-                        &candidate.predicate,
-                        &candidate.object,
-                        &drawer.id,
-                        &KGFactOrigin {
-                            added_by: "distilled-fact-duty".into(),
-                            ..KGFactOrigin::default()
-                        },
-                        &metadata,
-                        now,
-                    )
-                    .map_err(|error| format!("{error:?}"))?;
-                    desired_ids.insert(id.clone());
-                    newly_filed.push(id);
-                    filed += 1;
-                }
-
-                for old in &active {
-                    if !old.extraction_schema_version.is_empty() && !desired_ids.contains(&old.id) {
-                        self.withdraw_kg_fact(handle, &old.id, "fact-extraction-duty", None, now)
-                            .map_err(|error| format!("{error:?}"))?;
-                    }
-                }
-                let settled = estate
-                    .set_facts_extracted_if_content_matches(&drawer.id, &source)
-                    .map_err(|error| error.to_string())?;
-                if settled != 1 {
-                    for id in newly_filed {
-                        let _ =
-                            self.withdraw_kg_fact(handle, &id, "fact-extraction-duty", None, now);
-                    }
-                    return Ok((0, rejected));
-                }
-                Ok((filed, rejected))
-            })();
-            match outcome {
-                Ok((filed, rejected)) => {
-                    result.candidates_rejected += rejected;
-                    if filed == 0 {
-                        // Distinguish a successful zero/replay from a liveness
-                        // skip by checking the settlement bit.
-                        match estate.get_drawers(&[drawer.id.as_str()]) {
-                            Ok(rows) if rows.first().is_some_and(|d| d.are_facts_extracted()) => {
-                                result.completed_sources += 1;
-                            }
-                            _ => result.skipped_sources += 1,
-                        }
-                    } else {
-                        result.completed_sources += 1;
-                        result.facts_filed += filed;
-                    }
-                }
-                Err(error) => {
-                    // Fail-open: the debt bit stays clear and the next cycle
-                    // retries. The failure is logged so a source that never
-                    // settles is visible rather than only a debt that never falls.
-                    eprintln!(
-                        "fact extraction source {} failed (estate {:02x?}): {error}",
-                        drawer.id, handle.estate_uuid
-                    );
-                    result.candidates_rejected += rejected_on_failure;
-                    result.failed_sources += 1;
-                }
-            }
-        }
-        Ok(result)
     }
 }
 
@@ -313,7 +127,7 @@ fn same_recipe(lhs: &FactExtractorModelRow, rhs: &FactExtractorModelRow) -> bool
         && lhs.maximum_facts_per_source == rhs.maximum_facts_per_source
 }
 
-fn candidate_semantic_key(
+pub(super) fn candidate_semantic_key(
     candidate: &GroundedFactCandidate,
     digest: &str,
     spec: &FactExtractorModelSpec,
@@ -336,26 +150,7 @@ fn candidate_semantic_key(
     .join("\0")
 }
 
-fn fact_semantic_key(fact: &KGFact) -> String {
-    let evidence_start = fact.evidence_start.to_string();
-    let evidence_end = fact.evidence_end.to_string();
-    [
-        fact.source_digest.as_str(),
-        fact.extractor_provider_id.as_str(),
-        fact.extractor_model_id.as_str(),
-        fact.extractor_model_version.as_str(),
-        fact.extraction_schema_version.as_str(),
-        fact.subject.as_str(),
-        fact.predicate.as_str(),
-        fact.object.as_str(),
-        fact.evidence_quote.as_str(),
-        &evidence_start,
-        &evidence_end,
-    ]
-    .join("\0")
-}
-
-fn distilled_fact_id(source_id: &str, recipe_id: &str, semantic_key: &str) -> String {
+pub(super) fn distilled_fact_id(source_id: &str, recipe_id: &str, semantic_key: &str) -> String {
     let digest = substrate_kernel::sha256::hash(
         format!("distilled-fact-v1|{source_id}|{recipe_id}|{semantic_key}").as_bytes(),
     );
@@ -366,14 +161,14 @@ fn distilled_fact_id(source_id: &str, recipe_id: &str, semantic_key: &str) -> St
     uuid::Uuid::from_bytes(bytes).to_string()
 }
 
-fn source_digest(source: &str) -> String {
+pub(super) fn source_digest(source: &str) -> String {
     substrate_kernel::sha256::hash(source.as_bytes())
         .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
 
-fn extraction_metadata(
+pub(super) fn extraction_metadata(
     candidate: &GroundedFactCandidate,
     source_digest: &str,
     spec: &FactExtractorModelSpec,

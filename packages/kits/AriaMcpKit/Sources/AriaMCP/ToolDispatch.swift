@@ -829,7 +829,14 @@ private extension ToolDispatcher {
                 maximumSensitivity: maximumSensitivity,
                 recallOrigin: posture == .frozen ? .internal : .external,
                 usageLedger: DispatcherV2MemoryUsageLedger(
-                    surfaced: recallLedger, kit: kit, handle: handle, posture: posture)
+                    surfaced: recallLedger, kit: kit, handle: handle, posture: posture),
+                // Carry the un-collapsed grant ceiling (not `maximumSensitivity`,
+                // which is already `sensitivityGrant ?? .elevated` above and so
+                // cannot distinguish "no grant" from "a grant that ceilings at
+                // elevated") so the sensitivity-read-under-grant audit can tell
+                // whether a restricted/secret row's admission actually depended
+                // on a live grant. Same precedent as `packetOperations` below.
+                grantCeiling: sensitivityGrant
             )
         )
         let knowledgeJournal = AriaV2KnowledgeJournalService(
