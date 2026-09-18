@@ -765,16 +765,20 @@ jobs:
           restore-keys: release-rust-windows-x86_64-
 
       - name: Build release binaries
-        # pwsh is the default shell on the Windows runners and does not stop on a
-        # native command's non-zero exit, so the step took the LAST command's
-        # status: mootx01 failed to compile, moot-mgr succeeded, and the job
-        # carried on to report a missing mootx01.exe at staging time instead of
-        # the compile error. bash with -e fails where the failure happens.
-        shell: bash
+        # pwsh does not stop on a native command's non-zero exit, so this step
+        # used to take the LAST command's status: mootx01 failed to compile,
+        # moot-mgr succeeded, and the job carried on to report a missing
+        # mootx01.exe at staging instead of the compile error. Each build is
+        # checked instead of switching shells — bash puts Git-for-Windows' perl
+        # ahead of Strawberry Perl in PATH, and openssl-sys (pulled in by
+        # SQLCipher) configures itself with perl, so the shell choice decides
+        # whether OpenSSL can build at all.
+        shell: pwsh
         run: |
-          set -euo pipefail
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage binaries
         shell: pwsh
@@ -1085,16 +1089,20 @@ jobs:
           restore-keys: release-rust-windows-arm64-
 
       - name: Build release binaries
-        # pwsh is the default shell on the Windows runners and does not stop on a
-        # native command's non-zero exit, so the step took the LAST command's
-        # status: mootx01 failed to compile, moot-mgr succeeded, and the job
-        # carried on to report a missing mootx01.exe at staging time instead of
-        # the compile error. bash with -e fails where the failure happens.
-        shell: bash
+        # pwsh does not stop on a native command's non-zero exit, so this step
+        # used to take the LAST command's status: mootx01 failed to compile,
+        # moot-mgr succeeded, and the job carried on to report a missing
+        # mootx01.exe at staging instead of the compile error. Each build is
+        # checked instead of switching shells — bash puts Git-for-Windows' perl
+        # ahead of Strawberry Perl in PATH, and openssl-sys (pulled in by
+        # SQLCipher) configures itself with perl, so the shell choice decides
+        # whether OpenSSL can build at all.
+        shell: pwsh
         run: |
-          set -euo pipefail
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage binaries
         shell: pwsh
