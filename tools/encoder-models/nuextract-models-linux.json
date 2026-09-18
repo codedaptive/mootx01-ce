@@ -1,0 +1,26 @@
+{
+  "kind": "fact_extractor",
+  "model_id": "numind/NuExtract-1.5-tiny",
+  "model_version": "63e2e80c804d9c97f3f19a4aa25613e7beca83c9",
+  "architecture": "qwen2",
+  "maximum_input_characters": 12000,
+  "maximum_facts": 16,
+  "maximum_new_tokens": 1024,
+  "tokenizer_hash": "2b613fea6970a5467a1d30df270257b34bab9b86ade3d75d98f6c08f08c48656",
+  "files": [
+    {
+      "path": "model.gguf",
+      "sha256": "d193d0f0b61355959107b8ebe3d50c6350380e35aab74e6a51a9eafa58cda7b1"
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "2b613fea6970a5467a1d30df270257b34bab9b86ade3d75d98f6c08f08c48656"
+    }
+  ],
+  "ext": {
+    "hf_repo": "numind/NuExtract-1.5-tiny",
+    "hf_revision": "63e2e80c804d9c97f3f19a4aa25613e7beca83c9",
+    "runtime": "Candle",
+    "quantization": "Q8_0"
+  }
+}

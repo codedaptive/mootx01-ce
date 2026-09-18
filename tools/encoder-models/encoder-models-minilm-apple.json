@@ -1,0 +1,25 @@
+{
+  "_comment": "Apple (macOS/iOS) manifest. The sha256 values for MiniLM-L6-v2.mlmodelc and vocab.txt are populated by convert-coreml.py after the CoreML conversion step. Run convert-coreml.py to fill them in before packaging.",
+  "model_id": "minilm-l6-v2-w60",
+  "model_version": "1110a243fdf47",
+  "dim": 384,
+  "pooling": "mean",
+  "query_prefix": "",
+  "doc_prefix": "",
+  "window_words": 60,
+  "overlap_divisor": 2,
+  "max_spans": 32,
+  "max_sequence": 256,
+  "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+  "files": [
+    {
+      "path": "MiniLM-L6-v2.mlmodelc",
+      "sha256": "FILL_IN_AFTER_COREML_CONVERSION",
+      "type": "mlmodelc_dir"
+    },
+    {
+      "path": "vocab.txt",
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  ]
+}
