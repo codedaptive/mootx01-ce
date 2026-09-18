@@ -363,8 +363,10 @@ public enum MootProductIdentity {
         public let dutyFactSourceLeaseSeconds: Int
         /// `duties.fact_extraction_cadence_seconds`: the resident's Signal 14 period (default 300).
         public let dutyFactExtractionCadenceSeconds: Int
-        /// `duties.anomaly_sweep_rooms`: rooms scored per anomaly-sweep batch (default 8).
-        public let dutyAnomalySweepRooms: Int
+        /// `duties.anomaly_sweep_chests`: containers scored per anomaly-sweep batch (default 8).
+        public let dutyAnomalySweepChests: Int
+        /// `duties.chest_rebin_batch`: rooms re-binned per chest-rebin batch (default 1).
+        public let dutyChestRebinBatch: Int
 
         /// Maximum expanded reference output bytes (`context_distill.reference_expansion_max_bytes`).
         public let contextDistillReferenceExpansionMaxBytes: Int
@@ -429,7 +431,8 @@ public enum MootProductIdentity {
                 dutySubjectBackfillBatch: positiveIntegerOrDefault(duties?["subject_backfill_batch"], fallback: 32),
                 dutyFactSourceLeaseSeconds: positiveIntegerOrDefault(duties?["fact_source_lease_seconds"], fallback: 120),
                 dutyFactExtractionCadenceSeconds: positiveIntegerOrDefault(duties?["fact_extraction_cadence_seconds"], fallback: 300),
-                dutyAnomalySweepRooms: positiveIntegerOrDefault(duties?["anomaly_sweep_rooms"], fallback: 8))
+                dutyAnomalySweepChests: positiveIntegerOrDefault(duties?["anomaly_sweep_chests"], fallback: 8),
+                dutyChestRebinBatch: positiveIntegerOrDefault(duties?["chest_rebin_batch"], fallback: 1))
         }
 
         // MARK: Writing
@@ -516,7 +519,8 @@ public enum MootProductIdentity {
             dutySubjectBackfillBatch: Int = 32,
             dutyFactSourceLeaseSeconds: Int = 120,
             dutyFactExtractionCadenceSeconds: Int = 300,
-            dutyAnomalySweepRooms: Int = 8
+            dutyAnomalySweepChests: Int = 8,
+            dutyChestRebinBatch: Int = 1
         ) {
             self.daemonStatsStore = daemonStatsStore
             self.factExtractionCoreAIAsset = factExtractionCoreAIAsset
@@ -529,7 +533,8 @@ public enum MootProductIdentity {
             self.dutySubjectBackfillBatch = dutySubjectBackfillBatch
             self.dutyFactSourceLeaseSeconds = dutyFactSourceLeaseSeconds
             self.dutyFactExtractionCadenceSeconds = dutyFactExtractionCadenceSeconds
-            self.dutyAnomalySweepRooms = dutyAnomalySweepRooms
+            self.dutyAnomalySweepChests = dutyAnomalySweepChests
+            self.dutyChestRebinBatch = dutyChestRebinBatch
         }
     }
 }
