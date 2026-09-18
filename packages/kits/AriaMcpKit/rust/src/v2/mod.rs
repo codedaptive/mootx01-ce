@@ -6,6 +6,7 @@
 
 pub mod call_chain;
 pub(crate) mod report_withheld;
+pub(crate) mod chest_diversity;
 pub mod chain_registry;
 pub mod coach;
 pub mod codec;

@@ -41,11 +41,19 @@ pub enum EstatePreferenceKey {
     /// Which extractor the fact-extraction duty uses: `Nuextract` (default)
     /// or `Apple`; `FactExtraction` is the on/off master switch.
     FactExtractor,
+    /// ADR-027 D2: the contradiction hunt's third candidate lane, a probe's
+    /// container-mates. Off by default and never seeded: the 1.1 benchmark
+    /// measures it off and on against one artifact set.
+    ChestContradictionCandidates,
+    /// ADR-027 D3: the recall diversity rerank treats two candidates in one
+    /// container as one topic. Off by default and never seeded; a call may
+    /// override it (`GLKRecallRequest::chest_diversity`).
+    ChestRecallDiversity,
 }
 
 impl EstatePreferenceKey {
     /// Every key, in declaration order. Mirrors Swift `CaseIterable.allCases`.
-    pub const ALL: [Self; 7] = [
+    pub const ALL: [Self; 9] = [
         Self::FactExtraction,
         Self::Consolidation,
         Self::ContradictionSweep,
@@ -53,6 +61,8 @@ impl EstatePreferenceKey {
         Self::Maintenance,
         Self::AdaptiveRecall,
         Self::FactExtractor,
+        Self::ChestContradictionCandidates,
+        Self::ChestRecallDiversity,
     ];
 
     /// The estate-manifest key this switch is stored under. Mirrors Swift
@@ -66,6 +76,8 @@ impl EstatePreferenceKey {
             Self::Maintenance => "maintenance",
             Self::AdaptiveRecall => "adaptive_recall",
             Self::FactExtractor => "fact_extractor",
+            Self::ChestContradictionCandidates => "chest_contradiction_candidates",
+            Self::ChestRecallDiversity => "chest_recall_diversity",
         }
     }
 
@@ -78,11 +90,13 @@ impl EstatePreferenceKey {
         }
     }
 
-    /// What an absent or unrecognised manifest value reads as. `On` for the six
-    /// switches; `Nuextract` for the extractor choice.
+    /// What an absent or unrecognised manifest value reads as: `On` for the six
+    /// seeded switches, `Off` for the two chest switches, `Nuextract` for the
+    /// extractor choice.
     pub fn default_value(self) -> EstatePreferenceValue {
         match self {
             Self::FactExtractor => EstatePreferenceValue::Nuextract,
+            Self::ChestContradictionCandidates | Self::ChestRecallDiversity => EstatePreferenceValue::Off,
             _ => EstatePreferenceValue::On,
         }
     }

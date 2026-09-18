@@ -43,8 +43,11 @@ pub fn preference_seed_keys() -> Vec<EstatePreferenceKey> {
     EstatePreferenceKey::ALL
         .into_iter()
         .filter(|key| {
+            // The switches that default on. `fact_extraction` has its own
+            // capsule, `fact_extractor` is an engine choice, and the chest
+            // switches (ADR-027) default off and are never seeded.
             *key != EstatePreferenceKey::FactExtraction
-                && *key != EstatePreferenceKey::FactExtractor
+                && key.default_value() == EstatePreferenceValue::On
         })
         .collect()
 }

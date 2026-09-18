@@ -61,7 +61,8 @@ pub(crate) fn balanced_union_best_request(
         frame, mode: GLKRecallMode::UnionBest, scoring: GLKRecallScoring::MatrixAware,
         limit, fallback: RecallFallbackPolicy::AllowDegraded, query_text: Some(query.to_string()), trace_limit: None,
         origin: genius_locus_kit::recall::RecallOrigin::Internal, recall_shape: None, door: None, composition: None,
-        frontier_k, anomalous_filter: None, sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
+        frontier_k, anomalous_filter: None, chest_diversity: None,
+        sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
         rerank_directive,
     }
 }
@@ -214,6 +215,7 @@ fn run_session_hybrid(
         frontier_k: None,
         // §11.18: internal recall — no anomalous-flag filter applied.
         anomalous_filter: None,
+        chest_diversity: None,
         // Sub-span scoring is an additive-cost stage this recipe does not
         // request; every caller names the switch (ruling 2026-09-07).
         sub_span_scoring: genius_locus_kit::recall::GLKSubSpanScoring::Off,
