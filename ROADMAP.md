@@ -2,7 +2,7 @@
 title: The Road Ahead for MOOTx01
 status: active-roadmap
 audience: public
-updated: 2026-09-15
+updated: 2026-09-18
 ---
 
 # The Road Ahead for MOOTx01
@@ -203,6 +203,20 @@ references to the memories it used, so the calling AI reads less source
 material. It ships only when a model answers above our accuracy bar and
 abstains when the evidence is thin or contradictory; until then, and whenever
 an answer cannot be trusted, you get the retrieved memories themselves.
+
+Version 1.2 also reorganises the inside of a room. Rooms that grow into the
+thousands of memories gain chests: an internal structure, invisible to you and
+to the AI, that keeps every memory beside the memories most like it and keeps
+the cost of every write small no matter how large the room becomes. Chests
+land first for the anomaly sweep, and the same structure is planned to
+leverage (see ADR-026):
+
+- near-duplicate detection and consolidation within a chest;
+- contradiction candidates from content neighbours, beside the typed pairs;
+- a first cut for search on very large rooms;
+- finer change detection for sync and drift, a chest at a time;
+- a topology view over chest clusters instead of every memory;
+- a room-health summary on the estate map: how big, how tight.
 
 ## Version 1.3 — PGlite, pgMOOT, and Postgres anywhere
 
