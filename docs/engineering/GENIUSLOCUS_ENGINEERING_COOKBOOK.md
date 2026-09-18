@@ -1,10 +1,10 @@
 ---
 title: GeniusLocus Engineering Specification Cookbook
-version: 1.4.0
+version: 2.0.0
 status: accepted-1.1-target
-description: "The substrate math contract: every conformance-gated primitive, its algorithm, and its cross-language reference behavior. Math-first, annotation only where needed to implement; integrates the mathematical canon, the conformance harness (31 cross-language-pinned primitives), and the Clock Triangle, Capture Genesis Event, Row Identity UUID, and SubstrateLib four-package decisions. An implementer reads it once and ships code."
+description: "The substrate math contract: every conformance-gated primitive, its algorithm, and its cross-language reference behavior. Math-first, annotation only where needed to implement; integrates the mathematical canon, the conformance harness (31 cross-language-pinned primitives), and the Clock Triangle, Capture Genesis Event, Row Identity UUID, and SubstrateLib four-package decisions. An implementer reads it once and ships code. 2.0.0: replaced stored-distillation bit semantics with the legacy flag boundary; documented spanIndexed and removed obsolete column-write instructions."
 author: MOOTx01 maintainers
-date: 2026-08-21
+date: 2026-09-06
 relates_to:
   - docs/engineering/HARNESS_REFERENCE.md (the 31 conformance-gated primitives, agentic discovery index)
   - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md (cross-cutting system, identity, persistence, and federation rules)
@@ -388,7 +388,7 @@ Drawer operational (empirical-dominant, 6-bit floor):
                                  bit 16 is_pinned
                                  bit 17 is_keystone (NEW, §7.2)
                                  bit 18 is_locked_zone
-                                 bit 19 has_current_representation (NEW)
+                                 bit 19 has_current_representation (legacy name)
                                  bit 20 is_vague (NEW §2.4.2)
                                  bit 21 represented_by_vague (NEW §2.4.2)
                                  bits 22–23 vague_level [2-bit field] (NEW §2.4.2)
@@ -400,48 +400,19 @@ Drawer operational (empirical-dominant, 6-bit floor):
               ≤ −threshold (default 2.0). Cleared by the sweep for rooms with
               fewer than 3 drawers. Derived-signal write: no audit event, no
               lifecycle touch. Read via Drawer.isAnomalous / is_anomalous().
-  Bits 27–63  reserved
+  Bit  27     spanIndexed: encoded content spans are current
+  Bits 28–63  reserved
 ```
 
-#### §2.4.1. `has_current_representation` — bit 19 (NEW, 2026-07-28)
+#### §2.4.1. Representation flag history
 
-**Semantics.** Set iff the four distillation columns (`distilled`,
-`distilled_pipeline_version`, `distilled_token_count`, `distilled_at`)
-are all populated (i.e., the row carries a current distilled
-representation). Clear when those columns are all NULL — either because
-the row was never distilled, was reset by a content edit, or was cleared
-by the expunge scrub.
+Bit 19 remains named `hasCurrentRepresentation` in the bitmap API. Schema 19
+removed the stored-distillation columns and their write services. The flag
+is no longer evidence of a stored text representation.
 
-The §4 invariant ("NULL together or populated together") means the bit
-and the four columns can never skew: **set and clear travel in the same
-SQL UPDATE statement** as the column writes. The bit is not a cache of
-a query; it is a field on the row that moves with the data it reflects.
-
-**Practical win.** Sweep eligibility (`distillItemsSweep`) and drain
-accounting (`countUndistilled`) need not issue per-row `distilled IS NULL`
-scans; a `(operationalBitmap & (1<<19)) == 0` bitmap predicate covers
-all three concerns in a single index-friendly expression.
-
-**Design tenet.** Using open bitmap space for new features eliminates
-migration overhead. 1.0.x rows migrated to 1.1.x carry the bit clear
-because their distillation columns are all-NULL: no schema change,
-no backfill, no migration guard. The first successful distillation
-cycle sets the bit as a natural part of writing the four columns.
-
-**Wire value.** `1 << 19 = 524288 (0x80000)`.
-
-**Invariants.**
-- Set path: `setDistilledRepresentation` / `set_distilled_representation`
-  — read-modify-write within one transaction. Never set outside this path.
-- Clear paths (unconditional, same-statement): `withClearedRepresentation` /
-  `insert_cleared_representation` call sites — content-edit (§7.3),
-  expunge scrub (head + all lineage siblings), gate-reject scrub,
-  `updateDatasetContent` / `patch_dataset_handle_content`.
-- Migrated rows: clear at migration time. Bit enters clean on first
-  distillation cycle. No migration SQL required.
-- Estate-destruction bulk wipe (`wipe_all_content`) does not clear the
-  bit; the estate is destroyed immediately after the wipe, so row state
-  is never read again.
+Span indexing uses bit 27 (`spanIndexed`). Content changes clear that bit
+and the span-encode duty sets it after storing span vectors. See
+[the LocusKit interface](../reference/LOCUSKIT_INTERFACE.md).
 
 #### §2.4.2. Vague tier bits — bits 20–23 (Wave 2, 2026-07-29)
 
@@ -768,7 +739,7 @@ table.
 | 22 | Drawer.feature_flags.is_keystone | bit 17 | DrawerOperational.swift | NEW |
 | 23 | Adjective.dreaming_recalc_required | bit 26 | Adjectives.swift `Adjective.dreamingRecalcRequired` | NEW in v0.36 F17; cross-noun |
 | 24 | Adjective.sealed | bit 27 | Adjectives.swift `Adjective.sealed` | NEW in v1.0; integrity-triangle hint |
-| 25 | Drawer.feature_flags.has_current_representation | bit 19 (0x80000) | DrawerOperational.swift | NEW 2026-07-28; set iff distillation columns populated |
+| 25 | Drawer.feature_flags.has_current_representation | bit 19 (0x80000) | DrawerOperational.swift | Legacy name; stored-distillation columns removed at schema 19 |
 | 26 | Drawer.feature_flags.is_vague | bit 20 (0x100000) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; set iff this drawer is a Wave-2 consolidated vague item |
 | 27 | Drawer.feature_flags.represented_by_vague | bit 21 (0x200000) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; set iff absorbed into a vague item |
 | 28 | Drawer.feature_flags.vague_level | bits 22–23 (mask 0xC00000, shift 22, width 2) | DrawerOperational.swift | NEW 2026-07-29 §2.4.2; nesting depth 0–2 |
@@ -2565,7 +2536,7 @@ must never read as a perfect match in a retrieval lane.
 Lives in SubstrateTypes (Layer 1) because it is algebraically equivalent
 to other Fingerprint256 arithmetic (AND, OR, popcount) — the metric
 is fingerprint-level set algebra, not a higher-order ML algorithm.
-Backs VectorKit's `BinaryMetric.jaccard` retrieval lane (W2.5 Track M1
+Backs SynapseKit's `BinaryMetric.jaccard` retrieval lane (W2.5 Track M1
 activation). Activated by the DenseMetric dark-computation audit
 2026-08-20.
 
@@ -2968,7 +2939,7 @@ expunge(row_id: RowId, reason: String) -> Result<(), SubstrateError>
   of v0.35 governs).
 - Corresponding RAG vector deleted via cross-kit signal (GLK
   orchestrates the redact verb across kits; LocusKit performs the
-  tombstone + content-zero, RAG/VectorKit performs the vector
+  tombstone + content-zero, RAG/SynapseKit performs the vector
   delete, both within the redact transaction).
 - `dreaming_recalc_required` flag (§2.3 bit 26) set on the
   tombstoned row, synchronously, before the verb returns.
@@ -4603,3 +4574,8 @@ Sections trace back to designer artifacts as follows:
 
 ### 1.0.0 -- 2026-06-14
 Established under VERSIONING.md: version number removed from the filename; front matter normalized; baselined at 1.0.0.
+
+### 2.0.0 -- 2026-09-06
+
+Replaced stored-distillation bit semantics with the legacy flag boundary.
+Documented spanIndexed and removed obsolete column-write instructions.

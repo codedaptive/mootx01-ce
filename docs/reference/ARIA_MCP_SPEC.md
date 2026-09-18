@@ -1,9 +1,9 @@
 ---
 title: aria-mcp Specification
-version: 2.1.0
+version: 5.0.0
 status: accepted-1.1-target
-date: 2026-08-26
-description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees. 2.0.0: consolidated reorganization (adopted from the ARIA_PROPOSED pair) — return-shape taxonomy, composer invariant, canonical candidate row with fixed columns, runtime-active zero/one/many adornment composition over normalized storage, structured-result contract. Full history: ARIA_MCP_SPEC_CHANGELOG.md."
+date: 2026-09-15
+description: "Behavioral specification for aria-mcp: invariants, conformance requirements, and the contract it guarantees. 2.0.0: consolidated reorganization (adopted from the ARIA_PROPOSED pair) — return-shape taxonomy, composer invariant, canonical candidate row with fixed columns, runtime-active zero/one/many adornment composition over normalized storage, structured-result contract. 2.2.0: CDL-02 — moot_redistill behavioral contract added to §9. 2.4.0: ENC-W6B — S1/S2 row format updated: adornment column retired, firstSentence renamed bestSpan, SSC column becomes sscFacts raw string; moot_distill and moot_redistill retired. 2.5.0: ENC-W6B doc sweep — §8 composer paragraph updated (active-adornment read replaced with dark-switch notice); §8.3 row format reduced from 7 to 6 fields; adornment surface moved dark. Full history: ARIA_MCP_SPEC_CHANGELOG.md. 3.0.0: removed adornment queryability claims; recorded removal of stored-distillation sweep services and inline hydration contract. 3.1.0: a live sensitivity grant floors filings as well as lifting reads (§ 12.4). 3.2.0: the floor covers every filing verb, with or without a sensitivity argument (§ 12.4). 3.3.0: § 6.6 states estate selection as a launch-time fact and makes --in-memory a transient open in both ports and both binaries (no federation identity, no charter drawers); § 8.3 states the 120 of the subject contract as Unicode scalars. 3.4.0: V2-A surface adoption — the v2 catalog is the only projected surface in both ports; the git tag ARIAv1-Terminus marks the last commit carrying the v1 dispatch surface, superseded by its v2 equivalents in ARIA_MCP_INTERFACE.md § 3.9.2. 3.5.0: recorded that ARIA_MCP_INTERFACE.md's tool catalog now documents four previously-undocumented operations — moot_memory_recall_transcript, moot_propose_contradictions, moot_help, and moot_monitoring_set; each operates under this document's existing recall, contradiction, and monitoring contracts and introduces no new behavioral invariant. 3.5.1: front-matter description updated to include the 3.4.0 entry that had been omitted; no contract change. 3.5.2: §12.5 coaching triggers wired to the v2 surface — all six §12.5 triggers are now active on the v2 dispatch path; the v2 envelope gains a hint slot (new contract addition per ARIA_MCP_INTERFACE.md §3.10.2); estate-provisioned coaching_calls and sticky_enabled are applied on the first dispatch call of each session. 3.6.0: moot_reclassify_fdc is a live v2 write path — the stub is replaced with the real classify-and-apply implementation; apply, mode, and limit arguments added; structuredContent.data carries the 18-field report; moot_estate_status data contract gains fdc_recalculation (current/missing/stale); the v1 InterfaceTools dispatch arm for moot_reclassify_fdc is retired. 3.6.1: § 8 distilled recall paragraph extended with the savings behavioral contract; § 8.9 gains distillation in the capability metadata list and two new invariant bullets. 3.6.2: § 8 distilled paragraph adds emitted-rows rule and privacy projection note; § 8.9 invariant bullet corrected: savings counts only emitted rows whose distilled body is present. 3.6.3: § 8 names the row scaffolding excluded from returnedTokens and the Swift row cap as the one cross-port divergence. 4.0.0 (BREAKING): the four work-packet operations are retired from the ARIA surface (§ 12.4's filing-floor rule no longer names moot_file_packet); see ARIA_MCP_INTERFACE.md § Changelog 4.0.0 for the removed operation list. 4.1.0: § 12.4 states the mutation-gate invariant: every memory-naming write verb resolves its target through the read path's sensitivity gate and refuses an above-ceiling target with the absent-id envelope; link gates both endpoints; nothing is written on refusal. 4.2.0: adds the default-off report_withheld global modifier and the conditional meta.withheldBySensitivity count. 4.3.0: adds moot_memory_get depth skim: a 512-byte source-order preview with completeness and budget flags. 4.4.0: § 8.3 states the subject contract as 120 grapheme clusters counted identically in both ports; Swift's String.count and the Rust locus_kit::drawer_store::subject_length helper are the two implementations. 4.5.0: moot_recall_similar joins the recall family as the paraphrase door over the whole-record LSA lane; it operates under the existing recall and sensitivity-ceiling contracts and introduces no new invariant."
 spec_type: protocol
 authors: MOOTx01 maintainers
 relates_to:
@@ -14,6 +14,18 @@ relates_to:
 ---
 
 # aria-mcp Specification: ARIA Behavioral Contract
+
+### Explicit memory-get Skim
+
+`moot_memory_get(depth: "skim")` applies the complete Distiller followed by
+source-order `PassageViews.skim` with a fixed 512 UTF-8 byte target, only after
+the existing read authorization gates. It does not activate orderReducer,
+alter stored content, or change search ranking. The wire carries preview text,
+`complete` and `budgetHonored` flags, and a 🌱 savings line; it never
+carries the omitted tail or the underlying complete view. An oversized first
+dependency group is returned intact and flagged, not silently truncated.
+Other depths retain their existing behavior. This explicit memory-get option
+does not apply Skim automatically to `moot_recall_distilled`.
 
 This specification defines what ARIA means and which behaviors an ARIA MCP
 server guarantees. The companion
@@ -299,7 +311,32 @@ client entries, registers the resident service, and requests required client
 restarts. Manual stdio configuration remains the fallback. Remote custom
 connectors belong to the v1.1 profile.
 
-### 6.6 Authentication profile
+### 6.6 Estate selection and the in-memory posture
+
+Estate selection is a launch-time fact, never a wire argument: no MCP client
+can name an estate, and no environment value names one either. A server
+process resolves exactly one estate from the estate catalog before it accepts
+a frame — the active record by default, a registered record by name with
+`--db <name>`, or a transient record attached at `<dir>/<name>/` with
+`--db <dir>/<name>`.
+
+The RECORD decides the posture, and the posture decides three things
+together: whether the open establishes the estate's Ed25519 federation
+identity, whether its identity key store is the platform Keychain or an
+in-memory one, and whether the seven default wings and their charter hint
+drawers are seeded. A registered record takes all three; a transient record
+takes none of them and holds exactly what was imported into it.
+
+`--in-memory` selects the in-memory backend and is always served as a
+transient estate, whatever the record it resolved. The catalog is still
+opened and the record still resolved first, so a `--db` that names no estate
+is refused before the backend is chosen, but nothing that would outlive the
+process is established: no federation identity, and no charter drawers in the
+candidate pool. This is one rule across `aria-mcp` and `mootx01 serve`, in
+both ports. A measurement run over an in-memory estate therefore sees the
+pool it imported and nothing the server added.
+
+### 6.7 Authentication profile
 
 The v1.0 local-owner profile centralizes credential and write-policy checks at
 one boundary. The v1.1 profile replaces the trivial local credential seam with
@@ -360,11 +397,10 @@ text payload and builds `structuredContent`, so text/structured parity
 holds by construction and a new retrieval technique cannot emit an
 off-contract payload.
 
-For every set of result Drawer IDs, the composer performs one call-scoped
-active-adornment read. That read joins the permanent adornment table to the
-minter master table and returns only rows whose minter is active at composition
-time. The composer never reads a Drawer adornment field, caches a seat list, or
-hard-codes Apple, Candle, a port, or a fixed number of minters.
+The composer assembles result rows from live storage. Schema 19 has no
+adornment tables or drawer adornment column.
+The composer never hard-codes Apple, Candle, a port, or a fixed number of
+output columns.
 
 ### 8.1 Default containment
 
@@ -400,20 +436,28 @@ always see how strongly the ordering separated.
 ### 8.3 Canonical candidate row
 
 Every S1 surface uses one shared renderer. Each memory occupies one line of
-exactly seven fields separated by ` · `, in this order:
+exactly six fields separated by ` · `, in this order:
 
 1. drawer UUID;
 2. subject;
-3. first body sentence;
-4. Semantic Search Candle (SSC) facts;
-5. unlabeled active-adornment projection;
-6. event time in ISO-8601 form; and
-7. final relevance score to four decimal places.
+3. bestSpan — best content span from the highest-ranked SpanRerankHit, capped at 60
+   words; falls back to the first body sentence when no span hit is available;
+4. sscFacts — raw Semantic Search Candle string (e.g. `kind: hobby, entity: painting`);
+   stubbed as `-` until schema-19 drawer.sscFacts lands;
+5. event time in ISO-8601 form; and
+6. final relevance score to four decimal places.
 
-The column count is FIXED: an absent optional value (a first sentence
-byte-identical to the subject; no SSC; no active adornment) renders as `-`
-occupying its whole column, so every position means one thing for every
-reader. The header is:
+The subject a filing verb accepts is 1 to 120 grapheme clusters after
+whitespace trimming, and a refusal reports the offending cluster count. Both
+ports count the same unit on the same input, so a producer and a receiver
+always agree: Swift counts clusters through `String.count` and Rust counts
+them through `locus_kit::drawer_store::subject_length`, the two implementations
+of that one rule.
+
+The column count is FIXED: an absent optional value (bestSpan byte-identical
+to subject; no sscFacts) renders as `-` occupying its whole column, so every
+position means one thing for every reader. Adornment data is absent from
+rows, full hydration and structured results. The header is:
 
 ```text
 found N candidate memories, one per line
@@ -425,20 +469,12 @@ anywhere in the payload. Body-returning hydration tiers are outside this row
 contract. Value normalization, escaping, truncation, and the S2 variant of
 this row are Interface-owned.
 
-The fifth field is determined entirely by current minter-master state. With no
-active stored adornment it is `-`. With one, it is that adornment text. With
-many, every active adornment is used in ascending minter-ID order and the text
-values are joined inside the same field by ` || `. The fixed seven-column
-contract therefore does not grow with the number of active minters. Minter
-identity remains available losslessly in `structuredContent`; it is not
-repeated as scaffold in the AI-facing text row.
-
 **Sample**
 
 ```text
 found 2 candidate memories, one per line
-30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · TechFest; 2026-01-01; networking; elevator pitch; tips · 2026-01-01T00:07:52Z · 0.5687
-E70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · Sarah; Google; TechFest; 2026-01-01; three weeks ago · 2026-01-01T00:07:48Z · 0.5562
+30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · 2026-01-01T00:07:52Z · 0.5687
+E70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · 2026-01-01T00:07:48Z · 0.5562
 ```
 
 ### 8.4 Control lines
@@ -495,15 +531,23 @@ output makes the next rung optional:
 3. the batch winnow (S2 shallow depths: judge a shortlist without bodies);
 4. hydration (S3 full record: terminal).
 
-S3 hydration includes the same call-scoped active-adornment projection as its
-candidate row. It omits the adornment block when none are active and includes
-every active text when one or many are present.
+S3 hydration returns the full record for the selected row. The adornment block
+is absent (schema 19 removed the adornment tables); no adornment projection
+occurs at any depth.
 
 Distilled recall serves rung 3 in-line: each row is followed by its distilled
 text as an unlabeled indented continuation — a body substitute cheaper than
-hydration. A row still owing a distillate carries the one fallback marker and
-the verbatim content it substitutes. No acknowledgment ceremony precedes any
+hydration. Distillation is computed inline at read time via ContextDistiller;
+every `depth:distilled` response carries a rendered representation with no
+stored-distillate prerequisite. Memory-get uses the v23-attributed converter
+(`intent-span-v23-attributed@intent-span-v23.2-attributed-prose`) in both ports
+and in Swift's retained older dispatch path; a 512-scalar prefix is not a
+distillate. Authorization precedes rendering. Its `distilled` field at full
+depth uses the same converter. GLK hydration and explicit Skim retain their
+separate CompleteFormV6 converter. No acknowledgment ceremony precedes any
 result: behavior notices live in tool descriptions, never in payloads.
+
+The operation also reports savings. The figure covers the rows actually emitted in the response, after the row cap and the privacy projection; a row whose body is withheld (restricted or secret provenance, or an unavailable drawer) contributes to neither `originalTokens` nor `returnedTokens`. Original cost is the full original bodies (`content`) of the emitted rows carrying a distilled body; returned cost is the distilled bodies as sent (the `distilled` strings only; the row scaffolding `id`, `subject`, `bestSpan`, `sscFacts`, `eventTime`, `score`, `room`, `representation` and the `capabilities` object are common to both sides and excluded from both). The two ports compute identical figures over identical emitted row sets; the Swift row cap of 50 rows, which the Rust distilled projection does not share, is the one condition under which the sets differ. Both are measured with the same estimator across both ports; the estimator is named in the response. Numbers are estimates, marked as such (`estimated: true`). Growth is reported as an increase, never as a negative saving. No instruction to the AI to advertise or sum savings appears in any payload. Skim (`PassageViews.skim`) is a separate ContextDistillLib API that `moot_recall_distilled` does not apply today; the contract defines the `skim` field now so schema consumers need not change when skim is wired, and the field is absent until then.
 
 Vague recall renders both of its tiers in the canonical grammar under headers
 naming the tier (summaries, then hydrated originals), so the AI knows a
@@ -528,9 +572,9 @@ prose with no label; then the canonical candidate section. Term-frequency
 patterns, constant success rates, and template recommendations are not part
 of the payload.
 
-Synthesis receives the same call-scoped active-adornment projection as the
-candidate composer. It uses all active available adornments and never consults
-inactive stored rows.
+Synthesis assembles its candidate section from live storage. No adornment
+projection occurs in
+current production builds.
 
 ### 8.8 Answer shaping and front-door selection
 
@@ -551,13 +595,16 @@ default without changing the behavior of an unprovisioned estate.
 
 Every S1 surface declares the shared output schema and returns
 `structuredContent` alongside the text block: a common base row (id, subject,
-first sentence, typed SSC facts, composed adornment, active adornments, event
-time, score, room) with
-surface-specific extensions (graph provenance on connected recall; distillate
-and representation on distilled recall; tier on vague recall; estate identity
-on federated results; content at the memory-get depths) and top-level
-capability metadata mirroring the control lines. The Interface owns the
-schemas.
+bestSpan, sscFacts, event time, score, room) with surface-specific extensions
+(graph provenance on connected recall; distillate and representation on
+distilled recall; tier on vague recall; estate identity on federated results;
+content at the memory-get depths) and top-level capability metadata mirroring
+the control lines. `moot_recall_distilled` additionally carries a required
+`distillation` capability object (returnedTokens, originalTokens, savedTokens,
+savedPercent, estimated, estimator, optional skim, display) computed from the
+returned matches. The adornment fields (`adornment`, `adornments`) are absent
+in schema 19 estates; the surface is dark behind `MOOTX01_MINERS`. The
+Interface owns the schemas.
 
 Invariants:
 
@@ -567,16 +614,14 @@ Invariants:
 - redaction parity: a structured field MUST NOT reveal content the text
   withheld; not-found rows appear in neither representation;
 - score is absent on unranked surfaces;
-- `adornments` contains one `{minterID, text}` entry per active stored
-  adornment in minter-ID order; `adornment` is the exact composed fifth-column
-  string; both fields are absent when there is no active stored adornment;
-- zero/one/many conformance pins render `-`, the one text unchanged, and all
-  texts joined by ` || ` respectively, while retaining exactly seven columns;
 - consumption rule: machine extraction, deterministic identity matching, and
   scorer ingestion MUST use `structuredContent`; AI answer consumption and
   experiments whose independent variable is the presentation shape MAY
   consume the text payload. The text remains byte-pinned as the AI surface
-  and the audit fallback.
+  and the audit fallback;
+- the `distillation` savings block is present on every `moot_recall_distilled`
+  result and absent on every other operation's result;
+- savings counts only the rows emitted in that response whose distilled body is present; withheld or unavailable rows contribute to neither side.
 
 ### 8.10 Fact, edge, and tabular shapes
 
@@ -645,6 +690,17 @@ including withdrawn edges. A rejected pair is not automatically re-proposed.
 
 Single-tier contradiction searches are read-only. Dreaming and the resident
 contradiction scout share the same core pass and deduplication contract.
+
+### 9.5 Distillation tool retirement (ENC-W6B)
+
+`moot_distill` and `moot_redistill` are retired. Distillation is now inline:
+every `depth:distilled` recall hydrates each result via `ContextDistiller` at
+read time. Callers that previously used `moot_distill` or `moot_redistill`
+to pre-populate the distilled tier should migrate to `moot_recall_distilled`,
+which hydrates on demand. A call to either retired verb returns a
+`methodNotFound` error. The stored-representation sweep services are removed.
+The current inline contract is recorded in
+[the retirement ledger](../decisions/DECISION_RETIRED_TECHNIQUES_LEDGER.md).
 
 ## 10. Session behavior
 
@@ -793,6 +849,33 @@ where every client encounters it at discovery or orientation. Advisory
 presence depends only on grant state, never on whether sensitive rows exist;
 conditioning it on contents would disclose the protected population.
 
+A live grant floors filings as well as lifting reads. A memory filed while a
+restricted or secret grant is live may carry material recalled under that
+grant, so every filing verb reads the same grant ledger the recall verbs
+read. A verb that takes a sensitivity argument (`moot_file_memory`) files
+an omitted sensitivity at the grant's tier, keeps
+an explicit tier at or above it, and refuses an explicit lower tier with the
+ceiling named and nothing written. A verb whose contract carries no
+sensitivity argument (the opt-in `memory` adapter's content-bearing writes)
+files at the higher of the tier the write would otherwise carry and the
+grant's tier. In both cases the reply names the tier applied while a grant
+is live, and a drawer filed under the grant is read back through the same
+gate that hides it once the grant lifts. With no grant live, filing behaves
+as if the ledger did not exist. The Interface owns the argument, reply and
+error text.
+
+The same ceiling gates every write that names a memory. A mutation verb
+(`moot_update_memory` in all its mutations, `moot_withdraw_memory`,
+`moot_erase_memory`, `moot_confirm_memory`, `moot_move_memory`,
+`moot_link_memories`, `moot_review_tunnel`) resolves its target through the
+read path's gate. A target above the caller's ceiling is refused with the
+same envelope the read path returns for an absent id, so a caller holding
+only an identifier cannot distinguish restricted from nonexistent, and no
+row, edge or tunnel is written on a refused call. `moot_link_memories`
+gates both endpoints. A `correct_sensitivity` mutation may raise the tier of
+a row the caller can read; it cannot lower a tier the caller cannot read,
+because it cannot reach the row at all. Both ports refuse identically.
+
 ## 13. Conformance
 
 ### 13.1 Release-scoped conformance
@@ -816,12 +899,12 @@ The Interface lists the current test entry points and generated surface census.
 
 This specification leads; deviations are code defects against it, not
 documented variants. The known deviations at adoption time — retrieval
-renderers missing score and adornment columns with content-alphabetical
-ordering (precise, connected, temporal recall), fact search surfacing
-internal provenance, distilled recall returning an acknowledgment gate,
-the synthesize scaffold fields, and the structured-result field gap — are
-enumerated with their target shapes in this document and are
-resolved by the conformance pass that brings both ports to it.
+renderers missing score columns with content-alphabetical ordering (precise,
+connected, temporal recall), fact search surfacing internal provenance, the
+synthesize scaffold fields, and the structured-result field gap — are
+enumerated with their target shapes in this document and are resolved by the
+conformance pass that brings both ports to it. The adornment-column and
+distilled-recall-gate deviations were resolved in ENC-W6B (schema 19).
 Generated projection remains the census source for tool counts; port
 metadata differences where backing stores carry different information are
 recorded per surface in the Interface.
@@ -872,7 +955,224 @@ now lives):
 | Test commands and fixtures | Interface §16 |
 | Legacy changelogs | Retained unchanged in source documents; current requirements integrated above |
 
+## Sensitivity-withheld reporting
+
+`report_withheld` is a per-call global modifier, stripped by the chain registry
+before strict argument decoding and absent from every operation input schema.
+Only boolean `true` enables it; omitted, false, and other values leave it off.
+Successful precise, shaped, vague, connected, distilled, federated and transcript
+recall, and partial-cue, keystones and trust-synthesis lenses conditionally add
+integer `meta.withheldBySensitivity`. When off, the key is absent and rows and
+ordering are unchanged. Refusals and unrelated operations do not disclose a count.
+
+LocusKit counts primary candidates excluded only by its default adjective-
+sensitivity ceiling while all other frame predicates admit. Explicit sensitivity
+filters yield zero. Vague counts hop-1 candidates; federated counts only the
+grant-authorized source population. Keystones counts only ranked topK endpoint
+drawers rejected at hydration by that ceiling, not all graph endpoints. Later
+provenance projection and tunnel counts are separate. The default Rust partial-cue
+frame remains its current frame; this modifier does not change frame admission.
+
+Transcript recall supplies the caller's explicit sensitivity ceiling in both
+ports (default elevated, or the live grant ceiling). Rust now matches Swift's
+existing caller-frame construction; the state default remains CurrentlyBelieve.
+Its sensitivity-default-only count is therefore zero, including when restricted
+candidates exist. This correction is separate from the partial-cue frame unit.
+
+The optional meta field uses existing additional-properties permissions; catalog
+schemas, release artifacts and the pinned capability digest are unchanged. Global
+modifier help is documented once and pinned byte-identically in both ports.
+
+## Security repair contract
+
+### Trusted review attribution and authorized aggregates
+
+A caller cannot select a tunnel reviewer identity through tool arguments.
+Review attribution is trusted-context derived, and acceptance requires trusted
+user identity. Rejected estate/sensitivity admission cannot reward a memory.
+Memory answer citations are derived only after provenance admission. Lens
+counts and conflicting fact groups use the admissible population; hidden
+values cannot influence public contradiction totals. Reclassification applies
+the active sensitivity ceiling before either reporting or changing rows.
+
 ## Changelog
+
+### 5.0.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 4.5.0 -- 2026-09-14
+
+`moot_recall_similar` joins the recall family (full entry in
+`ARIA_MCP_INTERFACE.md` 4.6.0): the paraphrase door over the whole-record
+LSA lane, nearest-first, no fusion and no rerank. It reads under § 12.4's
+sensitivity ceiling like every other recall verb and reports withheld rows
+under the § 4.2.0 modifier; no new behavioral invariant is introduced.
+
+### 4.4.0 -- 2026-09-14
+
+§ 8.3: the subject contract is stated as 120 grapheme clusters counted
+identically at every cut in both ports. Swift counts clusters through
+`String.count`; Rust counts them through `locus_kit::drawer_store::subject_length`.
+A refusal reports the offending cluster count.
+
+### 4.3.0 -- 2026-09-13
+
+Added explicit memory-get Skim: authorized complete distillation followed by
+source-order preview at a fixed 512 UTF-8 byte target. Documented the
+`budgetHonored` and `complete` flags, the savings line, and exclusion of the
+omitted tail.
+No stored schema, ranking, or other hydration-depth behavior changes.
+
+### 4.2.0 -- 2026-09-13
+
+Added the default-off report_withheld modifier, conditional sensitivity-only meta
+count, ranked topK keystones hydration definition, and unchanged-schema contract.
+
+### 4.1.0 -- 2026-09-12
+
+§ 12.4 gains the mutation-gate invariant. Every write verb that names a
+memory (`moot_update_memory`, `moot_withdraw_memory`, `moot_erase_memory`,
+`moot_confirm_memory`, `moot_move_memory`, `moot_link_memories`,
+`moot_review_tunnel`) resolves its target through the read path's
+sensitivity gate; an above-ceiling target is refused with the absent-id
+envelope and nothing is written; `moot_link_memories` gates both endpoints;
+`correct_sensitivity` may raise a readable row's tier and cannot reach an
+unreadable one. Records behaviour shipped in both ports; no new argument.
+
+### 4.0.0 -- 2026-09-11 (BREAKING)
+
+The four work-packet operations (`moot_file_packet`, `moot_packet_get`,
+`moot_packet_list`, `moot_packet_lineage`) are retired from the ARIA
+surface. § 12.4's filing-floor rule no longer names `moot_file_packet`
+among the verbs a sensitivity argument applies to. See
+`ARIA_MCP_INTERFACE.md` § Changelog 4.0.0 for the full removed-operation
+list and the new tool counts. Stored packet drawers already in an estate
+are unaffected; no migration step is introduced.
+
+### 3.6.3 -- 2026-09-09
+
+§ 8 distilled recall paragraph: `returnedTokens` counts the distilled bodies only and the excluded row scaffolding fields are named; the cross-port identity is qualified by the Swift 50-row cap.
+
+### 3.6.2 -- 2026-09-09
+
+§ 8 distilled recall paragraph updated: the savings figure covers rows actually emitted after the row cap and privacy projection; a withheld body (restricted or secret provenance, or unavailable drawer) contributes to neither `originalTokens` nor `returnedTokens`. § 8.9 invariant bullet corrected to match: savings counts only emitted rows whose distilled body is present; withheld or unavailable rows contribute to neither side.
+
+### 3.6.1 -- 2026-09-09
+
+Extended § 8 distilled recall paragraph with the savings behavioral contract: original cost is the full bodies of returned records; returned cost is the distilled payload; both use the same named estimator; estimates are marked as such; growth is reported as an increase; no AI advertising instruction; skim is defined but absent until wired. Extended § 8.9 capability metadata list to include `distillation` (required on `moot_recall_distilled` only); added two invariant bullets: the savings block is present on every `moot_recall_distilled` result; savings counts only returned records.
+
+
+### 3.6.0 -- 2026-09-09
+
+moot_reclassify_fdc is a live v2 write path — the stub is replaced with the real classify-and-apply implementation; apply, mode, and limit arguments added; structuredContent.data carries the 18-field report; moot_estate_status data contract gains fdc_recalculation (current/missing/stale); the v1 InterfaceTools dispatch arm for moot_reclassify_fdc is retired.
+
+### 3.5.2 -- 2026-09-09
+
+§12.5 coaching triggers wired to the v2 surface — all six §12.5 triggers are now active on the v2 dispatch path; the v2 envelope gains a hint slot (new contract addition per ARIA_MCP_INTERFACE.md §3.10.2); estate-provisioned coaching_calls and sticky_enabled are applied on the first dispatch call of each session.
+
+### 3.5.1 -- 2026-09-10
+
+Front-matter description was missing a 3.4.0 entry (the description ran
+3.3.0 straight to 3.5.0). Added, summarized from the 3.4.0 entry below. No
+contract change.
+
+### 3.5.0 -- 2026-09-09
+
+Recorded four previously-undocumented operations now carrying full
+`ARIA_MCP_INTERFACE.md` entries: `moot_memory_recall_transcript`,
+`moot_propose_contradictions`, `moot_help`, and `moot_monitoring_set`. Each
+operates under an existing behavioral contract in this document (recall,
+contradiction resolution, discovery, and monitoring control respectively);
+no new invariant is introduced.
+
+### 3.4.0 -- 2026-09-09
+
+V2-A surface adoption: the v2 catalog is the only projected surface in both
+ports. The git tag ARIAv1-Terminus marks the last commit that carried the v1
+dispatch surface; behavioral contracts that referenced the v1 tool set are
+superseded by their v2 equivalents in ARIA_MCP_INTERFACE.md §3.9.2.
+
+
+### 3.3.0 -- 2026-09-08
+
+New § 6.6 states estate selection as a launch-time fact and gives the record's
+kind three consequences together: federation identity, identity key store, and
+charter seeding. `--in-memory` resolves its catalog record first and then
+serves it TRANSIENT whatever the record says, so a measurement run over an
+in-memory estate sees no charter drawers. One rule across `aria-mcp` and
+`mootx01 serve`, both ports. The former § 6.6 (authentication profile) is now
+§ 6.7.
+
+§ 8.3: the 120 of the subject-length contract is 120 Unicode scalars, the unit
+both ports count and both `moot-bridge` ports cut a derived subject on.
+Interface 3.8.0 carries the command line and the error text.
+
+### 3.2.0 -- 2026-09-07
+
+§ 12.4: the filing floor covers every filing verb. A verb with a
+sensitivity argument (`moot_file_memory`, `moot_file_packet`) applies the
+omitted-files-at-ceiling and lower-tier-refused rule; a verb whose contract
+carries no argument (the `memory` adapter's `create`, `str_replace`,
+`insert`) files at the higher of its own tier and the ceiling. Replies name
+the tier while a grant is live; a drawer filed under a grant is hidden by
+the read gate once the grant lifts. Interface 3.5.0 carries the argument,
+reply and error text.
+
+### 3.1.0 -- 2026-09-07
+
+§ 12.4: a live sensitivity grant floors filings as well as lifting reads.
+A filing verb that takes a sensitivity reads the same grant ledger the
+recall verbs read; an omitted sensitivity files at the grant's tier, a
+lower explicit tier is refused with the ceiling named, and the reply
+names the tier applied. No change with no grant live. Interface 3.4.0
+carries the `moot_file_memory` argument, reply and error text.
+
+### 3.0.1 -- 2026-09-06
+
+Description field corrected: the 2.5.0 sentence is restored so the field reads cumulatively through 3.0.0. No contract change.
+
+### 3.0.0 -- 2026-09-06
+
+Removed claims that adornment data remains queryable. Recorded removal of
+the stored-distillation sweep services and the inline hydration contract.
+
+
+### 2.5.0 -- 2026-09-05
+
+ENC-W6B doc sweep. Composer paragraph (§8) updated: active-adornment read
+replaced with dark-switch notice. S3 hydration note (§8.6) updated: adornment
+block absence noted, distillation inline via ContextDistiller. Synthesis note
+(§8.7) updated: adornment projection replaced with dark-switch notice. §8.9
+structured-results base row updated to six columns (id · subject · bestSpan ·
+sscFacts · event_time · score · room); `adornment`/`adornments` invariant
+replaced with dark-switch note. §13.3 conformance backlog updated: adornment-
+column and distilled-recall-gate items recorded as resolved in ENC-W6B.
+
+### 2.4.0 -- 2026-09-05
+
+ENC-W6B: S1/S2 row format updated (§8.3). The 7-column format (uuid ·
+subject · firstSentence · SSC · adornment · eventTime · score) is replaced
+by a 6-column format (uuid · subject · bestSpan · sscFacts · eventTime ·
+score). Changes: (1) `firstSentence` renamed `bestSpan` — best content span
+from the highest-ranked SpanRerankHit, falling back to the first body
+sentence; (2) SSC column now carries the raw `sscFacts` string (e.g.
+`kind: hobby, entity: painting`), stubbed as `-` until schema-19
+drawer.sscFacts lands; (3) adornment column retired. `moot_distill` and
+`moot_redistill` retired (§9.5 replaced). Callers must migrate to
+`moot_recall_distilled`.
+
+### 2.3.0 -- 2026-09-04
+Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
+
+### 2.2.0 -- 2026-09-02
+
+CDL-02: moot_redistill force-redistill contract. §9.5 added: behavioral
+invariants for force-redistill (bypass convergence guard, sweep all active
+items, reindex with `laneScope: .all` for BM25 trailer-token correctness,
+idempotence contract). No change to §8 retrieval contract or §10 session
+behavior.
 
 ### 2.1.0 -- 2026-08-26
 Ladder merge. The develop/1.1.x stream and the benchmark stream each
