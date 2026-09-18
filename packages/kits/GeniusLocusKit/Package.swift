@@ -32,8 +32,8 @@ import PackageDescription
 let package = Package(
     name: "GeniusLocusKit",
     platforms: [
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .library(
@@ -170,22 +170,22 @@ let package = Package(
         ),
         // Apple encoder providers (NLContextualEmbedding, NLEmbedding, NeuralEmbed).
         // Off by default: retained in case Apple improves the NaturalLanguage framework,
-        // or for a device class that cannot host a CoreML encoder. Mirror of
+        // or for a device class that cannot host a Core AI encoder. Mirror of
         // CorpusKit's AppleEncoders trait and APPLE_ENCODERS Swift define.
         // Enable: --traits AppleEncoders.
         .trait(
             name: "AppleEncoders",
-            description: "Compile apple-nl-v1 and neural-embed-v1 provisioning paths in EstateLifecycle. Off by default; retained for device classes that cannot host CoreML encoders or when the NaturalLanguage framework improves. Enable: --traits AppleEncoders."
+            description: "Compile apple-nl-v1 and neural-embed-v1 provisioning paths in EstateLifecycle. Off by default; retained for device classes that cannot host Core AI encoders or when the NaturalLanguage framework improves. Enable: --traits AppleEncoders."
         ),
         // CrossEncoder: lets the retrieval-time cross-encoder stage load the
-        // packaged pair classifier (PairScorerFactory over CoreML). The
+        // packaged pair classifier (PairScorerFactory over Core AI). The
         // request field, the report and the fusion rule compile regardless;
         // with the trait off an `apply` directive degrades with reason
         // `capability_off`. Twin of the Rust feature `cross-encoder`
         // (`corpus-kit-providers/candle`). The product targets enable it.
         .trait(
             name: "CrossEncoder",
-            description: "Compile the cross-encoder scorer load (PairScorerFactory over CoreML) behind the retrieval-time rerank stage. Off by default in the kit; enabled by the product targets. Defines MOOTX01_CROSS_ENCODER."
+            description: "Compile the cross-encoder scorer load (PairScorerFactory over Core AI) behind the retrieval-time rerank stage. Off by default in the kit; enabled by the product targets. Defines MOOTX01_CROSS_ENCODER."
         ),
     ],
     dependencies: [
@@ -563,7 +563,7 @@ let package = Package(
             swiftSettings: [
                 // AppleEncoders: gates apple-nl-v1 and neural-embed-v1 provisioning
                 // paths in EstateLifecycle.swift. Off by default; retained for device
-                // classes that cannot host CoreML encoders. Mirror of CorpusKit
+                // classes that cannot host Core AI encoders. Mirror of CorpusKit
                 // AppleEncoders trait.
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),

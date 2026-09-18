@@ -262,7 +262,7 @@ struct EncoderActivationEstateTests {
         try await kit2.close(handle)
     }
 
-    /// Runs only where the Arctic CoreML directory exists (`MOOT_ENCODER_MODEL_DIR`
+    /// Runs only where the Arctic model directory exists (`MOOT_ENCODER_MODEL_DIR`
     /// names it): the seeded row loads, the rerank stage registers on the fresh
     /// estate, and a captured drawer still has no span rows until the span-encode
     /// signal runs. Skipped elsewhere; the report records whether it ran.
