@@ -430,11 +430,11 @@ pub fn run(
             //
             // The coordinator is a mutex, not an actor: a batch that runs
             // under it blocks every other worker for its whole length. The
-            // anomaly sweep scores rooms O(n²) in their size, minutes on a
-            // room of thousands of drawers, so its worker below claims and
-            // settles under the lock but scores with the lock RELEASED, the
-            // way the Swift resident's `scoreRoom` detaches its pairwise loop
-            // off the actor. Observed 2026-09-18 on the LongMemEval
+            // anomaly sweep's first scoring of a container is a square
+            // (bounded at a chest of 500, ADR-026), so its worker below claims
+            // and settles under the lock but scores with the lock RELEASED,
+            // the way the Swift resident's `scoreContainer` detaches its
+            // pairwise loop off the actor. Observed 2026-09-18 on the LongMemEval
             // aggregate (2,598 drawers in one room): the sweep held the lock
             // for over eleven minutes and span encoding sat at 64 of 19,195.
             {
@@ -459,7 +459,7 @@ pub fn run(
                                 match claim {
                                     Ok(jobs) if jobs.is_empty() => None,
                                     Ok(jobs) => {
-                                        let limit = coord.duty_limits(&worker_handle).anomaly_sweep_rooms;
+                                        let limit = coord.duty_limits(&worker_handle).anomaly_sweep_chests;
                                         match coord.anomaly_sweep_prepare(&worker_handle, limit, now_ms) {
                                             Ok(work) => Some((jobs, work)),
                                             Err(e) => {
@@ -475,12 +475,12 @@ pub fn run(
                             Err(_) => None,
                         };
                         if let Some((jobs, work)) = claimed {
-                            // No coordinator mutex is held while the rooms are scored.
+                            // No coordinator mutex is held while the containers are scored.
                             let now_ms = now_millis();
                             let scored = genius_locus_kit::brain::anomaly_flag_sweep::anomaly_sweep_score(&work, now_ms);
                             if let Ok(coord) = worker_coord.lock() {
                                 let paid = match &scored {
-                                    Ok(rooms) => coord.anomaly_sweep_settle(&worker_handle, rooms, now_ms).unwrap_or(0),
+                                    Ok(containers) => coord.anomaly_sweep_settle(&worker_handle, containers, now_ms).unwrap_or(0),
                                     Err(_) => 0,
                                 };
                                 for job in &jobs { coord.complete_duty_job(&worker_handle, job, scored.is_ok()); }
@@ -503,6 +503,7 @@ pub fn run(
                 for (kind, seconds, enqueues) in [
                     (DutyKind::SpanEncode, fast, true),
                     (DutyKind::SubjectBackfill, cadence, true),
+                    (DutyKind::ChestRebin, cadence, true),
                     (DutyKind::FactsBackfill, fast, false),
                     (DutyKind::RetrainBasis, fast, false),
                 ] {
