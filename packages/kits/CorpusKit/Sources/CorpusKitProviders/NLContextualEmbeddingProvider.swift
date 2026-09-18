@@ -1,7 +1,7 @@
 #if APPLE_ENCODERS
 // Apple encoder provider — compiled only when the AppleEncoders trait is on.
 // Retained in case Apple improves the NaturalLanguage framework, or for a device class
-// that cannot host a CoreML encoder.
+// that cannot host a Core AI encoder.
 // Off by default; held for v1.2 iOS and Apple cloud compute. See Package.swift.
 // NLContextualEmbeddingProvider.swift
 //

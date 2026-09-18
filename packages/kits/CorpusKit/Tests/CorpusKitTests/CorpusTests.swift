@@ -5,7 +5,7 @@
 // backend production and the gauntlet use, and the on-disk equivalent of
 // MemPalace's Chroma — never the in-RAM backend (whose divergent type
 // round-trip hid real reopen bugs). EmbeddingModel.deterministic is used for
-// the provider (no CoreML required). All assertions are behavioral, not
+// the provider (no model asset required). All assertions are behavioral, not
 // implementation:
 // they verify the public surface (ingest / recall / remove / count)
 // and the sealed-vector principle (no SynapseKit type imported here).
@@ -259,10 +259,10 @@ struct CorpusTests {
 
     // MARK: - EmbeddingModel default
 
-    /// The static default must be .deterministic (no CoreML required).
+    /// The static default must be .deterministic (no model asset required).
     @Test func embeddingModelDefaultIsDeterministic() {
         // If EmbeddingModel.default were changed to a case requiring
-        // CoreML, Corpus.init would fail in the test environment.
+        // a model asset, Corpus.init would fail in the test environment.
         // This test pins the default as deterministic.
         if case .deterministic = EmbeddingModel.default {
             // correct

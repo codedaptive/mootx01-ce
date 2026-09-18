@@ -17,7 +17,7 @@
 //               missing model and a failing scorer degrade with their reason
 //               and the incoming order; close drops the scorer.
 //   packaged  — with MOOT_CROSS_ENCODER_ASSETS set (and the CrossEncoder trait
-//               on) the real CoreML classifier loads once through the
+//               on) the real Core AI classifier loads once through the
 //               product's resolver and the apply reports `coreml`.
 
 import Foundation
@@ -600,7 +600,7 @@ struct CrossEncoderStageDirectorTests {
 
 #if MOOTX01_CROSS_ENCODER
     @Test(
-        "the packaged CoreML classifier loads once through the resolver and applies (MOOT_CROSS_ENCODER_ASSETS)",
+        "the packaged Core AI classifier loads once through the resolver and applies (MOOT_CROSS_ENCODER_ASSETS)",
         .enabled(
             if: ProcessInfo.processInfo.environment["MOOT_CROSS_ENCODER_ASSETS"].map { !$0.isEmpty } ?? false,
             "MOOT_CROSS_ENCODER_ASSETS not set — skipping asset-gated test"
