@@ -345,6 +345,44 @@ struct DrawerStoreTests {
         #expect(Set(result.map(\.id)) == [TestStorage.tid("a"), TestStorage.tid("c")])
     }
 
+    @Test("drawersIn(wing:room:) covers the room's chests, and a chest resolves to its room's names")
+    func drawersInWingRoomCoversChests() async throws {
+        // ADR-026: a chest is a depth-3 node under a room. A room read is the
+        // subtree (drawers on the room itself plus every chest), and a
+        // drawer parented to a chest still resolves to (wing, room).
+        let url = makeTempURL()
+        defer { cleanup(url) }
+        let storage = TestStorage.sqlite(url)
+        let store = try await DrawerStore(storage: storage)
+        let nodeStore = NodeStore(storage: storage)
+        let root = try await nodeStore.createRoot(displayName: "Estate", now: t(0))
+        let wingNode = try await nodeStore.createNode(displayName: "w", parentId: root.id, now: t(1))
+        let roomR1 = try await nodeStore.createNode(displayName: "r1", parentId: wingNode.id, now: t(2))
+        let roomR2 = try await nodeStore.createNode(displayName: "r2", parentId: wingNode.id, now: t(3))
+        let chest = try await nodeStore.createNode(displayName: "chest-1", parentId: roomR1.id, now: t(4))
+        #expect(chest.depth == 3)
+
+        try await store.addDrawer(Drawer(
+            id: TestStorage.tid("a"), content: "content-a", parentNodeId: roomR1.id.uuidString,
+            addedBy: "bilby", filedAt: t(1), embeddingModelID: "minilm-v6"))
+        try await store.addDrawer(Drawer(
+            id: TestStorage.tid("b"), content: "content-b", parentNodeId: chest.id.uuidString,
+            addedBy: "bilby", filedAt: t(2), embeddingModelID: "minilm-v6"))
+        try await store.addDrawer(Drawer(
+            id: TestStorage.tid("c"), content: "content-c", parentNodeId: roomR2.id.uuidString,
+            addedBy: "bilby", filedAt: t(3), embeddingModelID: "minilm-v6"))
+
+        let result = try await store.drawersIn(wing: "w", room: "r1")
+        #expect(result.map(\.id) == [TestStorage.tid("a"), TestStorage.tid("b")],
+                "the room read is the subtree, in filedAt order")
+        #expect(try await store.chestNodeIds(roomNodeId: roomR1.id.uuidString) == [chest.id.uuidString])
+
+        let names = try await store.resolveNodeNames(parentNodeIds: [chest.id.uuidString, roomR2.id.uuidString])
+        #expect(names[chest.id.uuidString]?.wing == "w")
+        #expect(names[chest.id.uuidString]?.room == "r1")
+        #expect(names[roomR2.id.uuidString]?.room == "r2")
+    }
+
     @Test("drawersBySource(file:) returns only matching source")
     func drawersBySource() async throws {
         let (store, url) = try await makeStore()
