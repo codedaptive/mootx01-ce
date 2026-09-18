@@ -3,7 +3,12 @@ import FactExtractionKitProviders
 import Foundation
 import FoundationModels
 import GeniusLocusKit
+// The Apple Foundation Models extractor lives in a kit the Community edition
+// does not carry, so the import is conditional and the two closures below
+// answer "no Apple extractor here" when it is absent.
+#if canImport(MootFoundationModelsKit)
 import MootFoundationModelsKit
+#endif
 import MootProductIdentity
 
 /// Product composition for the Swift fact-extraction providers. The estate
@@ -34,12 +39,8 @@ public enum FactExtractorBuilder {
                 configurationDirectory: settingsDirectory),
             settingsDirectory: settingsDirectory,
             workerExecutableURL: workerExecutableURL,
-            appleAvailable: {
-                SystemLanguageModel.default.availability == .available
-            },
-            makeApple: {
-                AppleFoundationFactExtractor.systemDefault()
-            },
+            appleAvailable: { appleExtractorAvailable() },
+            makeApple: { makeAppleExtractor() },
             makeNuExtract: { asset, tokenizer, version in
                 try CoreAINuExtractFactExtractor(
                     workerExecutableURL: workerExecutableURL,
@@ -61,12 +62,8 @@ public enum FactExtractorBuilder {
                 configurationDirectory: settingsDirectory),
             settingsDirectory: settingsDirectory,
             workerExecutableURL: workerExecutableURL,
-            appleAvailable: {
-                SystemLanguageModel.default.availability == .available
-            },
-            makeApple: {
-                AppleFoundationFactExtractor.systemDefault()
-            },
+            appleAvailable: { appleExtractorAvailable() },
+            makeApple: { makeAppleExtractor() },
             makeNuExtract: { _, _, _ in
                 throw FactExtractionError.unavailable(
                     "CoreAI NuExtract is unavailable on iOS")
@@ -82,7 +79,7 @@ public enum FactExtractorBuilder {
         settingsDirectory: URL,
         workerExecutableURL: URL,
         appleAvailable: () -> Bool,
-        makeApple: () -> any FactExtractor,
+        makeApple: () -> (any FactExtractor)?,
         makeNuExtract: (URL, URL, String) throws -> any FactExtractor,
         log: (String) -> Void
     ) -> (any FactExtractor)? {
@@ -90,11 +87,11 @@ public enum FactExtractorBuilder {
 
         switch extractorSetting {
         case .apple:
-            guard appleAvailable() else {
+            guard appleAvailable(), let extractor = makeApple() else {
                 log("mootx01: Apple Foundation Models fact extractor is selected but unavailable")
                 return nil
             }
-            return makeApple()
+            return extractor
 
         case .nuextract:
             guard let assets = resolveNuExtractAssets(
@@ -117,6 +114,27 @@ public enum FactExtractorBuilder {
             log("mootx01: unsupported fact_extractor preference \(extractorSetting.rawValue.debugDescription)")
             return nil
         }
+    }
+
+    /// Whether this build can reach the Apple Foundation Models extractor at
+    /// all. Without the kit there is nothing to ask, so the answer is no.
+    private static func appleExtractorAvailable() -> Bool {
+#if canImport(MootFoundationModelsKit)
+        SystemLanguageModel.default.availability == .available
+#else
+        false
+#endif
+    }
+
+    /// nil when the kit is absent. The caller treats that the same way it
+    /// treats a machine whose model is unavailable: it logs and returns no
+    /// extractor rather than failing the build or the run.
+    private static func makeAppleExtractor() -> (any FactExtractor)? {
+#if canImport(MootFoundationModelsKit)
+        AppleFoundationFactExtractor.systemDefault()
+#else
+        nil
+#endif
     }
 
     private struct NuExtractAssets {
