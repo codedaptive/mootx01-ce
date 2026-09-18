@@ -6,6 +6,7 @@
 // coverage lives in the peer suite MatchTests.swift.
 
 import Testing
+import SubstrateTypes
 @testable import EngramLib
 
 @Suite("EngramLib API")
@@ -192,5 +193,41 @@ struct EngramLibTests {
         let session = EngramLib.session()
         let stateful = session.findNearest(probe: probe, in: estate, k: 10)
         #expect(stateless == stateful)
+    }
+
+    // MARK: - Chest placement key (ADR-026), vectors shared with the Rust port
+
+    static let vecFingerprint = Fingerprint256(block0: 0x0123456789ABCDEF, block1: 0xFEDCBA9876543210,
+                                               block2: 0x0F0F0F0F0F0F0F0F, block3: 0xAAAAAAAAAAAAAAAA)
+    static let vecKey: [UInt64] = [0x0153494B6173682F, 0xC097888FA0B6F9BE, 0xFBACB3B49B8D9791, 0x3F2937711F490711,
+                                   0x15BB05FB15FA01FE, 0x11FE01BE11BE10FE, 0x88DC989C889C99D8, 0x89D8D9D8C9D989C9]
+
+    @Test("morton key: pinned vector, all-zero and all-one fingerprints")
+    func mortonKeyVectors() {
+        #expect(ChestPlacement.key(Self.vecFingerprint).words == Self.vecKey)
+        #expect(ChestPlacement.key(Fingerprint256(block0: 0, block1: 0, block2: 0, block3: 0)).words == [UInt64](repeating: 0, count: 8))
+        let ones = Fingerprint256(block0: .max, block1: .max, block2: .max, block3: .max)
+        #expect(ChestPlacement.key(ones).words == [UInt64](repeating: .max, count: 8))
+    }
+
+    @Test("morton key: one fingerprint bit sets exactly its two key bits; the permutation is a bijection")
+    func mortonKeySingleBit() {
+        // Bit 0 of the fingerprint lands at key bit 0 (ordering A) and at key
+        // bit 2j+1 where permutation(j) == 0 (ordering B): j = 55, so word 1 bit 16.
+        let one = Fingerprint256(block0: 1 << 63, block1: 0, block2: 0, block3: 0)
+        #expect(ChestPlacement.key(one).words == [0x8000000000000000, 0x0000000000010000, 0, 0, 0, 0, 0, 0])
+        #expect(ChestPlacement.permutation(55) == 0)
+        #expect(Set((0..<256).map(ChestPlacement.permutation)).count == 256)
+    }
+
+    @Test("deal and range index: sorted keys cut at the fill, binary search finds the range")
+    func dealAndRangeIndex() {
+        let ranges = ChestPlacement.deal(sortedKeys: Array(0..<10), fill: 4)
+        #expect(ranges.map { [$0.low, $0.high, $0.count] } == [[0, 3, 4], [4, 7, 4], [8, 9, 2]])
+        #expect(ChestPlacement.rangeIndex(of: 5, in: ranges) == 1)
+        #expect(ChestPlacement.rangeIndex(of: 9, in: ranges) == 2)
+        #expect(ChestPlacement.rangeIndex(of: 11, in: ranges) == nil)
+        #expect(ChestPlacement.deal(sortedKeys: [Int](), fill: 4).isEmpty)
+        #expect(ChestPlacement.capacity == 500 && ChestPlacement.fill == 250)
     }
 }

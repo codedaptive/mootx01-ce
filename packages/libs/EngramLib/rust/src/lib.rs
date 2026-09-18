@@ -47,6 +47,8 @@ use substrate_kernel::kernel::{PortableKernel, SubstrateKernel};
 pub type Engram = Fingerprint256;
 
 mod matchx;
+pub mod morton_key;
+pub use morton_key::{chest_placement, KeyRange, MortonKey};
 pub use matchx::Match;
 
 /// EngramLib free functions. Stateless. Thread-safe.
