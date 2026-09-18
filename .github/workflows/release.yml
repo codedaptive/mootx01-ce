@@ -1428,13 +1428,17 @@ jobs:
       # (scripts/release/README.md — "run it in CI and immediately before tagging".)
       - name: Verify version stamps match the release tag
         env:
-          # The tag name is untrusted input — hand it in via env, validate it as
-          # strict vMAJOR.MINOR.PATCH before it reaches the verifier.
+          # The tag name is untrusted input — hand it in via env and validate its
+          # shape before it reaches the verifier. A pre-release qualifier is
+          # allowed because it is part of the version the tree carries: the
+          # stamps read 1.1.0-rc1 and the verifier matches them against exactly
+          # that string. The character class stays narrow so the tag cannot
+          # smuggle anything through.
           TAG_NAME: ${{ github.ref_name }}
         run: |
           version="${TAG_NAME#v}"
-          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "ERROR: tag '$TAG_NAME' is not a vMAJOR.MINOR.PATCH release tag" >&2
+          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "ERROR: tag '$TAG_NAME' is not a vMAJOR.MINOR.PATCH release tag, with or without a pre-release qualifier" >&2
             exit 1
           fi
           python3 scripts/release/verify_version.py "$version"
