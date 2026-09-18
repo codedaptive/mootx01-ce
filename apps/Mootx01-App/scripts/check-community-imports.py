@@ -21,7 +21,6 @@ PRIVATE_MODULES = {
     "MootEnterpriseGateway",
     "MootEnterpriseUI",
     "NearbyInteraction",
-    "WorkPacketKit",
 }
 
 # Swift permits attributes before an import and permits declaration-scoped

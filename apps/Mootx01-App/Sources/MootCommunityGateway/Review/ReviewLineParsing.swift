@@ -1,25 +1,44 @@
 import Foundation
 import AriaMCPWire
 
+/// The Community twin of MootIntentCore's `RecalledDrawer`: one admissible
+/// structured recall row. A search row carries a subject, a best span and a
+/// room when resolved; only the memory-get depths carry a body.
 private struct CommunityRecalledDrawer: Sendable, Equatable {
     let id: String
-    let content: String
-    let room: String
+    let subject: String?
+    let bestSpan: String?
+    let room: String?
+    let content: String?
+
+    /// The row's own text: body, else best span, else subject.
+    var excerpt: String { content ?? bestSpan ?? subject ?? "" }
 }
 
 private enum CommunityStructuredRecallResults {
+    /// Decode `structuredContent.results` rows into community recalled-drawer
+    /// values. A row is admissible when it carries usable text: a `subject`
+    /// that is not the server's absence marker, or a `content`. Gated rows
+    /// arrive with `subject` set to `ARIAServerConstants.noSubjectMarker` and
+    /// are skipped so callers never see an unexplained "(no subject)" entry.
+    /// Malformed rows are skipped too.
     static func drawers(from structured: JSONValue?) -> [CommunityRecalledDrawer] {
         guard let results = structured?.objectValue?["results"]?.arrayValue else {
             return []
         }
         return results.compactMap { row in
             guard let object = row.objectValue,
-                  let id = object["id"]?.stringValue,
-                  let room = object["room"]?.stringValue,
-                  let content = object["content"]?.stringValue else {
+                  let id = object["id"]?.stringValue else {
                 return nil
             }
-            return CommunityRecalledDrawer(id: id, content: content, room: room)
+            let subject = object["subject"]?.stringValue
+            let content = object["content"]?.stringValue
+            // Opaque rows (gated or unhydrated) carry noSubjectMarker — skip them.
+            guard subject != ARIAServerConstants.noSubjectMarker else { return nil }
+            guard subject != nil || content != nil else { return nil }
+            return CommunityRecalledDrawer(
+                id: id, subject: subject, bestSpan: object["bestSpan"]?.stringValue,
+                room: object["room"]?.stringValue, content: content)
         }
     }
 }
@@ -30,7 +49,7 @@ private enum CommunityStructuredRecallResults {
 // Every format below is transcribed from the code that PRODUCES it and was
 // confirmed against live responses from a local estate on 2026-07-24:
 //
-//   LensTools.list(_:_:)            "<heading>: N result(s)" then "  - <item>"
+//   list-shaped lens text           "<heading>: N result(s)" then "  - <item>"
 //   moot_lens_theme_weather         "  - <room id> momentum=<f64>"
 //   moot_lens_keystones             "  - <drawer id> centrality=<f64>"
 //   moot_lens_cohesion              "cohesion_outliers (considered N): M result(s)"
@@ -42,11 +61,17 @@ private enum CommunityStructuredRecallResults {
 //                                   "conflicting_facts: N subject+predicate pair(s)"
 //                                   | "…: none", then "  [<subject>] <predicate>"
 //                                   and "    <fact id>  object=[<o>]  source=<s>  filed=<iso>"
-//   moot_fact_search                "<id>  [<subject>] <predicate> [<object>]  filed=<iso>  source=<s>"
+//   moot_fact_search                "found N facts, one per line" (singular "found 1 fact, …")
+//                                   then the S4 row (ARIA_MCP_SPEC § 8.10, six columns
+//                                   joined by " · "):
+//                                   "<id> · <subject> · <predicate> · <object> · <source|-> · <filedAt>"
 //   moot_read_journal               "journal for <agent>: N entry(s)" then "[<iso>]  <entry>"
 //   moot_memory_search              NOT text-parsed: the reply's structuredContent
-//                                   rows ({id, room, content, subject}) are decoded
-//                                   by StructuredRecallResults (MootIntentKit) —
+//                                   rows ({id, subject, bestSpan?, sscFacts?,
+//                                   eventTime, score, room?}; content only at
+//                                   memory-get depths) are decoded by
+//                                   CommunityStructuredRecallResults, the twin of
+//                                   StructuredRecallResults (MootIntentKit) —
 //                                   drawer content is caller-controlled, so the
 //                                   display text is never a source of drawer data.
 //
@@ -99,24 +124,6 @@ enum ReviewLineParsing {
     /// Both are written with a plain `ISO8601DateFormatter`, no fractional seconds.
     static func instant(_ raw: String) -> Date? {
         ISO8601DateFormatter().date(from: raw)
-    }
-
-    /// Text between the first `[` and the following `]`, and the remainder after
-    /// it.
-    ///
-    /// Sole caller: the SUBJECT field in `facts(_:_:)`. First-`]` matching, which
-    /// is correct for subjects — every subject the KG surfaces emit is a short
-    /// slug (`ce-release`, `forge_v10`, `aria`). It would TRUNCATE a subject
-    /// containing a literal `]`; no such subject has been observed on a real
-    /// estate. Object values are different — they are free text and do carry
-    /// brackets — which is why `facts(_:_:)` reads the object with its own
-    /// last-`]` span instead of calling this. The asymmetry is deliberate; if a
-    /// bracket-bearing subject ever appears, this helper is the place to fix.
-    private static func bracketed(_ line: Substring) -> (inner: String, rest: Substring)? {
-        guard let open = line.firstIndex(of: "["),
-              let close = line[open...].firstIndex(of: "]") else { return nil }
-        return (String(line[line.index(after: open)..<close]),
-                line[line.index(after: close)...])
     }
 
     // MARK: theme_weather
@@ -296,41 +303,53 @@ enum ReviewLineParsing {
 
     // MARK: fact_search
 
-    /// Active KG facts. `<id>  [<subject>] <predicate> [<object>]  filed=<iso>  source=<s>`.
+    /// Active KG facts, the S4 row: `<id> · <subject> · <predicate> · <object>
+    /// · <source|-> · <filedAt>`. The composer normalizes all six S4 columns so
+    /// embedded newlines and middle dots are mapped out before the row is
+    /// emitted. The dual-ended parser (three columns from the left, two from the
+    /// right, the rest is the object) is retained as defence in depth against
+    /// unnormalized producers; it also handles a separator embedded in the
+    /// object of any legacy unnormalized row.
     static func facts(_ text: String, _ context: ReviewProvenanceContext) -> [ReviewItem] {
         var items: [ReviewItem] = []
         for line in text.split(separator: "\n", omittingEmptySubsequences: false) {
-            // Skip the "facts: N" / "facts matching …" header:
-            // only fact rows carry a bracketed subject.
-            guard line.contains("  ["), let (subject, rest) = bracketed(line) else { continue }
-            let factID = String(line.prefix { !$0.isWhitespace })
-            guard !factID.isEmpty else { continue }
-            // Remainder is " <predicate> [<object>]  filed=…  source=…". Cut the
-            // trailing metadata off first, then read the object from its first `[`
-            // to the LAST `]` in what remains — object values are free text and do
-            // contain brackets (estate rows carry values like
-            // "[a_verb_applied_to_a_noun]"), which a first-`]` scan would truncate.
-            let head = rest.range(of: "  filed=")
-                .map { String(rest[rest.startIndex..<$0.lowerBound]) } ?? String(rest)
-            let predicate = head
-                .prefix { $0 != "[" }
-                .trimmingCharacters(in: .whitespaces)
-            var object = ""
-            if let open = head.firstIndex(of: "["), let close = head.lastIndex(of: "]"),
-               open < close {
-                object = String(head[head.index(after: open)..<close])
-            }
-            let body = line.trimmingCharacters(in: .whitespaces)
+            // The header ("found N facts, one per line") has no separator.
+            guard let row = S4FactRow(String(line)) else { continue }
             items.append(ReviewItem(
                 id: ReviewItem.makeID(
-                    surface: context.surface, subjectID: factID, ordinal: items.count),
-                title: subject,
-                detail: object.isEmpty ? predicate : "\(predicate) \(object)",
-                subjectID: factID,
-                occurredAt: field(body, key: "filed").flatMap(instant),
+                    surface: context.surface, subjectID: row.id, ordinal: items.count),
+                title: row.subject,
+                detail: row.object.isEmpty ? row.predicate : "\(row.predicate) \(row.object)",
+                subjectID: row.id,
+                occurredAt: instant(row.filedAt),
                 provenance: context.provenance(line: String(line))))
         }
         return items
+    }
+
+    /// One `moot_fact_search` row split into its six columns.
+    struct S4FactRow: Equatable {
+        static let separator = " · "
+        let id: String
+        let subject: String
+        let predicate: String
+        let object: String
+        /// The source drawer id, nil when the column rendered `-`.
+        let source: String?
+        let filedAt: String
+
+        init?(_ line: String) {
+            let columns = line.components(separatedBy: Self.separator)
+            guard columns.count >= 6 else { return nil }
+            id = columns[0]
+            subject = columns[1]
+            predicate = columns[2]
+            object = columns[3..<(columns.count - 2)].joined(separator: Self.separator)
+            let sourceColumn = columns[columns.count - 2]
+            source = sourceColumn == "-" ? nil : sourceColumn
+            filedAt = columns[columns.count - 1]
+            guard !id.isEmpty, !filedAt.isEmpty else { return nil }
+        }
     }
 
     // MARK: read_journal
@@ -368,15 +387,17 @@ enum ReviewLineParsing {
             ReviewItem(
                 id: ReviewItem.makeID(
                     surface: context.surface, subjectID: drawer.id, ordinal: ordinal),
-                title: drawer.room,
-                detail: drawer.content,
+                // The room when the server resolved one, else the subject: a
+                // search row always carries the latter.
+                title: drawer.room ?? drawer.subject ?? drawer.id,
+                detail: drawer.excerpt,
                 subjectID: drawer.id,
                 // The structured recall row carries no filed instant.
                 occurredAt: nil,
                 // The audit record names the structured row the item came
                 // from — there is no response "line" for this surface.
                 provenance: context.provenance(
-                    line: "structured row: id=\(drawer.id) room=\(drawer.room) content=\(drawer.content)"))
+                    line: "structured row: id=\(drawer.id) room=\(drawer.room ?? "-") excerpt=\(drawer.excerpt)"))
         }
     }
 }

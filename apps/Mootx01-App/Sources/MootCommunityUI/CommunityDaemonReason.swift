@@ -4,7 +4,7 @@ import Foundation
 //
 // Human presentation for the resident daemon's machine reason codes.
 //
-// The Community 1.1 contract (contracts/community/1.1/contract.json,
+// The Community 1.1 contract (apps/mootx01/Contracts/community-1.1/contract.json,
 // `reasonCodes`) names refusal and failure causes as stable slugs
 // ("privacy-escalation", "lan-authority-missing", …). Those slugs are wire
 // vocabulary: the human-language acceptance law forbids showing them as the
@@ -161,6 +161,8 @@ public struct CommunityDaemonReason: Sendable, Equatable {
             String(localized: "The resident daemon is blocked and cannot complete this operation.")
         case "daemon-refused":
             String(localized: "The resident daemon refused the request without giving a specific reason.")
+        case "daemon-result-ambiguous":
+            String(localized: "The connection ended before the app received the result. The operation may already be complete; check your estate before trying again.")
         // App-side wire-adapter conditions (unreachable daemon or a response
         // that failed strict parsing — the adapters never guess a cause).
         case "daemon-unavailable", "daemon-unavailable-or-malformed",

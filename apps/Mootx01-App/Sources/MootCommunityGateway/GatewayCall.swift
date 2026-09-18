@@ -1,6 +1,18 @@
 import AriaMCPWire
 import Foundation
 
+/// Where a failed call was determined.
+///
+/// A transport failure does not prove whether the daemon applied a mutation:
+/// the response can be lost after commit. Recovering callers use this value to
+/// replay reads while returning an explicit ambiguous outcome for writes.
+public enum GatewayCallFailureDisposition: Sendable, Equatable {
+    case none
+    case server
+    case transport
+    case ambiguous
+}
+
 /// A daemon call's complete wire record, retained for truthful Community UI
 /// status and strict structured-response decoding.
 public struct GatewayCall: Sendable {
@@ -9,19 +21,22 @@ public struct GatewayCall: Sendable {
     public let text: String
     public let structured: JSONValue?
     public let isError: Bool
+    public let failureDisposition: GatewayCallFailureDisposition
 
     public init(
         requestJSON: String,
         responseJSON: String,
         text: String,
         structured: JSONValue?,
-        isError: Bool
+        isError: Bool,
+        failureDisposition: GatewayCallFailureDisposition = .none
     ) {
         self.requestJSON = requestJSON
         self.responseJSON = responseJSON
         self.text = text
         self.structured = structured
         self.isError = isError
+        self.failureDisposition = failureDisposition
     }
 }
 
@@ -37,7 +52,8 @@ package enum GatewayResponseDecoder {
             responseJSON: pretty(response.asJSONValue),
             text: text,
             structured: structured,
-            isError: isError
+            isError: isError,
+            failureDisposition: isError ? .server : .none
         )
     }
 
@@ -50,7 +66,8 @@ package enum GatewayResponseDecoder {
             responseJSON: "(\(note))",
             text: "",
             structured: nil,
-            isError: true
+            isError: true,
+            failureDisposition: .transport
         )
     }
 
@@ -64,7 +81,8 @@ package enum GatewayResponseDecoder {
             responseJSON: "(transport failure: \(reason))",
             text: reason,
             structured: nil,
-            isError: true
+            isError: true,
+            failureDisposition: .transport
         )
     }
 

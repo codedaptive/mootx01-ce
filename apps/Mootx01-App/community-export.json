@@ -20,20 +20,46 @@
     "apps/Mootx01-App/Tests/MootCommunityUITestSupport",
     "apps/Mootx01-App/Assets.xcassets",
     "apps/Mootx01-App/App/PrivacyInfo.xcprivacy",
-    "contracts/community/1.1",
+    "apps/mootx01/Contracts/community-1.1",
     "packages/apple/MootIntentKit/Package.resolved",
     "packages/apple/MootIntentKit/Sources/MootIntentCore",
-    "packages/apple/MootIntentKit/Tests/MootIntentCoreTests"
+    "packages/apple/MootIntentKit/Tests/MootIntentCoreTests",
+    "apps/mootx01/README.md",
+    "apps/mootx01/Package.resolved",
+    "apps/mootx01/rust",
+    "apps/mootx01/scripts",
+    "apps/mootx01/testdata",
+    "apps/mootx01/Sources/MootCommunityDaemon",
+    "apps/mootx01/Sources/MootCoreAIWorker",
+    "apps/mootx01/Sources/MootDaemonProvider",
+    "apps/mootx01/Sources/MootEstateOpen",
+    "apps/mootx01/Sources/MootFactExtractorActivation",
+    "apps/mootx01/Sources/MootInstallerCore",
+    "apps/mootx01/Sources/mootx01",
+    "apps/mootx01/Sources/mootx01-daemon",
+    "apps/mootx01/Sources/mootx01-daemon-contract-host",
+    "apps/mootx01/Tests/Fixtures",
+    "apps/mootx01/Tests/MootCommunityContractTests",
+    "apps/mootx01/Tests/MootCommunityDaemonTests",
+    "apps/mootx01/Tests/MootDaemonProviderTests",
+    "apps/mootx01/Tests/MootFactExtractorActivationTests",
+    "apps/mootx01/Tests/MootInstallerCoreTests",
+    "apps/mootx01/Tests/Mootx01CLITests"
   ],
   "rename": {
     "apps/Mootx01-App/COMMUNITY_README.md": "apps/Mootx01-App/README.md",
     "apps/Mootx01-App/Package.community.swift": "apps/Mootx01-App/Package.swift",
     "apps/Mootx01-App/project.community.yml": "apps/Mootx01-App/project.yml",
-    "packages/apple/MootIntentKit/Package.community.swift": "packages/apple/MootIntentKit/Package.swift"
+    "packages/apple/MootIntentKit/Package.community.swift": "packages/apple/MootIntentKit/Package.swift",
+    "apps/mootx01/Package.community.swift": "apps/mootx01/Package.swift"
   },
   "replace": [
     "apps/Mootx01-App",
-    "packages/apple/MootIntentKit"
+    "packages/apple/MootIntentKit",
+    "apps/mootx01",
+    "benchmarks",
+    "docs",
+    "tools/encoder-models"
   ],
   "remove": [
     "packages/apple/MootFoundationModelsKit"
@@ -45,7 +71,12 @@
     "packages/apple/MootIntentKit/Package.community.swift",
     "packages/apple/MootIntentKit/Sources/MootIntentKit",
     "packages/apple/MootIntentKit/Tests/MootIntentKitTests",
-    "packages/apple/MootFoundationModelsKit"
+    "packages/apple/MootFoundationModelsKit",
+    "apps/mootx01/Package.community.swift",
+    "apps/mootx01/Sources/MootDaemonFederation",
+    "apps/mootx01/Tests/MootDaemonFederationTests",
+    "apps/mootx01/Sources/MootProductDock",
+    "apps/mootx01/Tests/MootProductDockTests"
   ],
   "forbidden": [
     "apps/Mootx01-App/App/Mootx01App.swift",
@@ -72,6 +103,8 @@
     "packages/apple/MootIntentKit/Tests/MootIntentKitTests",
     "packages/apple/MootFoundationModelsKit",
     "apps/Mootx01-App/App/Mootx01-iOS.entitlements",
+    "apps/Mootx01-App/App/Mootx01-macOS.entitlements",
+    "apps/Mootx01-App/App/Mootx01-macOS-source.entitlements",
     "apps/Mootx01-App/App/Mootx01Shortcuts.swift",
     "apps/Mootx01-App/CustodyProof",
     "apps/Mootx01-App/DaemonHelper",
@@ -83,6 +116,11 @@
     "apps/Mootx01-App/scripts/export-community.sh",
     "apps/Mootx01-App/scripts/prove-macos-cross-install-custody.sh",
     "apps/Mootx01-App/scripts/prove-macos-daemon-helper.sh",
-    "packages/apple/MootIntentKit/README.md"
+    "packages/apple/MootIntentKit/README.md",
+    "apps/mootx01/Package.community.swift",
+    "apps/mootx01/Sources/MootDaemonFederation",
+    "apps/mootx01/Tests/MootDaemonFederationTests",
+    "apps/mootx01/Sources/MootProductDock",
+    "apps/mootx01/Tests/MootProductDockTests"
   ]
 }

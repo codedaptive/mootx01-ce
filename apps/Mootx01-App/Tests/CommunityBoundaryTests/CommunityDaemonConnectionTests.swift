@@ -17,6 +17,30 @@ struct CommunityDaemonConnectionTests {
         #expect(descriptor?.capabilities == Set(DaemonCapability.allCases))
     }
 
+    @Test("schema-3 decoder accepts the resident EE capability vocabulary")
+    func residentEECapabilitiesDecode() throws {
+        var object = try descriptorObject()
+        object["capabilities"] = [
+            "authenticated-first-party",
+            "federation-sync",
+            "product-dock",
+            "resident-estate",
+            "tool-surface",
+        ]
+
+        let descriptor = CommunityDaemonDescriptorFile.decode(
+            try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        )
+
+        #expect(descriptor?.capabilities == [
+            .authenticatedFirstParty,
+            .federationSync,
+            .productDock,
+            .residentEstate,
+            .toolSurface,
+        ])
+    }
+
     @Test("descriptor reader rejects widened and non-canonical records")
     func malformedDescriptorsFailClosed() throws {
         var extra = try descriptorObject()
@@ -65,7 +89,9 @@ struct CommunityDaemonConnectionTests {
         ]
         let forbidden = [
             "GatewayRuntime.shared.bridge",
-            "MootBridge.attachSQLite",
+            "MootBridge.attach(record:",
+            "MootBridge.attach(record",
+            "attach(record:",
             "MootBridge.attachInMemory",
             "ProductDockProcessLifecycle",
             "SQLiteStorage",
@@ -87,6 +113,15 @@ struct CommunityDaemonConnectionTests {
         }
         #expect(findings.isEmpty, "Community storage/dock boundary violations: \(findings)")
     }
+
+    // The resident-daemon layout assertions that used to sit here moved to
+    // Tests/MootGatewayTests/ResidentProductDockLayoutTests.swift. They read
+    // App/Mootx01App.swift, apps/mootx01/Sources/MootProductDock/ and the full
+    // project.yml — none of which exist in a Community checkout, so they could
+    // only ever fail there. This suite is copied to Community; that one is not.
+    // The Community half of the same invariant is proved by
+    // `communitySourceBoundary` above, which reads only sources Community
+    // actually ships.
 
     @Test("Community release entitlement uses the daemon custody App Group")
     func communityReleaseUsesTeamPrefixedCustodyGroup() throws {
@@ -132,10 +167,17 @@ struct CommunityDaemonConnectionTests {
         ))
     }
 
+    // The generated-target App Group sweep also moved to
+    // ResidentProductDockLayoutTests: it enumerates six EE macOS targets, and
+    // Community's project.yml declares five Community ones. The Community
+    // release entitlement is covered by
+    // `communityReleaseUsesTeamPrefixedCustodyGroup` above, which reads
+    // CommunityApp/Mootx01-Community-macOS.entitlements.
+
     @Test("compiled Community contract identity matches the frozen bundle")
     func compiledContractIdentityMatchesFrozenBundle() throws {
         let contractRoot = repositoryRoot()
-            .appendingPathComponent("contracts/community/1.1", isDirectory: true)
+            .appendingPathComponent("apps/mootx01/Contracts/community-1.1", isDirectory: true)
         let contractData = try Data(contentsOf: contractRoot.appendingPathComponent("contract.json"))
         let contract = try #require(
             JSONSerialization.jsonObject(with: contractData) as? [String: Any]
@@ -206,7 +248,7 @@ struct CommunityDaemonConnectionTests {
 
     private func identityFixture(caseID: String, digest: String? = nil) throws -> JSONValue {
         let fixtureURL = repositoryRoot()
-            .appendingPathComponent("contracts/community/1.1/fixtures/identity.json")
+            .appendingPathComponent("apps/mootx01/Contracts/community-1.1/fixtures/identity.json")
         let fixture = try #require(
             JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as? [String: Any]
         )
