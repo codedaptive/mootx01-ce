@@ -82,7 +82,6 @@ let package = Package(
         ),
         .package(name: "LocusKit", path: "../../packages/kits/LocusKit"),
         .package(name: "FactExtractionKit", path: "../../packages/kits/FactExtractionKit"),
-        .package(name: "MootFoundationModelsKit", path: "../../packages/apple/MootFoundationModelsKit"),
         // SynapseKit + SubstrateKernel: the span-encode and vector-reclaim
         // steps of `mootx01 upgrade` write encoder span rows
         // (VectorStore.writeSpanVectors, Int8Vec.quantize) and reclaim the
@@ -180,7 +179,6 @@ let package = Package(
                 .product(name: "FactExtractionKit", package: "FactExtractionKit"),
                 .product(name: "FactExtractionKitProviders", package: "FactExtractionKit"),
                 .product(name: "GeniusLocusKit", package: "GeniusLocusKit"),
-                .product(name: "MootFoundationModelsKit", package: "MootFoundationModelsKit"),
             ],
             path: "Sources/MootFactExtractorActivation"
         ),
