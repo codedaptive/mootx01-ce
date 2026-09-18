@@ -1,0 +1,77 @@
+{
+  "model_id": "arctic-embed-s-w60",
+  "model_version": "e596f507467533e48a2e17c007f0e1dacc837b33",
+  "dim": 384,
+  "pooling": "cls",
+  "query_prefix": "Represent this sentence for searching relevant passages: ",
+  "doc_prefix": "",
+  "window_words": 60,
+  "overlap_divisor": 2,
+  "max_spans": 32,
+  "max_sequence": 512,
+  "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+  "files": [
+    {
+      "path": "ArcticEmbedS.mlmodelc",
+      "sha256": "6c44eca8a3347ed5a20fb7c22d4fd08ea58d4422e3fbadc963db28fdb42aef42",
+      "type": "mlmodelc_dir"
+    },
+    {
+      "path": "vocab.txt",
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  ],
+  "ext": {
+    "hf_repo": "Snowflake/snowflake-arctic-embed-s",
+    "hf_revision": "e596f507467533e48a2e17c007f0e1dacc837b33",
+    "source": "huggingface-pinned-revision",
+    "source_manifest_sha256": "cc50d6e47ee27b1e188badb7a3a3f3ce94337e593e4231cbc48411b0067d9fdf",
+    "source_files": {
+      "config.json": "4e519aa92ec40943356032afe458c8829d70c5766b109e4a57490b82f72dcfb7",
+      "tokenizer.json": "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854",
+      "model.safetensors": "0350e62666ee2403db0223fc7cef6293c951cc63d1d2e71468da9a5aea3b544a",
+      "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    },
+    "coreml_compute_units": "all",
+    "coreml_compute_precision": "float32",
+    "coreml_output": {
+      "name": "last_hidden_state",
+      "dtype": "float32"
+    },
+    "coreml_deployment_target": "macOS15",
+    "directory_hash_algorithm": "mootx01-directory-sha256-v1",
+    "artifacts": {
+      "mlpackage": {
+        "path": "ArcticEmbedS.mlpackage",
+        "sha256": "f2562ddc574abfccb3a792a845c0bbc48982cef2efd2e44bf88c9f86e9daac81",
+        "size_bytes": 133767469,
+        "role": "conversion_intermediate_not_shipped"
+      },
+      "mlmodelc": {
+        "path": "ArcticEmbedS.mlmodelc",
+        "size_bytes": 133779183,
+        "role": "shipped"
+      }
+    },
+    "converter_script_sha256": "d4b322f8388d5722ebca90bdb22d8d3bd48da0fc8c8c7009cfe741281b782d93",
+    "tools": {
+      "python": "3.11.16",
+      "coremltools": "9.0",
+      "numpy": "1.26.4",
+      "torch": "2.7.0",
+      "transformers": "4.51.3",
+      "xcode": {
+        "version": "Xcode 27.0",
+        "build_version": "Build version 27A5218g",
+        "developer_dir": "/Applications/Xcode-beta.app/Contents/Developer",
+        "warnings": []
+      },
+      "coremlcompiler": {
+        "path": "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/coremlcompiler",
+        "sha256": "946fca15b0ea36e51d675a50fc1d846fa338d8241cd3944e3d3e203762e40d81",
+        "discovery_warnings": [],
+        "compile_warnings": []
+      }
+    }
+  }
+}

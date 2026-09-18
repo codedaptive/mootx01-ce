@@ -1,0 +1,29 @@
+{
+  "kind": "fact_extractor",
+  "model_id": "numind/NuExtract-1.5-tiny",
+  "model_version": "63e2e80c804d9c97f3f19a4aa25613e7beca83c9",
+  "architecture": "qwen2",
+  "maximum_input_characters": 12000,
+  "maximum_facts": 16,
+  "maximum_new_tokens": 1024,
+  "tokenizer_hash": "2b613fea6970a5467a1d30df270257b34bab9b86ade3d75d98f6c08f08c48656",
+  "files": [
+    {
+      "path": "nuextract-tiny-v1.5-v11s-8k-b1-q8.aimodel",
+      "sha256": "9b9af04fbd8be8bd8d71c3caf3643f059520f7708ea7a4ba8373da16b2a5fd34",
+      "type": "directory"
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "2b613fea6970a5467a1d30df270257b34bab9b86ade3d75d98f6c08f08c48656"
+    }
+  ],
+  "ext": {
+    "hf_repo": "numind/NuExtract-1.5-tiny",
+    "hf_revision": "63e2e80c804d9c97f3f19a4aa25613e7beca83c9",
+    "runtime": "CoreAI",
+    "asset_version": "2.0",
+    "asset_variant": "v11s-8k-b1-q8",
+    "directory_hash_algorithm": "mootx01-directory-sha256-v1"
+  }
+}

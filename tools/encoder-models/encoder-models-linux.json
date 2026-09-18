@@ -1,0 +1,36 @@
+{
+  "model_id": "arctic-embed-s-w60",
+  "model_version": "e596f507467533e48a2e17c007f0e1dacc837b33",
+  "dim": 384,
+  "pooling": "cls",
+  "query_prefix": "Represent this sentence for searching relevant passages: ",
+  "doc_prefix": "",
+  "window_words": 60,
+  "overlap_divisor": 2,
+  "max_spans": 32,
+  "max_sequence": 512,
+  "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+  "files": [
+    {
+      "path": "config.json",
+      "sha256": "4e519aa92ec40943356032afe458c8829d70c5766b109e4a57490b82f72dcfb7"
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854"
+    },
+    {
+      "path": "model.safetensors",
+      "sha256": "0350e62666ee2403db0223fc7cef6293c951cc63d1d2e71468da9a5aea3b544a"
+    },
+    {
+      "path": "vocab.txt",
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  ],
+  "ext": {
+    "hf_repo": "Snowflake/snowflake-arctic-embed-s",
+    "hf_revision": "e596f507467533e48a2e17c007f0e1dacc837b33",
+    "source": "huggingface-pinned-revision"
+  }
+}
