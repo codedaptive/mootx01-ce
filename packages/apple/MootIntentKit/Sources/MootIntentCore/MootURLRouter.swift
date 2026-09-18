@@ -145,12 +145,30 @@ public struct MootURLRouter: Sendable {
 
         // Callback-scheme gate: only build a return URL if the callback's
         // scheme is in the host-configured allowlist.
+        let rendered = Self.rendered(result)
         let returnURL = callbackBase.flatMap { base -> URL? in
             guard let scheme = URLComponents(string: base)?.scheme,
                   permittedCallbackSchemes.contains(scheme) else { return nil }
-            return Self.appendResult(to: base, result: result.text)
+            return Self.appendResult(to: base, result: rendered)
         }
-        return .routed(returnURL: returnURL, resultText: result.text, isError: result.isError)
+        return .routed(returnURL: returnURL, resultText: rendered, isError: result.isError)
+    }
+
+    /// The text a callback carries. ARIA v2 answers with a one-line compact
+    /// text and the rows in `structuredContent`, so the rows are rendered
+    /// after it, one line each as `memory_id · subject`, in the server's
+    /// order; a reply without rows is its compact text alone. Rendering reads
+    /// the structured rows only, never the text block, for the reason
+    /// `StructuredRecallResults` gives.
+    static func rendered(_ result: IntentCallResult) -> String {
+        let data = result.structured?.objectValue?["data"]?.objectValue
+        let rows = data?["results"]?.arrayValue ?? data?["memories"]?.arrayValue ?? []
+        let lines = rows.compactMap { row -> String? in
+            guard let object = row.objectValue, let id = object["memory_id"]?.stringValue else { return nil }
+            if let subject = object["subject"]?.stringValue { return "\(id) · \(subject)" }
+            return id
+        }
+        return lines.isEmpty ? result.text : ([result.text] + lines).joined(separator: "\n")
     }
 
     /// Append the result to a caller-supplied x-callback return URL as a

@@ -119,7 +119,9 @@ struct BridgeAcceptanceTests {
 
         // --- id6: read AFTER swap is answered by mootx01 -------------------
         let secondaryReadText = try resultText(byID[6])
-        #expect(secondaryReadText.contains(token))
+        // ARIA v2 answers with a one-line compact text; the token sits in the
+        // structured rows, which `directMootx01HasToken` reads below.
+        #expect(!secondaryReadText.contains("found 0"))
         // mootText shape proves mootx01 answered (not MemPalace JSON): the
         // "found N candidate ..." header and the one-line-per-hit rows.
         #expect(secondaryReadText.contains("found 1 candidate memory"))
@@ -143,14 +145,15 @@ struct BridgeAcceptanceTests {
         // the map lists the room and its memory count.
         let map = try directMootx01EstateMap(dataDir: mootDir)
         // After the M5-2 fix, constantArgs sends wing="scratch" + location="notes"
-        // (room "notes" inside wing "scratch"). The estate map renders this as
-        // "scratch/" (wing header) + "    notes: 1" (room count line).
+        // (room "notes" inside wing "scratch"). The ARIA v2 estate map answers
+        // with structured wings, each with its rooms and their memory counts;
+        // the raw reply carries the wing name, the room name and the count.
         // A bare location: "scratch/notes" produces room "scratch/notes" under
         // the default "Agentic Memory" wing — the bug this assertion detects.
-        #expect(map.contains("scratch/"),
+        #expect(map.contains("\"scratch\""),
                 "mirrored write must land in wing 'scratch': \(map)")
-        #expect(map.contains("notes: 1"),
-                "mirrored write must land in room 'notes': \(map)")
+        #expect(map.contains("\"notes\"") && map.contains("\"memory_count\":1"),
+                "mirrored write must land in room 'notes' with one memory: \(map)")
 
         // --- The stats store contains BOTH backends' series ----------------
         let series = try statsStoreSeries(at: statsPath)
