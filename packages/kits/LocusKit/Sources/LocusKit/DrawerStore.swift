@@ -717,6 +717,26 @@ public actor DrawerStore {
         return result
     }
 
+    /// All non-tombstoned drawers filed directly under one container node,
+    /// a room or a chest, in the room read's order (ADR-026, spec § 12).
+    /// The per-chest read the anomaly sweep scores from; a room read is the
+    /// union of these over the room and its chests.
+    public func drawersIn(parentNodeId: String) async throws -> [Drawer] {
+        let (rows, _) = try await storage.rowStore.querySkipCorrupt(
+            table: "drawers",
+            where: .and([
+                .eq(Column(table: "drawers", name: "parent_node_id"), .text(parentNodeId)),
+                .isNull(Column(table: "drawers", name: "tombstonedAt"))
+            ]),
+            orderBy: [
+                OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
+                OrderClause(column: Column(table: "drawers", name: "content"), direction: .ascending),
+            ],
+            limit: nil, offset: nil, columns: nil
+        )
+        return try decodeDrawerRowsResilient(rows, scan: "drawersIn(parentNodeId:)")
+    }
+
     /// All non-tombstoned drawers in a wing/room pair, ordered by filedAt.
     ///
     /// Resolves via the node tree: finds the room node by lookup_name

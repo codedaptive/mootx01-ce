@@ -158,7 +158,7 @@ struct AnomalyFlagSweepTests {
         let outlier = try await captureInRoom(content: Self.outlierContent, kit: kit, handle: handle)
 
         // Never scored: the room is owed.
-        let owedBefore = try await kit.anomalySweepOwedRooms(handle, now: t0)
+        let owedBefore = try await kit.anomalySweepOwedContainers(handle, now: t0)
         #expect(owedBefore.contains { $0.wing == Self.wing && $0.room == Self.room })
         #expect(try await kit.dutyDebt(.anomalySweep, in: handle, now: t0) == owedBefore.count)
 
@@ -174,7 +174,7 @@ struct AnomalyFlagSweepTests {
 
         // A write into the room makes exactly that room owed again.
         _ = try await captureInRoom(content: Self.cohortContents[0], kit: kit, handle: handle)
-        let owedAfter = try await kit.anomalySweepOwedRooms(handle, now: t0.addingTimeInterval(1))
+        let owedAfter = try await kit.anomalySweepOwedContainers(handle, now: t0.addingTimeInterval(1))
         #expect(owedAfter.count == 1)
         #expect(owedAfter.first?.room == Self.room)
     }
@@ -194,7 +194,7 @@ struct AnomalyFlagSweepTests {
         // `roomLevelFingerprints()` entirely — a room with zero remaining
         // drawers would not be a fair test of "still-owed", since an absent
         // room is filtered out of the owed list by construction (step 2 of
-        // `anomalySweepOwedRooms` only ever reports rooms the fingerprint
+        // `anomalySweepOwedContainers` only ever reports rooms the fingerprint
         // store still knows about).
         var roomADrawers: [Drawer] = []
         for content in Self.cohortContents {
@@ -218,17 +218,17 @@ struct AnomalyFlagSweepTests {
 
         // Settle all debt before the move so the owed set below reflects
         // ONLY what the move itself (not the initial captures) creates.
-        let owedInitially = try await kit.anomalySweepOwedRooms(handle, now: t0)
+        let owedInitially = try await kit.anomalySweepOwedContainers(handle, now: t0)
         _ = try await kit.runAnomalySweepBatch(handle, limit: owedInitially.count, now: t0)
-        #expect(try await kit.anomalySweepOwedRooms(handle, now: t0).isEmpty)
+        #expect(try await kit.anomalySweepOwedContainers(handle, now: t0).isEmpty)
 
         // Move one drawer out of room A into a brand-new room. Before the F4
-        // fix, `anomalySweepOwedRooms` read only the drawer's CURRENT (post-
+        // fix, the owed read only used the drawer's CURRENT (post-
         // move) parentNodeId off the audit-touched row, so only the
         // destination room was ever dirtied — room A's now-changed cohesion
         // peer set was silently skipped.
         try await kit.reanchor(handle, ReanchorFrame(rowID: mover.id, toRoom: destinationRoom))
-        let owedAfterMove = try await kit.anomalySweepOwedRooms(handle, now: t0.addingTimeInterval(1))
+        let owedAfterMove = try await kit.anomalySweepOwedContainers(handle, now: t0.addingTimeInterval(1))
         let owedKeys = Set(owedAfterMove.map { $0.wing + "/" + $0.room })
         #expect(owedKeys.contains(Self.wing + "/" + Self.room), "the room the drawer LEFT must be owed")
         #expect(owedKeys.contains(Self.wing + "/" + destinationRoom), "the room the drawer JOINED must be owed")
@@ -236,14 +236,14 @@ struct AnomalyFlagSweepTests {
         // Settle again so the expunge half below starts from zero debt.
         _ = try await kit.runAnomalySweepBatch(
             handle, limit: owedAfterMove.count, now: t0.addingTimeInterval(1))
-        #expect(try await kit.anomalySweepOwedRooms(handle, now: t0.addingTimeInterval(1)).isEmpty)
+        #expect(try await kit.anomalySweepOwedContainers(handle, now: t0.addingTimeInterval(1)).isEmpty)
 
         // Expunging a drawer must owe its (unchanged) room — no reanchor
         // involved, so the existing audit-fold path already resolves the
         // CURRENT parentNodeId correctly; this pins that it stays correct.
         _ = try await kit.expunge(handle, ExpungeFrame(
             rowID: toExpunge.id, reason: "F4 test expunge", confirmation: true))
-        let owedAfterExpunge = try await kit.anomalySweepOwedRooms(handle, now: t0.addingTimeInterval(2))
+        let owedAfterExpunge = try await kit.anomalySweepOwedContainers(handle, now: t0.addingTimeInterval(2))
         #expect(
             owedAfterExpunge.contains { $0.wing == Self.wing && $0.room == Self.room },
             "expunging a drawer must owe the room it was filed in"

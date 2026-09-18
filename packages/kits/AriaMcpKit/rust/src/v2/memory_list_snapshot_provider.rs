@@ -198,9 +198,17 @@ fn project_entry(
     // general TEXT drawer key: a non-UUID key makes the complete v2 inventory
     // unavailable rather than being skipped or fabricated.
     let memory_id = Uuid::parse_str(&entry.drawer.id).map_err(|_| inventory_unavailable())?;
-    let room = nodes
-        .get(&entry.drawer.parent_room_id)
+    // The parent is the room, or a chest under it (ADR-026): the public
+    // inventory names rooms, so a chest parent hops to its room.
+    let parent = nodes
+        .get(&entry.drawer.parent_node_id)
         .ok_or_else(inventory_unavailable)?;
+    let room = if parent.depth == 3 {
+        let room_id = parent.parent_id.ok_or_else(inventory_unavailable)?;
+        nodes.get(&room_id).ok_or_else(inventory_unavailable)?
+    } else {
+        parent
+    };
     let wing_id = room.parent_id.ok_or_else(inventory_unavailable)?;
     let wing = nodes.get(&wing_id).ok_or_else(inventory_unavailable)?;
     let root_id = wing.parent_id.ok_or_else(inventory_unavailable)?;
