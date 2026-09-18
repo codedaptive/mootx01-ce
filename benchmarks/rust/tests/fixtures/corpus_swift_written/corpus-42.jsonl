@@ -1,0 +1,11 @@
+{"content":"the Quillon Charter was chartered in the year 1926.","id":"n0000","location":"Ledger/quillon-charter","needleID":"n0000","role":"needle","tier":"T1"}
+{"content":"the Quillon Charter operates a fleet numbering exactly 392 vessels.","id":"n0000-t1-0","location":"Ledger/quillon-charter","needleID":"n0000","role":"distractor","tier":"T1"}
+{"content":"Fenmark Atelier is headquartered in the district of Ostry.","id":"n0001","location":"Charter/fenmark-atelier","needleID":"n0001","role":"needle","tier":"T2"}
+{"content":"Records indicate that Fenmark Atelier, as to its headquarters district, shows Brenne.","id":"n0001-t2-0","location":"Charter/fenmark-atelier","needleID":"n0001","role":"distractor","tier":"T2"}
+{"content":"the Marrowgate Trust is headquartered in the district of Brenne. (current as of 2023)","id":"n0002","location":"Charter/marrowgate-trust","needleID":"n0002","role":"needle","tier":"T3"}
+{"content":"the Marrowgate Trust is headquartered in the district of Cawl. (superseded; recorded 2009)","id":"n0002-t3-0","location":"Charter/marrowgate-trust","needleID":"n0002","role":"distractor","tier":"T3"}
+{"content":"the Ashfen Protocol records its charter year under reference REF-0934; see the matching reference entry for the value.","id":"n0003","location":"Ledger/ashfen-protocol","needleID":"n0003","role":"needle","tier":"T4"}
+{"content":"Reference REF-0934: the charter year is 1854.","id":"n0003-partner","location":"Ledger/ashfen-protocol","needleID":"n0003","role":"splitPartner","tier":"T4"}
+{"content":"Reference REF-6889: the charter year is 1993.","id":"n0003-t4-0","location":"Ledger/ashfen-protocol","needleID":"n0003","role":"distractor","tier":"T4"}
+{"content":"Mirelle Station is governed by the steward named Oren Vask.","id":"n0004","location":"Ledger/Outpost-349","needleID":"n0004","role":"needle","tier":"T5"}
+{"content":"Mirelle Station is governed by the steward named Nessa Pyke.","id":"n0004-t5-0","location":"Steward/mirelle-station","needleID":"n0004","role":"distractor","tier":"T5"}
