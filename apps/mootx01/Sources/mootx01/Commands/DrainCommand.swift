@@ -167,7 +167,9 @@ struct DrainCommand: AsyncParsableCommand {
         // The settle loop per row-debt duty (§ DUTY_LIFECYCLE): enqueue and
         // drain until the lane owes nothing or a batch pays nothing. One
         // progress line per batch so a script can watch it move.
-        for kind in [DutyKind.spanEncode, .subjectBackfill, .anomalySweep, .factExtraction] {
+        // The re-bin settles before the sweep so no container the sweep
+        // would skip (at or above capacity) is left standing (ADR-026).
+        for kind in [DutyKind.spanEncode, .subjectBackfill, .chestRebin, .anomalySweep, .factExtraction] {
             do {
                 _ = try await kit.payDutyUntilSettled(kind, in: handle, now: Date()) { report in
                     Logging.stderr.log(

@@ -218,7 +218,7 @@ pub fn run_one_dreaming_cycle(
         Ok(mut coord) => {
             use genius_locus_kit::brain::duty_queue::DutyKind;
             let now_ms = (now_epoch_secs * 1000.0) as i64;
-            for kind in [DutyKind::SubjectBackfill, DutyKind::SpanEncode, DutyKind::AnomalySweep] {
+            for kind in [DutyKind::SubjectBackfill, DutyKind::SpanEncode, DutyKind::ChestRebin, DutyKind::AnomalySweep] {
                 if let Err(error) = coord.enqueue_duty(&handle, kind, now_ms) {
                     eprintln!("mootx01 dream: {} enqueue error: {error:?}", kind.wire_name());
                     continue;

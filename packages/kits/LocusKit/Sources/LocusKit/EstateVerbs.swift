@@ -545,6 +545,35 @@ public extension Estate {
         return ranges
     }
 
+    /// The room's containers with live drawer counts, in key order: its
+    /// chests, and the room itself first (low key zero) when drawers are
+    /// filed directly on it, which is every room never re-binned and, for a
+    /// moment, a room a capture reached while a re-bin ran. The unit the
+    /// anomaly sweep scores and the re-bin duty measures against
+    /// `ChestPlacement.capacity`. Empty for an absent or empty room.
+    public func containers(in wing: String, room: String) async throws -> [ChestRange] {
+        guard let roomNode = try await existingRoomNode(wing: wing, room: room) else { return [] }
+        var ranges: [ChestRange] = []
+        let direct = try await store.storage.rowStore.count(
+            table: "drawers",
+            where: .and([
+                .eq(Column(table: "drawers", name: "parent_node_id"), .text(roomNode.id.uuidString)),
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            ]))
+        if direct > 0 {
+            ranges.append(ChestRange(chestNodeId: roomNode.id.uuidString,
+                                     lowKey: MortonKey(words: [UInt64](repeating: 0, count: 8)), count: direct))
+        }
+        ranges.append(contentsOf: try await chests(in: wing, room: room))
+        return ranges
+    }
+
+    /// The live drawers filed directly under one container, a room or a
+    /// chest (spec § 12). The per-container read the anomaly sweep scores.
+    public func drawersIn(containerNodeId: String) async throws -> [Drawer] {
+        try await store.drawersIn(parentNodeId: containerNodeId)
+    }
+
     /// Re-bin a room: every live drawer in the room's subtree is keyed by
     /// its content (ADR-026 D2), sorted, and dealt into ⌈n / fill⌉ chests
     /// named by their low keys; the drawer moves land in one transaction

@@ -16,17 +16,24 @@ public struct DutyLimits: Sendable, Equatable {
     /// exceed the extractor's request timeout, otherwise a slow call can be
     /// claimed twice.
     public var factSourceLeaseSeconds: Int
-    /// Rooms scored per anomaly-sweep batch (each room is O(n²) in its size).
-    public var anomalySweepRooms: Int
+    /// Containers scored per anomaly-sweep batch (ADR-026: a chest is at
+    /// most 500 drawers; a first scoring is at most 250 000 pairs, every
+    /// later write is linear).
+    public var anomalySweepChests: Int
+    /// Rooms re-binned per chest-rebin batch (a re-bin is one sort and one
+    /// transaction).
+    public var chestRebinBatch: Int
 
     public init(factExtractionBatch: Int = 16,
                 subjectBackfillBatch: Int = 32,
                 factSourceLeaseSeconds: Int = 120,
-                anomalySweepRooms: Int = 8) {
+                anomalySweepChests: Int = 8,
+                chestRebinBatch: Int = 1) {
         self.factExtractionBatch = max(1, factExtractionBatch)
         self.subjectBackfillBatch = max(1, subjectBackfillBatch)
         self.factSourceLeaseSeconds = max(1, factSourceLeaseSeconds)
-        self.anomalySweepRooms = max(1, anomalySweepRooms)
+        self.anomalySweepChests = max(1, anomalySweepChests)
+        self.chestRebinBatch = max(1, chestRebinBatch)
     }
 
     /// The limits the product settings module carries (`duties` object).
@@ -34,7 +41,8 @@ public struct DutyLimits: Sendable, Equatable {
         self.init(factExtractionBatch: settings.dutyFactExtractionBatch,
                   subjectBackfillBatch: settings.dutySubjectBackfillBatch,
                   factSourceLeaseSeconds: settings.dutyFactSourceLeaseSeconds,
-                  anomalySweepRooms: settings.dutyAnomalySweepRooms)
+                  anomalySweepChests: settings.dutyAnomalySweepChests,
+                  chestRebinBatch: settings.dutyChestRebinBatch)
     }
 }
 

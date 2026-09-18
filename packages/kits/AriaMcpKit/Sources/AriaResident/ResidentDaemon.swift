@@ -793,8 +793,8 @@ public enum AriaResident {
                     // scheduler clock is the deterministic `now` it passes.
                     anomalyCycle: { now in
                         // Enqueue only (§ DUTY_LIFECYCLE): the anomaly duty
-                        // worker scores owed rooms off the tick, and only the
-                        // rooms touched since their last scoring.
+                        // worker scores owed containers off the tick, and only
+                        // the containers touched since their last scoring.
                         _ = try await kit.enqueueDuty(.anomalySweep, in: handle, now: now)
                         return 0
                     },
@@ -907,6 +907,7 @@ public enum AriaResident {
             (DutyKind.spanEncode, SpanEncodeSignal.defaultCadenceSeconds, true),
             (DutyKind.subjectBackfill, dutyCadence, true),
             (DutyKind.factExtraction, dutyCadence, true),
+            (DutyKind.chestRebin, dutyCadence, true),
             (DutyKind.anomalySweep, dutyCadence, true),
             (DutyKind.factsBackfill, SpanEncodeSignal.defaultCadenceSeconds, false),
             (DutyKind.retrainBasis, SpanEncodeSignal.defaultCadenceSeconds, false),

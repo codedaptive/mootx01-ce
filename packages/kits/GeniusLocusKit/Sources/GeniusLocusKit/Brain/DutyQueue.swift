@@ -13,6 +13,8 @@
 //   duty-facts-backfill   one pass of `backfillSSCFacts`
 //   duty-fact-extraction  one batch of `runFactExtractionBatch`
 //   duty-retrain-basis    one `reindexCorpus`
+//   duty-anomaly-sweep    one batch of `runAnomalySweepBatch` (containers)
+//   duty-chest-rebin      one batch of `runChestRebinBatch` (rooms)
 //
 // A duty job means "pay one batch of this estate's debt for this duty". The
 // debt predicate (bit 27 clear, subject NULL, ssc_facts NULL, bit 28 clear)
@@ -49,16 +51,21 @@ public enum DutyKind: String, CaseIterable, Sendable, Codable {
     case factsBackfill = "facts-backfill"
     case factExtraction = "fact-extraction"
     case retrainBasis = "retrain-basis"
-    /// Room-cohesion anomaly scoring for rooms touched since their last
-    /// scoring (AnomalyFlagSweep.swift); debt is the owed-room count.
+    /// Container-cohesion anomaly scoring for containers touched since
+    /// their last scoring (AnomalyFlagSweep.swift); debt is the owed
+    /// container count.
     case anomalySweep = "anomaly-sweep"
+    /// Whole-room re-bin of rooms holding a container at or above
+    /// `ChestPlacement.capacity` (ChestRebin.swift); debt is the owed room
+    /// count. ADR-026.
+    case chestRebin = "chest-rebin"
 
     /// The QueueKit stream this duty's jobs ride.
     public var streamID: StreamID { StreamID(rawValue: "duty-" + rawValue) }
 
     /// Duties whose debt the resident pays on its own cadence. The retrain is
     /// requested by the dreaming theta hook and the upgrade, never inferred.
-    public static let residentDuties: [DutyKind] = [.spanEncode, .subjectBackfill, .factExtraction, .anomalySweep]
+    public static let residentDuties: [DutyKind] = [.spanEncode, .subjectBackfill, .factExtraction, .chestRebin, .anomalySweep]
 }
 
 /// What one `drainDuty` call did.
@@ -118,7 +125,9 @@ public extension GeniusLocusKit {
             // Rejected is settled (bits 28 and 29): reported, never owed.
             return state.runnable + state.inFlight + state.retrying + state.blocked
         case .anomalySweep:
-            return try await anomalySweepOwedRooms(handle, now: now).count
+            return try await anomalySweepOwedContainers(handle, now: now).count
+        case .chestRebin:
+            return try await chestRebinOwedRooms(handle).count
         case .factsBackfill, .retrainBasis:
             return 0
         }
@@ -328,7 +337,9 @@ public extension GeniusLocusKit {
             try await reindexCorpus(handle: handle, now: now)
             return 1
         case .anomalySweep:
-            return try await runAnomalySweepBatch(handle, limit: dutyLimits(for: handle).anomalySweepRooms, now: now)
+            return try await runAnomalySweepBatch(handle, limit: dutyLimits(for: handle).anomalySweepChests, now: now)
+        case .chestRebin:
+            return try await runChestRebinBatch(handle, limit: dutyLimits(for: handle).chestRebinBatch, now: now)
         }
     }
 }

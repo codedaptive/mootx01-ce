@@ -13,6 +13,8 @@
 //!   duty-facts-backfill   one pass of `backfill_ssc_facts`
 //!   duty-fact-extraction  one batch of `run_fact_extraction_batch`
 //!   duty-retrain-basis    one `reindex_corpus`
+//!   duty-anomaly-sweep    one batch of `run_anomaly_sweep_batch` (containers)
+//!   duty-chest-rebin      one batch of `run_chest_rebin_batch` (rooms)
 //!
 //! A duty job means "pay one batch of this estate's debt for this duty". The
 //! debt predicate (bit 27 clear, subject NULL, ssc_facts NULL, bit 28 clear)
@@ -46,25 +48,31 @@ pub enum DutyKind {
     FactsBackfill,
     FactExtraction,
     RetrainBasis,
-    /// Room-cohesion anomaly scoring for rooms touched since their last
-    /// scoring (anomaly_flag_sweep.rs); debt is the owed-room count.
+    /// Container-cohesion anomaly scoring for containers touched since
+    /// their last scoring (anomaly_flag_sweep.rs); debt is the owed
+    /// container count.
     AnomalySweep,
+    /// Whole-room re-bin of rooms holding a container at or above
+    /// `chest_placement::CAPACITY` (chest_rebin.rs); debt is the owed room
+    /// count. ADR-026.
+    ChestRebin,
 }
 
 impl DutyKind {
-    pub const ALL: [DutyKind; 6] = [
+    pub const ALL: [DutyKind; 7] = [
         DutyKind::SpanEncode,
         DutyKind::SubjectBackfill,
         DutyKind::FactsBackfill,
         DutyKind::FactExtraction,
         DutyKind::RetrainBasis,
         DutyKind::AnomalySweep,
+        DutyKind::ChestRebin,
     ];
 
     /// Duties whose debt the resident pays on its own cadence. The retrain is
     /// requested by the dreaming theta hook and the upgrade, never inferred.
-    pub const RESIDENT: [DutyKind; 4] =
-        [DutyKind::SpanEncode, DutyKind::SubjectBackfill, DutyKind::FactExtraction, DutyKind::AnomalySweep];
+    pub const RESIDENT: [DutyKind; 5] =
+        [DutyKind::SpanEncode, DutyKind::SubjectBackfill, DutyKind::FactExtraction, DutyKind::ChestRebin, DutyKind::AnomalySweep];
 
     /// Duties no standing signal owns; the tick drains these after the
     /// scheduler so each tick pays exactly one batch per duty.
@@ -79,6 +87,7 @@ impl DutyKind {
             DutyKind::FactExtraction => "fact-extraction",
             DutyKind::RetrainBasis => "retrain-basis",
             DutyKind::AnomalySweep => "anomaly-sweep",
+            DutyKind::ChestRebin => "chest-rebin",
         }
     }
 
@@ -126,13 +135,18 @@ pub struct DutyLimits {
     /// Per-source in-flight fence while a model call runs, in seconds. It
     /// must exceed the extractor's request timeout.
     pub fact_source_lease_seconds: u64,
-    /// Rooms scored per anomaly-sweep batch (each room is O(n²) in its size).
-    pub anomaly_sweep_rooms: usize,
+    /// Containers scored per anomaly-sweep batch (ADR-026: a chest is at
+    /// most 500 drawers; a first scoring is at most 250 000 pairs, every
+    /// later write is linear).
+    pub anomaly_sweep_chests: usize,
+    /// Rooms re-binned per chest-rebin batch (a re-bin is one sort and one
+    /// transaction).
+    pub chest_rebin_batch: usize,
 }
 
 impl Default for DutyLimits {
     fn default() -> Self {
-        Self { fact_extraction_batch: 16, subject_backfill_batch: 32, fact_source_lease_seconds: 120, anomaly_sweep_rooms: 8 }
+        Self { fact_extraction_batch: 16, subject_backfill_batch: 32, fact_source_lease_seconds: 120, anomaly_sweep_chests: 8, chest_rebin_batch: 1 }
     }
 }
 
@@ -143,7 +157,8 @@ impl DutyLimits {
             fact_extraction_batch: settings.duty_fact_extraction_batch.max(1),
             subject_backfill_batch: settings.duty_subject_backfill_batch.max(1),
             fact_source_lease_seconds: settings.duty_fact_source_lease_seconds.max(1),
-            anomaly_sweep_rooms: settings.duty_anomaly_sweep_rooms.max(1),
+            anomaly_sweep_chests: settings.duty_anomaly_sweep_chests.max(1),
+            chest_rebin_batch: settings.duty_chest_rebin_batch.max(1),
         }
     }
 }
@@ -203,7 +218,8 @@ impl EstateCoordinator {
                 let state = self.fact_extraction_work_status(handle, now)?;
                 return Ok(state.runnable + state.in_flight + state.retrying + state.blocked);
             }
-            DutyKind::AnomalySweep => return Ok(self.anomaly_sweep_owed_rooms(handle, now)?.len()),
+            DutyKind::AnomalySweep => return Ok(self.anomaly_sweep_owed_containers(handle, now)?.len()),
+            DutyKind::ChestRebin => return Ok(self.chest_rebin_owed_rooms(handle)?.len()),
             DutyKind::FactsBackfill | DutyKind::RetrainBasis => return Ok(0),
         };
         count.map_err(|e| Self::duty_failure(kind, format!("debt count: {e:?}")))
@@ -443,7 +459,10 @@ impl EstateCoordinator {
                 .map(|_| 1)
                 .map_err(|e| Self::duty_failure(kind, format!("{e:?}"))),
             DutyKind::AnomalySweep => {
-                self.run_anomaly_sweep_batch(handle, self.duty_limits(handle).anomaly_sweep_rooms, now_millis)
+                self.run_anomaly_sweep_batch(handle, self.duty_limits(handle).anomaly_sweep_chests, now_millis)
+            }
+            DutyKind::ChestRebin => {
+                self.run_chest_rebin_batch(handle, self.duty_limits(handle).chest_rebin_batch, now_millis)
             }
         }
     }

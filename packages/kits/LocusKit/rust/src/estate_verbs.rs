@@ -311,6 +311,76 @@ impl Estate {
         Ok(ranges)
     }
 
+    /// The room's containers with live drawer counts, in key order: its
+    /// chests, and the room itself first (low key zero) when drawers are
+    /// filed directly on it, which is every room never re-binned and, for a
+    /// moment, a room a capture reached while a re-bin ran. The unit the
+    /// anomaly sweep scores and the re-bin duty measures against
+    /// `chest_placement::CAPACITY`. Empty for an absent or empty room.
+    /// Mirrors Swift `Estate.containers(in:room:)`.
+    pub fn containers_in(&self, wing: &str, room: &str) -> Result<Vec<ChestRange>, LocusKitError> {
+        let room_node = match self.existing_room_node(wing, room)? {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+        let storage = self.store.storage().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable("containers_in: no storage".to_string())
+        })?;
+        let direct = storage
+            .row_store()
+            .count(
+                "drawers",
+                Some(&persistence_kit::predicate::StoragePredicate::And(vec![
+                    persistence_kit::predicate::StoragePredicate::Eq(
+                        persistence_kit::types::Column::new("drawers", "parent_node_id"),
+                        persistence_kit::types::TypedValue::Text(room_node.id.to_string()),
+                    ),
+                    persistence_kit::predicate::StoragePredicate::IsNull(
+                        persistence_kit::types::Column::new("drawers", "tombstonedAt"),
+                    ),
+                ])),
+            )
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        let mut ranges = Vec::new();
+        if direct > 0 {
+            ranges.push(ChestRange { chest_node_id: room_node.id.to_string(), low_key: MortonKey { words: [0; 8] }, count: direct });
+        }
+        ranges.extend(self.chests_in(wing, room)?);
+        Ok(ranges)
+    }
+
+    /// The live drawers filed directly under one container, a room or a
+    /// chest (spec § 12), in the room read's order. The per-container read
+    /// the anomaly sweep scores. Mirrors Swift `Estate.drawersIn(containerNodeId:)`.
+    pub fn drawers_in_container(&self, container_node_id: &str) -> Result<Vec<Drawer>, LocusKitError> {
+        let storage = self.store.storage().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable("drawers_in_container: no storage".to_string())
+        })?;
+        let (rows, _skipped) = storage
+            .row_store()
+            .query_skip_corrupt(
+                "drawers",
+                Some(&persistence_kit::predicate::StoragePredicate::And(vec![
+                    persistence_kit::predicate::StoragePredicate::Eq(
+                        persistence_kit::types::Column::new("drawers", "parent_node_id"),
+                        persistence_kit::types::TypedValue::Text(container_node_id.to_string()),
+                    ),
+                    persistence_kit::predicate::StoragePredicate::IsNull(
+                        persistence_kit::types::Column::new("drawers", "tombstonedAt"),
+                    ),
+                ])),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        let mut drawers = crate::drawer_store_inmemory::decode_rows_skip_corrupt(&rows, "drawers_in_container")?;
+        drawers.sort_by(|a, b| {
+            a.filed_at.cmp(&b.filed_at).then_with(|| a.content.cmp(&b.content)).then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(drawers)
+    }
+
     /// Re-bin a room: every live drawer in the room's subtree is keyed by
     /// its content (ADR-026 D2), sorted, and dealt into ⌈n / fill⌉ chests
     /// named by their low keys; the drawer moves land in one transaction
