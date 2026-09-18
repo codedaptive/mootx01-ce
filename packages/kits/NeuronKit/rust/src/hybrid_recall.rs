@@ -66,7 +66,21 @@ pub fn hybrid_recall(
         })
         .collect();
 
-    let reranked = rerank(&drawer_rows, tuning, cue_terms);
+    // Chest-aware diversity (ADR-027 D3): the caller's flag, else the estate
+    // preference `chest_recall_diversity`; off is byte-for-byte the shingle
+    // term. The container is each drawer's parent id, carried beside the
+    // rows so `DrawerRow` (built in several kits) keeps its shape.
+    let chest_diversity = tuning.chest_diversity
+        || matches!(
+            coordinator.provisioned_preference(handle, genius_locus_kit::estate_preference::EstatePreferenceKey::ChestRecallDiversity),
+            Ok(genius_locus_kit::estate_preference::EstatePreferenceValue::On)
+        );
+    let containers: Vec<Option<String>> = drawers
+        .iter()
+        .map(|d| if chest_diversity { Some(d.parent_node_id.to_lowercase()) } else { None })
+        .collect();
+
+    let reranked = rerank_with_containers(&drawer_rows, &containers, tuning, cue_terms);
     let pages = page_recall(&reranked, tuning.page_size);
 
     let elapsed_ms = wall_start.elapsed().as_secs_f64() * 1000.0;
@@ -123,6 +137,13 @@ pub struct RecallFrameTuning {
     pub rrf_k: i32,
     pub mmr_lambda: f32,
     pub page_size: i32,
+    /// ADR-027 D3: when true, two candidates in the same container score
+    /// 1.0 in the MMR similarity before any shingle compare. `hybrid_recall`
+    /// turns it on when the estate preference `chest_recall_diversity` reads
+    /// on; a caller sets it to force it. Absent from a stored tuning row
+    /// (`serde(default)`), so older `recall_tuning` manifests still decode.
+    #[serde(default)]
+    pub chest_diversity: bool,
 }
 
 impl RecallFrameTuning {
@@ -134,6 +155,7 @@ impl RecallFrameTuning {
             rrf_k: 60,
             mmr_lambda: 0.7,
             page_size: 50,
+            chest_diversity: false,
         }
     }
 }
@@ -197,6 +219,21 @@ pub fn page_recall(rows: &[DrawerRow], page_size: i32) -> Vec<RecallPage> {
 /// `cue_terms` is empty both lanes equal input order — output is bit-identical
 /// to the previous single-list path.
 pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning, cue_terms: &[String]) -> Vec<DrawerRow> {
+    let none: Vec<Option<String>> = vec![None; drawers.len()];
+    rerank_with_containers(drawers, &none, tuning, cue_terms)
+}
+
+/// `rerank` with each drawer's container beside it (ADR-027 D3): two
+/// drawers whose containers are both `Some` and equal score 1.0 in the MMR
+/// similarity before any shingle compare; a `None` container uses the
+/// shingle term. `containers` is aligned with `drawers`.
+pub fn rerank_with_containers(
+    drawers: &[DrawerRow],
+    containers: &[Option<String>],
+    tuning: &RecallFrameTuning,
+    cue_terms: &[String],
+) -> Vec<DrawerRow> {
+    debug_assert_eq!(containers.len(), drawers.len(), "containers align with drawers");
     if drawers.is_empty() {
         return Vec::new();
     }
@@ -278,7 +315,10 @@ pub fn rerank(drawers: &[DrawerRow], tuning: &RecallFrameTuning, cue_terms: &[St
         let (lo, hi) = if a < b { (a, b) } else { (b, a) };
         let key = lo * n + hi;
         *pair_memo.entry(key).or_insert_with(|| {
-            substrate_shingle::similarity_sets(&shingle_sets[lo], &shingle_sets[hi])
+            match (containers.get(lo), containers.get(hi)) {
+                (Some(Some(a)), Some(Some(b))) if a == b => 1.0,
+                _ => substrate_shingle::similarity_sets(&shingle_sets[lo], &shingle_sets[hi]),
+            }
         })
     };
 
