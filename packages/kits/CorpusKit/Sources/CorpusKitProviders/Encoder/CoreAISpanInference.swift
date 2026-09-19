@@ -5,7 +5,8 @@
 // and runs ONE inference per chunk of texts: Int32 `input_ids` and
 // `attention_mask` of shape `[B, L]`, L the longest tokenised text of the
 // chunk (E3), and reads the `pooled` output of shape `[B, dim]` (E4). The
-// asset is exported CLS-pooled and float32 by
+// asset is exported float32 with the profile's pooling (CLS for Arctic,
+// masked mean for MiniLM) baked in, by
 // `tools/encoder-models/export-coreai.py`, so a padded row cannot be pooled
 // wrongly here and nothing is reduced on this side.
 //
