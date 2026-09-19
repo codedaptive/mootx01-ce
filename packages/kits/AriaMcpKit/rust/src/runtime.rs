@@ -153,6 +153,13 @@ pub fn run(
         }
         _ => moot_product_identity::storage::configuration_directory(),
     };
+    // Read before `estate` moves into the server config below; the telemetry
+    // wiring further down keys on it.
+    let is_transient = matches!(
+        &estate,
+        crate::server::RuntimeEstate::Sqlite { record, .. }
+            if record.kind == genius_locus_kit::EstateRecordKind::Transient
+    );
     // Duty limits and the Signal 14 cadence come from the same settings
     // directory (§ DUTY_LIFECYCLE).
     let duty_settings = moot_product_identity::settings::load(&fact_settings_directory);
@@ -179,7 +186,8 @@ pub fn run(
     config.version_skew = version_skew.to_owned();
     config.update_advisory = update_advisory;
 
-    // Telemetry wiring (durable default for resident mode, opt-in for stdio).
+    // Telemetry wiring (durable default for a registered resident, off for
+    // stdio and for a transient estate).
     //
     // stats_store_path() resolves the moot-mgr stats store path from
     // the configuration directory in resident HTTP mode, and returns None for
@@ -188,12 +196,16 @@ pub fn run(
     //
     // is_http_mode = MOOTX01_HTTP_PORT is set (determined here before the
     // transport branch below so telemetry is wired once before the governor
-    // thread is spawned).
+    // thread is spawned). A transient estate (a `--db` benchmark or scratch
+    // estate) never gets a store even in HTTP mode: it is not the operator's
+    // daemon, and its snapshots landing in the install's store put a
+    // one-drawer benchmark estate in front of the operator's own on the
+    // moot-mgr dashboard (2026-09-18). Twin of the Swift serve command.
     let is_http_mode = !std::env::var("MOOTX01_HTTP_PORT")
         .unwrap_or_default()
         .is_empty();
     let mut gov_stats_store: Option<Arc<observer_sink::StatsStore>> = None;
-    let stats_store_path_opt = stats_store_path(is_http_mode, None);
+    let stats_store_path_opt = stats_store_path(is_http_mode && !is_transient, None);
     if let Some(ref stats_store_path) = stats_store_path_opt {
         match observer_sink::StatsStore::new(stats_store_path) {
             Ok(store) => {
