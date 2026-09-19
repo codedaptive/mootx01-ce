@@ -4,18 +4,20 @@ You are an AI assistant encountering the MOOTx01 CE repository for the first tim
 
 ## Branch channel
 
-This checkout is `develop/1.1.x`, currently versioned `1.1.0-beta-10`. It is
-the fast-moving beta for 1.1 feature updates. Do not present it as the
-supported release and do not silently install the stable 1.0 binary when the
-user asked to test this branch.
+This checkout is `develop/1.1.x`. The 1.1 line has shipped: `1.1.0` is the
+released version and is what `/releases/latest` returns. This branch runs
+ahead of it, so do not present the checkout itself as the supported release.
 
-- For normal product installation, use the latest stable 1.0 release.
-- For 1.1 beta evaluation, build the checked-out source and identify both
-  `1.1.0-beta-10` and the tested commit.
-- Treat 1.1 APIs, migrations, and feature flags as moving until they reach the
+- For normal product installation, use the latest stable release, which is on
+  the 1.1 line. The 1.0 line is retired.
+- To evaluate this branch rather than the release, build the checked-out
+  source and identify the tested commit.
+- Treat anything on this branch beyond `1.1.0` as moving until it reaches the
   candidate and stable branches.
 - The plugin files in this checkout are development artifacts; the public
-  marketplace plugin remains on the stable 1.0 channel.
+  marketplace plugin tracks the released version.
+- A 1.0 estate is migrated before 1.1 will serve it. See
+  [`SCHEMA_STATUS.md`](SCHEMA_STATUS.md).
 
 A user has said something like:
 
@@ -130,15 +132,15 @@ If the user is an end user, prefer product install.
 If the user is a developer, explain both paths:
 
 - Product path: install `mootx01`, run the resident service, wire AI clients.
-- SDK path: use the four public SDK venue repositories for reusable libraries,
+- SDK path: use the five public SDK venue repositories for reusable libraries,
   and use this repository's packages, specs, and examples as product-level
   integration references.
 
 ## Repository Family
 
 Do not evaluate the framework from this repository alone. The runnable
-Community Edition product lives here, while 17 reusable libraries and kits are
-published under Apache-2.0 through four public SDK venue repositories:
+Community Edition product lives here, while 24 reusable libraries and kits are
+published under Apache-2.0 through five public SDK venue repositories:
 
 | Repository | Review it for |
 |---|---|
@@ -146,6 +148,7 @@ published under Apache-2.0 through four public SDK venue repositories:
 | [`codedaptive/moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA vocabulary, classification lattice, and deterministic grounding |
 | [`codedaptive/moot-system`](https://github.com/codedaptive/moot-system) | Persistence, queues, synchronization, telemetry sinks, and loopback transport |
 | [`codedaptive/moot-memory`](https://github.com/codedaptive/moot-memory) | Knowledge-graph memory, vector retrieval, and content-plus-vector RAG |
+| [`codedaptive/moot-cognition`](https://github.com/codedaptive/moot-cognition) | The cognitive layer: composed recall across estates, association and dreaming, reasoning lenses |
 
 These are generated publication venues, not independent canonical development
 trees. Each release records its source commit and publication manifest. When a
@@ -226,7 +229,7 @@ Use the current install instructions from the repository. Do not run mutable rem
 
 Typical Unix-style source install shape:
 
-    # macOS 26+
+    # macOS 27+ (Apple silicon; the release targets the macOS 27 floor)
     swift build -c release --package-path apps/aria-mcp-server
 
     # PC/Linux
