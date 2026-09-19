@@ -64,10 +64,11 @@ copies the private app directory wholesale.
 ## The open substrate
 
 Everything in the Community Edition repository (`mootx01-ce`) is
-Apache-2.0: the seventeen foundation
+Apache-2.0: the twenty-four foundation
 libraries and kits, the composition layer (GeniusLocusKit — estates,
 grants, federation composition, composed recall), the Brain layers
-(NeuronKit and CognitionKit), VaultKit, the ARIA interface surfaces, the
+(NeuronKit and CognitionKit) — all three of which also publish as the
+`moot-cognition` venue — VaultKit, the ARIA interface surfaces, the
 conformance harness, the architecture specification, and the MOOTx01
 Community application.
 
