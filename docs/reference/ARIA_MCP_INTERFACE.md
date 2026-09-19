@@ -1,15 +1,15 @@
 ---
 title: aria-mcp Interface
-version: 2.4.0
+version: 5.0.0
 status: accepted-1.1-target
-date: 2026-08-26
-description: "Public API surface for aria-mcp in both the Swift and Rust ports. 2.0.0: consolidated reorganization (adopted from the ARIA_PROPOSED pair) — full result-format grammar catalog with Samples, structured base-row-plus-extensions schemas, zero/one/many active-adornment composition and structured minter provenance. Full history: ARIA_MCP_INTERFACE_CHANGELOG.md. 2.3.0: per-operation entry template across the six-family catalog."
+date: 2026-09-15
+description: "Public API surface for aria-mcp in both the Swift and Rust ports. 2.0.0: consolidated reorganization (adopted from the ARIA_PROPOSED pair) — full result-format grammar catalog with Samples, structured base-row-plus-extensions schemas, zero/one/many active-adornment composition and structured minter provenance. Full history: ARIA_MCP_INTERFACE_CHANGELOG.md. 2.3.0: per-operation entry template across the six-family catalog. 2.11.0: subject-length contract violations on moot_file_memory and moot_update_memory (setSubject) now return isError:true results rather than JSON-RPC errors. 2.12.0: moot_memory_search reply parity across the ports — Rust honours explain, its structured rows carry the Swift field set. 2.13.0: moot_file_fact oversize subject now returns isError:true with the contract message, both ports. 2.14.0: ENC-W6B — S1/S2 row schema updated: firstSentence→bestSpan, ssc object→sscFacts string, adornment column retired; moot_distill and moot_redistill retired. 2.15.0: dark mint tools and MOOTX01_MINT_TOOLS removed; adornment_miner status lines gone; Rust tools/list drops moot_distill/moot_redistill. 2.16.0: moot_estate_status drops the index_composition_policy line, both ports. 3.0.0: removed stored adornment projections and the contentFallback representation; recorded the removed force-redistill service. 3.1.0: moot_memory_search answer block parity — the Rust reply renders confidence:, citations: (five ids) and signals: in the Swift shape. 3.2.0: the signals: line reads the span rerank stage (lane_agreement = lexical-versus-span order agreement, dense_spread = span cosine spread) and the discrimination cap fires only when no span rerank stage is registered on the estate. 3.3.0: moot_packet_get and moot_packet_lineage read through the same containment gate as moot_memory_get (state, wing, room, sensitivity ceiling lifted only by a live grant, provenance Restricted/Secret drop) and take an optional wing argument. 3.4.0: moot_file_memory files at the live sensitivity grant ceiling, both ports: an omitted sensitivity takes the grant's tier, a lower explicit tier returns isError:true naming the ceiling, and the reply adds a sensitivity: line while a grant is live. 3.5.0: the same ceiling on moot_file_packet (new optional sensitivity argument, Swift) and on the memory adapter's create, str_replace and insert (no argument, both ports). 3.6.0: the discrimination cap reads the span rerank stage alone; the whole-record dense lane and its presets compile only under the WholeRecordDense trait. 3.7.0: the moot_recall_shaped roster under the dark switches (DenseFamilies 37 names, LSA 39, product build 26) and the byte-identical whole-record vacuum line printed by mootx01 upgrade in both ports. 3.8.0: §2.8 records the aria-mcp command line in both ports — the accepted forms, the four refusals, exit 1 on a usage error, --help, and the rule that --in-memory resolves its catalog record first and then serves it transient; the 120 of the subject contract is stated as Unicode scalars. 3.9.0: §2.8 corrects --in-memory: the estate starts empty (record resolved for validation only, content NOT loaded); table row and explanatory text updated. 3.9.1: ARIAServerConstants (in AriaMCPWire) added to §14.3 — the single stored declaration of noSubjectMarker, so consumer targets that link only AriaMCPWire have an interface reference; ResultComposer.noSubjectMarker forwards to it. 3.9.2: V2-A surface adoption — the v2 catalog is now the only published surface (git tag ARIAv1-Terminus marks the last commit before the v1 surface was removed); moot_federated_search renamed moot_federated_recall, moot_run_migration renamed moot_migration_run, moot_confirm_migration renamed moot_migration_confirm; moot_recollect removed (§16.3 retired-names list); dispatchableUnadvertisedTools removed from the frozen-posture read-set description (§12.2). 3.10.0: the catalog gains four previously-undocumented entries — moot_memory_recall_transcript, moot_propose_contradictions, moot_help, and moot_monitoring_set — each added under its family/tier with the standard per-operation template. 3.10.1: front-matter description updated to include the 3.9.1 and 3.9.2 entries that had been omitted; no contract change. 3.10.2: §12.5 coaching triggers wired to the v2 surface — AriaV2Coach/v2::coach implements all six triggers; the v2 envelope gains a new hint slot (structuredContent['hint'] + appended 'hint: …' line in content[0].text) and a periodic coaching block appended to content[0].text at the controlled cadence; estate-provisioned coaching_calls and sticky_enabled apply via applyPreferences on the first dispatch call. 3.11.0: moot_reclassify_fdc promoted to a real v2 write path — adds apply, mode, limit arguments; output moves to 18-field structuredContent.data contract (content[0].text carries a compact human report truncated at 512 scalars); moot_estate_status data gains fdc_recalculation field (current/missing/stale). 3.11.1: moot_recall_distilled Output gains capabilities.distillation and compact-text display line; §11.2 distilled sample extended with display line; §11.6 capabilities table and schema rule updated. 3.11.2: §11.6 capabilities paragraph extended with one sentence stating that distillation is measured over the rows actually emitted carrying a distilled field, after the row cap and privacy projection, using the CognitionKit measurement; the v2 surface sums per-row originalTokenCount and tokenCount from the recipe. 3.12.0: §3.2 rewritten to document the global-modifier contract — mode is stripped at the ARIA door before decode (not injected into per-tool schemas); documented once in the moot_help directory response under the global_modifiers key; owner operations that declare mode in their own input schema are excluded from door stripping; ARIASessionProtocol names the modifier. 4.0.0 (BREAKING): the four work-packet operations retired — moot_file_packet, moot_packet_get, moot_packet_list, moot_packet_lineage removed from the catalog, both ports (Swift only ever had a live implementation; the Rust twin never existed). Tool count is now 80 (vault-on) / 73 (vault-off). 4.1.0: adds report_withheld and meta.withheldBySensitivity to the recall and lens operations. 4.2.0: adds moot_memory_get(depth: "skim") and its preview-only skim object. 4.3.0: moot_list_lenses output is ordered alphabetically by tool name; both ports sort explicitly. 4.5.0: moot_recall_shaped roster is 35 entries (RI + LSA + whole-record presets); DenseFamilies and WholeRecordDense switch references removed from all tool descriptions. 4.6.0: adds moot_recall_similar, the paraphrase door over the whole-record LSA lane (query, limit 1-50 default 10, estate_id; transcript-shaped rows, no evidence block), both ports; tool count 81 (vault-on) / 74 (vault-off); the capability digest moves. 4.7.0: moot_drain_status always lists the fact_extraction lane (pending = drawers still owed extraction for the active recipe); report shape unchanged; both ports."
 spec_type: protocol
 authors: MOOTx01 maintainers
 relates_to:
   - ARIA_MCP_SPEC.md (the behavioral contract)
   - GENIUSLOCUSKIT_SPEC.md (the estate verb surface tools dispatch to)
-  - LOCUSKIT_SPEC.md (drawer, adornment-store, and lifecycle semantics)
+  - LOCUSKIT_SPEC.md (drawer storage and lifecycle semantics)
 ---
 
 # aria-mcp Interface
@@ -188,6 +188,45 @@ agents that cannot reach the user's loopback daemon. Subcommands are `ping`,
 
 When native `moot_*` tools are present, an agent uses them instead of botLink.
 
+### 2.8 Reference-server command line
+
+`aria-mcp` (Swift `apps/aria-mcp-server`, Rust `apps/aria-mcp-server/rust`)
+takes three arguments and no others. Both ports parse the same table.
+
+```
+usage: aria-mcp [--db <name>|<dir>/<name>] [--in-memory]
+```
+
+| Invocation | Estate |
+|---|---|
+| `aria-mcp` | the catalog's active estate |
+| `aria-mcp --db <name>` | the registered estate of that name |
+| `aria-mcp --db <dir>/<name>` | a transient estate at that directory, this process only |
+| `aria-mcp --in-memory` | a fresh empty estate on the in-memory backend (record resolved for validation only) |
+| `aria-mcp --help` / `-h` | prints the usage line to stdout, exit 0 |
+
+`--in-memory` opens the catalog and resolves the record BEFORE the backend is
+chosen, so a `--db` that names no registered estate and carries no path is
+refused rather than ignored. What it then serves is a **fresh empty estate**
+on the in-memory backend — the record's content is NOT loaded; the estate
+starts with zero drawers. Nothing survives the process: no Ed25519
+federation identity is minted and no charter drawers are seeded. The identical
+rule governs `mootx01 serve --in-memory` in both ports.
+
+A refused command line prints the reason and the usage line to stderr and
+exits **1** in both ports. Four shapes are refused:
+
+| Refusal | Reason |
+|---|---|
+| an unrecognised argument | `aria-mcp` has no other configuration on its command line |
+| `--db` with no value | the estate would be unnamed |
+| `--db` followed by a value beginning with `--` | the operator meant a flag and lost it to the value slot |
+| a repeated `--db` | two estates named, neither unambiguously the one wanted |
+
+`--frozen` and `--http`, which `mootx01 serve` accepts, are usage errors here.
+The frozen posture reaches `aria-mcp` through `MOOTX01_FROZEN` and the HTTP
+transport through `MOOTX01_HTTP_PORT`.
+
 ## 3. Common tool contract
 
 ### 3.1 Call shape
@@ -212,10 +251,28 @@ When native `moot_*` tools are present, an agent uses them instead of botLink.
 |---|---|---|---|
 | `estateID` | UUID string | default estate | Direct estate routing where permitted |
 | `teachme` | boolean | `false` | Return the tool guide instead of executing |
-| `mode` | string | absent | Advisory `Mode` or `Mode=Variant` declaration |
 
-The dispatcher injects `mode` into every generated input schema. Interface
-tools expose `estateID` and `teachme` where their surface permits them.
+Interface tools expose `estateID` and `teachme` where their surface permits them.
+
+#### Global modifiers
+
+Global modifiers are arguments stripped at the ARIA door before any operation
+decodes its own arguments. They are absent from every per-tool input schema and
+from per-operation help text. The full grammar and current modifier list is in
+the `moot_help` directory response under the `global_modifiers` key, and the
+session orientation payload (`moot_estate_status`) names each modifier.
+
+**`mode`** — advisory session modifier. Accepted on any call. Grammar:
+`mode:"Name"` sets the mode; `mode:"Name=Variant"` sets mode and variant; a
+bare name (`mode:"Name"`) clears any prior variant for that mode; the last
+declaration on a call wins. Fail-open: an unknown mode name or variant is
+silently ignored and does not clobber existing sticky state.
+
+*Owner operations* — operations that declare their own `mode` argument in their
+input schema — are excluded from door stripping; for those operations, `mode`
+belongs to the operation and is passed through untouched. Membership is read
+at runtime from the catalog input schema (not a hand-coded list), so a future
+operation that declares `mode` is automatically excluded.
 
 ### 3.3 Optional arguments
 
@@ -279,14 +336,25 @@ public enum ToolProjection {
 
 | Provenance | Contents |
 |---|---|
-| `.interface` | Core memory, connection, fact, journal, estate, maintenance, monitoring, dataset, and packet tools |
-| `.federation` | `moot_federated_search` |
+| `.interface` | Core memory, connection, fact, journal, estate, maintenance, monitoring, and dataset tools |
+| `.federation` | `moot_federated_recall` |
 | `.recipe` | Cognition recipes and the 23 `moot_lens_*` tools |
 | `.vault` | Vault export, import, status, reconcile, and job tools |
 
 `MOOTX01_MEMORY_TOOL=1` adds the opt-in Anthropic `memory_20250818`
 compatibility tool. Vault-off mode hides the vault tools and local-file import
-surfaces identified by the generated projection.
+surfaces identified by the generated projection. Under a frozen serve
+(§ 12.2) `memory` answers `view` only. The tool's schema is Anthropic's and
+carries no sensitivity argument, so its content-bearing writes (`create`,
+`str_replace`, `insert`) follow the live grant ceiling without one (SPEC
+§ 12.4): while a restricted or secret grant is live the drawer files at the
+higher of the tier it would otherwise carry (`normal` for `create`, the
+source file's tier for an edit) and the grant's tier, and the reply appends
+`sensitivity: <tier>` to the contract text; `rename` and `delete` are
+unchanged; with no grant live the replies keep Anthropic's text exactly.
+A file filed restricted or secret is outside the tool's no-grant read
+posture (§ 4.2 visibility, `view` reports it absent) until read through a
+grant-aware tool such as `moot_memory_get`. Both ports.
 
 ### 4.3 Family catalog format
 
@@ -322,10 +390,11 @@ Recall turns a question, anchor, date, or structure into remembered content.
   (§11.12). Recorded follow-ups: `moot_memory_get`, another `near`, or
   precise recall.
 - **Output:** Canonical candidate rows plus applicable deviation-only
-  control, tie, answer, and coaching lines (§11).
+  control, tie, answer, and coaching lines (§11). `explain: true` follows
+  each row with the explanation block (§11.2), identically in both ports.
 - **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** Canonical candidate grammar in §11.2; behavioral Sample in
-  Spec § 8.3.
+- **Sample:** Canonical candidate grammar and the explain block in §11.2;
+  behavioral Sample in Spec § 8.3.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
 #### `moot_recall_vague`
@@ -340,9 +409,9 @@ Recall turns a question, anchor, date, or structure into remembered content.
 - **Sample:** Two-section grammar in §11.2.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-#### `moot_federated_search`
+#### `moot_federated_recall`
 
-- **Purpose:** Grant-authorized search across locally open estates.
+- **Purpose:** Grant-authorized recall across locally open estates.
 - **Input:** `filter`, `hydrationLevel`, `ordering`, `limit`,
   optional/validated `requesterEstateID`.
 - **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
@@ -427,9 +496,12 @@ Recall turns a question, anchor, date, or structure into remembered content.
 - **Input:** `query`, `limit`, `filter`, `echo_query`.
 - **Behavior:** Verbatim fallback carries its marker when distillate is
   absent (§11.2).
-- **Output:** Candidate row plus unlabeled distilled continuation (§11.2).
+- **Output:** Candidate row plus unlabeled distilled continuation and
+  savings display line (§11.2); structured result includes
+  `capabilities.distillation` (§11.6).
 - **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** Distilled-form Sample in §11.2.
+- **Sample:** Distilled-form Sample and display line in §11.2; structured
+  `distillation` keys in §11.6.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
 #### `moot_recall_walk`
@@ -443,6 +515,52 @@ Recall turns a question, anchor, date, or structure into remembered content.
 - **Errors:** Standard JSON-RPC errors only (§16.1).
 - **Sample:** `walk:` control-line grammar in §11.3.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_memory_recall_transcript`
+
+- **Purpose:** Strict transcript recall.
+- **Input:** Required `query` (non-empty string); optional `estate_id` (UUID).
+- **Behavior:** Applies a strict two-stage pipeline: a classifier selects
+  transcript-type candidates, then a scored rerank over fresh head candidates
+  orders them. The pipeline is operationally unavailable when the encoder
+  model or classifier is not loaded; a refusal with `rerank_unavailable` is
+  returned in that case rather than a generic recall fallback.
+- **Output:** Ranked matches array, each carrying `memory_id`, `room`,
+  `excerpt`, `score`, and a `fetch` pointer to `moot_memory_get`; the
+  `strict_rerank` evidence block carries pipeline metadata (`status`,
+  `policy_version`, pool/head/span limits, encoder model ID and version,
+  classifier profile and revision).
+- **Errors:** Standard JSON-RPC errors only (§16.1). An empty `query` is
+  `invalidParams`. A `rerank_unavailable` refusal is retryable.
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_recall_similar`
+
+- **Purpose:** Find memories that mean the same as the question even when
+  they share no words with it: the paraphrase door over the whole-record
+  LSA lane.
+- **Input:** Required `query` (non-empty string); optional `limit`
+  (integer 1–50, default 10); optional `estate_id` (UUID). Unknown keys
+  are `invalidParams`.
+- **Behavior:** Runs the CognitionKit `similar_recall` recipe: the estate's
+  registered corpus lane is probed for the `limit` nearest drawers by
+  whole-record vector, hydrated under the caller's sensitivity ceiling
+  (`sensitivityAtMost`), and returned in the lane's own nearest-first order.
+  No fusion and no rerank are applied. An estate with no registered lane
+  returns zero matches. The withheld-by-sensitivity count follows the same
+  accounting as `moot_memory_recall_transcript`.
+- **Output:** `data.matches`: an array of rows, each carrying `memory_id`,
+  `room`, `excerpt`, `score` (raw cosine similarity in [−1, 1]), and a
+  `fetch` pointer to `moot_memory_get`. `meta.completeness` is
+  `incomplete` (a top-k result). There is no evidence block.
+- **Errors:** Standard JSON-RPC errors only (§16.1). An empty `query` or an
+  out-of-range `limit` is `invalidParams`. A `lane_unavailable` refusal
+  (recipe failure) is retryable and carries `recovery.required_operation`.
+- **Sample:** None recorded in this document.
+- **Conformance:** `AriaV2SimilarRecallTests` (Swift) and
+  `aria_v2_similar_recall_tests.rs` (Rust): strict decode and one
+  dispatcher round-trip on a scratch estate.
 
 #### `moot_fact_search`
 
@@ -477,6 +595,9 @@ Recall turns a question, anchor, date, or structure into remembered content.
 - **Purpose:** Grounded context synthesis.
 - **Input:** Optional `query`, `filter`, `limit`.
 - **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
+  Available under a frozen serve (§ 12.2 `frozen:`): reads candidates
+  via recall and generates text; writes no drawer, packet, journal,
+  meta, trace, or reward.
 - **Output:** Answer/digest fields plus canonical candidate citations
   (§11.4).
 - **Errors:** Standard JSON-RPC errors only (§16.1).
@@ -488,8 +609,8 @@ Recall turns a question, anchor, date, or structure into remembered content.
 #### `moot_memory_get`
 
 - **Purpose:** Exact drawer hydration.
-- **Input:** Exactly one of `id` or `ids`; `depth` is `subject`,
-  `distilled`, or `full` (default).
+- **Input:** Exactly one of `memory_id` or `memory_ids`; `depth` is `subject`,
+  `distilled`, `skim`, or `full` (default). Legacy dispatch uses `id`/`ids`.
 - **Behavior:** Batch shallow depths winnow a shortlist. The tool's
   `tools/list` description carries the sensitivity advisory (§11.12).
 - **Output:** S2 batch rows in request order (§11.5) or the S3 full record
@@ -498,6 +619,28 @@ Recall turns a question, anchor, date, or structure into remembered content.
   tool error (§11.6).
 - **Sample:** Full-record Sample in §11.6.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+`depth: "distilled"` returns v23-attributed ContextDistill output, not a
+512-character prefix. The same drawer yields the same distillate in Swift and
+Rust; the full-depth `distilled` field uses this converter too. Both binaries'
+`--version` output reports `converter recall <id> <version>` from this live
+converter and `converter hydration <id> <version>` from GLK's CompleteFormV6
+selection; the existing product-version first line remains unchanged.
+
+`depth: "skim"` explicitly requests a source-order preview of the complete
+distillate, targeting 512 UTF-8 bytes. There is no budget argument. Each v2
+`data.memories` row retains `memory_id`, optional `subject`, and `fetch`, and
+returns `skim: {text, complete, budgetHonored, savings}` instead of `content`,
+`distilled`, or tunnels. `savings` is a 🌱 text line separating estimated
+distillation savings from omitted preview tokens. No continuation or fullText
+is returned. Compact text carries the same preview, flags, and savings.
+
+`complete` means no distilled text was omitted, not that the preview is
+semantically sufficient. An indivisible first group can exceed the byte target;
+then `budgetHonored` is false. Fetch the same id at `distilled` or `full` depth
+to inspect further. Existing authorization gates apply before either reduction.
+
+Example: `moot_memory_get({"memory_id":"<uuid>","depth":"skim"})`.
 
 #### `moot_connection_search`
 
@@ -522,7 +665,7 @@ Recall turns a question, anchor, date, or structure into remembered content.
 
 ## 6. Capture family
 
-Capture admits memories, facts, links, datasets, packets, and imports.
+Capture admits memories, facts, links, datasets, and imports.
 
 ### 6.1 Tier 1 — Intake
 
@@ -574,16 +717,6 @@ Capture admits memories, facts, links, datasets, packets, and imports.
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-#### `moot_file_packet`
-
-- **Purpose:** Store a structured packet with lineage.
-- **Input:** Exact schema is generated by `ToolProjection.tools()`.
-- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
-- **Output:** Packet ID/acknowledgment.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** None recorded in this document.
-- **Conformance:** Covered by the §16.2 and §16.3 suites.
-
 ### 6.2 Tier 2 — Filing
 
 #### `moot_file_memory`
@@ -594,10 +727,34 @@ Capture admits memories, facts, links, datasets, packets, and imports.
   sensitivity, exportability, kind, event time, `impatient`, and
   `classificationScheme` (`udc` default or `mdcc`).
 - **Behavior:** `impatient: true` requests inline semantic indexing;
-  omitted/false uses the background encode path.
+  omitted/false uses the background encode path. The `sensitivity`
+  argument follows the live grant ceiling (SPEC § 12.4): with no
+  restricted or secret grant live on the dispatcher's grant ledger an
+  omitted `sensitivity` files `normal` and any explicit tier is kept.
+  While a grant is live, an omitted `sensitivity` files at the grant's
+  tier (`restricted` under a restricted grant, `secret` under a secret
+  grant), an explicit tier at or above the ceiling is kept, and an
+  explicit tier below it is refused without writing. Both ports read the
+  same `SensitivityGrantLedger` the recall tools consult.
 - **Output:** Reply begins `filed memory <uuid>` and carries
-  location/lineage details.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
+  location/lineage details. While a grant is live the reply adds a
+  fourth line, `sensitivity: <tier>`, naming the tier applied; with no
+  grant live the reply keeps its three-line shape.
+- **Errors:** Missing `subject` is a JSON-RPC `invalidParams` error.
+  A `subject` that is empty or exceeds 120 grapheme clusters is refused at the
+  decoder as a JSON-RPC `invalidParams` error, code `-32602`, at path
+  `$.subject`. The Rust decoder message is `"exceeds the subject length
+  contract"` with correction `"provide at most 120 grapheme clusters"`; the
+  Swift twin throws `"Argument 'subject' exceeds the subject length contract."`.
+  The refusal carries no count, so a caller compresses the subject and retries
+  rather than reading a target length off the error. An explicit
+  `sensitivity` below the live grant ceiling returns `isError: true`
+  with the text
+  `"sensitivity <requested> is below the live grant ceiling <ceiling>: while a <ceiling> grant is live a memory files at <ceiling> or higher. Omit sensitivity to file at the ceiling."`,
+  both ports byte-identical. A `sensitivity` of `null` or any value other
+  than the four tier names is an `invalidParams` fault in both ports;
+  omit the key to inherit the ceiling. Other parameter faults follow the
+  standard JSON-RPC error boundary (§16.1).
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
@@ -608,9 +765,15 @@ Capture admits memories, facts, links, datasets, packets, and imports.
 - **Purpose:** File one structured fact.
 - **Input:** Required: `subject`, `predicate`, `object`; optional
   `source_id`.
-- **Behavior:** Filing time is server-assigned.
+- **Behavior:** Filing time is server-assigned. `subject` is trimmed of
+  leading and trailing whitespace before validation.
 - **Output:** Filing acknowledgment.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Errors:** A `subject` that is empty or exceeds 120 Unicode scalars after
+  trimming (the unit both ports count) returns `isError: true` with the text
+  `"subject must be 1–120 characters (got N). One telegraphic sentence in
+  the AI-facing register — compress, don't truncate."` so the caller can
+  compress the subject and retry. Other parameter faults follow the
+  standard JSON-RPC error boundary (§16.1).
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
@@ -660,7 +823,16 @@ Capture admits memories, facts, links, datasets, packets, and imports.
   supersede, revive, accept, exportability correction, and `setSubject`.
 - **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
 - **Output:** Mutation acknowledgment.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Errors:** For `mutation=setSubject`: a missing `subject` argument
+  is a JSON-RPC `invalidParams` error. A `subject` that is empty or exceeds
+  120 grapheme clusters is refused at the decoder as a JSON-RPC `invalidParams`
+  error, code `-32602`, at path `$.subject`. The Rust decoder message is
+  `"is required and must contain 1 to 120 grapheme clusters before trimming
+  for set_subject"`; the Swift twin throws
+  `"Argument 'subject' exceeds the subject length contract."`. The refusal
+  carries no count, so a caller compresses the subject and retries rather than
+  reading a target length off the error. Other parameter faults
+  follow the standard JSON-RPC error boundary (§16.1).
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
@@ -701,9 +873,11 @@ Capture admits memories, facts, links, datasets, packets, and imports.
 #### `moot_review_tunnel`
 
 - **Purpose:** Review a proposed tunnel.
-- **Input:** `tunnel_id`, `verdict` (`accept`, `reject`, `endorse`),
-  optional `reviewed_by` (default `user`), optional `reason`.
-- **Behavior:** Only proposed tunnels are accepted.
+- **Input:** `tunnel_id`, `decision` (`accept`, `reject`, `endorse`),
+  optional `note`, optional `estate_id`.
+- **Behavior:** Only proposed tunnels are accepted, and only by the trusted
+  user identity. Reviewer identity comes from trusted context; caller-supplied
+  `reviewed_by` is rejected.
 - **Output:** Review acknowledgment.
 - **Errors:** Standard JSON-RPC errors only (§16.1).
 - **Sample:** None recorded in this document.
@@ -914,15 +1088,17 @@ below record the Purpose, Input, and Output facts.
 
 ### 9.2 Tier 2 — Sweeps
 
-#### `moot_distill`
+#### ~~`moot_distill`~~ (retired ENC-W6B)
 
-- **Purpose:** Bounded distillation pass.
-- **Input:** Exact schema is generated by `ToolProjection.tools()`.
-- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
-- **Output:** Result reports work and debt.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** None recorded in this document.
-- **Conformance:** Covered by the §16.2 and §16.3 suites.
+Retired. Distillation is now inline via `ContextDistiller` at read time.
+Callers should migrate to `moot_recall_distilled`. Calls to this tool return
+`methodNotFound`. The tool is absent from `tools/list`.
+
+#### ~~`moot_redistill`~~ (retired ENC-W6B)
+
+Retired. The force-redistill service is removed. Use `moot_recall_distilled` for
+on-demand distilled hydration. Calls to this tool return `methodNotFound`.
+The tool is absent from `tools/list`.
 
 #### `moot_hunt_contradictions`
 
@@ -936,44 +1112,75 @@ below record the Purpose, Input, and Output facts.
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
+#### `moot_propose_contradictions`
+
+- **Purpose:** Resolve selected contradiction candidates without rerunning
+  analysis.
+- **Input:** Required `analysis_ref` (opaque reference returned by
+  `moot_hunt_contradictions`); required `candidate_ids` (array of 1..1000
+  unique non-empty opaque IDs from the same hunt result); optional
+  `estate_id` (UUID).
+- **Behavior:** Validates the analysis reference against the caller binding
+  and authorization revision before filing. A stale reference, a candidate
+  ID not belonging to the named analysis, or a changed authorization revision
+  returns a typed operational refusal. Each selected candidate produces a
+  `created`, `existing`, or `settled` outcome; a `stale` digest match halts
+  with a top-level refusal rather than filing any partial results.
+- **Output:** Array of per-candidate objects, each carrying `candidate_id`,
+  `status` (`created` / `existing` / `settled`), and for non-settled outcomes
+  `tunnel_id` and `lifecycle`.
+- **Errors:** Standard JSON-RPC errors only (§16.1). Stale or mismatched
+  references return typed operational refusals (`proposal_expired`,
+  `proposal_stale`, `proposal_mismatch`, `invalid_candidate`).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
 #### `moot_reclassify_fdc`
 
-- **Purpose:** Audit/repair stored classification anchors.
-- **Input:** Explicit mode/apply gate.
-- **Behavior:** The mode/apply gate controls writes.
-- **Output:** Audit/repair report.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Purpose:** Audit/repair stored field-density classification anchors using
+  the current FDC classifier data version.
+- **Input:** Four optional arguments: `estate_id` (UUID), `apply` (boolean,
+  default `false`), `mode` (`"suspectOnly"` or `"all"`, default
+  `"suspectOnly"`), `limit` (integer 1–50000). An unrecognised `mode` value
+  or a `limit` outside 1–50000 returns an invalid-argument refusal. With
+  `apply: false` (the default) the run is a dry-run: it classifies every
+  active drawer and reports what would change, but writes nothing.
+- **Behavior:** Phase A classifies every active drawer in parallel
+  (deterministic and pure). Phase B applies repairs serially in scan order.
+  `suspectOnly` mode limits repair to drawers whose re-classification
+  resolves to the `000` sentinel. `all` mode repairs any changed anchor.
+  The estate-wide floor (`aria.fdc.recalced_data_version`) is stamped only
+  when `applied && mode == all && no limit && skipped_non_candidate_changes
+  == 0` (floor_stamp: `"stamped"`). All other outcomes leave the floor
+  unchanged. Apply repairs only the primary `udc_code` and `wikidata_qid`;
+  `udc_facets` and `wikidata_qids_secondary` are carried forward unchanged.
+- **Output:** 18-field structured data object in `structuredContent.data`.
+  Required fields: `applied`, `mode`, `estate_id`, `fdc_data_version`,
+  `fdc_recalculation_version`, `scanned`, `unchanged`, `empty_content`,
+  `candidates`, `updated`, `would_update`, `unclassified_after`,
+  `skipped_non_candidate_changes`, `floor_stamp`, `changes` (array, capped
+  at 25 entries in scan order), `changes_omitted`. Optional fields:
+  `estate_recalced_data_version_before`, `estate_recalced_data_version_after`
+  (absent when no floor is stored). `content[0].text` carries a compact
+  human report truncated at 512 Unicode scalars; use `structuredContent.data`
+  for programmatic assertions.
+- **Errors:** Standard JSON-RPC errors only (§16.1). Invalid `mode` or
+  out-of-range `limit` returns code `-32602` (invalidParams).
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-#### `moot_run_adornment_pass`
+#### ~~`moot_run_adornment_pass`~~ (retired, Encoder Rerank Program)
 
-- **Purpose:** Dark benchmark/maintenance adornment pass.
-- **Input:** Harness-only maximum-length override; `batch_size` bounds
-  (drawer, minter) pairs per call.
-- **Behavior:** Dispatched by name but omitted from `tools/list`.
-- **Output:** Pass report.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** None recorded in this document.
-- **Conformance:** Covered by the §16.2 and §16.3 suites.
+Retired with the adornment store. The name is unknown to both ports;
+`tools/call` returns the standard unknown-tool error (§ 16.1). The
+`MOOTX01_MINT_TOOLS` launch gate no longer exists.
 
-#### `moot_register_adornment_minter`
+#### ~~`moot_register_adornment_minter`~~ (retired, Encoder Rerank Program)
 
-- **Purpose:** Dark benchmark/maintenance minter registration.
-- **Input:** One full minter descriptor: `minter_id`, `minter_name`,
-  `minter_family`, `minter_model_id`, `minter_model_version`,
-  `minter_prompt_digest`, optional string-map `minter_parameters`.
-- **Behavior:** Dispatched by name but omitted from `tools/list`.
-  Registers the descriptor through the product surface and atomically
-  replaces the active set with exactly that minter.
-- **Output:** Registration report.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** None recorded in this document.
-- **Conformance:** Covered by the §16.2 and §16.3 suites.
+Retired with the adornment store. The name is unknown to both ports;
+`tools/call` returns the standard unknown-tool error (§ 16.1).
 
-### 9.3 Tier 3 — Surgery
-
-#### `moot_run_migration`
+#### `moot_migration_run`
 
 - **Purpose:** Derive and benchmark migration branches.
 - **Input:** Exact schema is generated by `ToolProjection.tools()`.
@@ -983,7 +1190,7 @@ below record the Purpose, Input, and Output facts.
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
-#### `moot_confirm_migration`
+#### `moot_migration_confirm`
 
 - **Purpose:** Promote exactly one eligible benchmarked branch.
 - **Input:** Exact schema is generated by `ToolProjection.tools()`.
@@ -1009,6 +1216,36 @@ below record the Purpose, Input, and Output facts.
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
+#### `moot_help`
+
+- **Purpose:** Discover the callable operations in this incomplete ARIA v2
+  build, or inspect one exact operation.
+- **Input:** Optional `intent` or `tool`, mutually exclusive; omitting both
+  returns the full directory.
+- **Behavior:** A supplied `tool` resolves the exact named operation
+  descriptor, or an `unknown_operation` refusal when no callable operation
+  matches. A supplied `intent` is trimmed and lowercased, then matched
+  against each operation's registered intents under the same normalization;
+  the result carries the matched operations, which may be empty. With
+  neither key, the reply is the full directory: every callable operation
+  plus non-callable directory records (recipes and similar entries that
+  stay outside `tools/list`, each carrying `callable: false` and its
+  callable tools). Supplying both `intent` and `tool` is a conflicting
+  argument.
+- **Output:** For `tool`: a single operation object (`id`, `name`,
+  `description`, `effect`, `input_schema`, `output_schema`, `intents`).
+  For `intent`: the intent string plus a matching `operations` array. For
+  the directory case: an `operations` array plus a `directory_records`
+  array (`recipe_id`, `description`, `callable: false`, `callable_tools`).
+  The envelope's `meta` carries `build_id`, `capability_digest`, and
+  `completeness: "incomplete"`.
+- **Errors:** Standard JSON-RPC errors only (§16.1). Supplying both
+  `intent` and `tool` is `invalidParams` (`conflicting_arguments`). A
+  `tool` naming no callable operation returns an `unknown_operation`
+  refusal, non-retryable, with recovery pointing back to `moot_help`.
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
 ### 10.2 Tier 2 — Orientation
 
 #### `moot_estate_status`
@@ -1023,8 +1260,11 @@ below record the Purpose, Input, and Output facts.
   `moot_rebuild_status` remain the cheap machine-polling surfaces.
 - **Output:** Estate counts, subject debt, sync, trace,
   migration/recalculation, modes, protocol, and optional advisory fields,
-  plus the appended drain report and rebuild line. Protocol block per
-  §12.1; sync vocabulary per §12.2; optional advisories per §12.3.
+  plus the appended drain report and rebuild line. The `data` object includes
+  a required `fdc_recalculation` field with values `"current"` (stored floor
+  matches the current recalculation version), `"missing"` (no floor stored),
+  or `"stale"` (floor stored but differs from the current version). Protocol
+  block per §12.1; sync vocabulary per §12.2; optional advisories per §12.3.
 - **Errors:** Standard JSON-RPC errors only (§16.1).
 - **Sample:** Protocol-block grammar in §12.1.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
@@ -1045,7 +1285,7 @@ below record the Purpose, Input, and Output facts.
 - **Input:** Terse by default; `verbose: true` for full descriptions and
   required arguments.
 - **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
-- **Output:** Lens catalog listing.
+- **Output:** Lens catalog listing. Tools are ordered alphabetically by tool name.
 - **Errors:** Standard JSON-RPC errors only (§16.1).
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
@@ -1057,6 +1297,26 @@ below record the Purpose, Input, and Output facts.
 - **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
 - **Output:** Recipe catalog listing.
 - **Errors:** Standard JSON-RPC errors only (§16.1).
+- **Sample:** None recorded in this document.
+- **Conformance:** Covered by the §16.2 and §16.3 suites.
+
+#### `moot_monitoring_set`
+
+- **Purpose:** Set daemon telemetry monitoring and return only its
+  confirmed effective state.
+- **Input:** Required `enabled` (boolean).
+- **Behavior:** Sets the requested value through the injected
+  `MonitoringControl` seam (§14.3), then re-reads the control before
+  reporting success. The write is best-effort and cannot self-report
+  whether persistence survived, so a nil or mismatched readback renders
+  as a refusal rather than an optimistic success.
+- **Output:** `monitoring: "enabled"` or `"disabled"`, reflecting the
+  confirmed post-write readback, never the requested value directly.
+- **Errors:** Standard JSON-RPC errors only (§16.1). Typed operational
+  refusals: `monitoring_unavailable` (no monitoring control in this
+  daemon context) and `monitoring_unverified` (the write may have
+  landed, but its effective state could not be confirmed), the latter
+  with recovery pointing to `moot_monitoring_status`.
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
 
@@ -1100,9 +1360,15 @@ below record the Purpose, Input, and Output facts.
 - **Input:** Exact schema is generated by `ToolProjection.tools()`.
 - **Behavior:** Distinguishes no drain from an idle drain. Lanes include
   `dreaming` (the recall-event dreaming queue — a genuine queue drain,
-  paid down out-of-band; the benchmarker's encode barrier denylists it).
-  A rebuild is not a drain, so it never appears here (see
-  `moot_rebuild_status`).
+  paid down out-of-band; the benchmarker's encode barrier denylists it)
+  and `fact_extraction` (always listed: `pending` is the count of drawers
+  still owed fact extraction for the active recipe — bit 28 clear —
+  paid down only by a dreaming cycle's bounded batch; `state` is
+  `draining` while any drawer is owed and `idle` once none are; the
+  benchmarker's encode barrier denylists it, and a caller settles an
+  estate on this lane reaching `idle` rather than by running blind
+  dreaming cycles). A rebuild is not a drain, so it never appears here
+  (see `moot_rebuild_status`).
 - **Output:** Drain report.
 - **Errors:** Standard JSON-RPC errors only (§16.1).
 - **Sample:** None recorded in this document.
@@ -1147,36 +1413,6 @@ below record the Purpose, Input, and Output facts.
 - **Input:** Exact schema is generated by `ToolProjection.tools()`.
 - **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
 - **Output:** Reconciliation report.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** None recorded in this document.
-- **Conformance:** Covered by the §16.2 and §16.3 suites.
-
-#### `moot_packet_get`
-
-- **Purpose:** Fetch one packet by ID.
-- **Input:** Packet ID.
-- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
-- **Output:** The packet.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** None recorded in this document.
-- **Conformance:** Covered by the §16.2 and §16.3 suites.
-
-#### `moot_packet_list`
-
-- **Purpose:** List/filter packets.
-- **Input:** Exact schema is generated by `ToolProjection.tools()`.
-- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
-- **Output:** Packet listing.
-- **Errors:** Standard JSON-RPC errors only (§16.1).
-- **Sample:** None recorded in this document.
-- **Conformance:** Covered by the §16.2 and §16.3 suites.
-
-#### `moot_packet_lineage`
-
-- **Purpose:** Return one packet's derivation thread.
-- **Input:** Packet ID.
-- **Behavior:** Behavioral contract: [ARIA_MCP_SPEC.md](ARIA_MCP_SPEC.md).
-- **Output:** Derivation thread.
 - **Errors:** Standard JSON-RPC errors only (§16.1).
 - **Sample:** None recorded in this document.
 - **Conformance:** Covered by the §16.2 and §16.3 suites.
@@ -1231,15 +1467,11 @@ audit fallback.
    § 11.9.)
 2. **Fixed columns.** Every row shape has a fixed column count. An absent
    optional value renders `-` occupying its whole column: on the S1 row, a
-   first sentence byte-identical to the subject, an absent SSC (Semantic
-   Search Candle), and an
-   absent active-adornment projection each render `-`. A literal `-` inside a real value is
+   best span byte-identical to the subject and an absent SSC (Semantic
+   Search Candle) each render `-`. A literal `-` inside a real value is
    unambiguous because the placeholder only ever occupies a whole column.
-3. **Truncation.** First sentence: hard cut at 120 characters, no
-   ellipsis. Subject: ≤120 by capture contract. Each adornment: ≤280 by mint
-   contract. One active adornment renders unchanged. Multiple active
-   adornments render in ascending minter-ID order, joined by ` || ` inside the
-   same column; a literal ` || ` inside an adornment is normalized to ` / `.
+3. **Truncation.** The best-span column uses the shared first-sentence
+   truncator with a 120-character limit. Subject: ≤120 by capture contract.
 4. **Timestamps** are ISO-8601 with trailing `Z`. **Scores** are `%.4f`,
    never absent on a ranked row, never zero for a genuinely ranked hit.
 5. **Ordering.** S1: score-descending under the tie-group contract. S2
@@ -1255,7 +1487,7 @@ audit fallback.
 
 ```text
 found N candidate memories, one per line
-<uuid> · <subject> · <first sentence | -> · <SSC facts | -> · <active adornment text(s) | -> · <event time> · <score %.4f>
+<uuid> · <subject> · <best span | -> · <SSC facts | -> · <event time> · <score %.4f>
 ```
 
 Singular header: `found 1 candidate memory, one per line`. Behavioral
@@ -1278,20 +1510,47 @@ found M hydrated originals, one per line
 <rows>
 ```
 
-Distilled recall follows each row with its distilled text as a four-space
-indented unlabeled continuation; a row still owing a distillate carries the
-fallback marker then the verbatim content:
+Distilled recall follows each row with text computed inline from its source
+content. The continuation is indented by four spaces. Every returned row
+has an inline rendering.
 
 ```text
-found 2 candidate memories, one per line
-30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Entelo follow-up decided at TechFest · user: I'll definitely look into Entelo further. · kind: decision, entity: Entelo · TechFest; 2026-01-01; networking; elevator pitch; tips · 2026-01-01T00:07:52Z · 0.5687
-    Decided at TechFest to evaluate Entelo as the recruitment tool; user owns the follow-up.
-E70A5761-152D-4ABB-B16A-964B06A09404 · AI recruitment tool exploration for company · user: I'm looking to explore AI-powered recruitment tools for my company. · kind: plan, entity: recruitment tools · Sarah; Google; TechFest; 2026-01-01; three weeks ago · 2026-01-01T00:07:48Z · 0.5562
-    source: content (not yet distilled)
-    I'm looking to explore AI-powered recruitment tools for my company. Sarah from Google suggested several options at TechFest three weeks ago.
+found 1 candidate memory, one per line
+30B1B3B0-945D-4C07-AE57-53D9FFC9B543 · Evaluation follow-up · Review the proposal on Friday. · - · 2026-01-01T00:07:52Z · 0.5687
+    Review the proposal on Friday.
 ```
 
+The v2 compact text for the same result is `Returned 1 distilled recall
+result(s).` followed on the next line by the savings display line. For
+this row the distilled rendering equals the content, so the line reads
+`🌱 Distilled: ~7 tokens returned vs ~7 original · ~0 saved (0%)` (the
+estimator gives 7 for the 30-byte, five-word body).
+
 No acknowledgment or contract-change notice ever precedes results.
+
+`explain: true` on `moot_memory_search` follows each row with the recall
+engine's explanation block, two-space indented, before the control lines.
+The block is the `RecallHit.explanation` array rendered one line each, in
+both ports: the sorted candidate-supply sources (`none` when empty), the
+non-zero score columns to two decimals (`final=` when every column is
+zero), the effective mode and scoring, a `why:` sentence built from the
+query type and the active signals, and, when the dense lane voted, the
+signal ids that voted. The structured twin is unchanged by `explain`.
+
+```text
+found N candidate memories, one per line
+<S1 row>
+  sources: <candidate-supply sources>
+  score: <contributing score columns>
+  mode: <mode> | scoring: <scoring>
+  why: <query and active-signal explanation>
+```
+
+Encoder evidence is included when the span stage contributes. Retired
+record-vector families do not appear in the default build.
+
+Both ports assert the block's lines against the shared vector
+`GeniusLocusKit/Tests/Conformance/recall_explainer_fixture.json`.
 
 ### 11.3 Control lines (deviation-only, fixed grammar, after the rows)
 
@@ -1304,7 +1563,12 @@ walk: stage=<stage> stoppedEarly=<yes|no>
 retrieval: degraded — one or more ranking stages unavailable
 ```
 
-The discrimination line renders only at low/medium. The degradation line
+The discrimination line renders only at low/medium. A `high` level renders
+no line; it is capped to `medium` when the dense lane was dark for the
+query AND the estate has no span rerank stage registered (the ranking is
+then lexical-only; `RecallDiscrimination.denseLaneDark(status:spanRerankRegistered:)`,
+§ 14.3). With a span rerank stage registered the encoder reorders the
+lexical head, so `high` stands. The degradation line
 renders when the dense lane did not contribute for a reason other than an
 empty query OR any pipeline stage was skipped — at most once; stage names
 and lane vocabulary never render (they are log-side). Connected recall
@@ -1348,7 +1612,7 @@ memory list:
 
 ```text
 listing N memories in <wing> / <room> — filing order, unranked
-<uuid> · <subject | -> · <first sentence | -> · <SSC | -> · <active adornment text(s) | -> · <event time>
+<uuid> · <subject | -> · <best span | -> · <SSC facts | -> · <event time>
 ```
 
 Debt mode (`filter: missing_subject`):
@@ -1375,7 +1639,7 @@ how a consumer tells enumeration from ranking.
 
 Base field spellings are pinned by renderer readback (`fullRecordLines`,
 2026-08-25). The `subject:` line appears only when the drawer carries one;
-the active `adornments:` block follows it when present. Tunnel lines are
+Tunnel lines are
 confirmed-active edges only, arrow gives direction, cap 50; verbatim content
 follows the `content:` label untruncated.
 
@@ -1383,9 +1647,6 @@ follows the `content:` label untruncated.
 memory 30B1B3B0-945D-4C07-AE57-53D9FFC9B543
 room: recruiting  wing: Agentic Memory
 subject: Entelo follow-up decided at TechFest
-adornments: 2
-  TechFest; Entelo evaluation; recruitment workflow; user follow-up
-  Entelo; sourcing tool review; TechFest recommendation; next action
 filed_at: 2026-01-02T10:15:00Z
 event_time: 2026-01-01T00:07:52Z
 state: active
@@ -1401,10 +1662,7 @@ content:
 user: I'll definitely look into Entelo further. Sarah from Google walked me through it at TechFest and it fits the sourcing workflow we discussed.
 ```
 
-The `adornments:` block is omitted when no active stored adornment exists. Its
-unlabeled indented values appear in ascending minter-ID order; structured
-content carries the IDs. One active minter renders `adornments: 1` and one
-value.
+Full hydration contains no adornment block.
 
 A gated or absent single id returns the standard not-found tool error.
 
@@ -1432,7 +1690,7 @@ Cap line when hit: `timeline capped at 200 rows — narrow with entity`.
 
 ```text
 found N outgoing connections, one per line
-<tunnel ID> · <kind/label[ (lifecycle)]> · <far endpoint: uuid · subject · first sentence | - · SSC | - · active adornment text(s) | - · event time>
+<tunnel ID> · <kind/label[ (lifecycle)]> · <far endpoint: uuid · subject · best span | - · SSC facts | - · event time>
 ```
 
 connection map is identical with the header word `incoming`. The far
@@ -1488,26 +1746,8 @@ Every S1 surface declares the shared output schema. Base row schema:
         "properties": {
           "id": { "type": "string" },
           "subject": { "type": "string" },
-          "firstSentence": { "type": "string" },
-          "ssc": {
-            "type": "object",
-            "properties": {
-              "kind": { "type": "string" },
-              "entities": { "type": "array", "items": { "type": "string" } }
-            }
-          },
-          "adornment": { "type": "string" },
-          "adornments": {
-            "type": "array",
-            "items": {
-              "type": "object",
-              "required": ["minterID", "text"],
-              "properties": {
-                "minterID": { "type": "string" },
-                "text": { "type": "string" }
-              }
-            }
-          },
+          "bestSpan": { "type": "string" },
+          "sscFacts": { "type": "string" },
           "eventTime": { "type": "string" },
           "score": { "type": "number" },
           "room": { "type": "string" },
@@ -1520,18 +1760,15 @@ Every S1 surface declares the shared output schema. Base row schema:
 }
 ```
 
-Before rendering, the shared composer calls GLK `activeAdornments` once with
-all result Drawer IDs. `adornment` is the exact text projected into the fifth
-column. `adornments` preserves the same contributing values as ordered
-`{minterID, text}` entries. Both properties are absent when no active stored
-adornment exists for that Drawer.
+The shared composer uses the result data supplied by each surface.
+`adornment` and `adornments` are absent from the schema and all results.
 
 Surface extensions (additional per-row properties):
 
 | Surface | Extension properties |
 |---|---|
 | connected recall | `retrievalSource`: `"anchor"` \| `"walk"` \| `"both"` |
-| distilled recall | `distilled` (string), `representation`: `"distilled"` \| `"contentFallback"` |
+| distilled recall | `distilled` (string), `representation`: `"distilled"` |
 | vague recall | `tier`: `"summary"` \| `"original"` |
 | federated search | `estateID` (string) |
 | memory get | `content` at the depths where the text carries it |
@@ -1541,9 +1778,19 @@ Top-level `capabilities` object mirrors the control lines — keys:
 `discrimination` (`"low"` \| `"medium"`), `walk` (`{ "stage": string,
 "stoppedEarly": boolean }`), `temporal` (`{ "mode": string, "source":
 string, "grab": string, "from": string, "to": string, "widenedDays":
-integer }`), `degraded` (`true`). Each key is ABSENT when its control line
-does not render. Synthesis adds top-level `cues` (string array, the
-normalized terms) and `summary` (string).
+integer }`), `degraded` (`true`), and, on `moot_recall_distilled` only,
+`distillation` (the savings object: `returnedTokens`, `originalTokens`,
+`savedTokens`, `savedPercent`, `estimated`, `estimator`, optional `skim`
+(`{ "omittedTokens": integer }`), and `display`; `additionalProperties:
+false`). The measurement covers only the rows actually emitted carrying a `distilled` field, after the row cap and the privacy projection; the v2 surface sums per-row `originalTokenCount` and `tokenCount` from the recipe and calls the CognitionKit measurement. Each key except `distillation` is ABSENT when its control line
+does not render; `distillation` is always present on `moot_recall_distilled`
+and always absent on every other operation. Synthesis adds top-level `cues`
+(string array, the normalized terms) and `summary` (string).
+
+`moot_recall_distilled` declares its own `data` schema: `results` (the
+shared memory-row array) plus a required `capabilities` object in which
+`distillation` is required and `discrimination` is optional. The shared
+capabilities schema of all other recall and lens operations is unchanged.
 
 Structured tabular results (S6): `columns` (array of `{ "name": string,
 "type": "text" | "int" | "float" | "bool" }`) and `rows` (array of arrays
@@ -1626,6 +1873,29 @@ The field key is `sync:`. `status: connected` is not part of this vocabulary.
 Trace-read failure renders `trace_rows: unavailable`, not zero. Drawer-derived
 aggregates use the bulk-exportable sensitivity ceiling.
 
+`frozen:` follows `sync:` and renders `true` when the
+serving process was started with `mootx01 serve --frozen` or `MOOTX01_FROZEN=1`,
+else `false`. It is a property of the serve process, not of the estate. A
+frozen serve classifies every tool it can dispatch into exactly one of three
+sets, held in `AriaMCP.ToolMutationInventory` /
+`aria_mcp::tool_mutation_inventory` and pinned by a completeness test in each
+port under every combination of `MOOTX01_VAULT` and `MOOTX01_MEMORY_TOOL`:
+
+- the read set (`frozenReadTools` / `FROZEN_READ_TOOLS`), let through unconditionally;
+- the refused set (additive writes, mutations, and erasure), refused
+  by name with the `isError` text `estate is frozen (serve --frozen): <tool> is
+  a mutating tool and was refused`;
+- the command-classified set (`frozenReadCommands` / `FROZEN_READ_COMMANDS`):
+  `memory`, whose `command` argument decides per call. `view` proceeds; every
+  other command, and a missing or unknown one, is refused with the `isError`
+  text `estate is frozen (serve --frozen): memory command <command> is not a
+  read command and was refused` (`(missing)` when the argument is absent).
+
+Both refusals fire before any runner and before session state records the
+call, so a refused call leaves no side effect; the `memory` adapter itself is
+posture-blind. A frozen serve also runs `moot_memory_search` with internal
+recall origin and writes no reward mark on dereference.
+
 ### 12.3 Optional advisories
 
 `version_skew:` appears only when injected plugin/binary mismatch text exists.
@@ -1675,11 +1945,39 @@ attribution. `PeriodicCoach` renders the deterministic block pinned by
 | `moot_memory_search` | no query, query over 200 characters, or zero memories |
 | `moot_file_memory` | content over 4,000 characters or duplicate result |
 | `moot_erase_memory` | confirmation absent or false |
-| `moot_confirm_migration` | disqualified branch result |
+| `moot_migration_confirm` | disqualified branch result |
 | `moot_link_memories` | unresolved IDs |
 | any lens | zero results |
 
-Hints never attach to error results. The first matching trigger wins.
+Hints never attach to error results (`isError: true` results pass through
+unmodified). The first matching trigger wins and exactly one hint fires per
+call.
+
+#### Hint slot
+
+When a trigger fires the v2 envelope gains two additions:
+
+- `structuredContent["hint"]` — a string value, sibling of `data` and `meta`,
+  present only when a trigger fires and absent otherwise. Consumers that read
+  `structuredContent` programmatically use this field.
+- A `"\nhint: <text>"` line appended to `content[0].text`. The append happens
+  **after** the 512 Unicode-scalar clamp of the operation body; the hint line
+  itself is never clamped.
+
+The periodic coaching block (§12.4) is appended to `content[0].text` **after**
+any hint line already present, so hint-then-block ordering is guaranteed.
+
+#### Lens scope
+
+The "any lens" row in the trigger table applies to `SurfaceRequest::Recall`
+variants — `moot_recall_precise`, `moot_recall_temporal`,
+`moot_recall_connected`, `moot_recall_shaped`, `moot_recall_distilled`,
+`moot_recall_vague`, and `moot_recall_walk`. The `moot_federated_recall` and
+`moot_memory_recall_transcript` tools map to separate enum variants
+(`FederatedRecall`, `TranscriptRecall`) and never receive the zero-results
+hint. This is an intentional boundary: federated and transcript recalls are
+read-only inspection tools whose zero results carry no actionable filing
+guidance.
 
 ## 13. Auxiliary HTTP endpoints
 
@@ -1863,6 +2161,11 @@ public enum DiscriminationLevel: Sendable, Equatable {
 
 public enum RecallDiscrimination {
     public static func classify(_ scores: [Double]) -> DiscriminationLevel
+    /// True when no span rerank stage is registered on the estate
+    /// (`GeniusLocusKit.isSpanRerankRegistered(for:)`): the cap's condition
+    /// (3.3.0; the span stage is the one dense provider).
+    /// Rust: `recall_discrimination::dense_lane_dark(span_rerank_registered)`.
+    public static func denseLaneDark(spanRerankRegistered: Bool) -> Bool
     public static func resultLine(
         for level: DiscriminationLevel,
         denseLaneDark: Bool = false
@@ -1887,6 +2190,23 @@ public enum ClassificationScheme: String, Sendable, CaseIterable {
 public enum Logging {
     public static let osLog: Logger
     public static let stderr: StderrLogger
+}
+
+/// Server-side string constants shared between the `AriaMCP` producer and
+/// `AriaMCPWire`-only consumer targets (e.g. `MootCommunityGateway`).
+/// Declaring them in `AriaMCPWire` lets a consumer that links only
+/// `AriaMCPWire` reference the same value the composer emits without risk
+/// of silent divergence through a duplicated literal.
+///
+/// `ResultComposer.noSubjectMarker` (in `AriaMCP`) forwards to this constant;
+/// the compiler enforces parity between the producer and all consumers.
+public enum ARIAServerConstants {
+    /// The subject value the server places on an opaque (gated or unhydrated)
+    /// search row. Consumers must filter rows whose subject equals this marker
+    /// before showing them in any UI surface.
+    ///
+    /// Value: `"(no subject)"`
+    public static let noSubjectMarker: String
 }
 ```
 
@@ -1946,6 +2266,15 @@ Protocol faults are JSON-RPC errors. Runner failures are `tools/call` results
 with `isError: true`. `toolDispatchFailure` remains an internal marker and is
 not a public wire code.
 
+Subject-length contract violations on `moot_file_memory` and
+`moot_update_memory` (`mutation=setSubject`) are runner failures: the call
+reached the runner and the value was rejected for exceeding the 120-character
+contract. These return `isError: true` rather than a JSON-RPC error so the
+model sees the contract message and can compress the subject and retry. A
+missing `subject` argument (the field is absent from the call) is a JSON-RPC
+`invalidParams` error because the call is malformed before any runner logic
+runs.
+
 ### 16.2 Swift
 
 ```sh
@@ -2001,13 +2330,513 @@ misrepresented as current projected tools:
 
 - `moot_estate_reconnect` is the retired name whose rationale is captured by
   `moot_estate_ping` in Spec §14.1;
-- `moot_recollect` is a retired notice-only stub queued for removal at the next
-  major version;
+- `moot_recollect` was a retired notice-only stub; removed at V2-A (git tag ARIAv1-Terminus);
 - `moot_update_check.py` is an update-check hook, not an MCP tool; and
 - `moot_vault_*` is prose shorthand for the five explicitly listed vault tools,
   not an additional tool name.
 
+## Sensitivity-withheld reporting
+
+`report_withheld` is a per-call global modifier, stripped by the chain registry
+before strict argument decoding and absent from every operation input schema.
+Only boolean `true` enables it; omitted, false, and other values leave it off.
+Successful precise, shaped, vague, connected, distilled, federated and transcript
+recall, and partial-cue, keystones and trust-synthesis lenses conditionally add
+integer `meta.withheldBySensitivity`. When off, the key is absent and rows and
+ordering are unchanged. Refusals and unrelated operations do not disclose a count.
+
+LocusKit counts primary candidates excluded only by its default adjective-
+sensitivity ceiling while all other frame predicates admit. Explicit sensitivity
+filters yield zero. Vague counts hop-1 candidates; federated counts only the
+grant-authorized source population. Keystones counts only ranked topK endpoint
+drawers rejected at hydration by that ceiling, not all graph endpoints. Later
+provenance projection and tunnel counts are separate. The default Rust partial-cue
+frame remains its current frame; this modifier does not change frame admission.
+
+Transcript recall supplies the caller's explicit sensitivity ceiling in both
+ports (default elevated, or the live grant ceiling). Rust now matches Swift's
+existing caller-frame construction; the state default remains CurrentlyBelieve.
+Its sensitivity-default-only count is therefore zero, including when restricted
+candidates exist. This correction is separate from the partial-cue frame unit.
+
+The optional meta field uses existing additional-properties permissions; catalog
+schemas, release artifacts and the pinned capability digest are unchanged. Global
+modifier help is documented once and pinned byte-identically in both ports.
+
+## Security repair contract
+
+### Security boundaries for review, lenses, and memory reads
+
+`moot_review_tunnel` accepts `tunnel_id`, `decision` (`accept`, `reject`,
+`endorse`), optional `note`, and optional `estate_id`. `reviewed_by` is an
+unknown argument. Attribution comes from trusted caller context or the daemon
+identity; only the trusted user identity may accept a proposal. Authenticated first-party agent sessions retain their agent identity and cannot accept on a human user’s behalf; trusted-user dispatcher context is required.
+
+Memory search filters provenance before packaging answer citations. The
+`explain` option gates discrimination text. Contradiction totals describe only
+the admissible population; compatibility withheld counters are zero and do not
+reveal protected populations. FDC reclassification filters the caller's current
+sensitivity ceiling before applying limits, reporting, or writing anchors.
+First-party lens discovery uses the first-party projected schemas.
+
 ## Changelog
+
+### 5.0.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 4.7.0 -- 2026-09-15
+
+`moot_drain_status` always lists the `fact_extraction` lane: `pending` is
+the count of drawers still owed fact extraction for the active recipe
+(bit 28 clear), `state` is `draining` while any drawer is owed and `idle`
+once none are. The report shape (`drains: [{name, state, pending}]`) is
+unchanged. Both ports.
+
+### 4.6.0 -- 2026-09-14
+
+Added `moot_recall_similar` (catalog identity `similar_recall`, effect
+read) under the recall family in both ports: the paraphrase door over the
+whole-record LSA lane through the CognitionKit `similar_recall` recipe.
+Arguments `query` (required, non-empty), `limit` (1–50, default 10),
+`estate_id`. Rows carry the `moot_memory_recall_transcript` shape
+(`memory_id`, `room`, `excerpt`, `score`, `fetch`); no evidence block.
+Tool count 80 → 81 (vault-on) and 73 → 74 (vault-off); the capability
+digest moves with the descriptor set. Classified as a pure read in both
+ports' mutation inventories and installer permission tiers.
+
+### 4.4.0 -- 2026-09-14
+
+The drawer subject contract is 120 grapheme clusters at every enforcement site
+in both ports. Updated two entries:
+
+- `moot_file_memory` §7.1 Errors: "120 Unicode scalars" → "120 grapheme clusters",
+  and the parenthetical updated to the Rust error string "provide at most 120
+  grapheme clusters".
+- `moot_update_memory` §7.2 Errors (mutation=setSubject): "120 characters" →
+  "120 grapheme clusters", and N described as the grapheme-cluster count both
+  ports report, citing the Rust error string "is required and must contain 1 to
+  120 grapheme clusters before trimming for set_subject".
+
+Lines 735 (`moot_file_fact`) and 2434 (historical changelog entry) are left
+unchanged: `moot_file_fact` subject is a different noun outside this ruling.
+
+Both entries also corrected the error shape: the subject-length refusal is a
+thrown JSON-RPC `invalidParams` error (code `-32602`, path `$.subject`), not
+an `isError: true` result. The Rust decoder messages are quoted verbatim; the
+Swift twin message is `"Argument 'subject' exceeds the subject length
+contract."`. Neither port reports a count in the refusal.
+
+### 4.3.0 -- 2026-09-14
+
+`moot_list_lenses` output is now contractually ordered alphabetically by
+tool name. Both ports sort explicitly; the ordering no longer depends on
+the registry's internal container order.
+
+### 4.2.0 -- 2026-09-13
+
+Added `moot_memory_get(depth: "skim")` and its preview-only `skim` object:
+`text`, `complete`, `budgetHonored`, and `savings`. Retains id and full-fetch
+reference. Corrected the public get argument names to `memory_id`/`memory_ids`.
+
+### 4.1.0 -- 2026-09-13
+
+Added the default-off report_withheld modifier, conditional sensitivity-only meta
+count, ranked topK keystones hydration definition, and unchanged-schema contract.
+
+### 4.0.0 -- 2026-09-11 (BREAKING)
+
+The four work-packet operations are retired from the ARIA surface, both
+ports: `moot_file_packet` (§6.1), `moot_packet_get`, `moot_packet_list`,
+and `moot_packet_lineage` (all three formerly §10.4-§10.6). The Swift
+package's `WorkPacketKit` dependency is removed from `AriaMcpKit`; the
+Rust port never carried a packet implementation. Stored packet drawers
+already in an estate are unaffected — this is a surface retirement, not
+a schema change, and no migration step is required. `.interface`
+provenance (§4.2) and the capture family summary (§6) drop the packet
+mention. Tool count is now 80 (vault-on, the default) / 73 (vault-off),
+down from 84 / 77.
+
+### 3.12.0 -- 2026-09-11
+
+§3.2 rewritten to document the global-modifier contract: `mode` is stripped
+at the ARIA door before any operation decodes its arguments (it is no longer
+injected into per-tool input schemas); it is documented once, in the
+`moot_help` directory response under the `global_modifiers` key; owner
+operations that declare `mode` in their own input schema are excluded from
+door stripping; `ARIASessionProtocol` names the modifier.
+
+### 3.11.2 -- 2026-09-09
+
+§11.6 capabilities paragraph extended: one sentence added stating that the distillation measurement covers only the rows actually emitted carrying a `distilled` field, after the row cap and privacy projection, using the CognitionKit measurement; the v2 surface sums per-row `originalTokenCount` and `tokenCount` from the recipe.
+
+### 3.11.1 -- 2026-09-09
+
+`moot_recall_distilled` Output entry (§5) updated: Output now states `capabilities.distillation` and the compact-text savings display line; Sample points to §11.2 and §11.6. §11.2 distilled recall sample extended with the display line appended after the indented continuation. §11.6 `capabilities` keys paragraph extended: `distillation` added (distilled recall only, always present, keys listed, `skim` optional); `moot_recall_distilled` declared as carrying its own `data` schema with `capabilities` and `distillation` required; shared capabilities schema of all other operations noted as unchanged.
+
+
+### 3.11.0 -- 2026-09-09
+
+moot_reclassify_fdc promoted to a real v2 write path — adds apply, mode, limit arguments; output moves to 18-field structuredContent.data contract (content[0].text carries a compact human report truncated at 512 scalars); moot_estate_status data gains fdc_recalculation field (current/missing/stale).
+
+### 3.10.2 -- 2026-09-09
+
+§12.5 coaching triggers wired to the v2 surface — AriaV2Coach/v2::coach implements all six triggers; the v2 envelope gains a new hint slot (structuredContent['hint'] + appended 'hint: …' line in content[0].text) and a periodic coaching block appended to content[0].text at the controlled cadence; estate-provisioned coaching_calls and sticky_enabled apply via applyPreferences on the first dispatch call.
+
+### 3.10.1 -- 2026-09-10
+
+Front-matter description was missing 3.9.1 and 3.9.2 entries (the
+description ran 3.9.0 straight to 3.10.0). Added, summarized from those two
+entries below. No contract change.
+
+### 3.10.0 -- 2026-09-09
+
+Added four previously-undocumented catalog entries: `moot_memory_recall_transcript`
+and `moot_propose_contradictions` (§5.2 and §9.2 respectively), and
+`moot_help` and `moot_monitoring_set` (§10.1 and §10.2 respectively, the
+latter alongside its `moot_monitoring_status` read counterpart). Tool count
+is now 84.
+
+### 3.9.2 -- 2026-09-09
+
+V2-A surface adoption: v2 catalog is now the only published surface (git tag
+ARIAv1-Terminus marks the last commit before the v1 surface was removed).
+Tool name updates: `moot_federated_search` renamed `moot_federated_recall`
+(§8 federation family), `moot_run_migration` renamed `moot_migration_run`,
+`moot_confirm_migration` renamed `moot_migration_confirm` (§9 migration
+family). `moot_recollect` removed; recorded in §16.3 retired-names list.
+`dispatchableUnadvertisedTools` removed from the frozen-posture read-set
+description (§12.2) — no unadvertised dispatchable names remain.
+
+
+### 3.9.1 -- 2026-09-09
+
+`ARIAServerConstants` (in `AriaMCPWire`) added to §14.3: documents the single
+stored declaration for `noSubjectMarker` so consumer targets that link only
+`AriaMCPWire` have an interface reference. `ResultComposer.noSubjectMarker`
+forwards to it; the compiler enforces parity.
+
+### 3.9.0 -- 2026-09-08
+
+§2.8 corrects the `--in-memory` description. The estate starts empty: the
+catalog record is resolved only to validate the selector argument; its content
+is NOT loaded. The command-table row now reads
+`aria-mcp --in-memory  a fresh empty estate on the in-memory backend (record
+resolved for validation only)` and the explanatory note is updated to match.
+
+### 3.8.0 -- 2026-09-08
+
+New §2.8 records the `aria-mcp` command line, which both ports now parse from
+one table: the four accepted invocations, `--help`/`-h` printing the usage
+line and exiting 0, and the four refused shapes (unrecognised argument, `--db`
+without a value, `--db` followed by a flag, repeated `--db`), each exiting 1.
+The Rust port previously exited 2, accepted `--db a --db b` last-wins, and
+took `--db --in-memory` as an estate named `--in-memory`; the Swift port had
+no `--help`.
+
+`--in-memory` is one rule across `aria-mcp` and `mootx01 serve`, both ports:
+the catalog opens and the record resolves before the backend is chosen, and
+the estate is then served TRANSIENT — no federation identity, no charter
+drawers. The Rust `aria-mcp` skipped the catalog entirely and the Swift ports
+federated when the record was registered.
+
+The 120 of the subject contract is stated as 120 Unicode scalars, the unit
+both ports count and both `moot-bridge` ports cut a derived subject on. Swift
+counted grapheme clusters, so a subject of combining sequences could pass the
+Swift check and be refused by the Rust one.
+
+### 3.7.0 -- 2026-09-07
+
+The `moot_recall_shaped` roster under the dark switches, both ports: with
+`DenseFamilies` / `dense-families` the roster holds 37 names (`ppmi_forward`,
+`nmf_forward`, `anti_redundant_nmf` beside the 34 of a `WholeRecordDense`
+build); `lsa_forward` and `anti_redundant_lsa` exist only in an `LSA` /
+`lsa` build (39 names), the switch of their own LSA moved to on 2026-09-07
+(GENIUSLOCUSKIT_SPEC 3.8.0). The product build is unchanged at 26 names.
+`mootx01 upgrade` gains the whole-record vacuum step, whose one output line
+(`whole-record vacuum: N float row(s), M graph row(s) deleted; B bytes
+returned to filesystem`, or `nothing to reclaim`) is byte-identical in both
+ports.
+
+### 3.6.0 -- 2026-09-07
+
+The discrimination cap reads the span rerank stage alone, both ports:
+`RecallDiscrimination.denseLaneDark(spanRerankRegistered:)` /
+`recall_discrimination::dense_lane_dark(span_rerank_registered)` is true when
+no span rerank stage is registered on the estate. The whole-record dense lane
+left the default build (GENIUSLOCUSKIT_SPEC 3.7.0), so its status is no longer
+an input. The `moot_recall_shaped` roster follows `RecallShape.presetNames`:
+26 names in the product build (`conceptual`, `associative`, `consensus`,
+`ri_forward`, `anti_redundant_ri`, `float-l2`, `float-dot` exist only in a
+`WholeRecordDense` build, with `whole_record_baseline`). The Rust
+`moot_fact_search` no longer appends a `recall_provenance: dense_lane:` line
+(the Swift port never did and 2.0.0 removed the line from the surface); the
+Swift `moot_fact_search` no longer runs a probe recall whose only output was
+the discarded dense lane status. The `moot_recall_precise` composition list
+drops `dense-fused` (NEURONKIT_SPEC 1.23.0). The `AriaMcpKit` package gains
+the `WholeRecordDense` trait, which compiles the resident adapter's float
+index duties and enables the trait in NeuronKit, GeniusLocusKit and CorpusKit.
+
+### 3.5.0 -- 2026-09-07
+
+The live sensitivity grant ceiling now floors the two remaining filing
+surfaces. `moot_file_packet` (Swift; the packet tools have no Rust twin)
+takes an optional `sensitivity` argument in the `moot_file_memory` shape:
+an omitted `sensitivity` files at the grant's tier, an explicit tier at or
+above the ceiling is kept, an explicit lower tier returns `isError: true`
+with the `moot_file_memory` refusal text and writes nothing, and the
+`packet_filed:` block ends with `sensitivity: <tier>` while a grant is
+live. WorkPacketKit's `store` gains the `sensitivity` parameter that
+carries the tier (WORKPACKETKIT_INTERFACE 1.1.0). The opt-in `memory`
+adapter, whose schema is Anthropic's and carries no sensitivity argument,
+floors its content-bearing writes without one, both ports: `create`,
+`str_replace` and `insert` file at the higher of the tier the write would
+otherwise carry and the grant's tier, and append `sensitivity: <tier>` to
+the contract reply while a grant is live; `rename` and `delete` are
+unchanged; with no grant live every reply keeps Anthropic's text exactly.
+A file filed restricted or secret is outside the adapter's no-grant read
+posture until read through a grant-aware tool. The `tools/list`
+descriptions of `moot_file_packet` and `memory` state the rule. Permission
+tiers unchanged (Allow). Tests: `PacketToolsTests.filePacket*` and
+`WorkPacketStoreTests` sensitivity cases (Swift),
+`MemoryToolAdapterSensitivityTests` grant cases (Swift) and
+`memory_create_under_restricted_grant_files_restricted_and_names_it` and
+siblings in `memory_adapter_tests.rs` (Rust).
+
+### 3.4.0 -- 2026-09-07
+
+`moot_file_memory` files at the live sensitivity grant ceiling, both
+ports. The checkpoint and handoff notes the context-meter hook asks for
+summarise whatever the session recalled, including material read under a
+restricted or secret grant, and a note filed with the default `normal`
+tier stayed readable after the grant expired. The write side now reads
+the same `SensitivityGrantLedger` as `moot_memory_search` and
+`moot_memory_get`: an omitted `sensitivity` files at the grant's tier, an
+explicit tier at or above it is kept, and an explicit lower tier returns
+`isError: true` with
+`"sensitivity <requested> is below the live grant ceiling <ceiling>: while a <ceiling> grant is live a memory files at <ceiling> or higher. Omit sensitivity to file at the ceiling."`
+and writes nothing. While a grant is live the reply adds a fourth line
+`sensitivity: <tier>`; with no grant live the argument, the default and
+the three-line reply are unchanged. The `tools/list` description of the
+`sensitivity` argument states the rule. Permission tier unchanged
+(Allow): the floor lives on the server, so the installer's allow-tier
+default needs no prompt to hold it. `moot_file_packet` and
+`moot_write_journal` carry no sensitivity argument and are unchanged. The
+context-meter hook's rungs and recovery text now say the same thing
+(file at the highest sensitivity recalled under a grant, name it in the
+call, the handoff is read back under the same ceiling). Tests:
+`FileMemorySensitivityCeilingTests` (Swift) and
+`file_memory_omitted_sensitivity_under_restricted_grant_files_restricted`
+and siblings (Rust).
+
+### 3.3.0 -- 2026-09-07
+`moot_packet_get` and `moot_packet_lineage` enforce the sensitivity ceiling
+(Swift; the packet tools have no Rust twin). Both readers now go through
+WorkPacketKit's frame-gated fetch (WORKPACKETKIT_SPEC 1.0.0 § 4 I-6): the
+`.currentlyBelieve` state gate, the wing and `work-packets` room, the
+adjective sensitivity ceiling — the estate default `.elevated`, lifted only
+by a live restricted or secret grant on the dispatcher's
+`SensitivityGrantLedger`, the same ledger `moot_memory_get` consults — and an
+unconditional drop of provenance Restricted/Secret rows. A gated row is
+reported with the not-found shape an absent id gets, so `drawer_id` cannot
+confirm hidden content exists. `moot_packet_lineage` gates its root before
+traversal and omits gated antecedents from the reported thread. Both tools
+gain an optional `wing` argument (default Agentic Memory), matching
+`moot_file_packet` and `moot_packet_list`, so packets filed into another
+wing stay reachable under the wing-scoped read. Permission tier unchanged
+(Allow). No change to `moot_packet_list`, which already read through a
+frame.
+
+### 3.2.0 -- 2026-09-06
+
+`moot_memory_search` answer block: the `signals:` line keeps its labels and
+shape, and its values now come from the span rerank stage
+(GENIUSLOCUSKIT_SPEC 3.2.0). `lane_agreement=<m2>` is the agreement between
+the lexical head order and the span-encoder reranked order of the
+span-scored hits (1.00 when the encoder confirms the lexical order, 0.00
+when it reverses it or when no hit carries span evidence);
+`dense_spread=<m3>` is the spread of the span cosines over those hits.
+`margin=` and `containment=` are unchanged, as are the thresholds, so an
+estate with an active encoder now reports `confident` and `intermediate`
+where every multi-hit answer read WEAK; an estate with no encoder still
+reads WEAK on multi-hit answers. The discrimination cap (`high` →
+`medium` with the "semantic lane dark" caveat) fires only when no span
+rerank stage is registered on the estate (since 3.3.0 the stage is the whole
+predicate); `RecallDiscrimination.denseLaneDark(spanRerankRegistered:)` /
+`recall_discrimination::dense_lane_dark` is the seam, both ports. Estates
+created after this version are encoder-active from their first open
+(GENIUSLOCUSKIT_SPEC 3.2.0 registry seeding); the app bundle must still
+carry the Arctic model folder.
+
+### 3.1.0 -- 2026-09-06
+
+`moot_memory_search` answer block parity (answer:always|auto). The Rust
+reply renders the lines Swift `runMemorySearch` renders: `confidence:
+confident|intermediate` (the level name; it read `high|medium`),
+`citations:` with up to five ids (it showed three), and `signals:
+margin=<m1> lane_agreement=<m2> dense_spread=<m3> containment=<m4>` with
+the two-decimal values in shortest form (it read `m1= m2= m3= m4=` with
+three decimals). The Rust port composes no answer text, so its `answer:`
+line stays absent; Swift's stands. The gate inputs agree too: Rust reads
+m4 as false with no composed answer, the Swift rule, and its citation ids
+are the first five hydrated drawer ids (GENIUSLOCUSKIT_INTERFACE 3.1.0).
+On one served-style fixture (seven charter hints, one filed memory, dense
+lane dark) both ports return the identical eight rows with identical lane
+scores and both classify WEAK; the Rust `sticky_recall_auto_e2e_dispatcher`
+test now runs on the Swift twin's bare-estate fixture, files its seed with
+the required `location`, and pins the line shape.
+
+### 3.0.0 -- 2026-09-06
+
+Corrected candidate-row examples and structured hydration. Removed stored
+adornment projections and the contentFallback representation. Recorded the
+removed force-redistill service.
+
+### 2.16.0 -- 2026-09-05
+
+One index composition (CorpusKit spec 1.28.0, GeniusLocusKit spec 2.23.0).
+`moot_estate_status` no longer prints `index_composition_policy: <id>`;
+`frozen:` now follows `sync:` directly, both ports. The benchmark harness
+`RunEnvironment` and the matrix rows drop the `index_composition_policy`
+field, and `MOOT_INDEX_COMPOSITION` is read nowhere. `mootx01 db composition`
+is gone from both ports (`db` keeps create, list, open, delete).
+
+### 2.15.0 -- 2026-09-05
+
+Encoder Rerank Program, integration. The two dark mint tools
+(`moot_run_adornment_pass`, `moot_register_adornment_minter`) and the
+`MOOTX01_MINT_TOOLS` launch gate are removed in both ports; the frozen
+refused set is the three advertised tiers only. `moot_estate_status` no
+longer carries the `adornment_miner` lines. `depth:distilled` on
+`moot_memory_get` renders inline in both ports; the
+`source: content (not yet distilled)` marker and the `moot_distill` hint are
+gone. Rust `tools/list` no longer advertises `moot_distill` / `moot_redistill`
+(parity with 2.14.0).
+
+### 2.14.0 -- 2026-09-05
+
+ENC-W6B: S1/S2 row schema updated. Text format: 7 columns → 6 columns.
+`firstSentence` renamed `bestSpan` (best content span from the highest-ranked
+SpanRerankHit, 60-word cap, falls back to first body sentence when no span
+hit is available). SSC column becomes `sscFacts` (raw string, e.g. `kind:
+hobby, entity: painting`; stubbed as `-` until schema-19 drawer.sscFacts
+lands). Adornment column retired from both text and structured rows;
+`adornment`, `adornments` keys removed from the structured result schema.
+Structured row now carries `bestSpan` and `sscFacts` in place of the
+old SSC object and firstSentence string. `moot_distill` and `moot_redistill`
+marked retired in §9.2; their entries replaced with retirement notices.
+Tool count: 82 → 80.
+
+### 2.13.0 -- 2026-09-05
+`moot_file_fact` oversize subject now returns `isError: true` with the
+contract message, both ports. Previously the Swift port returned a JSON-RPC
+`invalidParams` error while Rust returned a successful result; both now
+produce a uniform `isError` result.
+
+### 2.12.0 -- 2026-09-05
+PAR-1: `moot_memory_search` reaches reply parity across the ports. The
+Rust reply is composed through the shared S1 composer exactly as the Swift
+reply is: the adornment text is column 5 of the row (the separate
+`adornment:` line is gone), the structured row carries `score`,
+`eventTime`, `firstSentence`, `adornment`, `adornments`, and `room` (it
+carried `id`, `subject`, `room`, `content` before), the always-on
+`recall_provenance:` line that 2.0.0 removed from this surface is gone
+from the Rust reply too (the `retrieval: degraded` control line stands in),
+and the advertised `explain` argument is honoured: both ports follow each
+row with the recall engine's explanation block (§11.2 documents the
+grammar). Swift is unchanged. Rust GLK fills `RecallHit.explanation` with
+the same lines as Swift and `RecallHit.sources` with the candidate-supply
+lanes only (GENIUSLOCUSKIT_SPEC 2.16.0).
+
+### 2.11.0 -- 2026-09-04
+Subject-length contract violations on `moot_file_memory` and `moot_update_memory`
+(`mutation=setSubject`) now surface as `isError: true` results rather than JSON-RPC
+`invalidParams` errors. MCP clients render JSON-RPC errors as a bare "Tool execution
+failed" with no message; the `isError` surface puts the contract text in front of the
+model so it can compress the subject and retry. Both ports fixed (Swift `ToolDispatch.swift`,
+Rust `interface_tools.rs`). §16.1 updated to document the distinction. Verb error sections
+for `moot_file_memory` and `moot_update_memory` updated with the exact error text.
+Missing `subject` (absent field) remains a JSON-RPC `invalidParams` error — that is a
+malformed call, not a runner-level refusal.
+
+### 2.10.0 -- 2026-09-04
+Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
+
+### 2.9.0 -- 2026-09-03
+Frozen posture closes the gated-tool escape, both ports. `memory`
+(`MOOTX01_MEMORY_TOOL=1`) is classified per call under a frozen serve: `view`
+proceeds; `create`, `str_replace`, `insert`, `delete`, `rename`, and a missing
+or unknown command return the `isError` text `estate is frozen (serve
+--frozen): memory command <command> is not a read command and was refused`,
+before the adapter runs and before session state records the call. The two
+dark mint tools (`MOOTX01_MINT_TOOLS=1`) join the refused inventory as
+`darkMutationTools` / `DARK_MUTATION_TOOLS` and are refused by name. The
+inventory gains an explicit read set (`frozenReadTools` / `FROZEN_READ_TOOLS`)
+and a command map (`frozenReadCommands` / `FROZEN_READ_COMMANDS`); a
+completeness test in each port asserts every tool a serve can dispatch, under
+every combination of `MOOTX01_VAULT`, `MOOTX01_MEMORY_TOOL`, and
+`MOOTX01_MINT_TOOLS`, is in exactly one of the three sets, so a future tool
+cannot reach a frozen serve unclassified. `moot_file_packet` (Swift) is
+triaged as an additive write. § 12.2 rewritten.
+
+### 2.8.0 -- 2026-09-03
+`moot_estate_status`'s `index_composition_policy: <id>` line reports the
+estate's stored index composition setting (GeniusLocusKit spec I-23), the
+policy the wired Corpus runs under, and `none` when no Corpus is wired; both
+ports read it through the kit (Swift `kit.indexCompositionPolicy(for:)`, Rust
+`EstateCoordinator::index_composition_policy`), and the Rust handler no
+longer reads `MOOT_INDEX_COMPOSITION`. The benchmark harness
+`RunEnvironment.index_composition_policy` is the stored id captured from this
+line through the lane's own MCP client while the measured estate is
+connected (the matrix lane records it per row, one database per row). The
+setting is changed with `mootx01 db composition --set`, which rebuilds every
+index lane in the same command.
+
+### 2.7.0 -- 2026-09-03
+`moot_redistill` was advertised by `tools/list` in both ports (Swift tool
+count 82 with vault, Rust 78 with vault) and documented in § 9.2. The Swift
+recipe tool and its CognitionKit recipe were restored; the Rust list gained
+the entry for the handler it already dispatched. Both tools were retired in
+2.14.0 (ENC-W6B).
+
+### 2.6.0 -- 2026-09-03
+Frozen serve posture. `mootx01 serve --frozen` (or `MOOTX01_FROZEN=1`; the
+flag wins) serves an estate as a read-only, side-effect-free snapshot over
+stdio, both ports: no detached dreamer or drainer is spawned at startup, on
+the periodic trigger, or at exit; `moot_memory_search` runs with internal
+recall origin (no recall-trace rows, no dreaming enqueue); dereference verbs
+write no reward mark; and every tool in the mutation inventory
+(`AriaMCP.ToolMutationInventory` / `aria_mcp::tool_mutation_inventory` —
+additive writes, mutations, erasure) returns an `isError` tool result with
+the text `estate is frozen (serve --frozen): <tool> is a mutating tool and
+was refused`, before any runner fires and before session state records the
+call. `teachme:true` is still answered. `moot_estate_status` gains a
+`"frozen: true|false"` line immediately after `index_composition_policy`.
+The combination with `--http` / `MOOTX01_HTTP_PORT` is refused (the resident
+daemon runs background workers), and a frozen stdio serve refuses to forward
+to a live resident serving the same estate. The mutation inventory moved
+from the two installers into the kit so the installer's permission tiers
+and the frozen refusal read one table. The benchmark harness sets
+`MOOTX01_FROZEN=1` on every read-only artifact serve it launches.
+
+### 2.5.0 -- 2026-09-02
+Dark mint tools gated at launch (codex finding 16). `moot_run_adornment_pass`
+and `moot_register_adornment_minter` (§ 9.2) dispatch only when the serving
+process was started with `MOOTX01_MINT_TOOLS=1` (§ 4.2); the variable is read
+once per process, and without it `tools/call` for either name returns the
+standard unknown-tool error in both ports. `moot_run_adornment_pass`
+`batch_size` is clamped to `ADORNMENT_PASS_MAX_BATCH_SIZE` (5000). The
+benchmark mint driver sets the variable on the serve it launches. The
+advertised tool surface is unchanged.
+
+CDL-03: `moot_estate_status` response stats array gains
+`"index_composition_policy: <id>"` entry (e.g.
+`"index_composition_policy: lex=original;dense=distilled"`). The value is the
+`IndexCompositionPolicy.id` of the policy active for this estate open.
+`"index_composition_policy: none"` when no estate is open. Benchmark harness
+`RunEnvironment` gains the `index_composition_policy` field (snake_case CodingKey)
+populated from the `MOOT_INDEX_COMPOSITION` env var at run start.
 
 ### 2.4.0 -- 2026-08-26
 Ladder merge. The develop/1.1.x stream and the benchmark stream each

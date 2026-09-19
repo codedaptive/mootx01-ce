@@ -8,9 +8,9 @@ description: Four gated product changes distilled from the door, combo, miss, ca
 
 # Decision — Search Strategy Recipes and Lanes
 
-Evidence base: benchmark-ee/studies/ DOOR_MATRIX, COMBO_MATRIX,
-MISS_AUTOPSY, CASCADE_STUDY, EVENT_TIME_STUDY (all 2026-08-19), measured
-on pinned debug subsets over restored artifacts, no LLM anywhere.
+Evidence base: the DOOR_MATRIX, COMBO_MATRIX, MISS_AUTOPSY, CASCADE_STUDY,
+and EVENT_TIME_STUDY maintainer records (all 2026-08-19), measured on pinned
+debug subsets over restored artifacts, with no LLM involved.
 
 ## Item 1 — Recipe `moot_recall_consensus`
 

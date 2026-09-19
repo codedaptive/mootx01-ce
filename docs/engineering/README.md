@@ -30,6 +30,7 @@ recorded explicitly so an old proposal cannot be mistaken for shipped behavior.
 | Performance measurements and backend-selection gates | `SUBSTRATE_PERFORMANCE_GATE.md` |
 | Package authoring, Swift/Rust parity, dependency, test, and comment rules | `STANDARD_CODE_AUTHORING_PRACTICE.md` |
 | CE/EE publication and release flow | `RELEASE_RUNBOOK.md` |
+| ARIA interface lanes: error contract, egress presentation, advisory lines, multi-estate lenses, identifier conventions | `ARIA_INTERFACE_LANE_DECISIONS.md` |
 
 Reference specifications remain the detailed API contracts. These engineering
 masters connect those contracts and preserve the cross-cutting invariants that

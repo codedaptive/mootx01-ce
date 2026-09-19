@@ -1,9 +1,9 @@
 ---
 title: SubstrateKernel Interface
-version: 1.3.0
+version: 1.4.0
 status: active
-date: 2026-07-16
-description: Public API surface for SubstrateKernel in both the Swift and Rust ports.
+date: 2026-09-06
+description: Public API surface for SubstrateKernel in both the Swift and Rust ports. 1.4.0: Int8Vec — symmetric per-vector absmax int8 quantisation (quantize/dequantize/dotQuery), conformance fixture, and Swift/Rust concordance row added.
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -28,6 +28,7 @@ relates_to:
   - `HKDF.swift` — RFC 5869 HKDF-SHA256 (`GrantHKDF`)
   - `HammingNN.swift` — Hamming nearest-neighbor primitive
   - `FloatVecOps.swift` — scalar float-vector operations (`FloatVecOps`)
+  - `Int8Vec.swift` — symmetric per-vector absmax int8 quantisation (`Int8Vec`)
 - `Tests/SubstrateKernelTests/` — unit + conformance.
 - `Package.swift` — depends on `SubstrateTypes`.
 
@@ -44,6 +45,8 @@ relates_to:
 - `src/bit_field.rs`, `src/sha256.rs`, `src/hkdf.rs`, `src/hamming_nn.rs`.
 - `src/float_vec_ops.rs` — scalar float-vector operations (`l2_norm`,
   `l2_normalize`, `dot`, `cosine`).
+- `src/int8_vec.rs` — symmetric per-vector absmax int8 quantisation
+  (`quantize`, `dequantize`, `dot_query`).
 - `tests/` — conformance.
 - `Cargo.toml` — depends on `substrate-types`.
 
@@ -389,14 +392,58 @@ the owned buffer); Swift takes and returns `[Float]` by value
 builds). Both are intentional — silent truncation via `zip` is worse
 than a panic.
 
+### `Int8Vec`
+
+Symmetric per-vector absmax int8 quantisation for encoder span vectors.
+SPEC § 5.9. Conformance-gated on the shared fixture
+`packages/kits/SynapseKit/Tests/Fixtures/encoder/int8_vectors.json`.
+
+**Swift** (`Int8Vec.swift`, `public enum Int8Vec`):
+
+```swift
+/// Quantise v to int8 with a per-vector scale.
+/// Returns (q, scale); q.count == v.count.
+/// Zero vector returns all zeros with scale == 1.
+public static func quantize(_ v: [Float]) -> (q: [Int8], scale: Float)
+
+/// Reconstruct the approximate float32 vector: q_i × scale.
+public static func dequantize(_ q: [Int8], scale: Float) -> [Float]
+
+/// Similarity between a float32 query u (unit norm) and a stored
+/// quantised vector: (Σ u_i × q_i) × scale.
+/// Precondition: u.count == q.count.
+public static func dotQuery(_ u: [Float], q: [Int8], scale: Float) -> Float
+```
+
+**Rust** (`src/int8_vec.rs`, module free functions):
+
+```rust
+/// Returns (q, scale); q.len() == v.len(). Mirrors Swift Int8Vec.quantize.
+pub fn quantize(v: &[f32]) -> (Vec<i8>, f32);
+/// Mirrors Swift Int8Vec.dequantize.
+pub fn dequantize(q: &[i8], scale: f32) -> Vec<f32>;
+/// Panics on dimension mismatch (assert_eq!). Mirrors Swift Int8Vec.dotQuery.
+pub fn dot_query(u: &[f32], q: &[i8], scale: f32) -> f32;
+```
+
+**Bit-identity contract:** `quantize` and `scale` are bit-for-bit
+identical across ports on the shared conformance fixture. `dotQuery` /
+`dot_query` agree within 1e-5 (float32 accumulation order is identical;
+SPEC § 5.9 documents the exact operation sequence).
+
+**Naming idiom:** Swift `dotQuery` / Rust `dot_query` — standard camelCase
+vs snake_case port idiom. Swift `quantize` and Rust `quantize` share the
+same spelling (no camelCase conversion needed for this name).
+
 ## § 3 — Public functions
 
 All operations on this package are methods on the `SubstrateKernel`
 protocol implementations or static functions on the primitive
 namespaces (`BitField`, `SHA256`, `GrantHKDF`, `HammingNN`,
-`FloatVecOps`). No free top-level functions outside those surfaces.
+`FloatVecOps`, `Int8Vec`). No free top-level functions outside those surfaces.
 (In the Rust port these namespaces are modules of free functions:
-`bit_field::`, `sha256::`, `hkdf::`, `hamming_nn::`, `float_vec_ops::`.)
+`bit_field::`, `sha256::`, `hkdf::`, `hamming_nn::`, `float_vec_ops::`,
+`int8_vec::`)
 
 ## § 4 — Errors
 
@@ -496,6 +543,7 @@ differences; the two ports remain behaviorally equivalent.
 | Metal GPU kernel backend | `MetalKernel` struct — `PortableKernel-Metal.swift:109`; `defaultMaxN: Int = 100_000` — `:128`; `init?(maxN: Int = MetalKernel.defaultMaxN)` — `:134` | none — Apple `Metal` framework (`#if canImport(Metal)`, `init?` since GPU may be unavailable) | public / — | Rust: none — Apple platform binding (Metal is an Apple-only GPU system framework; the Rust port uses scalar + portable SIMD). `defaultMaxN` sets the persistent buffer-pool ceiling (dreaming-daemon batch scale, ~3.6 MB overhead); callers may pass a smaller `maxN` to cap pool RAM | `PortableKernelConformanceTests` "every host-reachable backend matches the scalar reference" — `PortableKernelTests.swift:270` (Swift-only host) | Apple-only |
 | Float-input SimHash projection (protocol op) | `SubstrateKernel.floatSimHashProject(vector:planes:)` — `PortableKernel.swift:127` (default impl in extension) | `SubstrateKernel::float_simhash_project(&self, vector, planes)` — `rust/src/kernel.rs:124` (default impl in trait) | public / `pub` (protocol/trait method with default impl) | Swift `floatSimHashProject(vector:[Float], planes:FloatSimHashPlanes) -> Fingerprint256` / Rust `float_simhash_project(&self, vector:&[f32], planes:&FloatSimHashPlanes) -> Fingerprint256`. Both: bit k set ⟺ ⟨vector, plane_k⟩ > 0 over 256 hyperplanes. Planes passed as data (no RNG in kernel). dim mismatch panics/preconditions in both | Rust: `float_simhash_project_valid_dim_is_deterministic` + `float_simhash_project_dim_mismatch_panics` — `kernel.rs:614,634` | Both ports |
 | Scalar float-vector operations | `FloatVecOps` enum (namespace) — `FloatVecOps.swift:62` | `float_vec_ops` module — `rust/src/float_vec_ops.rs` (free fns: `l2_norm:60`, `l2_normalize:89`, `dot:120`, `cosine:149`) | public / `pub` | Swift `FloatVecOps.l2Norm`, `.l2Normalize`, `.dot`, `.cosine` (static funcs) / Rust `float_vec_ops::l2_norm`, `l2_normalize`, `dot`, `cosine` (free fns). IEEE-754 scalar loop, bit-identical cross-port. Rust `l2_normalize` takes `Vec<f32>` owned / Swift takes `[Float]` by value — sanctioned port idiom. Rust uses `1.0 / sqrt` (not `.recip()`) to match Swift's bit pattern. Panic on dim mismatch in release builds in both (`precondition`/`assert_eq!`) | Rust `#[cfg(test)] mod tests` in `float_vec_ops.rs:170` (8 tests: l2_norm/l2_normalize/dot/cosine + bit-identity canonicals) | Both ports |
+| Symmetric int8 quantisation | `Int8Vec` enum (namespace) — `Int8Vec.swift` | `int8_vec` module — `rust/src/int8_vec.rs` (free fns: `quantize`, `dequantize`, `dot_query`) | public / `pub` | Swift `Int8Vec.quantize(_ v:[Float]) -> (q:[Int8], scale:Float)` / Rust `int8_vec::quantize(v:&[f32]) -> (Vec<i8>, f32)`. Swift `Int8Vec.dequantize(_ q:[Int8], scale:Float) -> [Float]` / Rust `int8_vec::dequantize(q:&[i8], scale:f32) -> Vec<f32>`. Swift `Int8Vec.dotQuery(_ u:[Float], q:[Int8], scale:Float) -> Float` / Rust `int8_vec::dot_query(u:&[f32], q:&[i8], scale:f32) -> f32`. Symmetric ±127 absmax policy: scale = max|v|/127, q = clamp(round-half-away(v/scale), −127, 127), dot = Σ u_i q_i × scale. Bit-for-bit identical on shared conformance fixture `SynapseKit/Tests/Fixtures/encoder/int8_vectors.json`; `dotQuery` within 1e-5. Panic on dim mismatch (`precondition`/`assert_eq!`). Named `dotQuery` (Swift) / `dot_query` (Rust) — standard camelCase vs snake_case port idiom | `Int8VecTests.swift` in `SubstrateKernelTests` / Rust `#[cfg(test)] mod tests` in `int8_vec.rs` (4 tests: zero vector, ±127 anchor, half-tie rounding, dot-after-loop scale) + `SynapseKitTests/Int8VecConformanceTests.swift` (shared fixture gate) | Both ports |
 
 ### Concordance notes
 
@@ -508,6 +556,15 @@ differences; the two ports remain behaviorally equivalent.
   op, and its BNNSGraph matmul path crashes on macOS 26.5.
 
 ## Changelog
+
+### 1.4.0 -- 2026-09-06
+
+Added `Int8Vec` section (§ 2 `Int8Vec` enum / `int8_vec` module):
+`quantize`/`dequantize`/`dotQuery` (Swift) and `quantize`/`dequantize`/
+`dot_query` (Rust). Added `Int8Vec.swift` to the Swift file listing,
+`src/int8_vec.rs` to the Rust file listing, `Int8Vec` to the § 3
+namespace list, and the `Int8Vec` concordance row. Bit-identity contract
+and conformance fixture documented per SPEC § 5.9.
 
 ### 1.3.0 -- 2026-07-16
 Corrected `MetalKernel` surface: added `public static let defaultMaxN: Int = 100_000`
