@@ -56,7 +56,7 @@ use crate::{
     handle::EstateHandle,
 };
 use engram_lib::chest_placement;
-use locus_kit::{error::LocusKitError, estate::Estate, provenance::Sensitivity};
+use locus_kit::{adjectives::AdjectiveSensitivity, error::LocusKitError, estate::Estate};
 use queuekit::{JobId, QueueCheckpointStore, StreamId, HLC};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -229,8 +229,12 @@ pub fn score_container(
     // any stale bit 26 cleared. Twin of the Swift AnomalyFlagSweep gate.
     let mut drawers = Vec::new();
     for drawer in estate.drawers_in_container(&container.node_id).map_err(failure)? {
-        let s = drawer.sensitivity();
-        if s == Sensitivity::Restricted || s == Sensitivity::Secret {
+        // Adjective sensitivity: the field the read-side containment gate
+        // enforces, so the cohort excludes exactly what an ungranted caller
+        // cannot read (the provenance sensitivity is a separate field
+        // capture does not set from the frame).
+        let s = drawer.adjective_sensitivity();
+        if s == AdjectiveSensitivity::Restricted || s == AdjectiveSensitivity::Secret {
             if drawer.is_anomalous() {
                 changed += estate.set_anomalous_flag(&drawer.id, false, now).map_err(failure)?;
             }
