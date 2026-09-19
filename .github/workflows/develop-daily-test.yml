@@ -56,7 +56,7 @@ jobs:
   test:
     needs: gate
     if: ${{ needs.gate.outputs.moved == 'true' }}
-    runs-on: macos-26
+    runs-on: xcode-27
     env:
       # GitHub's newest runner Xcode is 26.6; the Apple-app surface needs the
       # macOS 27 SDK. Those roots are local-compile-only and the shipped
