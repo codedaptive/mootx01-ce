@@ -1,0 +1,46 @@
+{
+  "cases": [
+    {
+      "expected_json": "{\n  \"format_version\": 1,\n  \"name\": \"v1-minimal\",\n  \"records\": [\n    {\n      \"content\": \"Only one sentence.\",\n      \"event_time\": \"2026-01-01T00:00:00Z\",\n      \"id\": \"r1\",\n      \"room\": \"bench/room\",\n      \"subject\": \"Only one sentence.\"\n    }\n  ]\n}",
+      "id": "minimal",
+      "name": "v1-minimal",
+      "records": [
+        {
+          "content": "Only one sentence.",
+          "event_time": "2026-01-01T00:00:00Z",
+          "id": "r1",
+          "room": "bench/room"
+        }
+      ]
+    },
+    {
+      "expected_json": "{\n  \"format_version\": 1,\n  \"name\": \"v1-escapes\",\n  \"records\": [\n    {\n      \"content\": \"Quote \\\" backslash \\\\ and\\nnewline, tab\\there, unit \\u001f end.\",\n      \"event_time\": \"2026-01-03T09:00:00Z\",\n      \"id\": \"r0001\",\n      \"room\": \"supersession/color\",\n      \"subject\": \"Quote \\\" backslash \\\\ and newline, tab\\there, unit \\u001f end.\"\n    },\n    {\n      \"content\": \"Ünïcode → stays UTF-8 verbatim.\",\n      \"event_time\": \"2026-01-04T10:30:00.250Z\",\n      \"exportability\": \"private\",\n      \"id\": \"r0002\",\n      \"kind\": \"prose\",\n      \"room\": \"supersession/color\",\n      \"sensitivity\": \"elevated\",\n      \"subject\": \"Ünïcode → stays UTF-8 verbatim.\",\n      \"wing\": \"Benchmark\"\n    }\n  ]\n}",
+      "id": "escapes-and-optionals",
+      "name": "v1-escapes",
+      "records": [
+        {
+          "content": "Quote \" backslash \\ and\nnewline, tab\there, unit \u001f end.",
+          "event_time": "2026-01-03T09:00:00Z",
+          "id": "r0001",
+          "room": "supersession/color"
+        },
+        {
+          "content": "Ünïcode → stays UTF-8 verbatim.",
+          "event_time": "2026-01-04T10:30:00.250Z",
+          "exportability": "private",
+          "id": "r0002",
+          "kind": "prose",
+          "room": "supersession/color",
+          "sensitivity": "elevated",
+          "wing": "Benchmark"
+        }
+      ]
+    },
+    {
+      "expected_json": "{\n  \"format_version\": 1,\n  \"name\": \"v1-empty\",\n  \"records\": []\n}",
+      "id": "empty-records",
+      "name": "v1-empty",
+      "records": []
+    }
+  ]
+}

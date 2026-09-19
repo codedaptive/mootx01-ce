@@ -1,0 +1,73 @@
+{
+  "seed": 42,
+  "distractorsPerNeedle": 1,
+  "tierCounts": {
+    "T1": 1,
+    "T5": 1,
+    "T2": 1,
+    "T3": 1,
+    "T4": 1
+  },
+  "needles": [
+    {
+      "id": "n0000",
+      "query": "What is the charter year of the Quillon Charter?",
+      "content": "the Quillon Charter was chartered in the year 1926.",
+      "tier": "T1",
+      "location": "Ledger/quillon-charter",
+      "distractorIDs": [
+        "n0000-t1-0"
+      ],
+      "splitPartnerID": null,
+      "expectedRank": 1
+    },
+    {
+      "id": "n0001",
+      "query": "What is the headquarters district of Fenmark Atelier?",
+      "content": "Fenmark Atelier is headquartered in the district of Ostry.",
+      "tier": "T2",
+      "location": "Charter/fenmark-atelier",
+      "distractorIDs": [
+        "n0001-t2-0"
+      ],
+      "splitPartnerID": null,
+      "expectedRank": 1
+    },
+    {
+      "id": "n0002",
+      "query": "What is the headquarters district of the Marrowgate Trust?",
+      "content": "the Marrowgate Trust is headquartered in the district of Brenne. (current as of 2023)",
+      "tier": "T3",
+      "location": "Charter/marrowgate-trust",
+      "distractorIDs": [
+        "n0002-t3-0"
+      ],
+      "splitPartnerID": null,
+      "expectedRank": 1
+    },
+    {
+      "id": "n0003",
+      "query": "What is the charter year of the Ashfen Protocol?",
+      "content": "the Ashfen Protocol records its charter year under reference REF-0934; see the matching reference entry for the value.",
+      "tier": "T4",
+      "location": "Ledger/ashfen-protocol",
+      "distractorIDs": [
+        "n0003-t4-0"
+      ],
+      "splitPartnerID": "n0003-partner",
+      "expectedRank": 1
+    },
+    {
+      "id": "n0004",
+      "query": "What is the presiding steward of Mirelle Station?",
+      "content": "Mirelle Station is governed by the steward named Oren Vask.",
+      "tier": "T5",
+      "location": "Ledger/Outpost-349",
+      "distractorIDs": [
+        "n0004-t5-0"
+      ],
+      "splitPartnerID": null,
+      "expectedRank": 1
+    }
+  ]
+}

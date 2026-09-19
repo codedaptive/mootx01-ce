@@ -1,0 +1,379 @@
+{
+  "contradictions" : [
+    {
+      "attribute" : "employer",
+      "entity" : "Amara Lindqvist C0",
+      "id" : "con-0",
+      "leftRecordID" : "con-0-a",
+      "rightRecordID" : "con-0-b"
+    },
+    {
+      "attribute" : "city",
+      "entity" : "Amara Kowalski C1",
+      "id" : "con-1",
+      "leftRecordID" : "con-1-a",
+      "rightRecordID" : "con-1-b"
+    },
+    {
+      "attribute" : "role",
+      "entity" : "Hiroshi Haddad C2",
+      "id" : "con-2",
+      "leftRecordID" : "con-2-a",
+      "rightRecordID" : "con-2-b"
+    },
+    {
+      "attribute" : "primary language",
+      "entity" : "Marcus Baptiste C3",
+      "id" : "con-3",
+      "leftRecordID" : "con-3-a",
+      "rightRecordID" : "con-3-b"
+    }
+  ],
+  "decoys" : [
+
+  ],
+  "divergences" : [
+
+  ],
+  "queries" : [
+    {
+      "attribute" : "employer",
+      "currentRecordID" : "sup-0-2",
+      "currentValue" : "Acme Robotics",
+      "entity" : "Diego Reyes 0",
+      "id" : "q-0",
+      "question" : "Where does Diego Reyes 0 work now?",
+      "supersededRecordIDs" : [
+        "sup-0-0",
+        "sup-0-1"
+      ]
+    },
+    {
+      "attribute" : "city",
+      "currentRecordID" : "sup-1-2",
+      "currentValue" : "Toronto",
+      "entity" : "Hiroshi Novak 1",
+      "id" : "q-1",
+      "question" : "Where does Hiroshi Novak 1 live now?",
+      "supersededRecordIDs" : [
+        "sup-1-0",
+        "sup-1-1"
+      ]
+    },
+    {
+      "attribute" : "role",
+      "currentRecordID" : "sup-2-2",
+      "currentValue" : "principal architect",
+      "entity" : "Priya Adeyemi 2",
+      "id" : "q-2",
+      "question" : "What is Priya Adeyemi 2's current role?",
+      "supersededRecordIDs" : [
+        "sup-2-0",
+        "sup-2-1"
+      ]
+    },
+    {
+      "attribute" : "primary language",
+      "currentRecordID" : "sup-3-2",
+      "currentValue" : "Rust",
+      "entity" : "Marcus Okafor 3",
+      "id" : "q-3",
+      "question" : "What language does Marcus Okafor 3 mostly write now?",
+      "supersededRecordIDs" : [
+        "sup-3-0",
+        "sup-3-1"
+      ]
+    },
+    {
+      "attribute" : "employer",
+      "currentRecordID" : "sup-4-2",
+      "currentValue" : "Beta Corp",
+      "entity" : "Tomas Lindqvist 4",
+      "id" : "q-4",
+      "question" : "Where does Tomas Lindqvist 4 work now?",
+      "supersededRecordIDs" : [
+        "sup-4-0",
+        "sup-4-1"
+      ]
+    },
+    {
+      "attribute" : "city",
+      "currentRecordID" : "sup-5-2",
+      "currentValue" : "Toronto",
+      "entity" : "Priya Reyes 5",
+      "id" : "q-5",
+      "question" : "Where does Priya Reyes 5 live now?",
+      "supersededRecordIDs" : [
+        "sup-5-0",
+        "sup-5-1"
+      ]
+    }
+  ],
+  "records" : [
+    {
+      "attribute" : "employer",
+      "content" : "Diego Reyes 0 works at Vireo Systems. Noted one Monday morning in January.",
+      "entity" : "Diego Reyes 0",
+      "eventTime" : "2020-01-26T00:53:20Z",
+      "id" : "sup-0-0",
+      "isCurrent" : false,
+      "value" : "Vireo Systems",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "employer",
+      "content" : "Update: Diego Reyes 0 now works at Beta Corp. Noted one Monday morning in January.",
+      "entity" : "Diego Reyes 0",
+      "eventTime" : "2020-12-13T00:53:20Z",
+      "id" : "sup-0-1",
+      "isCurrent" : false,
+      "value" : "Beta Corp",
+      "versionIndex" : 1
+    },
+    {
+      "attribute" : "employer",
+      "content" : "Update: Diego Reyes 0 now works at Acme Robotics. Noted one Monday morning in January.",
+      "entity" : "Diego Reyes 0",
+      "eventTime" : "2022-01-01T00:53:20Z",
+      "id" : "sup-0-2",
+      "isCurrent" : true,
+      "value" : "Acme Robotics",
+      "versionIndex" : 2
+    },
+    {
+      "attribute" : "city",
+      "content" : "Hiroshi Novak 1 lives in Nairobi. Noted one Tuesday noon in February.",
+      "entity" : "Hiroshi Novak 1",
+      "eventTime" : "2020-01-26T00:53:21Z",
+      "id" : "sup-1-0",
+      "isCurrent" : false,
+      "value" : "Nairobi",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "city",
+      "content" : "Update: Hiroshi Novak 1 now lives in Reykjavik. Noted one Tuesday noon in February.",
+      "entity" : "Hiroshi Novak 1",
+      "eventTime" : "2020-08-18T00:53:21Z",
+      "id" : "sup-1-1",
+      "isCurrent" : false,
+      "value" : "Reykjavik",
+      "versionIndex" : 1
+    },
+    {
+      "attribute" : "city",
+      "content" : "Update: Hiroshi Novak 1 now lives in Toronto. Noted one Tuesday noon in February.",
+      "entity" : "Hiroshi Novak 1",
+      "eventTime" : "2021-04-06T00:53:21Z",
+      "id" : "sup-1-2",
+      "isCurrent" : true,
+      "value" : "Toronto",
+      "versionIndex" : 2
+    },
+    {
+      "attribute" : "role",
+      "content" : "Priya Adeyemi 2 is a engineering manager. Noted one Wednesday afternoon in March.",
+      "entity" : "Priya Adeyemi 2",
+      "eventTime" : "2020-01-26T00:53:22Z",
+      "id" : "sup-2-0",
+      "isCurrent" : false,
+      "value" : "engineering manager",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "role",
+      "content" : "Update: Priya Adeyemi 2 now is a staff engineer. Noted one Wednesday afternoon in March.",
+      "entity" : "Priya Adeyemi 2",
+      "eventTime" : "2020-12-19T00:53:22Z",
+      "id" : "sup-2-1",
+      "isCurrent" : false,
+      "value" : "staff engineer",
+      "versionIndex" : 1
+    },
+    {
+      "attribute" : "role",
+      "content" : "Update: Priya Adeyemi 2 now is a principal architect. Noted one Wednesday afternoon in March.",
+      "entity" : "Priya Adeyemi 2",
+      "eventTime" : "2021-11-04T00:53:22Z",
+      "id" : "sup-2-2",
+      "isCurrent" : true,
+      "value" : "principal architect",
+      "versionIndex" : 2
+    },
+    {
+      "attribute" : "primary language",
+      "content" : "Marcus Okafor 3 mostly writes Swift. Noted one Thursday evening in April.",
+      "entity" : "Marcus Okafor 3",
+      "eventTime" : "2020-01-26T00:53:23Z",
+      "id" : "sup-3-0",
+      "isCurrent" : false,
+      "value" : "Swift",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "primary language",
+      "content" : "Update: Marcus Okafor 3 now mostly writes Zig. Noted one Thursday evening in April.",
+      "entity" : "Marcus Okafor 3",
+      "eventTime" : "2020-08-16T00:53:23Z",
+      "id" : "sup-3-1",
+      "isCurrent" : false,
+      "value" : "Zig",
+      "versionIndex" : 1
+    },
+    {
+      "attribute" : "primary language",
+      "content" : "Update: Marcus Okafor 3 now mostly writes Rust. Noted one Thursday evening in April.",
+      "entity" : "Marcus Okafor 3",
+      "eventTime" : "2022-03-10T00:53:23Z",
+      "id" : "sup-3-2",
+      "isCurrent" : true,
+      "value" : "Rust",
+      "versionIndex" : 2
+    },
+    {
+      "attribute" : "employer",
+      "content" : "Tomas Lindqvist 4 works at Acme Robotics. Noted one Friday night in May.",
+      "entity" : "Tomas Lindqvist 4",
+      "eventTime" : "2020-01-26T00:53:24Z",
+      "id" : "sup-4-0",
+      "isCurrent" : false,
+      "value" : "Acme Robotics",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "employer",
+      "content" : "Update: Tomas Lindqvist 4 now works at Halcyon Labs. Noted one Friday night in May.",
+      "entity" : "Tomas Lindqvist 4",
+      "eventTime" : "2021-02-12T00:53:24Z",
+      "id" : "sup-4-1",
+      "isCurrent" : false,
+      "value" : "Halcyon Labs",
+      "versionIndex" : 1
+    },
+    {
+      "attribute" : "employer",
+      "content" : "Update: Tomas Lindqvist 4 now works at Beta Corp. Noted one Friday night in May.",
+      "entity" : "Tomas Lindqvist 4",
+      "eventTime" : "2021-12-26T00:53:24Z",
+      "id" : "sup-4-2",
+      "isCurrent" : true,
+      "value" : "Beta Corp",
+      "versionIndex" : 2
+    },
+    {
+      "attribute" : "city",
+      "content" : "Priya Reyes 5 lives in Osaka. Noted one Saturday morning in June.",
+      "entity" : "Priya Reyes 5",
+      "eventTime" : "2020-01-26T00:53:25Z",
+      "id" : "sup-5-0",
+      "isCurrent" : false,
+      "value" : "Osaka",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "city",
+      "content" : "Update: Priya Reyes 5 now lives in Lisbon. Noted one Saturday morning in June.",
+      "entity" : "Priya Reyes 5",
+      "eventTime" : "2021-01-31T00:53:25Z",
+      "id" : "sup-5-1",
+      "isCurrent" : false,
+      "value" : "Lisbon",
+      "versionIndex" : 1
+    },
+    {
+      "attribute" : "city",
+      "content" : "Update: Priya Reyes 5 now lives in Toronto. Noted one Saturday morning in June.",
+      "entity" : "Priya Reyes 5",
+      "eventTime" : "2021-06-13T00:53:25Z",
+      "id" : "sup-5-2",
+      "isCurrent" : true,
+      "value" : "Toronto",
+      "versionIndex" : 2
+    },
+    {
+      "attribute" : "employer",
+      "content" : "Amara Lindqvist C0 works at Acme Robotics. Noted one Sunday noon in July.",
+      "entity" : "Amara Lindqvist C0",
+      "eventTime" : "2020-01-26T00:53:20Z",
+      "id" : "con-0-a",
+      "isCurrent" : false,
+      "value" : "Acme Robotics",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "employer",
+      "captureDate" : "2020-01-26T00:53:21Z",
+      "content" : "Amara Lindqvist C0 works at Beta Corp. Noted one Sunday noon in July.",
+      "entity" : "Amara Lindqvist C0",
+      "eventTime" : "2020-01-26T00:53:20Z",
+      "id" : "con-0-b",
+      "isCurrent" : false,
+      "value" : "Beta Corp",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "city",
+      "content" : "Amara Kowalski C1 lives in Osaka. Noted one Monday afternoon in August.",
+      "entity" : "Amara Kowalski C1",
+      "eventTime" : "2020-01-27T00:53:20Z",
+      "id" : "con-1-a",
+      "isCurrent" : false,
+      "value" : "Osaka",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "city",
+      "captureDate" : "2020-01-27T00:53:21Z",
+      "content" : "Amara Kowalski C1 lives in Lisbon. Noted one Monday afternoon in August.",
+      "entity" : "Amara Kowalski C1",
+      "eventTime" : "2020-01-27T00:53:20Z",
+      "id" : "con-1-b",
+      "isCurrent" : false,
+      "value" : "Lisbon",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "role",
+      "content" : "Hiroshi Haddad C2 is a director of platform. Noted one Tuesday evening in September.",
+      "entity" : "Hiroshi Haddad C2",
+      "eventTime" : "2020-01-28T00:53:20Z",
+      "id" : "con-2-a",
+      "isCurrent" : false,
+      "value" : "director of platform",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "role",
+      "captureDate" : "2020-01-28T00:53:21Z",
+      "content" : "Hiroshi Haddad C2 is a engineering manager. Noted one Tuesday evening in September.",
+      "entity" : "Hiroshi Haddad C2",
+      "eventTime" : "2020-01-28T00:53:20Z",
+      "id" : "con-2-b",
+      "isCurrent" : false,
+      "value" : "engineering manager",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "primary language",
+      "content" : "Marcus Baptiste C3 mostly writes Elixir. Noted one Wednesday night in October.",
+      "entity" : "Marcus Baptiste C3",
+      "eventTime" : "2020-01-29T00:53:20Z",
+      "id" : "con-3-a",
+      "isCurrent" : false,
+      "value" : "Elixir",
+      "versionIndex" : 0
+    },
+    {
+      "attribute" : "primary language",
+      "captureDate" : "2020-01-29T00:53:21Z",
+      "content" : "Marcus Baptiste C3 mostly writes OCaml. Noted one Wednesday night in October.",
+      "entity" : "Marcus Baptiste C3",
+      "eventTime" : "2020-01-29T00:53:20Z",
+      "id" : "con-3-b",
+      "isCurrent" : false,
+      "value" : "OCaml",
+      "versionIndex" : 0
+    }
+  ],
+  "seed" : 20260725
+}

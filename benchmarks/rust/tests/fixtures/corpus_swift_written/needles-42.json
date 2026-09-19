@@ -1,0 +1,69 @@
+{
+  "distractorsPerNeedle" : 1,
+  "needles" : [
+    {
+      "content" : "the Quillon Charter was chartered in the year 1926.",
+      "distractorIDs" : [
+        "n0000-t1-0"
+      ],
+      "expectedRank" : 1,
+      "id" : "n0000",
+      "location" : "Ledger/quillon-charter",
+      "query" : "What is the charter year of the Quillon Charter?",
+      "tier" : "T1"
+    },
+    {
+      "content" : "Fenmark Atelier is headquartered in the district of Ostry.",
+      "distractorIDs" : [
+        "n0001-t2-0"
+      ],
+      "expectedRank" : 1,
+      "id" : "n0001",
+      "location" : "Charter/fenmark-atelier",
+      "query" : "What is the headquarters district of Fenmark Atelier?",
+      "tier" : "T2"
+    },
+    {
+      "content" : "the Marrowgate Trust is headquartered in the district of Brenne. (current as of 2023)",
+      "distractorIDs" : [
+        "n0002-t3-0"
+      ],
+      "expectedRank" : 1,
+      "id" : "n0002",
+      "location" : "Charter/marrowgate-trust",
+      "query" : "What is the headquarters district of the Marrowgate Trust?",
+      "tier" : "T3"
+    },
+    {
+      "content" : "the Ashfen Protocol records its charter year under reference REF-0934; see the matching reference entry for the value.",
+      "distractorIDs" : [
+        "n0003-t4-0"
+      ],
+      "expectedRank" : 1,
+      "id" : "n0003",
+      "location" : "Ledger/ashfen-protocol",
+      "query" : "What is the charter year of the Ashfen Protocol?",
+      "splitPartnerID" : "n0003-partner",
+      "tier" : "T4"
+    },
+    {
+      "content" : "Mirelle Station is governed by the steward named Oren Vask.",
+      "distractorIDs" : [
+        "n0004-t5-0"
+      ],
+      "expectedRank" : 1,
+      "id" : "n0004",
+      "location" : "Ledger/Outpost-349",
+      "query" : "What is the presiding steward of Mirelle Station?",
+      "tier" : "T5"
+    }
+  ],
+  "seed" : 42,
+  "tierCounts" : {
+    "T1" : 1,
+    "T2" : 1,
+    "T3" : 1,
+    "T4" : 1,
+    "T5" : 1
+  }
+}
