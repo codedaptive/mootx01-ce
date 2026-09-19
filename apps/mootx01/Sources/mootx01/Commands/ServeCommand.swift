@@ -484,10 +484,16 @@ struct ServeCommand: AsyncParsableCommand {
             // Resident daemon: HTTP transport + autonomic governor + telemetry/monitoring
             // gate via the shared AriaResident runner (identical wiring to
             // aria-mcp). The estate is the durable SQLite opened above, so dreaming
-            // persists. Telemetry store at the canonical path computed by
-            // MootPaths.daemonStatsStorePath — the same location moot-mgr reads
-            // and the launchd plist no longer needs to carry the path in its env
-            // (R6: ARIA_MCP_STATS_STORE moves from env to configuration).
+            // persists. A registered estate's telemetry store is the canonical
+            // path computed by MootPaths.daemonStatsStorePath — the same location
+            // moot-mgr reads, so the launchd plist carries no path in its env
+            // (R6: ARIA_MCP_STATS_STORE moves from env to configuration). A
+            // transient estate (a `--db` benchmark or scratch estate) gets no
+            // store at all: it is not the operator's daemon, and writing its
+            // topology snapshots and samples into the install's store put a
+            // one-drawer benchmark estate in front of the operator's own on
+            // the moot-mgr dashboard (2026-09-18). Nil is "telemetry off", and
+            // off is free.
             // The master switch and selected provider are estate-owned. A
             // transient benchmark estate reads only its own optional config;
             // registered estates read the product configuration directory.
@@ -537,7 +543,8 @@ struct ServeCommand: AsyncParsableCommand {
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(env: environment),
                 brainTickMs: AriaResident.brainTickMs(env: environment),
                 monitoringPollMs: AriaResident.monitoringPollMs(env: environment),
-                statsStorePath: MootPaths.daemonStatsStorePath(dataDir: dataDir),
+                statsStorePath: estate.kind == .registered
+                    ? MootPaths.daemonStatsStorePath(dataDir: dataDir) : nil,
                 vaultPath: AriaResident.vaultPath(env: environment),
                 vaultEstatePollSeconds: AriaResident.vaultEstatePollSeconds(env: environment),
                 factExtractorFactory: factExtractorFactory,
