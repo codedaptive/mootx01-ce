@@ -1,8 +1,8 @@
 ---
 status: active
 authors: MOOTx01 maintainers
-date: 2026-07-17
-version: 1.8
+date: 2026-09-08
+version: 1.9
 description: Public API surface for ConvergenceKit in both the Swift and Rust ports.
 package: ConvergenceKit
 languages: [swift, rust]
@@ -1069,6 +1069,17 @@ calls. `AdaptivePollScheduler` owns the clock and feeds `nowMs` here.
 *End of ConvergenceKit Interface.*
 
 ## Changelog
+
+### 1.9 -- 2026-09-08
+- **CKError classification change (W1b-8):** `.participantAlreadyInvited`
+  reclassified from retryable to `permanent(.other(...))`. See
+  CONVERGENCEKIT_SPEC.md § 1.7 changelog for the full note and operator
+  guidance. No interface surface changed; the taxonomy is internal.
+- **OSLog subsystem consolidation (I1b-2):** ConvergenceKit now logs under
+  `com.mootx01.kit` exclusively. Subsystem strings
+  `com.mootx01.synckit.cloudkit`, `com.mootx01.synckit.federation`, and
+  `com.mootx01.convergencekit.federation` are no longer active. Update
+  `log stream` filter expressions accordingly.
 
 ### 1.7 -- 2026-07-17 (CVK-WC-FIX)
 - **`FederationSyncEngine.init`**: corrected signature from `init()` to

@@ -69,8 +69,10 @@ presentation and local-host app;
 control plane, configuration, and troubleshooting;
 [`moot-bridge`](../apps/moot-bridge/README.md) documents the optional
 two-backend MCP multiplexer and its failure model; and
-[`moot-math-benchmark`](../apps/moot-math-benchmark/README.md) documents the
-benchmark protocol and tracked evidence. The
+[`moot-math-speedtest`](../apps/moot-math-speedtest/README.md) documents the
+substrate and kernel speed-test protocol and tracked evidence. The end-to-end
+memory benchmark suite is documented under [`benchmarks/`](../benchmarks/).
+The
 [`Obsidian vault guide`](start-here/OBSIDIAN_VAULT.md) covers user-facing
 export, import, drift detection, and resync.
 
@@ -87,8 +89,9 @@ source trails, and diagrams. The article index keeps each business and
 technical edition together as a pair.
 
 **You are looking for history.**
-Use the Git history and dated validation records. Superseded material is not
-published as an authoritative `docs/archive/` tree on this branch.
+Use the [`archive/`](archive/) for preserved superseded documents, plus Git
+history and dated validation records. Archive documents are historical records,
+not authoritative current guidance.
 
 ## Conventions
 

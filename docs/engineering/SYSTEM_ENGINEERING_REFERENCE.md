@@ -1,3 +1,10 @@
+---
+version: 1.0.0
+status: active
+date: 2026-09-06
+description: "Engineering rules for current storage and recall behavior."
+---
+
 # MOOTx01 System Engineering Reference
 
 This document is the stable home for cross-cutting rules that span multiple
@@ -41,7 +48,7 @@ The principal ownership boundaries are:
   backends, and storage observation.
 - `ConvergenceKit` owns replication policy and transport over PersistenceKit
   operations; consumers do not bypass PersistenceKit to sync.
-- `EngramLib`, `LocusKit`, `VectorKit`, and `CorpusKit` own representation,
+- `EngramLib`, `LocusKit`, `SynapseKit`, and `CorpusKit` own representation,
   estate/domain state, vector engines, and corpus/encoder integration
   respectively.
 - `NeuronKit` owns brain algorithms, signals, daemon policies, and update work.
@@ -284,7 +291,7 @@ the backend boundary.
 
 PersistenceKit guarantees that a backend can store the vector-related data the
 current schema requires. It does **not** define or own a per-backend k-nearest-
-neighbor engine. VectorKit owns vector indices and search engines. There is no
+neighbor engine. SynapseKit owns vector indices and search engines. There is no
 `Storage.vectorIndex` contract and no sqlite-vec/pgvector shadow implementation
 in PersistenceKit.
 
@@ -355,24 +362,23 @@ present it as available.
 
 ## 5. Recall, embeddings, matrices, and autonomous work
 
-### 5.1 Honest semantic fusion
+### 5.1 Recall fusion
 
-The semantic lane is an explainable classical ensemble: FDC, LSA, random
-indexing, NMF, PPMI, and BM25 contribute through rank fusion/soft consensus.
-Consensus is a confidence signal, not a claim that the system used a learned
-neural model. Learned encoders are additive providers; they do not replace or
-rename the classical lane. Adaptive optimization owns signal weights.
+The lexical lane supplies candidates. The span encoder reranks the head
+and reciprocal-rank fusion combines the two rankings. Result provenance
+reports the evidence that contributed. Random indexing remains available
+for fingerprints used by dreaming and consolidation.
 
-Callers steer recall by goal/recipe and effort (`fast`, `standard`, `deep`), not
-by selecting internal math. Result provenance reports the providers and spaces
-that actually contributed.
+The retirement ledger records earlier record-vector approaches and the
+criteria for revisiting them.
 
 ### 5.2 RecallShape
 
 RecallShape's key space covers every scoring column: `locus`, `bm25`,
 `hamming`, `dense`, `dense:<modelID>`, `fieldFit`, `coOccurrence`, `temporal`,
 `graph`, and `preference`. Weight `1` is neutral, `0` excludes, and a negative
-weight suppresses. Missing keys default to `1`. The effective factor is shape
+weight suppresses. The whole-record `signal:vector` defaults to `0`; other
+missing keys default to `1`. The effective factor is shape
 weight multiplied by adaptive weight and the column score.
 
 Matrix, graph, and preference columns participate only in matrix-aware recall;
@@ -389,23 +395,13 @@ carry the space provenance required to prevent comparison across incompatible
 spaces. Recall searches compatible spaces independently and fuses results at
 the result layer.
 
-Apple `NLEmbedding` and `NLContextualEmbedding` providers are opt-in Swift
-adapters below that seam. They use distinct projection seeds/spaces, return an
-absent lane when a language or asset is unavailable, and never pretend an
-unavailable model produced a vector. Rust need not implement the Apple backend;
-it must preserve provider, absence, and provenance semantics.
+The current span encoder is selected through the encoder registry. Its
+model record fixes dimensions and tokenizer identity. Compatible int8
+span vectors support the rerank stage in both ports.
 
-The stable Apple provider identities are `apple-nlembedding-v1` and
-`apple-nlcontextual-v1`, both version `1.0.0`. Their FloatSimHash projection
-seeds are `0x4150_4E4C_454D_4231` and `0x4150_4E4C_4354_5831` respectively.
-Both providers are item-local, L2-normalize their float vectors, do not conform
-to the trainable-basis contract, and do not join the default ensemble.
-
-LSA and NMF train on one stored, shared, IDF-reduced vocabulary, normally in the
-1,000–3,000 term range. The vocabulary is frozen with the basis and projection
-uses that exact mapping. Bulk import defers automatic retraining/reindexing and
-triggers one rebuild after the batch. Rebuild refits the basis and re-embeds the
-estate. Random indexing, PPMI, FDC, and BM25 retain their own representations.
+[The retirement ledger](../decisions/DECISION_RETIRED_TECHNIQUES_LEDGER.md)
+records the deferred provider families. Matrix factorization and random
+indexing retain their separate substrate roles.
 
 ### 5.4 Matrix T
 
@@ -640,3 +636,10 @@ contracts:
 
 Engineers may design these later, but must not infer their types, storage
 semantics, or availability from historical proposals.
+
+## Changelog
+
+### 1.0.0 -- 2026-09-06
+
+Replaced the retired ensemble and platform-provider narrative with lexical
+candidates and span reranking. Recorded the default whole-record weight.

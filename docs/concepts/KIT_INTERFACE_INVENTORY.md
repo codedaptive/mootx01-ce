@@ -248,7 +248,7 @@ description: A per-kit inventory of every kit's public interface — types, func
 
 ---
 
-### VectorKit
+### SynapseKit
 **Role:** On-device embeddings + nearest-neighbor search (model-tagged vectors).  
 **Language:** Swift + Rust
 
@@ -260,9 +260,9 @@ description: A per-kit inventory of every kit's public interface — types, func
 - `VectorIndex` (queryable ANN)
 
 **Public Functions:**
-- `VectorKit.embed(_ text: String, using: EmbeddingProvider) -> EmbeddingResult?`
-- `VectorKit.findNearest(query: Vector, in: [Vector], k: Int) -> [Match]`
-- `VectorKit.index(_ vectors: [Vector]) -> VectorIndex`
+- `SynapseKit.embed(_ text: String, using: EmbeddingProvider) -> EmbeddingResult?`
+- `SynapseKit.findNearest(query: Vector, in: [Vector], k: Int) -> [Match]`
+- `SynapseKit.index(_ vectors: [Vector]) -> VectorIndex`
 
 **Concrete Providers:**
 - `MiniLM`
@@ -404,7 +404,7 @@ description: A per-kit inventory of every kit's public interface — types, func
 > shipped/planned statuses below now reflect the current surface (the
 > ARIA MCP server and its Rust port are implemented). The entry list is
 > still incomplete against the full access surface — it does not yet
-> enumerate the mootx01 CLI, moot-mgr, moot-math-benchmark, or
+> enumerate the mootx01 CLI, moot-mgr, moot-math-speedtest, or
 > moot-agent-skills, and the per-entry interface detail is summary-level.
 > A content-completeness pass is pending for those.
 
@@ -452,7 +452,7 @@ description: A per-kit inventory of every kit's public interface — types, func
 |------|------|
 | **Foundation** | AriaLexiconLib, SubstrateLib, PersistenceKit, QueueKit, ConvergenceKit, EngramLib |
 | **Grounding** | LatticeLib, EideticLib |
-| **Substrate** | LocusKit, VectorKit, CorpusKit, GeniusLocusKit |
+| **Substrate** | LocusKit, SynapseKit, CorpusKit, GeniusLocusKit |
 | **Reasoning** | NeuronKit |
 | **Behaviour** | CognitionKit |
 | **Access** | aria-mcp (Swift + Rust ports), Mootx01-App (macOS, iOS) |
@@ -471,9 +471,9 @@ EngramLib             (SubstrateLib)
 LatticeLib               (zero deps)
 EideticLib             (LatticeLib)
 LocusKit              (SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
-VectorKit             (SubstrateLib, EngramLib, PersistenceKit)
-CorpusKit                (VectorKit, PersistenceKit, ConvergenceKit, EngramLib)
-GeniusLocusKit        (LocusKit, CorpusKit, VectorKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
+SynapseKit             (SubstrateLib, EngramLib, PersistenceKit)
+CorpusKit                (SynapseKit, PersistenceKit, ConvergenceKit, EngramLib)
+GeniusLocusKit        (LocusKit, CorpusKit, SynapseKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
 NeuronKit             (EideticLib, GeniusLocusKit, EngramLib)
 CognitionKit          (NeuronKit, GeniusLocusKit)
 aria-mcp              (All substrate kits + NeuronKit)
