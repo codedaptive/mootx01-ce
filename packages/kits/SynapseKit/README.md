@@ -1,18 +1,18 @@
-# VectorKit
+# SynapseKit
 
 **Status:** Mission 6 refactor complete (2026-05-19): on PersistenceKit + SubstrateLib, three production blockers fixed.
 **Standalone:** Yes; use independently, no other kits required.
 
-A Swift library for on-device embedding generation and vector search on Apple Silicon. VectorKit gives any application a privacy-first semantic search layer; generate embeddings locally via CoreML, store them model-tagged, and query by nearest-neighbour; with zero cloud dependency.
+A Swift library for on-device embedding generation and vector search on Apple Silicon. SynapseKit gives any application a privacy-first semantic search layer; generate embeddings locally via CoreML, store them model-tagged, and query by nearest-neighbour; with zero cloud dependency.
 
 ## Standalone value
 
-Use VectorKit to build:
+Use SynapseKit to build:
 - **Semantic search** for any application; find content by meaning, not just keywords
 - A **private embedding store**; generate and persist vectors on-device, tagged by model and version
 - A **RAG vector tier**; the vector half of retrieval-augmented generation, without bundling content
 
-VectorKit is complete on its own. You do not need LocusKit, CorpusKit, or GeniusLocusKit to use it.
+SynapseKit is complete on its own. You do not need LocusKit, CorpusKit, or GeniusLocusKit to use it.
 
 ## Mission 6 changes (2026-05-19)
 
@@ -58,12 +58,12 @@ Refactored per `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-d
 
 ## Build order
 
-VectorKit builds in **parallel with LocusKit** (Phase 1). It has no dependency on LocusKit. CorpusKit gates on VectorKit; build VectorKit first.
+SynapseKit builds in **parallel with LocusKit** (Phase 1). It has no dependency on LocusKit. CorpusKit gates on SynapseKit; build SynapseKit first.
 
 ## Key specs
 
 - `docs/specs/GENIUSLOCUS_ARCHITECTURE_SPEC_v0.35.md`; I-4 (model tagging), I-12 (substrate composition), § 15.1
-- `docs/specs/GENIUSLOCUS_IMPLEMENTATION_PLAN_v0.35.md`; § 2, VectorKit done-definition
+- `docs/specs/GENIUSLOCUS_IMPLEMENTATION_PLAN_v0.35.md`; § 2, SynapseKit done-definition
 - `docs/validation/substrate_math_performance/`; `glref-swift-HammingNN.swift`, `glref-swift-SimHash.swift`, `glref-swift-HyperplaneFamily.swift`
 
 ## Scope
