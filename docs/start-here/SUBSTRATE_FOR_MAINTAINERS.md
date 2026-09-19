@@ -57,7 +57,7 @@ You do not need to know the equations to read the code. You do need to know what
 
 **Why four blocks instead of one.** Different recall modes care about different facets. A query about "documents from last week from my work account" cares about block 2 and block 3 more than block 0. Splitting the hash into facets lets recall weight the blocks instead of treating the row as one undifferentiated point.
 
-**Where it lives.** SubstrateLib holds the hash itself (`SimHash`) and the batched kernel that produces fingerprints in volume. LocusKit holds the per-block input construction (`DrawerFingerprint`). VectorKit consumes fingerprints next to embeddings during recall.
+**Where it lives.** SubstrateLib holds the hash itself (`SimHash`) and the batched kernel that produces fingerprints in volume. LocusKit holds the per-block input construction (`DrawerFingerprint`). SynapseKit consumes fingerprints next to embeddings during recall.
 
 **Performance intent.** A single fingerprint takes about 166 nanoseconds on Apple Silicon. Batched at 256 rows, that drops to about 59 nanoseconds per input. The bottleneck is memory bandwidth, not arithmetic, which is why the kernel layer matters (section twelve).
 
@@ -121,7 +121,7 @@ The technique is called a grow-only set CRDT, with hybrid logical clocks for ord
 
 The learning is by pairwise preference (Bradley-Terry), updated from observed user choices. The user picks one of two suggestions; the substrate nudges the weights toward what the user picked.
 
-**Where it lives.** VectorKit holds the composite (`HybridRecall`). NeuronKit holds the preference update and the exploration bandit. CognitionKit recipes choose the ranking mode and emit the trace that feeds the update.
+**Where it lives.** SynapseKit holds the composite (`HybridRecall`). NeuronKit holds the preference update and the exploration bandit. CognitionKit recipes choose the ranking mode and emit the trace that feeds the update.
 
 # 11. Federation: two estates that speak
 

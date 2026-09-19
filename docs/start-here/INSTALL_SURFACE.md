@@ -184,7 +184,6 @@ Common install or runtime environment knobs may include:
 | Variable | Purpose |
 |---|---|
 | `MOOTX01_HTTP_PORT` | Resident daemon HTTP port, default `4242`. |
-| `MOOTX01_DATA_DIR` | Data directory override. |
 | `MOOTX01_HTTP_MAX_BODY_BYTES` | Maximum HTTP MCP request body. |
 | `MOOTX01_BRAIN_TICK_MS` | Background maintenance cadence. |
 | `MOOTX01_MONITORING_POLL_MS` | How often the daemon checks whether monitoring is enabled (default `5000`). |
