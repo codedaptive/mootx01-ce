@@ -222,6 +222,65 @@ pub fn append_id_map_block(mut result: Value, data: &Value) -> Value {
     result
 }
 
+/// Recursively rebuild `value` with object keys in sorted order.
+///
+/// serde_json's `preserve_order` feature is on in this build graph, so a
+/// `Map` keeps insertion order; the trailing text block must serialize with
+/// sorted keys to match the Swift twin's `.sortedKeys` byte for byte.
+fn sorted_keys(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let sorted: std::collections::BTreeMap<&String, Value> =
+                map.iter().map(|(k, v)| (k, sorted_keys(v))).collect();
+            let mut out = serde_json::Map::new();
+            for (k, v) in sorted {
+                out.insert(k.clone(), v);
+            }
+            Value::Object(out)
+        }
+        Value::Array(items) => Value::Array(items.iter().map(sorted_keys).collect()),
+        other => other.clone(),
+    }
+}
+
+/// Append the serialized structured payload as the LAST text block of a v2
+/// result (MCP tools specification, Structured Content: "a tool that returns
+/// structured content SHOULD also return the serialized JSON in a TextContent
+/// block").
+///
+/// Why this exists (2026-09-18): Claude Desktop hands the model only the
+/// `content` text blocks and ignores `structuredContent`; Claude Code does the
+/// reverse. With the compact line alone in the text block, every v2 read
+/// (estate map, status, drains, help, journal, recall rows) reached Desktop as
+/// a one-line completion sentence and nothing else. The serialized payload as
+/// a trailing block gives a text-only client the whole answer while
+/// `content[0]` keeps its compact line, hint and coaching block.
+///
+/// Runs as the last egress transform (position 40, after `report_withheld` at
+/// 30) so the block reflects every earlier egress edit, including redaction.
+/// Applied to refusals as well: their structured error is data a text-only
+/// client needs. Sorted keys and no slash escaping match the Swift twin
+/// (`AriaV2Envelope.appendStructuredText`). Idempotent: an identical trailing
+/// block is not appended twice. A result without `structuredContent` or one
+/// that cannot be serialized is returned unchanged.
+pub fn append_structured_text(mut result: Value) -> Value {
+    let Some(structured) = result.get("structuredContent") else { return result };
+    let Ok(serialized) = serde_json::to_string(&sorted_keys(structured)) else { return result };
+    let Some(content) = result.get_mut("content").and_then(|c| c.as_array_mut()) else {
+        return result;
+    };
+    if content
+        .last()
+        .and_then(|b| b.get("text"))
+        .and_then(|t| t.as_str())
+        == Some(serialized.as_str())
+    {
+        return result;
+    }
+    content.push(json!({ "type": "text", "text": serialized }));
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -349,5 +408,65 @@ mod tests {
             hint_pos < block_pos,
             "hint must precede coaching block in text; text: {text:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod structured_text_tests {
+    //! The serialized structured payload rides as the LAST text block of a v2
+    //! result, so a text-only client (Claude Desktop) receives the answer.
+    use super::*;
+
+    fn texts(result: &Value) -> Vec<String> {
+        result["content"]
+            .as_array()
+            .map(|a| a.iter().filter_map(|b| b["text"].as_str().map(str::to_owned)).collect())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn trailing_block_is_the_structured_payload_with_sorted_keys() {
+        let result = json!({
+            "content": [{ "type": "text", "text": "moot_estate_ping completed for estate abc." }],
+            "structuredContent": { "tool": "moot_estate_ping", "data": { "wings": ["Personal"], "estate_id": "abc" } },
+            "isError": false,
+        });
+        let out = append_structured_text(result.clone());
+        let t = texts(&out);
+        assert_eq!(t.len(), 2);
+        assert_eq!(t[0], "moot_estate_ping completed for estate abc.");
+        let parsed: Value = serde_json::from_str(&t[1]).unwrap();
+        assert_eq!(parsed, result["structuredContent"]);
+        assert!(t[1].starts_with("{\"data\":{\"estate_id\":\"abc\""), "sorted keys: {}", t[1]);
+    }
+
+    #[test]
+    fn idempotent_and_carries_an_earlier_hint() {
+        let base = json!({
+            "content": [{ "type": "text", "text": "found 0 candidate memories" }],
+            "structuredContent": { "tool": "moot_memory_search", "data": { "results": [] } },
+            "isError": false,
+        });
+        let hinted = apply_hint(base, "narrow the query");
+        let once = append_structured_text(hinted);
+        let twice = append_structured_text(once.clone());
+        assert_eq!(once, twice);
+        let t = texts(&once);
+        assert_eq!(t.len(), 2);
+        assert!(t[1].contains("\"hint\":\"narrow the query\""));
+    }
+
+    #[test]
+    fn refusals_get_the_block_and_bare_results_are_untouched() {
+        let refusal = json!({
+            "content": [{ "type": "text", "text": "no such memory" }],
+            "structuredContent": { "tool": "moot_memory_get", "error": { "code": "not_found" } },
+            "isError": true,
+        });
+        let t = texts(&append_structured_text(refusal));
+        assert_eq!(t.len(), 2);
+        assert!(t[1].contains("\"code\":\"not_found\""));
+        let bare = json!({ "content": [{ "type": "text", "text": "plain" }], "isError": false });
+        assert_eq!(append_structured_text(bare.clone()), bare);
     }
 }

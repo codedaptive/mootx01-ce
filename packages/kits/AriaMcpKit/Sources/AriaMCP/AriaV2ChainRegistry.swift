@@ -271,5 +271,11 @@ func ariaV2ProductionRegistrations(
         AriaV2ChainRegistration(concernName: "report_withheld", egress: (position: 30, hook: .transform({ _, result, _ in
             await AriaV2Withheld.egress(result)
         }))),
+        // Last: the serialized structured payload as a trailing text block, so
+        // a text-only client (Claude Desktop) receives the whole answer. Runs
+        // after redaction so the block never carries what egress withheld.
+        AriaV2ChainRegistration(concernName: "structured_text", egress: (position: 40, hook: .transform({ _, result, _ in
+            AriaV2Envelope.appendStructuredText(result)
+        }))),
     ]
 }

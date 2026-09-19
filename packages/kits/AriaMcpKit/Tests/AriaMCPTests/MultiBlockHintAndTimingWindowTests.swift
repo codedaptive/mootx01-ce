@@ -131,7 +131,10 @@ struct MultiBlockHintAndTimingWindowTests {
             name: "moot_json_import",
             arguments: .object(["path": .string(plainSeed.path)]))
         #expect(!isError(of: plain), "plain import must succeed")
-        #expect(blocks(of: plain).count == 1,
+        // content[0] is the receipt; the trailing block is the serialized
+        // structured payload every v2 result carries (§8 serialized-payload
+        // invariant), so a plain import has two blocks and never an id_map block.
+        #expect(blocks(of: plain).count == 2,
                 "absent return_id_map must leave the reply at one block; got \(blocks(of: plain))")
 
         // The structured data carries id_map even when the flag is absent.
@@ -150,8 +153,8 @@ struct MultiBlockHintAndTimingWindowTests {
             ]))
         #expect(!isError(of: mapped), "mapped import must succeed")
         let mappedBlocks = blocks(of: mapped)
-        #expect(mappedBlocks.count == 2,
-                "return_id_map:true must append a second block; got \(mappedBlocks)")
+        #expect(mappedBlocks.count == 3,
+                "return_id_map:true must append an id_map block ahead of the serialized payload; got \(mappedBlocks)")
 
         // Assert on the block's TEXT, not merely on the count: a count check
         // passes even when the block carries the wrong payload. The record id
@@ -163,7 +166,7 @@ struct MultiBlockHintAndTimingWindowTests {
             return
         }
         #expect(drawerID == drawerID.lowercased(), "drawer ids are canonical lowercase")
-        #expect(mappedBlocks.count == 2 && mappedBlocks[1] == "{\"id_map\":{\"seed/mapped\":\"\(drawerID)\"}}",
+        #expect(mappedBlocks.count == 3 && mappedBlocks[1] == "{\"id_map\":{\"seed/mapped\":\"\(drawerID)\"}}",
                 "second block text must be the exact id_map JSON; got \(mappedBlocks.last ?? "none")")
     }
 
@@ -205,7 +208,7 @@ struct MultiBlockHintAndTimingWindowTests {
         #expect(!isError(of: result), "two-record import must succeed")
 
         let contentBlocks = blocks(of: result)
-        #expect(contentBlocks.count == 2, "two-record import with return_id_map:true must have two blocks; got \(contentBlocks)")
+        #expect(contentBlocks.count == 3, "two-record import with return_id_map:true must have the receipt, the id_map block and the serialized payload; got \(contentBlocks)")
 
         // Recover the drawer IDs from structured data.
         guard let idMapObj = data(of: result)?["id_map"]?.objectValue,

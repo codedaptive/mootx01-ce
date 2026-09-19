@@ -85,8 +85,10 @@ fn selected_json_import_persists_records_and_returns_the_opted_in_id_map() {
         let drawer_id = map[source_id].as_str().expect("source record maps to drawer UUID");
         uuid::Uuid::parse_str(drawer_id).expect("mapped drawer id is canonical UUID");
     }
-    assert_eq!(result["content"].as_array().map(Vec::len), Some(2),
-        "return_id_map:true must append a text receipt block");
+    // content[0] receipt, content[1] the opted-in id_map block, content[2] the
+    // serialized structured payload every v2 result carries.
+    assert_eq!(result["content"].as_array().map(Vec::len), Some(3),
+        "return_id_map:true must append an id_map block ahead of the serialized payload");
 
     let drawers = session.coord.lock().unwrap()
         .all_drawers(&session.default.handle).expect("durable drawer read");

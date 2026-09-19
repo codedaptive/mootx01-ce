@@ -97,7 +97,9 @@ struct JsonImportToolTests {
             name: "moot_json_import",
             arguments: .object(["path": .string(url.path)]))
         #expect(!isError(of: plain))
-        #expect(blockCount(of: plain) == 1)
+        // The receipt and the serialized structured payload every v2 result
+        // carries; no id-map block.
+        #expect(blockCount(of: plain) == 2)
 
         // Explicit false is identical to omission: accepted, with no id-map block.
         let falseURL = try tempSeedFile(seed.replacingOccurrences(of: "\"m1\"", with: "\"m-false\""))
@@ -109,7 +111,7 @@ struct JsonImportToolTests {
                 "return_id_map": .bool(false),
             ]))
         #expect(!isError(of: explicitFalse))
-        #expect(blockCount(of: explicitFalse) == 1,
+        #expect(blockCount(of: explicitFalse) == 2,
                 "return_id_map:false must not add an id-map content block")
 
         // Explicit null is rejected rather than read as "use the default".

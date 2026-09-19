@@ -372,8 +372,8 @@ fn v2_json_import_return_id_map_appends_a_second_text_block() {
     assert_eq!(plain["result"]["isError"], false, "{plain}");
     let plain_content = plain["result"]["content"].as_array().expect("content array");
     assert_eq!(
-        plain_content.len(), 1,
-        "absent return_id_map must leave the reply at one block; got {plain_content:?}",
+        plain_content.len(), 2,
+        "absent return_id_map leaves the receipt and the serialized payload only, no id_map block; got {plain_content:?}",
     );
 
     // The structured data carries id_map either way — the flag gates the block only.
@@ -393,8 +393,8 @@ fn v2_json_import_return_id_map_appends_a_second_text_block() {
     assert_eq!(with_map["result"]["isError"], false, "{with_map}");
     let content = with_map["result"]["content"].as_array().expect("content array");
     assert_eq!(
-        content.len(), 2,
-        "return_id_map:true must append a second block; got {content:?}",
+        content.len(), 3,
+        "return_id_map:true: receipt, id_map block, serialized payload; got {content:?}",
     );
     assert_eq!(content[1]["type"], "text");
 
@@ -1152,8 +1152,8 @@ fn v2_json_import_id_map_two_records_sorted() {
     let content = result["result"]["content"].as_array()
         .expect("content must be an array");
     assert_eq!(
-        content.len(), 2,
-        "two-record import with return_id_map:true must have two blocks; got {content:?}"
+        content.len(), 3,
+        "two-record import with return_id_map:true: receipt, id_map block, serialized payload; got {content:?}"
     );
 
     // Recover the drawer IDs from structured data.

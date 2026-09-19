@@ -304,6 +304,11 @@ pub(crate) fn aria_v2_production_registrations(
             .with_egress(EGRESS_COACHING, V2EgressHook::Transform(egress)),
         V2ChainRegistration::new("report_withheld").with_egress(30,
             V2EgressHook::Transform(Box::new(|_, result, _| Ok(super::report_withheld::egress(result))))),
+        // Last: the serialized structured payload as a trailing text block, so
+        // a text-only client (Claude Desktop) receives the whole answer. Runs
+        // after redaction so the block never carries what egress withheld.
+        V2ChainRegistration::new("structured_text").with_egress(40,
+            V2EgressHook::Transform(Box::new(|_, result, _| Ok(crate::v2::render::append_structured_text(result))))),
     ]
 }
 
