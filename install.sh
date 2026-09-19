@@ -213,23 +213,28 @@ curl -fsSL "$checksums_sig_url" -o "$tmp/checksums.txt.minisig" \
 # Step 1: SHA-256 checksum — verifies asset integrity against checksums.txt.
 verify_checksum "$tmp/mootx01.tar.gz" "$tmp/checksums.txt" "$asset"
 
-# Step 2: minisign Ed25519 signature verification — Linux/POSIX only.
-# macOS uses Developer ID / Gatekeeper (the binary itself is signed and
-# notarized; verifying the tarball signature is redundant with Gatekeeper).
-if [ "$os" != "macos" ]; then
-  # The public key is embedded here directly rather than resolved from a
-  # repository path. In the documented install mode (`curl ... | sh`) $0 is
-  # the shell binary, so `dirname "$0"` yields a system directory (e.g. /bin)
-  # and a path-relative lookup would fail — there is no repo checkout.
-  # Embedding the key keeps the trust anchor intact for all install modes.
-  #
-  # Key ID: BC4D1E6ABCB5B788
-  # Source: distribution/minisign.pub in codedaptive/mootx01-ce at build time.
-  _pub_key="$tmp/minisign.pub"
-  printf 'untrusted comment: minisign public key BC4D1E6ABCB5B788\nRWSIt7W8ah5NvMXMLQ3+T2flXrQ+J6xoDxDrL62I+8iEkR04YIAlXa12\n' \
-    > "$_pub_key"
-  verify_minisign "$tmp/checksums.txt" "$tmp/checksums.txt.minisig" "$_pub_key"
-fi
+# Step 2: minisign Ed25519 signature verification — every platform.
+#
+# This was Linux-only while the installer placed nothing but the two Mach-O
+# executables: Developer ID and Gatekeeper authenticate exactly those, so the
+# archive signature added nothing on macOS. It places share/mootx01/models
+# now, and no code signature covers a data file — an attacker able to replace
+# release assets can serve a matching checksums.txt and swap the encoder or
+# tokenizer while the signed executables stay untouched. Authenticating
+# checksums.txt is what makes the tarball hash it carries mean anything.
+#
+# The public key is embedded here directly rather than resolved from a
+# repository path. In the documented install mode (`curl ... | sh`) $0 is
+# the shell binary, so `dirname "$0"` yields a system directory (e.g. /bin)
+# and a path-relative lookup would fail — there is no repo checkout.
+# Embedding the key keeps the trust anchor intact for all install modes.
+#
+# Key ID: BC4D1E6ABCB5B788
+# Source: distribution/minisign.pub in codedaptive/mootx01-ce at build time.
+_pub_key="$tmp/minisign.pub"
+printf 'untrusted comment: minisign public key BC4D1E6ABCB5B788\nRWSIt7W8ah5NvMXMLQ3+T2flXrQ+J6xoDxDrL62I+8iEkR04YIAlXa12\n' \
+  > "$_pub_key"
+verify_minisign "$tmp/checksums.txt" "$tmp/checksums.txt.minisig" "$_pub_key"
 
 # validate_archive_members preflights every member path in a tar archive before
 # extraction. Rejects any member whose path is absolute (starts with /) or
