@@ -650,6 +650,33 @@ public actor Estate {
         try await store.subjectDebtBatch(limit: limit, includingPipelines: pipelines)
     }
 
+    /// One producer's debt count and sweep enumerator: the tier-aware
+    /// forms minus the rows that producer refused. See the DrawerStore twins.
+    public func countSubjectDebt(includingPipelines pipelines: [String], refusedBy: String?) async throws -> Int {
+        try await store.countSubjectDebt(includingPipelines: pipelines, refusedBy: refusedBy)
+    }
+
+    public func subjectDebtBatch(
+        limit: Int, includingPipelines pipelines: [String], refusedBy: String?
+    ) async throws -> [Drawer] {
+        try await store.subjectDebtBatch(limit: limit, includingPipelines: pipelines, refusedBy: refusedBy)
+    }
+
+    /// Rows `pipelineVersion` refused. See `DrawerStore.countSubjectRefused`.
+    public func countSubjectRefused(pipelineVersion: String) async throws -> Int {
+        try await store.countSubjectRefused(pipelineVersion: pipelineVersion)
+    }
+
+    /// Record a producer's refusal on one drawer. See
+    /// `DrawerStore.markSubjectRefused`.
+    @discardableResult
+    public func markSubjectRefused(
+        drawerId: String, pipelineVersion: String, reason: String, at refusedAt: Date
+    ) async throws -> Int {
+        try await store.markSubjectRefused(
+            drawerId: drawerId, pipelineVersion: pipelineVersion, reason: reason, at: refusedAt)
+    }
+
     // MARK: - Drawer enumeration
 
     /// Enumerate every drawer in the estate. Used by cross-row

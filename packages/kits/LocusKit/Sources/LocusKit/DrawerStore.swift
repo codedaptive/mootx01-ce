@@ -6241,6 +6241,74 @@ public actor DrawerStore {
         }
     }
 
+    /// Record that `pipelineVersion` refused to produce a subject for
+    /// `drawerId`: the subject stays NULL, `subject_pipeline_version` takes
+    /// `subjectRefusedMarker(for:)`, `subject_at` the time, and one sealed
+    /// custody event (verb `subjectRefused`, reason = the producer's reason)
+    /// lands in the same transaction, the custody shape `setSubjectRepresentation`
+    /// seals. Mirrors Rust `mark_subject_refused`.
+    ///
+    /// - Returns: Count of rows updated (0 = drawer not found, no event).
+    @discardableResult
+    public func markSubjectRefused(
+        drawerId: String,
+        pipelineVersion: String,
+        reason: String,
+        at refusedAt: Date,
+        changedBy: String? = nil
+    ) async throws -> Int {
+        try Self.validateNonEmpty(drawerId, label: "drawerId")
+        try Self.validateNonEmpty(pipelineVersion, label: "pipelineVersion")
+        let rowUuid = try Self.requireUuid(drawerId, label: "drawerId")
+        let actor: String
+        if let changedBy, !changedBy.isEmpty {
+            actor = changedBy
+        } else {
+            let owner = (try? await readManifest().ownerIdentifier) ?? ""
+            actor = owner.isEmpty ? "estate" : owner
+        }
+        let marker = Self.subjectRefusedMarker(for: pipelineVersion)
+        let nowMillis = Int64(refusedAt.timeIntervalSince1970 * 1000)
+        let stamp = hlc.send(now: nowMillis)
+        let estate = estateUuid
+        return try await storage.transaction(isolation: .serializable) { txn in
+            let rows = try await txn.rowStore.query(
+                table: "drawers",
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId)))
+            guard let row = rows.first else { return 0 }
+            let bitmaps = (
+                adjective: Self.int64(row["adjectiveBitmap"]),
+                operational: Self.int64(row["operationalBitmap"]),
+                provenance: Self.int64(row["provenance"])
+            )
+            let anchor = SubstrateTypes.LatticeAnchor.udc(Self.string(row["udcCode"]))
+            let event = AuditEvent(
+                estateUuid: estate,
+                rowId: rowUuid,
+                hlc: stamp,
+                verb: "subjectRefused",
+                beforeBitmaps: bitmaps,
+                afterBitmaps: bitmaps,
+                beforeLatticeAnchor: anchor,
+                afterLatticeAnchor: anchor,
+                actor: actor,
+                reason: reason)
+            let updated = try await txn.rowStore.update(
+                table: "drawers",
+                values: [
+                    "subject_pipeline_version": .text(marker),
+                    "subject_at": .timestamp(refusedAt),
+                ],
+                where: .eq(Column(table: "drawers", name: "id"), .text(drawerId))
+            )
+            if updated > 0 {
+                try await refreshContentFingerprint(drawerId: drawerId, txn: txn)
+                try await txn.auditLog.append(event)
+            }
+            return updated
+        }
+    }
+
     /// The subject length contract (characters). One capped sentence in
     /// the AI-facing register — the bound that keeps every contact-sheet
     /// row's context cost near-uniform. Shared by both legs (Rust
@@ -6453,10 +6521,37 @@ public actor DrawerStore {
     /// consolidation-v1/seed-v1 and never ai-v1, so the filing AI
     /// outranks the fallback model STRUCTURALLY: its rows are simply
     /// never enumerated for regeneration).
-    private static func subjectDebtPredicate(includingPipelines pipelines: [String]) -> StoragePredicate {
-        var subjectClauses: [StoragePredicate] = [
-            .isNull(Column(table: "drawers", name: "subject"))
-        ]
+    /// The `subject_pipeline_version` value a producer's refusal leaves on a
+    /// drawer whose subject stays NULL: `<pipeline>:refused`. The producer's
+    /// own debt predicate excludes it; every other producer still sees the
+    /// row as debt. Mirrors Rust `subject_refused_marker`.
+    public static func subjectRefusedMarker(for pipelineVersion: String) -> String {
+        "\(pipelineVersion):refused"
+    }
+
+    private static func subjectDebtPredicate(
+        includingPipelines pipelines: [String], refusedBy: String? = nil
+    ) -> StoragePredicate {
+        // A NULL subject is debt unless the requesting producer has refused
+        // the row: then `subject_pipeline_version` carries that producer's
+        // refusal marker and the row leaves this producer's lane for good
+        // (a content guardrail refusal is deterministic; retrying it every
+        // cadence pinned the lane on one drawer, 2026-09-19). Another
+        // producer's marker keeps the row as debt for this one.
+        let nullSubject: StoragePredicate
+        if let refusedBy {
+            nullSubject = .and([
+                .isNull(Column(table: "drawers", name: "subject")),
+                .or([
+                    .isNull(Column(table: "drawers", name: "subject_pipeline_version")),
+                    .neq(Column(table: "drawers", name: "subject_pipeline_version"),
+                         .text(Self.subjectRefusedMarker(for: refusedBy))),
+                ]),
+            ])
+        } else {
+            nullSubject = .isNull(Column(table: "drawers", name: "subject"))
+        }
+        var subjectClauses: [StoragePredicate] = [nullSubject]
         for pipeline in pipelines {
             subjectClauses.append(
                 .eq(Column(table: "drawers", name: "subject_pipeline_version"),
@@ -6486,9 +6581,30 @@ public actor DrawerStore {
     /// `countSpanIndexDebt`'s note; the same five-second poll cadence
     /// applies here. Mirrors Rust `count_subject_debt_including`.
     public func countSubjectDebt(includingPipelines pipelines: [String]) async throws -> Int {
+        try await countSubjectDebt(includingPipelines: pipelines, refusedBy: nil)
+    }
+
+    /// Debt count for one producer: the tier-aware count minus the rows
+    /// that producer has refused (`subjectRefusedMarker(for:)`). Mirrors
+    /// Rust `count_subject_debt_for_producer`.
+    public func countSubjectDebt(includingPipelines pipelines: [String], refusedBy: String?) async throws -> Int {
         try await storage.rowStore.count(
             table: "drawers",
-            where: Self.subjectDebtPredicate(includingPipelines: pipelines))
+            where: Self.subjectDebtPredicate(includingPipelines: pipelines, refusedBy: refusedBy))
+    }
+
+    /// Rows one producer has refused: NULL subject with that producer's
+    /// refusal marker in `subject_pipeline_version`. Mirrors Rust
+    /// `count_subject_refused`.
+    public func countSubjectRefused(pipelineVersion: String) async throws -> Int {
+        try await storage.rowStore.count(
+            table: "drawers",
+            where: .and([
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                .isNull(Column(table: "drawers", name: "subject")),
+                .eq(Column(table: "drawers", name: "subject_pipeline_version"),
+                    .text(Self.subjectRefusedMarker(for: pipelineVersion))),
+            ]))
     }
 
     /// The subject-backfill sweep enumerator (PR-09): up to `limit`
@@ -6509,9 +6625,18 @@ public actor DrawerStore {
     public func subjectDebtBatch(
         limit: Int, includingPipelines pipelines: [String]
     ) async throws -> [Drawer] {
+        try await subjectDebtBatch(limit: limit, includingPipelines: pipelines, refusedBy: nil)
+    }
+
+    /// Sweep enumerator for one producer: the tier-aware batch minus the
+    /// rows that producer has refused. Mirrors Rust
+    /// `subject_debt_batch_for_producer`.
+    public func subjectDebtBatch(
+        limit: Int, includingPipelines pipelines: [String], refusedBy: String?
+    ) async throws -> [Drawer] {
         let rows = try await storage.rowStore.query(
             table: "drawers",
-            where: Self.subjectDebtPredicate(includingPipelines: pipelines),
+            where: Self.subjectDebtPredicate(includingPipelines: pipelines, refusedBy: refusedBy),
             orderBy: [
                 OrderClause(column: Column(table: "drawers", name: "filedAt"), direction: .ascending),
                 OrderClause(column: Column(table: "drawers", name: "id"), direction: .ascending),

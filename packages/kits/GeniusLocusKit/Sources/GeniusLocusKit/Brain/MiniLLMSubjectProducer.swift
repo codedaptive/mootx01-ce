@@ -69,17 +69,38 @@ public struct MiniLLMSubjectProducer: SubjectProducer {
         // would waste the on-device budget.
         let prompt = String(content.prefix(2000))
         let session = LanguageModelSession(instructions: Self.registerInstructions)
-        var candidate = Self.postProcess(try await session.respond(to: prompt).content)
-        // ONE bounded retry on over-length: re-ask with the cap
-        // restated. If the model still overruns, return the long form —
-        // the sweep's register gate skips it (never stored) and the row
-        // stays debt for a later pass.
-        if candidate.count > DrawerStore.subjectLengthContract {
-            let retry = try await session.respond(
-                to: "Too long. Compress to at most 120 characters, one sentence, same claim.")
-            candidate = Self.postProcess(retry.content)
+        do {
+            var candidate = Self.postProcess(try await session.respond(to: prompt).content)
+            // ONE bounded retry on over-length: re-ask with the cap
+            // restated. If the model still overruns, return the long form —
+            // the sweep's register gate skips it (never stored) and the row
+            // stays debt for a later pass.
+            if candidate.count > DrawerStore.subjectLengthContract {
+                let retry = try await session.respond(
+                    to: "Too long. Compress to at most 120 characters, one sentence, same claim.")
+                candidate = Self.postProcess(retry.content)
+            }
+            return candidate
+        } catch let error as LanguageModelSession.GenerationError {
+            throw Self.classify(error)
+        } catch {
+            throw SubjectProducerError.unavailable(reason: "\(error)")
         }
-        return candidate
+    }
+
+    /// Which failures are a property of the content (the model will refuse
+    /// it every time) and which are the service's moment. Only the former
+    /// may mark a drawer; the sweep retries the latter next cadence.
+    static func classify(_ error: LanguageModelSession.GenerationError) -> SubjectProducerError {
+        switch error {
+        case .guardrailViolation, .refusal, .exceededContextWindowSize,
+             .unsupportedLanguageOrLocale, .unsupportedGuide, .decodingFailure:
+            return .refused(reason: "\(error)")
+        case .assetsUnavailable, .rateLimited, .concurrentRequests:
+            return .unavailable(reason: "\(error)")
+        @unknown default:
+            return .unavailable(reason: "\(error)")
+        }
     }
 
     /// Deterministic post-pass: collapse to a single trimmed line and

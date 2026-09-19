@@ -8,7 +8,7 @@
 use std::sync::Arc;
 
 use genius_locus_kit::{
-    DrainStatus, EstateCoordinator, SubjectProducer,
+    DrainStatus, EstateCoordinator, SubjectProducer, SubjectProducerError,
 };
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
@@ -24,7 +24,7 @@ const NOW: i64 = 1_700_000_000;
 struct StubProducer;
 impl SubjectProducer for StubProducer {
     fn pipeline_version(&self) -> &str { "stub-v1" }
-    fn subject_for_content(&self, content: &str) -> Result<String, String> {
+    fn subject_for_content(&self, content: &str) -> Result<String, SubjectProducerError> {
         Ok(content.lines().next().unwrap_or("").chars().take(120).collect())
     }
 }
@@ -34,9 +34,84 @@ impl SubjectProducer for StubProducer {
 struct InadmissibleProducer;
 impl SubjectProducer for InadmissibleProducer {
     fn pipeline_version(&self) -> &str { "bad-v1" }
-    fn subject_for_content(&self, _content: &str) -> Result<String, String> {
+    fn subject_for_content(&self, _content: &str) -> Result<String, SubjectProducerError> {
         Ok("This is a summary that violates the register.".to_string())
     }
+}
+
+
+/// Refuses any content carrying the marker word, produces for the rest.
+/// Twin of Swift RefusingProducer.
+struct RefusingProducer;
+impl SubjectProducer for RefusingProducer {
+    fn pipeline_version(&self) -> &str { "refusing-v1" }
+    fn subject_for_content(&self, content: &str) -> Result<String, SubjectProducerError> {
+        if content.contains("REFUSE") {
+            return Err(SubjectProducerError::Refused("guardrail".to_string()));
+        }
+        Ok(content.lines().next().unwrap_or("").chars().take(120).collect())
+    }
+}
+
+/// Cannot answer at all right now. Twin of Swift UnavailableProducer.
+struct UnavailableProducer;
+impl SubjectProducer for UnavailableProducer {
+    fn pipeline_version(&self) -> &str { "unavailable-v1" }
+    fn subject_for_content(&self, _content: &str) -> Result<String, SubjectProducerError> {
+        Err(SubjectProducerError::Unavailable("rate limited".to_string()))
+    }
+}
+
+#[test]
+fn a_refusal_marks_the_drawer_and_the_sweep_moves_on() {
+    let (mut coord, handle) = open_estate();
+    seed_debt(&coord, &handle, 4);
+    for i in 1..=2 {
+        let frame = CaptureFrame::new(
+            format!("REFUSE row {i} the model will not summarise."),
+            CaptureChannel::Typed, "backfill-tests", LatticeAnchor::udc("000"),
+            "subject-backfill-tests", "test-model-v1");
+        coord.capture(&handle, frame, NOW).expect("capture");
+    }
+    coord.register_subject_producer(&handle, Arc::new(RefusingProducer)).unwrap();
+    let report = coord.subject_backfill_sweep(&handle, 32, NOW + 1).unwrap();
+    assert_eq!(report.written, 4);
+    assert_eq!(report.refused, 2);
+    assert_eq!(report.remaining_debt, 0, "refused rows left the lane");
+    let estate = coord.estate_for(&handle).unwrap();
+    let marker = locus_kit::drawer_store::subject_refused_marker("refusing-v1");
+    let mut refused_rows = 0;
+    for d in estate.all_drawers().unwrap() {
+        if d.content.contains("REFUSE") {
+            assert!(d.subject.is_none(), "a refusal stores no subject");
+            assert_eq!(d.subject_pipeline_version.as_deref(), Some(marker.as_str()));
+            refused_rows += 1;
+        } else {
+            assert!(d.subject.is_some());
+        }
+    }
+    assert_eq!(refused_rows, 2);
+    assert_eq!(estate.count_subject_refused("refusing-v1").unwrap(), 2);
+    // Another producer still sees those two rows as debt.
+    assert_eq!(estate.count_subject_debt_for_producer(&[], Some("other-v1")).unwrap(), 2);
+    // The lane reports the refusals and the second sweep enumerates none of them.
+    let lanes = coord.drain_statuses(&handle).unwrap();
+    let lane = lanes.iter().find(|l| l.name == DrainStatus::SUBJECT_BACKFILL_NAME).expect("lane");
+    assert_eq!(lane.pending, 0);
+    assert_eq!(lane.detail.as_deref(), Some("pipeline: refusing-v1, refused: 2"));
+    let again = coord.subject_backfill_sweep(&handle, 32, NOW + 2).unwrap();
+    assert_eq!((again.written, again.refused), (0, 0));
+}
+
+#[test]
+fn an_unavailable_producer_stops_the_sweep_and_marks_nothing() {
+    let (mut coord, handle) = open_estate();
+    seed_debt(&coord, &handle, 3);
+    coord.register_subject_producer(&handle, Arc::new(UnavailableProducer)).unwrap();
+    assert!(coord.subject_backfill_sweep(&handle, 32, NOW + 1).is_err());
+    let estate = coord.estate_for(&handle).unwrap();
+    assert_eq!(estate.count_subject_debt_for_producer(&[], Some("unavailable-v1")).unwrap(), 3, "pending unchanged");
+    assert_eq!(estate.count_subject_refused("unavailable-v1").unwrap(), 0);
 }
 
 fn open_estate() -> (EstateCoordinator, genius_locus_kit::EstateHandle) {
@@ -139,7 +214,7 @@ fn sweep_drains_debt_with_registered_producer_and_lane_renders() {
         .find(|d| d.name == DrainStatus::SUBJECT_BACKFILL_NAME)
         .expect("lane must render with a rider");
     assert_eq!(lane.pending, 5);
-    assert_eq!(lane.detail.as_deref(), Some("pipeline: stub-v1"));
+    assert_eq!(lane.detail.as_deref(), Some("pipeline: stub-v1, refused: 0"));
 
     // Bounded batch: limit 3 writes 3, leaves 2.
     let first = coord.subject_backfill_sweep(&handle, 3, NOW + 10).unwrap();
@@ -191,7 +266,7 @@ fn inadmissible_producer_output_is_skipped_never_stored() {
 struct TieredStubProducer;
 impl SubjectProducer for TieredStubProducer {
     fn pipeline_version(&self) -> &str { "tiered-stub-v1" }
-    fn subject_for_content(&self, content: &str) -> Result<String, String> {
+    fn subject_for_content(&self, content: &str) -> Result<String, SubjectProducerError> {
         Ok(content.lines().next().unwrap_or("").chars().take(120).collect())
     }
     fn regenerates_pipelines(&self) -> Vec<String> {

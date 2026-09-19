@@ -2029,6 +2029,30 @@ impl Estate {
         self.store.subject_debt_batch_including(limit, pipelines)
     }
 
+    /// One producer's debt count: the tier-aware count minus the rows it
+    /// refused. See `DrawerStore::count_subject_debt_for_producer`.
+    pub fn count_subject_debt_for_producer(&self, pipelines: &[String], refused_by: Option<&str>) -> Result<usize, LocusKitError> {
+        self.store.count_subject_debt_for_producer(pipelines, refused_by)
+    }
+
+    /// One producer's sweep enumerator: the tier-aware batch minus the rows
+    /// it refused. See `DrawerStore::subject_debt_batch_for_producer`.
+    pub fn subject_debt_batch_for_producer(&self, limit: usize, pipelines: &[String], refused_by: Option<&str>) -> Result<Vec<Drawer>, LocusKitError> {
+        self.store.subject_debt_batch_for_producer(limit, pipelines, refused_by)
+    }
+
+    /// Rows `pipeline_version` refused. See `DrawerStore::count_subject_refused`.
+    pub fn count_subject_refused(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.store.count_subject_refused(pipeline_version)
+    }
+
+    /// Record a producer's refusal on one drawer; the custody event names
+    /// the manifest owner (or "estate") as actor. See
+    /// `DrawerStore::mark_subject_refused`.
+    pub fn mark_subject_refused(&self, drawer_id: &str, pipeline_version: &str, reason: &str, generated_at: i64) -> Result<usize, LocusKitError> {
+        self.store.mark_subject_refused(drawer_id, pipeline_version, reason, generated_at, &self.changed_by_or_estate())
+    }
+
     /// Up to `limit` drawers in the estate (including tombstoned rows),
     /// in the store's natural `filedAt`-ascending order. Estate-level
     /// pass-through over `DrawerStore::all_drawers_bounded`. The bound is

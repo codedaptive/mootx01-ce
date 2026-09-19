@@ -3551,11 +3551,127 @@ impl DrawerStore for DrawerStoreCore {
     /// `count_span_index_debt`'s note; the same five-second poll cadence
     /// applies here. Mirrors Swift `countSubjectDebt(includingPipelines:)`.
     fn count_subject_debt_including(&self, pipelines: &[String]) -> Result<usize, LocusKitError> {
-        let predicate = subject_debt_predicate(pipelines);
+        self.count_subject_debt_for_producer(pipelines, None)
+    }
+
+    /// Debt count for one producer: the tier-aware count minus the rows
+    /// that producer has refused. Mirrors Swift
+    /// `countSubjectDebt(includingPipelines:refusedBy:)`.
+    fn count_subject_debt_for_producer(
+        &self,
+        pipelines: &[String],
+        refused_by: Option<&str>,
+    ) -> Result<usize, LocusKitError> {
+        let predicate = subject_debt_predicate(pipelines, refused_by);
         self.storage
             .row_store()
             .count(T_DRAWERS, Some(&predicate))
             .map_err(map_storage_err)
+    }
+
+    /// Rows one producer has refused: NULL subject with that producer's
+    /// refusal marker in `subject_pipeline_version`. Mirrors Swift
+    /// `countSubjectRefused(pipelineVersion:)`.
+    fn count_subject_refused(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        let predicate = StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "tombstonedAt")),
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
+            StoragePredicate::Eq(
+                Column::new(T_DRAWERS, "subject_pipeline_version"),
+                TypedValue::Text(crate::drawer_store::subject_refused_marker(pipeline_version)),
+            ),
+        ]);
+        self.storage
+            .row_store()
+            .count(T_DRAWERS, Some(&predicate))
+            .map_err(map_storage_err)
+    }
+
+    /// Record that `pipeline_version` refused to produce a subject for
+    /// `drawer_id`: the subject stays NULL, `subject_pipeline_version`
+    /// takes the refusal marker, `subject_at` the time, and one sealed
+    /// custody event (verb `subjectRefused`, reason = the producer's
+    /// reason) lands in the same transaction. Mirrors Swift
+    /// `markSubjectRefused`.
+    fn mark_subject_refused(
+        &self,
+        drawer_id: &str,
+        pipeline_version: &str,
+        reason: &str,
+        generated_at: i64,
+        changed_by: &str,
+    ) -> Result<usize, LocusKitError> {
+        if drawer_id.is_empty() {
+            return Err(LocusKitError::InvalidContent("drawerId must not be empty".to_string()));
+        }
+        if pipeline_version.is_empty() {
+            return Err(LocusKitError::InvalidContent("pipelineVersion must not be empty".to_string()));
+        }
+        if changed_by.is_empty() {
+            return Err(LocusKitError::InvalidContent("changedBy must not be empty".to_string()));
+        }
+        let row_uuid = require_uuid(drawer_id, "drawerId")?;
+        let id_pred = StoragePredicate::Eq(
+            Column::new(T_DRAWERS, "id"),
+            TypedValue::Text(drawer_id.to_string()),
+        );
+        let rows = self
+            .storage
+            .row_store()
+            .query(T_DRAWERS, Some(&id_pred), &[], Some(1), None)
+            .map_err(map_storage_err)?;
+        let Some(row) = rows.first() else {
+            return Ok(0);
+        };
+        let bitmaps = (
+            i64_value_of(row.get("adjectiveBitmap")),
+            i64_value_of(row.get("operationalBitmap")),
+            i64_value_of(row.get("provenance")),
+        );
+        let anchor =
+            substrate_lib::verbs::LatticeAnchor::udc(&string_value_of(row.get("udcCode")));
+        let stamp = self.hlc.lock().unwrap().send(generated_at);
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: audit_gate::content_id(
+                self.estate_uuid.as_u128(),
+                substrate_lib::verbs::RowId(row_uuid.as_u128()),
+                &stamp,
+                "subjectRefused",
+                bitmaps,
+                anchor,
+            ),
+            estate_uuid: self.estate_uuid.as_u128(),
+            row_id: substrate_lib::verbs::RowId(row_uuid.as_u128()),
+            hlc: stamp,
+            verb: "subjectRefused".to_string(),
+            before_bitmaps: Some(bitmaps),
+            after_bitmaps: bitmaps,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor: changed_by.to_string(),
+            reason: Some(reason.to_string()),
+        };
+        let marker = crate::drawer_store::subject_refused_marker(pipeline_version);
+        let mut values = BTreeMap::new();
+        values.insert("subject_pipeline_version".to_string(), TypedValue::Text(marker.clone()));
+        values.insert("subject_at".to_string(), TypedValue::Timestamp(generated_at));
+        let fingerprint_value = self.recomputed_fingerprint(drawer_id, |d| {
+            d.subject_pipeline_version = Some(marker.clone());
+            d.subject_at = Some(generated_at);
+        })?;
+        values.insert("content_fingerprint".to_string(), fingerprint_value);
+        let audit_row = pk_audit_event_from(&event);
+        let mut updated: usize = 0;
+        self.storage
+            .transaction(IsolationLevel::Serializable, &mut |txn| {
+                updated = txn.row_store().update(T_DRAWERS, values.clone(), &id_pred)?;
+                if updated > 0 {
+                    txn.audit_log().append(audit_row.clone())?;
+                }
+                Ok(())
+            })
+            .map_err(map_storage_err)?;
+        Ok(updated)
     }
 
     /// The subject-backfill sweep enumerator (PR-09). Deterministic
@@ -3573,7 +3689,19 @@ impl DrawerStore for DrawerStoreCore {
         limit: usize,
         pipelines: &[String],
     ) -> Result<Vec<Drawer>, LocusKitError> {
-        let predicate = subject_debt_predicate(pipelines);
+        self.subject_debt_batch_for_producer(limit, pipelines, None)
+    }
+
+    /// Sweep enumerator for one producer: the tier-aware batch minus the
+    /// rows that producer has refused. Mirrors Swift
+    /// `subjectDebtBatch(limit:includingPipelines:refusedBy:)`.
+    fn subject_debt_batch_for_producer(
+        &self,
+        limit: usize,
+        pipelines: &[String],
+        refused_by: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        let predicate = subject_debt_predicate(pipelines, refused_by);
         let (rows, _skipped) = self
             .storage
             .row_store()
@@ -6757,6 +6885,18 @@ impl DrawerStore for InMemoryDrawerStore {
     ) -> Result<Vec<Drawer>, LocusKitError> {
         self.inner.subject_debt_batch_including(limit, pipelines)
     }
+    fn count_subject_debt_for_producer(&self, pipelines: &[String], refused_by: Option<&str>) -> Result<usize, LocusKitError> {
+        self.inner.count_subject_debt_for_producer(pipelines, refused_by)
+    }
+    fn subject_debt_batch_for_producer(&self, limit: usize, pipelines: &[String], refused_by: Option<&str>) -> Result<Vec<Drawer>, LocusKitError> {
+        self.inner.subject_debt_batch_for_producer(limit, pipelines, refused_by)
+    }
+    fn count_subject_refused(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.inner.count_subject_refused(pipeline_version)
+    }
+    fn mark_subject_refused(&self, drawer_id: &str, pipeline_version: &str, reason: &str, generated_at: i64, changed_by: &str) -> Result<usize, LocusKitError> {
+        self.inner.mark_subject_refused(drawer_id, pipeline_version, reason, generated_at, changed_by)
+    }
     fn count_missing_subject(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
         self.inner.count_missing_subject(pipeline_version)
     }
@@ -7907,9 +8047,27 @@ fn drawer_from_row(row: &StorageRow) -> Result<Drawer, LocusKitError> {
 /// lists the deterministic tiers and never ai-v1, so the filing AI
 /// outranks the fallback model STRUCTURALLY). Twin of Swift
 /// `DrawerStore.subjectDebtPredicate(includingPipelines:)`.
-fn subject_debt_predicate(pipelines: &[String]) -> StoragePredicate {
-    let mut subject_clauses: Vec<StoragePredicate> =
-        vec![StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject"))];
+fn subject_debt_predicate(pipelines: &[String], refused_by: Option<&str>) -> StoragePredicate {
+    // A NULL subject is debt unless the requesting producer has refused the
+    // row: then `subject_pipeline_version` carries that producer's refusal
+    // marker and the row leaves this producer's lane for good (a content
+    // guardrail refusal is deterministic; retrying it every cadence pinned
+    // the lane on one drawer, 2026-09-19). Another producer's marker keeps
+    // the row as debt for this one.
+    let null_subject = match refused_by {
+        Some(pipeline) => StoragePredicate::And(vec![
+            StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
+            StoragePredicate::Or(vec![
+                StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject_pipeline_version")),
+                StoragePredicate::Neq(
+                    Column::new(T_DRAWERS, "subject_pipeline_version"),
+                    TypedValue::Text(crate::drawer_store::subject_refused_marker(pipeline)),
+                ),
+            ]),
+        ]),
+        None => StoragePredicate::IsNull(Column::new(T_DRAWERS, "subject")),
+    };
+    let mut subject_clauses: Vec<StoragePredicate> = vec![null_subject];
     for pipeline in pipelines {
         subject_clauses.push(StoragePredicate::Eq(
             Column::new(T_DRAWERS, "subject_pipeline_version"),

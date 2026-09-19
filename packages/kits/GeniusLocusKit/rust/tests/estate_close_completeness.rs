@@ -28,7 +28,7 @@
 
 use std::sync::Arc;
 
-use genius_locus_kit::{DrainStatus, EstateCoordinator, EstateHandle, SubjectProducer};
+use genius_locus_kit::{DrainStatus, EstateCoordinator, EstateHandle, SubjectProducer, SubjectProducerError};
 use locus_kit::drawer_operational::CaptureChannel;
 use locus_kit::drawer_store::DrawerStore;
 use locus_kit::drawer_store_inmemory::InMemoryDrawerStore;
@@ -44,7 +44,7 @@ impl SubjectProducer for StubProducer {
     fn pipeline_version(&self) -> &str {
         "close-completeness-stub-v1"
     }
-    fn subject_for_content(&self, content: &str) -> Result<String, String> {
+    fn subject_for_content(&self, content: &str) -> Result<String, SubjectProducerError> {
         Ok(content.lines().next().unwrap_or("").chars().take(120).collect())
     }
 }

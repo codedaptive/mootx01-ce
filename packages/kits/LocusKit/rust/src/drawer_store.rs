@@ -196,6 +196,14 @@ pub fn conflict_proposal_digests(
 /// The unit is grapheme clusters, the same unit Swift's `String.count` returns.
 pub const SUBJECT_LENGTH_CONTRACT: usize = 120;
 
+
+/// The `subject_pipeline_version` value a producer's refusal leaves on a
+/// drawer whose subject stays NULL: `<pipeline>:refused`. The producer's
+/// own debt predicate excludes it; every other producer still sees the row
+/// as debt. Mirrors Swift `DrawerStore.subjectRefusedMarker(for:)`.
+pub fn subject_refused_marker(pipeline_version: &str) -> String {
+    format!("{pipeline_version}:refused")
+}
 /// Returns the grapheme-cluster count of `subject`.
 ///
 /// The unit is the grapheme cluster, the same unit Swift's `String.count`
@@ -1079,6 +1087,59 @@ pub trait DrawerStore: Send + Sync {
     ) -> Result<Vec<Drawer>, LocusKitError> {
         Err(LocusKitError::DatabaseUnavailable(
             "subject_debt_batch_including not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Debt count for one producer: `count_subject_debt_including` minus
+    /// the rows that producer refused (`subject_refused_marker`). Mirrors
+    /// Swift `countSubjectDebt(includingPipelines:refusedBy:)`.
+    fn count_subject_debt_for_producer(
+        &self,
+        _pipelines: &[String],
+        _refused_by: Option<&str>,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_subject_debt_for_producer not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Sweep enumerator for one producer: the tier-aware batch minus the
+    /// rows that producer refused. Mirrors Swift
+    /// `subjectDebtBatch(limit:includingPipelines:refusedBy:)`.
+    fn subject_debt_batch_for_producer(
+        &self,
+        _limit: usize,
+        _pipelines: &[String],
+        _refused_by: Option<&str>,
+    ) -> Result<Vec<Drawer>, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "subject_debt_batch_for_producer not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Rows `pipeline_version` refused (NULL subject, refusal marker).
+    /// Mirrors Swift `countSubjectRefused(pipelineVersion:)`.
+    fn count_subject_refused(&self, _pipeline_version: &str) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "count_subject_refused not implemented for this DrawerStore impl".to_string(),
+        ))
+    }
+
+    /// Record a producer's refusal on one drawer: subject stays NULL,
+    /// `subject_pipeline_version` = `subject_refused_marker(pipeline)`,
+    /// `subject_at` = now, one sealed custody event (verb
+    /// `subjectRefused`). Returns rows updated (0 = drawer not found).
+    /// Mirrors Swift `markSubjectRefused`.
+    fn mark_subject_refused(
+        &self,
+        _drawer_id: &str,
+        _pipeline_version: &str,
+        _reason: &str,
+        _generated_at: i64,
+        _changed_by: &str,
+    ) -> Result<usize, LocusKitError> {
+        Err(LocusKitError::DatabaseUnavailable(
+            "mark_subject_refused not implemented for this DrawerStore impl".to_string(),
         ))
     }
 
@@ -2666,6 +2727,18 @@ impl DrawerStore for std::sync::Arc<dyn DrawerStore> {
         pipelines: &[String],
     ) -> Result<Vec<Drawer>, LocusKitError> {
         self.as_ref().subject_debt_batch_including(limit, pipelines)
+    }
+    fn count_subject_debt_for_producer(&self, pipelines: &[String], refused_by: Option<&str>) -> Result<usize, LocusKitError> {
+        self.as_ref().count_subject_debt_for_producer(pipelines, refused_by)
+    }
+    fn subject_debt_batch_for_producer(&self, limit: usize, pipelines: &[String], refused_by: Option<&str>) -> Result<Vec<Drawer>, LocusKitError> {
+        self.as_ref().subject_debt_batch_for_producer(limit, pipelines, refused_by)
+    }
+    fn count_subject_refused(&self, pipeline_version: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().count_subject_refused(pipeline_version)
+    }
+    fn mark_subject_refused(&self, drawer_id: &str, pipeline_version: &str, reason: &str, generated_at: i64, changed_by: &str) -> Result<usize, LocusKitError> {
+        self.as_ref().mark_subject_refused(drawer_id, pipeline_version, reason, generated_at, changed_by)
     }
     fn seal_expunge_audit(
         &self,
