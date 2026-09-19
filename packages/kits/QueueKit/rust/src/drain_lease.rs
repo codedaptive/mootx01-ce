@@ -101,8 +101,8 @@ impl DrainLease {
     /// (infrastructure — pass `wall_now_secs()`).
     pub fn try_acquire(&self, now_secs: f64) -> bool {
         if let Some((held_owner, held_at)) = self.read() {
-            if held_owner != self.owner && now_secs - held_at <= self.ttl_secs {
-                return false; // fresh and held by another drainer — stand down
+            if held_owner != self.owner && now_secs - held_at <= self.ttl_secs && holder_is_alive(&held_owner) {
+                return false; // fresh and held by another live drainer — stand down
             }
         }
         // Absent, ours, or stale → (re)claim, then re-read to resolve a write
@@ -128,7 +128,7 @@ impl DrainLease {
     /// TTL, and its owner is not this drainer.
     pub fn is_held_by_other(&self, now_secs: f64) -> bool {
         match self.read() {
-            Some((owner, at)) => owner != self.owner && now_secs - at <= self.ttl_secs,
+            Some((owner, at)) => owner != self.owner && now_secs - at <= self.ttl_secs && holder_is_alive(&owner),
             None => false,
         }
     }
@@ -187,6 +187,32 @@ pub fn wall_now_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Whether the process that wrote `owner` (`pid-<pid>-<token>`) still exists.
+/// A lease left fresh by a process that has already exited is stale the
+/// moment it is read, not one TTL later: every process a benchmark unit
+/// passes through (import serve, span resident, drain) otherwise stood down
+/// for the full 15 s TTL of its predecessor's lease, which was most of a
+/// one-record unit's wall clock (measured 2026-09-19). Linux reads
+/// `/proc/<pid>`; elsewhere `kill -0` is asked, which probes existence
+/// without delivering a signal (a process that exists but is not ours
+/// answers "not permitted" and counts as alive). An owner that carries no
+/// pid, or a probe that cannot be run, is treated as alive so an unknown
+/// writer is never stepped on. Twin of Swift `DrainLease.holderIsAlive`.
+pub fn holder_is_alive(owner: &str) -> bool {
+    let mut parts = owner.splitn(3, '-');
+    let Some("pid") = parts.next() else { return true };
+    let Some(pid) = parts.next().and_then(|p| p.parse::<u32>().ok()) else { return true };
+    if cfg!(target_os = "linux") {
+        return std::path::Path::new(&format!("/proc/{pid}")).exists();
+    }
+    match std::process::Command::new("kill").arg("-0").arg(pid.to_string())
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped()).output()
+    {
+        Ok(out) => out.status.success() || String::from_utf8_lossy(&out.stderr).contains("not permitted"),
+        Err(_) => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +252,25 @@ mod tests {
     const T0: f64 = 1_700_000_000.0;
 
     /// Acquire on a free lease succeeds.
+    #[test]
+    fn a_fresh_lease_of_a_dead_process_is_reclaimable_at_once() {
+        let dir = std::env::temp_dir().join(format!("drain-lease-dead-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A child that has already exited: its pid is gone.
+        let mut child = std::process::Command::new("true").spawn().unwrap();
+        let dead_pid = child.id();
+        child.wait().unwrap();
+        let mine = DrainLease::new(&dir, "encode", format!("pid-{}-mine", std::process::id()));
+        std::fs::write(dir.join("encode.drain.lease"), format!("pid-{dead_pid}-old\n{}\n", wall_now_secs())).unwrap();
+        assert!(!mine.is_held_by_other(wall_now_secs()), "a dead holder's fresh lease is not held");
+        assert!(mine.try_acquire(wall_now_secs()), "reclaimed without waiting out the TTL");
+        // A live foreign holder (this process under another token) still blocks.
+        let other = DrainLease::new(&dir, "encode", format!("pid-{}-other", std::process::id()));
+        assert!(other.is_held_by_other(wall_now_secs()));
+        assert!(!other.try_acquire(wall_now_secs()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn acquire_on_free_lease() {
         let dir = TempDir::new();

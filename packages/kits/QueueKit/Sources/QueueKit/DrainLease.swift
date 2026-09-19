@@ -27,6 +27,11 @@
 // Mirrors the Rust `DrainLease` in `drain_lease.rs`.
 
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
 
 /// A stream-keyed heartbeat-TTL drain lease.
 ///
@@ -98,8 +103,9 @@ public struct DrainLease: Sendable {
     /// and the caller should stand down. `now` is the wall-clock instant
     /// (infrastructure — not the deterministic engine).
     public func tryAcquire(now: Date) -> Bool {
-        if let held = read(), held.owner != owner, now.timeIntervalSince(held.at) <= ttl {
-            return false  // fresh and held by another drainer — stand down
+        if let held = read(), held.owner != owner, now.timeIntervalSince(held.at) <= ttl,
+           Self.holderIsAlive(held.owner) {
+            return false  // fresh and held by another live drainer — stand down
         }
         // Absent, ours, or stale → (re)claim, then re-read to resolve a write
         // race: atomic replace is last-writer-win; the losing writer sees the
@@ -125,7 +131,24 @@ public struct DrainLease: Sendable {
     /// down is warranted without attempting an acquire.
     public func isHeldByOther(now: Date) -> Bool {
         guard let held = read() else { return false }
-        return held.owner != owner && now.timeIntervalSince(held.at) <= ttl
+        return held.owner != owner && now.timeIntervalSince(held.at) <= ttl && Self.holderIsAlive(held.owner)
+    }
+
+    /// Whether the process that wrote `owner` (`pid-<pid>-<token>`) still
+    /// exists. A lease left fresh by a process that has already exited is
+    /// stale the moment it is read, not one TTL later: every process a
+    /// benchmark unit passes through (import serve, span resident, drain)
+    /// otherwise stood down for the full 15 s TTL of its predecessor's lease,
+    /// which was most of a one-record unit's wall clock (measured
+    /// 2026-09-19). Signal 0 probes existence without delivering anything;
+    /// EPERM means the process exists but is not ours, so it counts as
+    /// alive. An owner that does not carry a pid is treated as alive, so an
+    /// unknown writer is never stepped on. Twin of Rust `holder_is_alive`.
+    static func holderIsAlive(_ owner: String) -> Bool {
+        let parts = owner.split(separator: "-", maxSplits: 2)
+        guard parts.count >= 2, parts[0] == "pid", let pid = pid_t(parts[1]) else { return true }
+        if kill(pid, 0) == 0 { return true }
+        return errno == EPERM
     }
 
     /// Release the lease on clean teardown. Removes the lease file so another
