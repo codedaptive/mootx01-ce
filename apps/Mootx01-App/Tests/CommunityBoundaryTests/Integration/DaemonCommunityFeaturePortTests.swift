@@ -6,6 +6,146 @@ import Testing
 
 @Suite("Community production feature adapters")
 struct DaemonCommunityFeaturePortTests {
+    @MainActor
+    @Test("Community recall uses the negotiated stable provider tuple on its daemon caller")
+    func communityRecallCarriesStableProviderTuple() async throws {
+        let estateID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let receipt = CommunityEstateReceipt(
+            estate: CommunityEstateSummary(id: estateID, name: "Home", schemaVersion: "1.1"),
+            receiptID: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        )
+        let transport = CommunityRecallTransport()
+        let contract = FirstPartyProviderClientContract.current
+        let compatibility = FirstPartyProviderCompatibility(
+            contractVersion: contract.contractVersion,
+            ariaSupportedVersion: contract.ariaSupportedVersion,
+            capabilityDigest: contract.capabilityDigest
+        )
+        let caller = MootCaller(
+            transport: transport,
+            serverName: DaemonContract.serverName,
+            estateIdentity: .daemon(
+                estate: estateID,
+                service: DaemonContract.serviceIdentifier
+            ),
+            firstPartyProviderCompatibility: compatibility
+        )
+        let model = CommunityAppModel(
+            connector: ReadyConnectionFixture(caller: caller, estateID: estateID),
+            setupService: LifecycleFixture(states: [.ready(receipt)]),
+            captureService: UnavailableCommunityCaptureService(),
+            reviewPort: FakeReviewPort(),
+            obsidianPort: FakeObsidianPort(),
+            transferPort: FakeTransferPort(),
+            lanPort: FakeLANPort()
+        )
+
+        await model.start()
+        model.recallQuery = "quarterly planning"
+        await model.recall()
+
+        let request = try #require(await transport.memorySearchRequest())
+        let params = try #require(request.params?.objectValue)
+        #expect(params["name"] == .string("moot_memory_search"))
+        #expect(params["first_party_provider"] == compatibility.jsonValue)
+        #expect(params["first_party_provider"]?.objectValue?.count == 3)
+        guard case .results(let rows, _) = model.recallOutcome else {
+            Issue.record("Community recall did not compose the daemon result")
+            return
+        }
+        #expect(rows.map(\.subject) == ["Quarterly planning is Thursday"])
+    }
+
+    @MainActor
+    @Test("Community recall re-admits once after daemon transport failure")
+    func communityRecallReplacesFailedCaller() async throws {
+        let estateID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let receipt = CommunityEstateReceipt(
+            estate: CommunityEstateSummary(id: estateID, name: "Home", schemaVersion: "1.1"),
+            receiptID: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        )
+        let failedTransport = RestartingCommunityTransport(failingTool: "moot_memory_search")
+        let replacementTransport = RestartingCommunityTransport()
+        let connector = SequencedReadyConnectionFixture(
+            callers: [
+                communityCaller(transport: failedTransport, estateID: estateID),
+                communityCaller(transport: replacementTransport, estateID: estateID),
+            ],
+            estateID: estateID
+        )
+        let model = CommunityAppModel(
+            connector: CommunityDaemonConnections.recovering(connector),
+            setupService: LifecycleFixture(states: [.ready(receipt)]),
+            captureService: UnavailableCommunityCaptureService(),
+            reviewPort: FakeReviewPort(),
+            obsidianPort: FakeObsidianPort(),
+            transferPort: FakeTransferPort(),
+            lanPort: FakeLANPort()
+        )
+
+        await model.start()
+        model.recallQuery = "quarterly planning"
+        await model.recall()
+
+        #expect(await connector.connectCount() == 2)
+        let request = try #require(await replacementTransport.request(for: "moot_memory_search"))
+        #expect(request.params?.objectValue?["name"] == .string("moot_memory_search"))
+        #expect(request.params?.objectValue?["first_party_provider"] == communityCompatibility.jsonValue)
+        guard case .results(let rows, _) = model.recallOutcome else {
+            Issue.record("Community recall did not compose the replacement daemon result")
+            return
+        }
+        #expect(rows.map(\.subject) == ["Quarterly planning is Thursday"])
+    }
+
+    @MainActor
+    @Test("Community capture re-admits but does not replay an ambiguous mutation")
+    func communityCaptureDoesNotReplayAfterResponseLoss() async throws {
+        let estateID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
+        let receipt = CommunityEstateReceipt(
+            estate: CommunityEstateSummary(id: estateID, name: "Home", schemaVersion: "1.1"),
+            receiptID: UUID(uuidString: "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB")!
+        )
+        let failedTransport = RestartingCommunityTransport(failingTool: "moot_community_capture")
+        let replacementTransport = RestartingCommunityTransport()
+        let connector = SequencedReadyConnectionFixture(
+            callers: [
+                communityCaller(transport: failedTransport, estateID: estateID),
+                communityCaller(transport: replacementTransport, estateID: estateID),
+            ],
+            estateID: estateID
+        )
+        let model = CommunityAppModel(
+            connector: CommunityDaemonConnections.recovering(connector),
+            setupService: LifecycleFixture(states: [.ready(receipt)]),
+            reviewPort: FakeReviewPort(),
+            obsidianPort: FakeObsidianPort(),
+            transferPort: FakeTransferPort(),
+            lanPort: FakeLANPort()
+        )
+
+        await model.start()
+        model.captureModel.subject = "Restart-safe capture"
+        model.captureModel.body = "The resident daemon restarted during this capture."
+        await model.captureModel.submit()
+
+        #expect(await connector.connectCount() == 2)
+        let failedRequest = try #require(await failedTransport.request(for: "moot_community_capture"))
+        let failedArguments = try #require(
+            failedRequest.params?.objectValue?["arguments"]?.objectValue
+        )
+        #expect(failedArguments["requestID"]?.stringValue != nil)
+        #expect(await replacementTransport.request(for: "moot_community_capture") == nil)
+        #expect(
+            failedRequest.params?.objectValue?["first_party_provider"]
+                == communityCompatibility.jsonValue
+        )
+        #expect(
+            model.captureModel.outcome
+                == .failed(reason: DaemonOperationReplayPolicy.ambiguousOutcomeReason)
+        )
+    }
+
     @Test("estate lifecycle readiness is decoded from the daemon receipt")
     func estateLifecycleWire() async {
         let estateID = UUID(uuidString: "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA")!
@@ -375,7 +515,7 @@ private func frozenFixtureResult(family: String, caseID: String) throws -> JSONV
     var repositoryRoot = URL(fileURLWithPath: #filePath)
     for _ in 0..<6 { repositoryRoot.deleteLastPathComponent() }
     let fixtureURL = repositoryRoot
-        .appendingPathComponent("contracts/community/1.1/fixtures", isDirectory: true)
+        .appendingPathComponent("apps/mootx01/Contracts/community-1.1/fixtures", isDirectory: true)
         .appendingPathComponent("\(family).json")
     let fixture = try #require(
         JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as? [String: Any]
@@ -459,5 +599,170 @@ private actor FeatureCallerFixture: MootEstateCalling {
             structured: nil,
             isError: true
         )
+    }
+}
+
+private actor CommunityRecallTransport: GatewayTransport {
+    private var requests: [JSONRPCRequest] = []
+
+    func send(_ request: JSONRPCRequest) async throws -> JSONRPCResponse? {
+        requests.append(request)
+        guard let id = request.id else { return nil }
+        return .ok(id, .object([
+            "content": .array([.object([
+                "type": .string("text"),
+                "text": .string("found 1 result"),
+            ])]),
+            "structuredContent": .object([
+                "results": .array([.object([
+                    "id": .string("11111111-2222-3333-4444-555555555555"),
+                    "subject": .string("Quarterly planning is Thursday"),
+                    "content": .string("The planning session moved to Thursday."),
+                ])]),
+            ]),
+            "isError": .bool(false),
+        ]))
+    }
+
+    func memorySearchRequest() -> JSONRPCRequest? {
+        requests.last { request in
+            request.method == "tools/call"
+                && request.params?.objectValue?["name"]?.stringValue == "moot_memory_search"
+        }
+    }
+}
+
+private let communityCompatibility: FirstPartyProviderCompatibility = {
+    let contract = FirstPartyProviderClientContract.current
+    return FirstPartyProviderCompatibility(
+        contractVersion: contract.contractVersion,
+        ariaSupportedVersion: contract.ariaSupportedVersion,
+        capabilityDigest: contract.capabilityDigest
+    )
+}()
+
+private func communityCaller(
+    transport: any GatewayTransport,
+    estateID: UUID
+) -> MootCaller {
+    MootCaller(
+        transport: transport,
+        serverName: DaemonContract.serverName,
+        estateIdentity: .daemon(
+            estate: estateID,
+            service: DaemonContract.serviceIdentifier
+        ),
+        firstPartyProviderCompatibility: communityCompatibility
+    )
+}
+
+private actor SequencedReadyConnectionFixture: CommunityDaemonConnecting {
+    private var callers: [any MootEstateCalling]
+    private let estateID: UUID
+    private var count = 0
+
+    init(callers: [any MootEstateCalling], estateID: UUID) {
+        self.callers = callers
+        self.estateID = estateID
+    }
+
+    func connect() async -> CommunityDaemonConnection {
+        count += 1
+        guard !callers.isEmpty else {
+            return CommunityDaemonConnection(state: .unavailable)
+        }
+        return CommunityDaemonConnection(
+            state: .ready(.daemon(
+                estate: estateID,
+                service: DaemonContract.serviceIdentifier
+            )),
+            caller: callers.removeFirst()
+        )
+    }
+
+    func connectCount() -> Int { count }
+}
+
+private actor RestartingCommunityTransport: GatewayTransport {
+    static let capturedRecordID = UUID(
+        uuidString: "CCCCCCCC-CCCC-4CCC-8CCC-CCCCCCCCCCCC"
+    )!
+
+    private let failingTool: String?
+    private var requests: [JSONRPCRequest] = []
+
+    init(failingTool: String? = nil) {
+        self.failingTool = failingTool
+    }
+
+    func send(_ request: JSONRPCRequest) async throws -> JSONRPCResponse? {
+        requests.append(request)
+        guard let id = request.id else { return nil }
+        let tool = request.params?.objectValue?["name"]?.stringValue
+        if tool == failingTool {
+            throw URLError(.cannotConnectToHost)
+        }
+        return .ok(id, Self.toolResult(tool))
+    }
+
+    func request(for tool: String) -> JSONRPCRequest? {
+        requests.last {
+            $0.method == "tools/call"
+                && $0.params?.objectValue?["name"]?.stringValue == tool
+        }
+    }
+
+    private static func toolResult(_ tool: String?) -> JSONValue {
+        let structured: JSONValue
+        switch tool {
+        case "moot_community_capture_choices":
+            structured = .object([
+                "destinations": .array([.object([
+                    "id": .string("inbox"),
+                    "title": .string("Inbox"),
+                    "detail": .string("Review later"),
+                ])]),
+                "sensitivities": .array([.string("normal")]),
+                "defaultPolicy": .object([
+                    "destinationID": .string("inbox"),
+                    "sensitivity": .string("normal"),
+                    "exportEligible": .bool(false),
+                    "lanEligible": .bool(false),
+                ]),
+            ])
+        case "moot_community_capture":
+            structured = .object([
+                "outcome": .string("applied"),
+                "recordID": .string(capturedRecordID.uuidString),
+                "effectivePolicy": .object([
+                    "destination": .object([
+                        "id": .string("inbox"),
+                        "title": .string("Inbox"),
+                        "detail": .string("Review later"),
+                    ]),
+                    "sensitivity": .string("normal"),
+                    "exportEligible": .bool(false),
+                    "lanEligible": .bool(false),
+                ]),
+            ])
+        case "moot_memory_search":
+            structured = .object([
+                "results": .array([.object([
+                    "id": .string("11111111-2222-3333-4444-555555555555"),
+                    "subject": .string("Quarterly planning is Thursday"),
+                    "content": .string("The planning session moved to Thursday."),
+                ])]),
+            ])
+        default:
+            structured = .object([:])
+        }
+        return .object([
+            "content": .array([.object([
+                "type": .string("text"),
+                "text": .string("ok"),
+            ])]),
+            "structuredContent": structured,
+            "isError": .bool(false),
+        ])
     }
 }
