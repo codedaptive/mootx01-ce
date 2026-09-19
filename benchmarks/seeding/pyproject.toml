@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mootx01-benchmark-seeding"
+version = "1.0.0"
+description = "MOOTx01 benchmark seeding harness"
+requires-python = ">=3.10"
+authors = [{name = "Codedaptive"}]
+dependencies = []
+
+[tool.pytest.ini_options]
+# Run all test files under tests/. A bare `python3 -m pytest` from this
+# directory (what scripts/moot-test's run_python lane runs) discovers them
+# here; `make test-one DIR=<this directory>` resolves the same root via
+# find_owner, stopping at this file before the parent Package.swift.
+testpaths = ["tests"]
