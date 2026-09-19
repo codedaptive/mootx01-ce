@@ -10,9 +10,11 @@ on:
       # are stable-only channels that auto-upgrade every installed user.
       # Ordinary betas still ship via candidate.yml from candidate/1.1.x; a
       # release candidate comes through here so the signed, notarized path is
-      # the one being proved.
+      # the one being proved. The exclusion that used to sit on the next line,
+      # '!v*-*', is what the guard replaces: it kept qualifier tags out by
+      # never building them, at the cost of never proving this path before a
+      # stable tag ran it for the first time.
       - 'v*'
-      - '!v*-*'
   # Manual debug trigger: COMPILE-ONLY. Builds a chosen platform from a branch
   # to catch build breaks fast, without tagging or the slow legs. It NEVER
   # signs, notarizes, uploads artifacts, or publishes: every Apple Developer ID
@@ -73,7 +75,7 @@ jobs:
   build-macos-arm64:
     name: Build macOS arm64
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos' }}
-    runs-on: macos-26
+    runs-on: macos-27
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
         with:
@@ -102,6 +104,8 @@ jobs:
           # SPM dependencies are public github.com packages and build without
           # auth injection (verified: candidate.yml omits this step and builds fine).
           swift build -c release --package-path apps/mootx01 --product mootx01
+          # mootx01-daemon is wrapped as Mootx01DaemonProvider.app by the pkg step.
+          swift build -c release --package-path apps/mootx01 --product mootx01-daemon
           swift build -c release --package-path apps/moot-mgr --product moot-mgr
 
       - name: Import Developer ID Certificate
@@ -144,6 +148,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
           echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
           echo "MGR_BIN=$MGR_BIN"  >> "$GITHUB_ENV"
+          echo "DAEMON_BIN=apps/mootx01/.build/arm64-apple-macosx/release/mootx01-daemon" >> "$GITHUB_ENV"
 
       - name: Notarize binaries
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
@@ -163,6 +168,12 @@ jobs:
 
       - name: Package binaries
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
+        # The model fetch reads release assets through the GitHub API. Without a
+        # token those calls are anonymous and share one per-IP hourly budget with
+        # every other runner on the same host, which is how a release build died
+        # on HTTP 403 rate-limit while downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Tag comes from $RELEASE_TAG (a plain env value, never templated into shell) and is
           # validated against a strict release-version regex before any use.
@@ -279,16 +290,24 @@ jobs:
           # runtime) inside the .pkg so the package passes notarization.
           APP_IDENTITY: "Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
           # Fail closed: a published .pkg must be signed (SECURITY 927f38c4).
+          DAEMON_PROFILE_BASE64: ${{ secrets.APPLE_DAEMON_PROVISIONING_PROFILE }}
           REQUIRE_SIGNING: "1"
         run: |
           # Strip leading 'v' from tag (build-pkg.sh uses version in filename).
           VERSION_NUM="${VERSION#v}"
+          if [ -z "$DAEMON_PROFILE_BASE64" ]; then
+            echo "Daemon provider provisioning profile secret is missing" >&2
+            exit 1
+          fi
+          export DAEMON_PROVISIONING_PROFILE="$RUNNER_TEMP/daemon-provider.provisionprofile"
+          echo "$DAEMON_PROFILE_BASE64" | base64 --decode > "$DAEMON_PROVISIONING_PROFILE"
           bash distribution/macos/build-pkg.sh \
             "${VERSION_NUM}" \
             arm64 \
             "${MOOT_BIN}" \
             "${MGR_BIN}" \
-            "${SETUP_BIN}"
+            "${SETUP_BIN}" \
+            "${DAEMON_BIN}"
           PKG_ASSET="mootx01-${VERSION_NUM}-macos-arm64.pkg"
           echo "PKG_ASSET=${PKG_ASSET}" >> "${GITHUB_ENV}"
 
@@ -336,241 +355,6 @@ jobs:
           name: macos-arm64-pkg
           path: ${{ env.PKG_ASSET }}
 
-  build-macos-x86_64:
-    name: Build macOS x86_64
-    if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos' }}
-    runs-on: macos-26
-    steps:
-      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
-        with:
-          # See the arm64 job: no persisted write token in a swift-build job.
-          persist-credentials: false
-
-      - name: Select Swift 6.2 toolchain (latest stable Xcode)
-        # See arm64 job: macos-26 ships the 6.2 runtime; latest-stable Xcode matches it.
-        uses: maxim-lobanov/setup-xcode@ed7a3b1fda3918c0306d1b724322adc0b8cc0a90 # v1
-        with:
-          xcode-version: latest-stable
-
-      - name: Show Swift version
-        run: swift --version
-
-      - name: Build release binaries (cross-compile to x86_64)
-        run: |
-          # Both binaries cross-compiled to x86_64; see the arm64 job for the
-          # mootx01/moot-mgr split rationale (macOS moot-mgr = SwiftUI app).
-          swift build -c release --package-path apps/mootx01 --product mootx01 --arch x86_64
-          swift build -c release --package-path apps/moot-mgr --product moot-mgr --arch x86_64
-
-      - name: Import Developer ID Certificate
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        env:
-          CERT_P12_BASE64: ${{ secrets.APPLE_SIGNING_CERT_P12 }}
-          CERT_P12_PASSWORD: ${{ secrets.APPLE_SIGNING_CERT_PASSWORD }}
-        run: |
-          KEYCHAIN_PATH="$RUNNER_TEMP/build.keychain"
-          KEYCHAIN_PASS="$(openssl rand -base64 32)"
-          security create-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
-          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/cert.p12"
-          security import "$RUNNER_TEMP/cert.p12" \
-            -k "$KEYCHAIN_PATH" \
-            -P "$CERT_P12_PASSWORD" \
-            -T /usr/bin/codesign
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -k "$KEYCHAIN_PASS" "$KEYCHAIN_PATH"
-          security list-keychain -d user -s "$KEYCHAIN_PATH"
-          rm "$RUNNER_TEMP/cert.p12"
-
-      - name: Sign binaries
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        run: |
-          IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          MOOT_BIN="apps/mootx01/.build/x86_64-apple-macosx/release/mootx01"
-          MGR_BIN="apps/moot-mgr/.build/x86_64-apple-macosx/release/moot-mgr"
-          for bin in "$MOOT_BIN" "$MGR_BIN"; do
-            test -f "$bin"
-            test -x "$bin"
-            file "$bin" | grep -E 'Mach-O.*x86_64'
-          done
-          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
-          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MOOT_BIN"
-          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$MGR_BIN"
-          codesign --verify --deep --strict --verbose=2 "$MOOT_BIN"
-          codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
-          echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
-          echo "MGR_BIN=$MGR_BIN"  >> "$GITHUB_ENV"
-
-      - name: Notarize binaries
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        env:
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-        run: |
-          mkdir -p ~/.private_keys
-          echo "$APPLE_API_KEY_P8" | base64 --decode > \
-            ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
-          zip -j "$RUNNER_TEMP/binaries.zip" "$MOOT_BIN" "$MGR_BIN"
-          xcrun notarytool submit "$RUNNER_TEMP/binaries.zip" \
-            --key ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8 \
-            --key-id "${{ secrets.APPLE_API_KEY_ID }}" \
-            --issuer "${{ secrets.APPLE_API_KEY_ISSUER }}" \
-            --wait
-          rm -f ~/.private_keys/AuthKey_${{ secrets.APPLE_API_KEY_ID }}.p8
-
-      - name: Package binaries
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        run: |
-          # Tag comes from $RELEASE_TAG (a plain env value, never templated into shell) and is
-          # validated against a strict release-version regex before any use.
-          VERSION="$RELEASE_TAG"
-          if [[ ! "$VERSION" =~ ^v[0-9]+(\.[0-9]+){2}(-[0-9A-Za-z.-]+)?$ ]]; then
-            echo "mootx01: invalid release tag: $VERSION" >&2
-            exit 1
-          fi
-          ASSET="mootx01-${VERSION}-macos-x86_64.tar.gz"
-          cp "$MOOT_BIN" mootx01
-          cp "$MGR_BIN" moot-mgr
-          # SPM resource bundles MUST ship beside the Swift binaries — see
-          # the arm64 job's identical step for the full rationale (v1.0.9
-          # shipped without them; installed CLI crashed on resource touch).
-          rm -rf ./*.bundle
-          cp -R "$(dirname "$MOOT_BIN")"/*.bundle .
-          for b in "$(dirname "$MGR_BIN")"/*.bundle; do
-            bn="$(basename "$b")"
-            [ -e "./$bn" ] || cp -R "$b" .
-          done
-          # The span encoder and the fact extractor ship inside the artifact.
-          # fetch-release.sh verifies each tarball's sha256 and then every
-          # extracted file against the platform manifest, so a truncated or
-          # substituted asset fails the job here and not on a user's machine.
-          # The repository is resolved from GITHUB_REPOSITORY, so each edition
-          # fetches its own model releases.
-          bash tools/encoder-models/fetch-release.sh apple \
-            share/mootx01/models/arctic-embed-s-w60
-          bash tools/encoder-models/fetch-release.sh apple \
-            share/mootx01/models/nuextract-tiny-v1.5 nuextract-tiny-v1.5
-          tar -czf "${ASSET}" mootx01 moot-mgr ./*.bundle share
-          echo "ASSET=${ASSET}" >> "${GITHUB_ENV}"
-          echo "VERSION=${VERSION}" >> "${GITHUB_ENV}"
-
-      - name: Upload asset
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: macos-x86_64
-          path: ${{ env.ASSET }}
-
-      # ── macOS .pkg installer (x86_64) ───────────────────────────────────────
-      # Cross-compiled x86_64 build; same pattern as the arm64 .pkg job above.
-      # The Mootx01-Setup package is also cross-compiled with --arch x86_64 so
-      # the setup binary matches the installed CLI arch on Intel Macs.
-      - name: Build setup assistant (x86_64)
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        run: |
-          swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup --arch x86_64
-          SETUP_BIN="apps/Mootx01-Setup/.build/x86_64-apple-macosx/release/Mootx01Setup"
-          test -f "$SETUP_BIN"
-          test -x "$SETUP_BIN"
-          file "$SETUP_BIN" | grep -E 'Mach-O.*x86_64'
-          echo "SETUP_BIN=${SETUP_BIN}" >> "${GITHUB_ENV}"
-
-      - name: Sign setup assistant (x86_64)
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        run: |
-          IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          # sign-retry.sh: --timestamp contacts Apple's TSA; retry transient outages.
-          bash distribution/macos/sign-retry.sh codesign --options runtime --timestamp --sign "$IDENTITY" "$SETUP_BIN"
-          codesign --verify --deep --strict --verbose=2 "$SETUP_BIN"
-
-      - name: Import Developer ID Installer Certificate (x86_64)
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        env:
-          CERT_P12_BASE64: ${{ secrets.APPLE_INSTALLER_CERT_P12 }}
-          CERT_P12_PASSWORD: ${{ secrets.APPLE_INSTALLER_CERT_PASSWORD }}
-        run: |
-          INST_KEYCHAIN="$RUNNER_TEMP/installer.keychain"
-          INST_KEYCHAIN_PASS="$(openssl rand -base64 32)"
-          security create-keychain -p "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
-          security set-keychain-settings -lut 21600 "$INST_KEYCHAIN"
-          security unlock-keychain -p "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
-          echo "$CERT_P12_BASE64" | base64 --decode > "$RUNNER_TEMP/installer-cert.p12"
-          security import "$RUNNER_TEMP/installer-cert.p12" \
-            -k "$INST_KEYCHAIN" \
-            -P "$CERT_P12_PASSWORD" \
-            -T /usr/bin/productsign
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -k "$INST_KEYCHAIN_PASS" "$INST_KEYCHAIN"
-          security list-keychain -d user -s "$RUNNER_TEMP/build.keychain" "$INST_KEYCHAIN"
-          rm "$RUNNER_TEMP/installer-cert.p12"
-
-      - name: Build macOS .pkg installer (x86_64)
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        env:
-          INSTALLER_IDENTITY: "Developer ID Installer: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          # Application identity seals the bundled Mootx01Setup.app (hardened
-          # runtime) inside the .pkg so the package passes notarization.
-          APP_IDENTITY: "Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          # Fail closed: a published .pkg must be signed (SECURITY 927f38c4).
-          REQUIRE_SIGNING: "1"
-        run: |
-          VERSION_NUM="${VERSION#v}"
-          bash distribution/macos/build-pkg.sh \
-            "${VERSION_NUM}" \
-            x86_64 \
-            "${MOOT_BIN}" \
-            "${MGR_BIN}" \
-            "${SETUP_BIN}"
-          PKG_ASSET="mootx01-${VERSION_NUM}-macos-x86_64.pkg"
-          echo "PKG_ASSET=${PKG_ASSET}" >> "${GITHUB_ENV}"
-
-      - name: Notarize macOS .pkg (x86_64)
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        env:
-          APPLE_API_KEY_P8: ${{ secrets.APPLE_API_KEY_P8 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_KEY_ISSUER: ${{ secrets.APPLE_API_KEY_ISSUER }}
-        run: |
-          mkdir -p ~/.private_keys
-          KEYFILE=~/.private_keys/AuthKey_${APPLE_API_KEY_ID}.p8
-          echo "$APPLE_API_KEY_P8" | base64 --decode > "$KEYFILE"
-          # Submit and wait; capture the JSON so that on a non-Accepted verdict
-          # we can fetch Apple's notary log, which names the exact rejected
-          # component (otherwise the failure is an opaque "status: Invalid").
-          SUBMIT_JSON="$(xcrun notarytool submit "${PKG_ASSET}" \
-            --key "$KEYFILE" \
-            --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_KEY_ISSUER" \
-            --output-format json --wait)"
-          echo "$SUBMIT_JSON"
-          SUBMIT_ID="$(printf '%s' "$SUBMIT_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["id"])')"
-          STATUS="$(printf '%s' "$SUBMIT_JSON" | python3 -c 'import sys,json;print(json.load(sys.stdin)["status"])')"
-          if [ "$STATUS" != "Accepted" ]; then
-            echo "::error::pkg notarization $STATUS — Apple notary log follows:"
-            xcrun notarytool log "$SUBMIT_ID" \
-              --key "$KEYFILE" \
-              --key-id "$APPLE_API_KEY_ID" \
-              --issuer "$APPLE_API_KEY_ISSUER" || true
-            rm -f "$KEYFILE"
-            exit 1
-          fi
-          xcrun stapler staple "${PKG_ASSET}"
-          rm -f "$KEYFILE"
-
-      - name: Upload macOS .pkg installer (x86_64)
-        if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
-        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
-        with:
-          name: macos-x86_64-pkg
-          path: ${{ env.PKG_ASSET }}
-
-  # ── Linux builds (x86_64 + arm64) ─────────────────────────────────────────
-  # Linux ships the Rust CLI from apps/mootx01/rust (NOT the Swift installer —
-  # Swift has no Linux GUI, and the Swift package's non-macOS branch omits
-  # `serve`). The Rust binary is the complete CLI: install, db, status, query,
-  # proxy, serve, uninstall, upgrade. Verified green by rust-cli.yml.
   build-linux-x86_64:
     name: Build Linux x86_64
     if: ${{ startsWith(github.ref, 'refs/tags/') || github.event.inputs.platform == 'all' || github.event.inputs.platform == 'linux' }}
@@ -601,6 +385,12 @@ jobs:
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml
 
       - name: Package binaries
+        # The model fetch reads release assets through the GitHub API. Without a
+        # token those calls are anonymous and share one per-IP hourly budget with
+        # every other runner on the same host, which is how a release build died
+        # on HTTP 403 rate-limit while downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Tag comes from $RELEASE_TAG (a plain env value, never templated into shell) and is
           # validated against a strict release-version regex before any use.
@@ -665,6 +455,12 @@ jobs:
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml
 
       - name: Package binaries
+        # The model fetch reads release assets through the GitHub API. Without a
+        # token those calls are anonymous and share one per-IP hourly budget with
+        # every other runner on the same host, which is how a release build died
+        # on HTTP 403 rate-limit while downloading the span encoder.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Tag comes from $RELEASE_TAG (a plain env value, never templated into shell) and is
           # validated against a strict release-version regex before any use.
@@ -739,9 +535,20 @@ jobs:
           restore-keys: release-rust-windows-x86_64-
 
       - name: Build release binaries
+        # pwsh does not stop on a native command's non-zero exit, so this step
+        # used to take the LAST command's status: mootx01 failed to compile,
+        # moot-mgr succeeded, and the job carried on to report a missing
+        # mootx01.exe at staging instead of the compile error. Each build is
+        # checked instead of switching shells — bash puts Git-for-Windows' perl
+        # ahead of Strawberry Perl in PATH, and openssl-sys (pulled in by
+        # SQLCipher) configures itself with perl, so the shell choice decides
+        # whether OpenSSL can build at all.
+        shell: pwsh
         run: |
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target x86_64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage binaries
         shell: pwsh
@@ -1052,9 +859,20 @@ jobs:
           restore-keys: release-rust-windows-arm64-
 
       - name: Build release binaries
+        # pwsh does not stop on a native command's non-zero exit, so this step
+        # used to take the LAST command's status: mootx01 failed to compile,
+        # moot-mgr succeeded, and the job carried on to report a missing
+        # mootx01.exe at staging instead of the compile error. Each build is
+        # checked instead of switching shells — bash puts Git-for-Windows' perl
+        # ahead of Strawberry Perl in PATH, and openssl-sys (pulled in by
+        # SQLCipher) configures itself with perl, so the shell choice decides
+        # whether OpenSSL can build at all.
+        shell: pwsh
         run: |
           cargo build --release --locked --manifest-path apps/mootx01/rust/Cargo.toml --target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build --release --locked --manifest-path apps/moot-mgr/rust/Cargo.toml --target aarch64-pc-windows-msvc
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Stage binaries
         shell: pwsh
@@ -1319,7 +1137,6 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/') }}
     needs:
       - build-macos-arm64
-      - build-macos-x86_64
       - build-linux-x86_64
       - build-linux-arm64
       # Windows: depend on the SIGN jobs (they need the build jobs); the final
@@ -1358,13 +1175,17 @@ jobs:
       # (scripts/release/README.md — "run it in CI and immediately before tagging".)
       - name: Verify version stamps match the release tag
         env:
-          # The tag name is untrusted input — hand it in via env, validate it as
-          # strict vMAJOR.MINOR.PATCH before it reaches the verifier.
+          # The tag name is untrusted input — hand it in via env and validate its
+          # shape before it reaches the verifier. A pre-release qualifier is
+          # allowed because it is part of the version the tree carries: the
+          # stamps read 1.1.0-rc1 and the verifier matches them against exactly
+          # that string. The character class stays narrow so the tag cannot
+          # smuggle anything through.
           TAG_NAME: ${{ github.ref_name }}
         run: |
           version="${TAG_NAME#v}"
-          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "ERROR: tag '$TAG_NAME' is not a vMAJOR.MINOR.PATCH release tag" >&2
+          if ! echo "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "ERROR: tag '$TAG_NAME' is not a vMAJOR.MINOR.PATCH release tag, with or without a pre-release qualifier" >&2
             exit 1
           fi
           python3 scripts/release/verify_version.py "$version"
@@ -1372,7 +1193,7 @@ jobs:
       - name: Download all assets
         # Downloads every artifact uploaded by the build jobs into assets/<name>/.
         # This includes the new installer artifacts (macos-arm64-pkg,
-        # macos-x86_64-pkg, windows-x86_64-setup, windows-arm64-setup) alongside
+        # windows-x86_64-setup, windows-arm64-setup) alongside
         # the existing binary archives.
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
         with:
@@ -1407,7 +1228,6 @@ jobs:
           # configured (distribution/windows/SIGNING.md); an unsigned build (creds
           # absent) still trips SmartScreen on direct download.
           for f in flat/mootx01-*-macos-arm64.pkg;          do cp "$f" flat/mootx01-macos-arm64.pkg;          done
-          for f in flat/mootx01-*-macos-x86_64.pkg;         do cp "$f" flat/mootx01-macos-x86_64.pkg;         done
           for f in flat/mootx01-*-windows-arm64-setup.exe;  do cp "$f" flat/mootx01-windows-arm64-setup.exe;  done
           for f in flat/mootx01-*-windows-x86_64-setup.exe; do cp "$f" flat/mootx01-windows-x86_64-setup.exe; done
           cd flat
@@ -1532,7 +1352,11 @@ jobs:
   # must not block the release.
   update-winget:
     name: Update winget manifests
-    if: ${{ startsWith(github.ref, 'refs/tags/') }}
+    # A qualifier in the tag means a pre-release, which never reaches winget —
+    # a stable-only channel that auto-upgrades every installed user. Skipping
+    # is the correct outcome there, not the version-shaped error the submit job
+    # used to raise after the release had already published.
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !contains(github.ref_name, '-') }}
     needs: [release]
     runs-on: ubuntu-latest
     # Writes the updated manifests back to develop/1.1.x, the line releases
@@ -1672,7 +1496,7 @@ jobs:
     # workflow_dispatch comment at the top). `!cancelled()` lets the dispatch
     # path run even though its `needs` (update-winget) is skipped on dispatch;
     # the manifests in this repo were already updated by the original tag run.
-    if: ${{ !cancelled() && ((startsWith(github.ref, 'refs/tags/') && github.event_name == 'push') || (github.event_name == 'workflow_dispatch' && github.event.inputs.winget-tag != '')) }}
+    if: ${{ !cancelled() && ((startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' && !contains(github.ref_name, '-')) || (github.event_name == 'workflow_dispatch' && github.event.inputs.winget-tag != '')) }}
     needs: [update-winget]
     runs-on: windows-latest
     steps:
