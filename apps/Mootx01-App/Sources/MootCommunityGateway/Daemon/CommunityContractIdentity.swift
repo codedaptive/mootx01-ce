@@ -2,7 +2,7 @@ import Foundation
 
 /// Exact identity of the frozen Community 1.1 application/daemon contract.
 ///
-/// These values are mirrored from `contracts/community/1.1` and locked there
+/// These values are mirrored from `apps/mootx01/Contracts/community-1.1` and locked there
 /// by `verify_contract.py`. A production caller is not released to Community
 /// features until the authenticated daemon reports all four values and the
 /// descriptor-bound daemon and estate identities exactly.
