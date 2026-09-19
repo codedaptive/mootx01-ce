@@ -5,7 +5,7 @@
 # Downloads a prebuilt mootx01 binary from GitHub Releases and places it on
 # your PATH. No Swift toolchain, no build tools, no clone required.
 #
-#   curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.1.x/install.sh | sh
 #
 # Then wire it into your AI clients (interactive menu):
 #   mootx01 install
@@ -27,6 +27,13 @@
 set -eu
 
 REPO="${MOOTX01_REPO:-codedaptive/mootx01-ce}"
+
+# Pinned codesign designated requirement for macOS: the certificate must be
+# issued to Codedaptive's Developer ID Application identity. A validly-signed
+# binary from any other identity is rejected. Gatekeeper alone accepts any
+# notarized publisher; this pins the publisher. Override only when rotating
+# the release signing identity.
+MACOS_CODESIGN_REQUIREMENT="${MOOTX01_MACOS_CODESIGN_REQUIREMENT:-certificate leaf[subject.CN] = \"Developer ID Application: Codedaptive\"}"
 INSTALL_DIR="${MOOTX01_INSTALL_DIR:-$HOME/.mootx01/bin}"
 BIN_DIR="${MOOTX01_BIN_DIR:-$HOME/.local/bin}"
 
@@ -53,6 +60,14 @@ case "$arch" in
   *) echo "mootx01: unsupported architecture '$arch'." >&2; exit 1 ;;
 esac
 target="${os}-${arch}"
+
+# Intel Macs are not built from 1.1.0 on: the release targets macOS 27, which
+# Apple ships for Apple silicon alone, so no macos-x86_64 asset exists. Say so
+# here rather than letting the download step fail on a bare 404.
+if [ "$os" = "macos" ] && [ "$arch" = "x86_64" ]; then
+  echo "mootx01: Intel Macs are not supported from 1.1.0 onward; macOS builds require macOS 27 on Apple silicon." >&2
+  exit 1
+fi
 
 # Linux/Windows ship the Rust `mootx01` vertical, which hosts the estate via
 # `mootx01 serve` exactly like macOS (CI smoke-tests `serve` on Linux). The
@@ -198,26 +213,70 @@ curl -fsSL "$checksums_sig_url" -o "$tmp/checksums.txt.minisig" \
 # Step 1: SHA-256 checksum — verifies asset integrity against checksums.txt.
 verify_checksum "$tmp/mootx01.tar.gz" "$tmp/checksums.txt" "$asset"
 
-# Step 2: minisign Ed25519 signature verification — Linux/POSIX only.
-# macOS uses Developer ID / Gatekeeper (the binary itself is signed and
-# notarized; verifying the tarball signature is redundant with Gatekeeper).
-if [ "$os" != "macos" ]; then
-  # The public key is embedded here directly rather than resolved from a
-  # repository path. In the documented install mode (`curl ... | sh`) $0 is
-  # the shell binary, so `dirname "$0"` yields a system directory (e.g. /bin)
-  # and a path-relative lookup would fail — there is no repo checkout.
-  # Embedding the key keeps the trust anchor intact for all install modes.
-  #
-  # Key ID: BC4D1E6ABCB5B788
-  # Source: distribution/minisign.pub in codedaptive/mootx01-ce at build time.
-  _pub_key="$tmp/minisign.pub"
-  printf 'untrusted comment: minisign public key BC4D1E6ABCB5B788\nRWSIt7W8ah5NvMXMLQ3+T2flXrQ+J6xoDxDrL62I+8iEkR04YIAlXa12\n' \
-    > "$_pub_key"
-  verify_minisign "$tmp/checksums.txt" "$tmp/checksums.txt.minisig" "$_pub_key"
-fi
+# Step 2: minisign Ed25519 signature verification — every platform.
+#
+# This was Linux-only while the installer placed nothing but the two Mach-O
+# executables: Developer ID and Gatekeeper authenticate exactly those, so the
+# archive signature added nothing on macOS. It places share/mootx01/models
+# now, and no code signature covers a data file — an attacker able to replace
+# release assets can serve a matching checksums.txt and swap the encoder or
+# tokenizer while the signed executables stay untouched. Authenticating
+# checksums.txt is what makes the tarball hash it carries mean anything.
+#
+# The public key is embedded here directly rather than resolved from a
+# repository path. In the documented install mode (`curl ... | sh`) $0 is
+# the shell binary, so `dirname "$0"` yields a system directory (e.g. /bin)
+# and a path-relative lookup would fail — there is no repo checkout.
+# Embedding the key keeps the trust anchor intact for all install modes.
+#
+# Key ID: BC4D1E6ABCB5B788
+# Source: distribution/minisign.pub in codedaptive/mootx01-ce at build time.
+_pub_key="$tmp/minisign.pub"
+printf 'untrusted comment: minisign public key BC4D1E6ABCB5B788\nRWSIt7W8ah5NvMXMLQ3+T2flXrQ+J6xoDxDrL62I+8iEkR04YIAlXa12\n' \
+  > "$_pub_key"
+verify_minisign "$tmp/checksums.txt" "$tmp/checksums.txt.minisig" "$_pub_key"
 
-# Step 3: Extract. Archives carry `mootx01` (required) and `moot-mgr`
-# (optional — installed when present).
+# validate_archive_members preflights every member path in a tar archive before
+# extraction. Rejects any member whose path is absolute (starts with /) or
+# contains a parent-directory component (..). These are the two path-traversal
+# forms ("zip-slip") that would let a compromised archive write outside the
+# extraction directory. Matches the containment semantics used in the Swift
+# validateTarballMembers and Rust validate_tarball_members upgrade paths.
+validate_archive_members() {
+  archive="$1"
+  bad_member=""
+  # List members to a temp file and read from it, rather than a `< <(...)`
+  # process substitution (bash-only — this script runs under /bin/sh). Reading
+  # from a file keeps the loop in the current shell so `bad_member` persists
+  # (a `tar | while` pipe would run the loop in a subshell and lose it).
+  members_list="$(mktemp)"
+  tar -tzf "${archive}" > "${members_list}"
+  while IFS= read -r member; do
+    case "${member}" in
+      /*) bad_member="${member}"; break ;;
+    esac
+    save_IFS="$IFS"
+    IFS='/'
+    # shellcheck disable=SC2086
+    set -- ${member}
+    IFS="$save_IFS"
+    for component; do
+      if [ "${component}" = ".." ]; then
+        bad_member="${member}"; break 2
+      fi
+    done
+  done < "${members_list}"
+  rm -f "${members_list}"
+  if [ -n "${bad_member}" ]; then
+    echo "mootx01: archive rejected: unsafe member path '${bad_member}'." >&2
+    echo "mootx01: member contains an absolute path or '..' component (zip-slip prevention)." >&2
+    exit 1
+  fi
+}
+
+# Step 3: Archive member containment, then extract. Archives carry `mootx01`
+# (required), `moot-mgr` (optional) and share/mootx01/models/.
+validate_archive_members "$tmp/mootx01.tar.gz"
 tar -xzf "$tmp/mootx01.tar.gz" -C "$tmp"
 [ -f "$tmp/mootx01" ] || { echo "mootx01: archive did not contain the expected binary." >&2; exit 1; }
 
@@ -248,6 +307,26 @@ WRAP
   chmod 0755 "$_entry"
 }
 
+# macOS: verify the Developer ID signature and the pinned publisher identity,
+# and that Gatekeeper accepts the binary, BEFORE placing it. The quarantine
+# xattr set further down makes Gatekeeper assess on first run; this check
+# refuses a wrong-publisher binary before it ever reaches the install dir.
+verify_macos_binary() {
+  binary="$1"
+  name="$2"
+  codesign --verify --deep --strict --requirement "$MACOS_CODESIGN_REQUIREMENT" "$binary" \
+    || { echo "mootx01: codesign verification failed for $name binary or signer identity." >&2; exit 1; }
+  spctl --assess --type execute "$binary" \
+    || { echo "mootx01: Gatekeeper assessment failed for $name binary." >&2; exit 1; }
+}
+
+if [ "$os" = "macos" ]; then
+  verify_macos_binary "$tmp/mootx01" "mootx01"
+  if [ -f "$tmp/moot-mgr" ]; then
+    verify_macos_binary "$tmp/moot-mgr" "moot-mgr"
+  fi
+fi
+
 mkdir -p "$INSTALL_DIR"
 install -m 0755 "$tmp/mootx01" "$INSTALL_DIR/mootx01"
 mkdir -p "$BIN_DIR"
@@ -265,6 +344,40 @@ for _bundle in "$tmp"/*.bundle; do
   rm -rf "${INSTALL_DIR:?}/$_bname"
   cp -R "$_bundle" "$INSTALL_DIR/$_bname"
   echo "Installed  $INSTALL_DIR/$_bname"
+done
+
+# Every release archive carries share/mootx01/models/ — the recall encoder and
+# the fact-extraction model — and the runtime resolves them from the share slot
+# beside the install dir (<exe>/../share/mootx01/models/<id>/). Copy the whole
+# share tree rather than a named model so a model added to a later release
+# installs without touching this script. Their absence is a packaging defect,
+# not a degraded mode: recall would come up with no encoder at all, so the
+# install fails instead.
+_share_src="$tmp/share"
+_share_root="$(dirname "$INSTALL_DIR")"
+if [ -d "$_share_src" ]; then
+  mkdir -p "$_share_root/share"
+  cp -R "$_share_src/." "$_share_root/share/"
+  echo "Installed  $_share_root/share/mootx01/models"
+else
+  echo "mootx01: release archive is missing share/mootx01/models; refusing to install." >&2
+  exit 1
+fi
+
+# The macOS archives carry the Core AI artifact; the Linux archives carry the
+# Candle files. Name them so a truncated or mis-built archive fails here rather
+# than at the first recall.
+_model_dest="$_share_root/share/mootx01/models/arctic-embed-s-w60"
+if [ "$os" = "macos" ]; then
+  _required="ArcticEmbedS.aimodel vocab.txt"
+else
+  _required="config.json tokenizer.json model.safetensors vocab.txt"
+fi
+for _entry in $_required; do
+  if [ ! -e "$_model_dest/$_entry" ]; then
+    echo "mootx01: encoder model install incomplete: missing $_entry" >&2
+    exit 1
+  fi
 done
 
 # moot-mgr (the management & monitoring console) ships in the macOS and Linux
