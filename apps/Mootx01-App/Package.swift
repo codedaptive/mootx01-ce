@@ -18,6 +18,12 @@ let package = Package(
             name: "MootCommunityGateway",
             dependencies: [
                 .product(name: "AriaMCPWire", package: "AriaMcpKit"),
+                // DaemonOperationReplayPolicy reads which operations the
+                // provider declares read-only, and FirstPartyProviderClientContract
+                // reads the compatibility tuple it validates the handshake
+                // against. Both come from FirstPartyProviderCatalog. The
+                // Enterprise manifest already carries both products.
+                .product(name: "AriaMCP", package: "AriaMcpKit"),
             ],
             path: "Sources/MootCommunityGateway"
         ),

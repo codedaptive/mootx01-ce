@@ -76,7 +76,7 @@ from boundary import parse_conf
 # tree, and the report would be indistinguishable from a real pass.
 community_export.self_test()
 
-manifest = community_export.load(
+manifest = community_export.load_ee(
     (root / "apps/Mootx01-App/community-export.json").read_text())
 
 findings = community_export.audit(manifest, community_export.tracked_paths(root))
@@ -186,8 +186,17 @@ fi
 gateway_dependencies="$(swift package --package-path "$app_root" --scratch-path "$scratch/app" dump-package \
   | /usr/bin/jq -r '.targets[] | select(.name == "MootCommunityGateway") | .dependencies[] | if has("byName") then .byName[0] else .product[0] end' \
   | sort)"
-if [[ "$gateway_dependencies" != "AriaMCPWire" ]]; then
-  echo "Community gateway dependency graph is not wire-only:" >&2
+# The gateway is the connection layer both the Community and Pro applications
+# talk to, and the first-party provider is a function of both editions. It may
+# read the provider's own contract -- the operation roster and the compatibility
+# tuple it negotiates at the handshake -- so AriaMCP is admitted beside the wire
+# module. The daemon already links AriaMCP in the Community graph. Nothing
+# beyond these two is permitted: the client-only release boundary is that the
+# application links the interface it calls, never an estate owner or a
+# licensed target.
+if [[ "$gateway_dependencies" != "AriaMCP
+AriaMCPWire" ]]; then
+  echo "Community gateway dependency graph is not the exact interface boundary:" >&2
   echo "$gateway_dependencies" >&2
   exit 1
 fi

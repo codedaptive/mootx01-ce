@@ -267,8 +267,9 @@ public final class CommunityCaptureModel {
             // request is a new attempt and receives a new idempotency key.
             pendingRequestID = nil
         case .failed:
-            // Delivery is uncertain: preserve the request identity so an
-            // exact retry cannot create a duplicate canonical record.
+            // Delivery may be uncertain. Preserve the request identity so the
+            // daemon can recognize an exact retry where its contract supports
+            // that check; this does not claim that every capture is exactly-once.
             break
         }
         isSubmitting = false

@@ -21,6 +21,9 @@ public actor CommunityFeatureCallerBox {
     func call(_ method: String, arguments: [String: JSONValue] = [:]) async -> JSONValue? {
         guard let caller else { return nil }
         let result = await caller.callToolFull(method, arguments: arguments)
+        if result.failureDisposition == .ambiguous {
+            return result.structured
+        }
         guard !result.isError else { return nil }
         return result.structured
     }

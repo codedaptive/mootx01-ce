@@ -5,6 +5,7 @@
 #if os(macOS)
 import AriaMCPWire
 import Foundation
+import MootProductIdentity
 
 // MARK: - Resident daemon contract
 //
@@ -49,12 +50,12 @@ public enum DaemonContract {
     /// is the `com.mootx01.mgr` LaunchAgent label the installer registers
     /// (`MootInstallerCore.Paths.launchAgentLabel`) — the one component
     /// permitted to publish a descriptor a client will act on.
-    public static let providerIdentifier = "com.mootx01.mgr"
+    public static let providerIdentifier = MootProductIdentity.Services.managerLabel
 
     /// The resident daemon service itself: the `com.mootx01.daemon` LaunchAgent
     /// label (`MootInstallerCore.Paths.daemonLabel`) that owns the estate and
     /// serves the ARIA tool surface.
-    public static let serviceIdentifier = "com.mootx01.daemon"
+    public static let serviceIdentifier = MootProductIdentity.Services.daemonLabel
 
     /// The `serverInfo.name` the daemon's dispatcher reports at `initialize`.
     /// The resident daemon runs the `aria-mcp` dispatcher, which advertises
@@ -171,6 +172,16 @@ public enum DaemonCapability: String, CaseIterable, Sendable, Codable, Comparabl
 
     /// The daemon owns a resident estate and is the single writer for it.
     case residentEstate = "resident-estate"
+
+    /// The Enterprise daemon owns the continuous federation sync lifecycle.
+    /// Community clients do not require or invoke it, but must be able to
+    /// authenticate a descriptor that truthfully advertises it.
+    case federationSync = "federation-sync"
+
+    /// The resident daemon owns the private ProductDock attachment surface.
+    /// This remains optional for Community clients and is never exposed on the
+    /// public or LAN MCP lanes.
+    case productDock = "product-dock"
 
     /// Ordered by wire spelling so any diagnostic listing capabilities — most
     /// visibly `DaemonCompatibility.missingCapabilities` — is deterministic

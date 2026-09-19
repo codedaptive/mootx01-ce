@@ -88,6 +88,7 @@ struct CommunityDaemonReasonPresentation {
         "unexpected-failure",
         "daemon-blocked",
         "daemon-refused",
+        "daemon-result-ambiguous",
     ]
 
     /// App-side wire-adapter codes: one shared truthful sentence (the app

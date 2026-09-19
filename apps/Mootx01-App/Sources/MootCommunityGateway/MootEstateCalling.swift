@@ -19,7 +19,7 @@ import Foundation
 //     representation. Federation and the CloudKit courier use it and are
 //     therefore not consumers of this protocol; moving them is separate work.
 //   - `registerSyncEngine` — same reason, and for the same two callers.
-//   - `attachSQLite` / `attachInMemory` — construction, and specific to owning
+//   - `attach(record:)` / `attachInMemory` — construction, and specific to owning
 //     an estate rather than calling one.
 //
 // The omissions are the point. A consumer written against this protocol cannot

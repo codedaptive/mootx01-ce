@@ -44,11 +44,9 @@ public enum ReviewKind: String, Codable, Sendable, CaseIterable {
 // MARK: - ReviewSurface
 
 /// The ARIA tools a review may read. Raw values are the EXACT registered tool
-/// names dispatched by AriaMcpKit (`LensTools.lensToolNames` and
-/// `ToolDispatcher`'s read verbs) — they are passed straight to
-/// `ReviewSurfaceReading.call(_:arguments:)`, so a typo here is a runtime
-/// tool-not-found, not a compile error. Verified against
-/// packages/kits/AriaMcpKit/Sources/AriaMCP/{LensTools,ToolProjection,ToolDispatch}.swift.
+/// names in the AriaMcpKit v2 catalog (`AriaV2SelectedCatalog`) — they are
+/// passed straight to `ReviewSurfaceReading.call(_:arguments:)`, so a typo
+/// here is a runtime tool-not-found, not a compile error.
 ///
 /// Read verbs only. No mutation tool is reachable from this enum, which is what
 /// makes the whole Review module structurally read-only (same discipline as the
