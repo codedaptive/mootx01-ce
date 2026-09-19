@@ -286,7 +286,7 @@ impl Estate {
         })?;
         let mut ranges = Vec::new();
         for chest in ns.active_chests(room_node.id)? {
-            let low = MortonKey::from_hex(&chest.display_name).ok_or_else(|| {
+            let low = MortonKey::from_hex(crate::node_store::NodeStore::chest_low_key_hex(&chest.display_name)).ok_or_else(|| {
                 LocusKitError::InvalidContent(format!(
                     "chest {} under {wing}/{room} is not named by a placement key", chest.id
                 ))
@@ -404,29 +404,47 @@ impl Estate {
             LocusKitError::DatabaseUnavailable("rebin_room: no storage".to_string())
         })?;
         let drawers = self.store.drawers_in_wing_room(wing, room)?;
-        let mut keyed: Vec<(MortonKey, String, String)> = drawers
-            .iter()
-            .map(|d| (chest_placement::key(&content_fingerprint::fingerprint(&d.content)), d.id.clone(), d.parent_node_id.clone()))
-            .collect();
-        // Ties on the key break on the id so the deal is deterministic.
-        keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-        let keys: Vec<MortonKey> = keyed.iter().map(|k| k.0).collect();
-        let ranges = chest_placement::deal(&keys, chest_placement::FILL);
-
         let mut assignments: Vec<(Uuid, Vec<String>)> = Vec::new();
         let mut kept: HashSet<Uuid> = HashSet::new();
-        let mut start = 0usize;
-        for range in &ranges {
-            let chest = ns.create_chest(room_node.id, &range.low.hex(), now)?;
-            kept.insert(chest.id);
-            let chest_id = chest.id.to_string();
-            let moving: Vec<String> = keyed[start..start + range.count]
+        let mut chest_count = 0usize;
+        // Two deals: the visible drawers and the hidden (restricted or
+        // secret) ones, each into chests of its own class, so a hidden
+        // drawer never decides which chest a visible drawer lands in
+        // (`NodeStore::chest_name`).
+        for hidden in [false, true] {
+            let mut keyed: Vec<(MortonKey, String, String)> = drawers
                 .iter()
-                .filter(|k| k.2 != chest_id)
-                .map(|k| k.1.clone())
+                .filter(|d| is_hidden_adjective(d.adjective_sensitivity()) == hidden)
+                .map(|d| (chest_placement::key(&content_fingerprint::fingerprint(&d.content)), d.id.clone(), d.parent_node_id.clone()))
                 .collect();
-            assignments.push((chest.id, moving));
-            start += range.count;
+            if keyed.is_empty() {
+                continue;
+            }
+            // Ties on the key break on the id so the deal is deterministic.
+            keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            let keys: Vec<MortonKey> = keyed.iter().map(|k| k.0).collect();
+            let ranges = chest_placement::deal(&keys, chest_placement::FILL);
+            // Identical content gives identical keys; a second range at the
+            // same low key is its own chest, named by ordinal.
+            let mut ordinals: BTreeMap<String, usize> = BTreeMap::new();
+            let mut start = 0usize;
+            for range in &ranges {
+                let hex = range.low.hex();
+                let ordinal = *ordinals.get(&hex).unwrap_or(&0);
+                ordinals.insert(hex.clone(), ordinal + 1);
+                let name = crate::node_store::NodeStore::chest_name(&hex, hidden, ordinal);
+                let chest = ns.create_chest(room_node.id, &name, now)?;
+                kept.insert(chest.id);
+                chest_count += 1;
+                let chest_id = chest.id.to_string();
+                let moving: Vec<String> = keyed[start..start + range.count]
+                    .iter()
+                    .filter(|k| k.2 != chest_id)
+                    .map(|k| k.1.clone())
+                    .collect();
+                assignments.push((chest.id, moving));
+                start += range.count;
+            }
         }
 
         let changed_by = self.store.read_manifest().map(|m| m.owner_identifier).unwrap_or_default();
@@ -447,7 +465,7 @@ impl Estate {
             before_lattice_anchor: Some(anchor),
             after_lattice_anchor: anchor,
             actor,
-            reason: Some(format!("room={wing}/{room} drawers={} chests={}", drawers.len(), ranges.len())),
+            reason: Some(format!("room={wing}/{room} drawers={} chests={}", drawers.len(), chest_count)),
         };
         let audit_row = crate::drawer_store_inmemory::pk_audit_event_from(&event);
         storage
@@ -478,7 +496,18 @@ impl Estate {
                 ns.tombstone_node(chest.id, now)?;
             }
         }
-        Ok(ranges.len())
+        // ADR-027 D1: every chest carries its own root and the room folds
+        // them. The deal moved drawers between chests, so each kept chest's
+        // stored root is recomputed here and the room, wing and estate roots
+        // rolled up over them; an incremental rollup after a later write
+        // then folds current sibling roots, never empty or stale ones
+        // (codex finding 2026-09-19).
+        for chest_id in &kept {
+            let root = self.compute_chest_merkle_root(*chest_id)?;
+            ns.update_merkle_root(*chest_id, &root, now)?;
+        }
+        self.rollup_merkle_roots(room_node.id, now)?;
+        Ok(chest_count)
     }
 
     // -----------------------------------------------------------------------
@@ -651,7 +680,8 @@ impl Estate {
         let room_node = node_store.create_node(&room_name, wing_node.id, now)?;
         // Chest placement (ADR-026, spec § 12): the room itself until it has
         // been re-binned, then the chest the content key selects.
-        let parent_node_id = node_store.placement_parent(room_node.id, &frame.content)?;
+        let parent_node_id = node_store.placement_parent(
+            room_node.id, &frame.content, is_hidden_adjective(frame.sensitivity))?;
 
         // Stamp a lineage id: use the caller's if provided, otherwise fresh.
         let lineage_id = frame.lineage_id.unwrap_or_else(Uuid::new_v4);
@@ -859,7 +889,8 @@ impl Estate {
             // chests can differ between two frames of one batch only if the
             // batch itself re-binned, which it never does, so the per-frame
             // read is one node query per room.
-            let parent_node_id = node_store.placement_parent(room_node.id, &frame.content)?;
+            let parent_node_id = node_store.placement_parent(
+                room_node.id, &frame.content, is_hidden_adjective(frame.sensitivity))?;
             let mut drawer = Drawer::new(
                 drawer_id,
                 frame.content,
@@ -3886,6 +3917,15 @@ fn is_leap(year: i64) -> bool {
 // Tests
 // ---------------------------------------------------------------------------
 
+/// A restricted or secret drawer is dealt into hidden chests and placed only
+/// among them (`NodeStore::placement_parent`). The adjective sensitivity
+/// (bits 6–11 of the adjective bitmap) is the field the read-side
+/// containment gate enforces, so it is the one that decides what an
+/// ungranted caller can see and therefore the one placement keys on.
+fn is_hidden_adjective(sensitivity: crate::adjectives::AdjectiveSensitivity) -> bool {
+    matches!(sensitivity, crate::adjectives::AdjectiveSensitivity::Restricted | crate::adjectives::AdjectiveSensitivity::Secret)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4160,6 +4200,84 @@ mod tests {
 
     // --- chests (ADR-026, spec § 12); twins of ChestTests.swift ---
 
+
+    #[test]
+    fn identical_content_does_not_collapse_chests() {
+        let estate = make_estate();
+        let frames: Vec<CaptureFrame> = (0..500).map(|_| chest_frame("the same note every time", "study")).collect();
+        estate.capture_batch(frames, 1_700_000_001_000).unwrap();
+        let audit_before = audit_count(&estate);
+        assert_eq!(estate.rebin_room("w", "study", 1_700_000_100_000).unwrap(), 2);
+        let chests = estate.chests_in("w", "study").unwrap();
+        assert_eq!(chests.iter().map(|c| c.count).collect::<Vec<_>>(), vec![250, 250], "two ranges at one key are two chests, not one chest of 500");
+        assert_ne!(chests[0].chest_node_id, chests[1].chest_node_id);
+        assert_eq!(chests[0].low_key, chests[1].low_key, "both chests carry the same low key");
+        let ns = estate.node_store().unwrap().clone();
+        let room_id = ns.get_node(Uuid::parse_str(&chests[0].chest_node_id).unwrap()).unwrap().unwrap().parent_id.unwrap();
+        let hex = chests[0].low_key.hex();
+        use crate::node_store::NodeStore;
+        assert_eq!(chests[0].chest_node_id, NodeStore::chest_id(room_id, &NodeStore::chest_name(&hex, false, 0)).to_string());
+        assert_eq!(chests[1].chest_node_id, NodeStore::chest_id(room_id, &NodeStore::chest_name(&hex, false, 1)).to_string(),
+            "the second range at a key is named by ordinal and gets its own derived id");
+        assert_eq!(audit_count(&estate), audit_before + 1);
+        // A new capture at the same key joins the newest range at that key.
+        let more = estate.capture(chest_frame("the same note every time", "study"), 1_700_000_200_000).unwrap();
+        assert_eq!(more.parent_node_id, chests[1].chest_node_id);
+    }
+
+    #[test]
+    fn hidden_drawers_deal_apart() {
+        use crate::adjectives::AdjectiveSensitivity;
+        use crate::node_store::NodeStore;
+        // Visible-only estate: the reference deal.
+        let reference = make_estate();
+        let visible: Vec<CaptureFrame> = (0..600).map(|i| chest_frame(&format!("note {i} on topic {}", i % 7), "study")).collect();
+        reference.capture_batch(visible.clone(), 1_700_000_001_000).unwrap();
+        reference.rebin_room("w", "study", 1_700_000_100_000).unwrap();
+        let reference_chests = reference.chests_in("w", "study").unwrap();
+        let rns = reference.node_store().unwrap().clone();
+        let reference_parents: BTreeMap<String, String> = reference.store.drawers_in_wing_room("w", "study").unwrap()
+            .into_iter().map(|d| (d.content, d.parent_node_id)).collect();
+
+        // The same visible drawers plus 300 hidden ones interleaved by key.
+        let estate = make_estate();
+        let mut frames = visible;
+        for i in 0..300 {
+            let mut f = chest_frame(&format!("hidden note {i} on topic {}", i % 5), "study");
+            f.sensitivity = if i % 2 == 0 { AdjectiveSensitivity::Restricted } else { AdjectiveSensitivity::Secret };
+            frames.push(f);
+        }
+        estate.capture_batch(frames, 1_700_000_001_000).unwrap();
+        assert_eq!(estate.rebin_room("w", "study", 1_700_000_100_000).unwrap(), 5);
+        let chests = estate.chests_in("w", "study").unwrap();
+        let ns = estate.node_store().unwrap().clone();
+        let room_id = ns.get_node(Uuid::parse_str(&chests[0].chest_node_id).unwrap()).unwrap().unwrap().parent_id.unwrap();
+        let hidden_chests: HashSet<String> = chests.iter()
+            .filter(|c| NodeStore::chest_is_hidden(&ns.get_node(Uuid::parse_str(&c.chest_node_id).unwrap()).unwrap().unwrap().display_name))
+            .map(|c| c.chest_node_id.clone())
+            .collect();
+        assert_eq!(hidden_chests.len(), 2, "300 hidden drawers deal into two hidden chests");
+        let visible_names: HashSet<String> = chests.iter().filter(|c| !hidden_chests.contains(&c.chest_node_id)).map(|c| c.low_key.hex()).collect();
+        assert_eq!(visible_names, reference_chests.iter().map(|c| c.low_key.hex()).collect::<HashSet<_>>(),
+            "hidden drawers moved no visible boundary");
+        for d in estate.store.drawers_in_wing_room("w", "study").unwrap() {
+            let node = ns.get_node(Uuid::parse_str(&d.parent_node_id).unwrap()).unwrap().unwrap();
+            let hidden = matches!(d.adjective_sensitivity(), AdjectiveSensitivity::Restricted | AdjectiveSensitivity::Secret);
+            assert_eq!(NodeStore::chest_is_hidden(&node.display_name), hidden, "a drawer sits in a chest of its own class");
+            if !hidden {
+                let reference_node = rns.get_node(Uuid::parse_str(&reference_parents[&d.content]).unwrap()).unwrap().unwrap();
+                assert_eq!(node.display_name, reference_node.display_name, "same visible chest as without any hidden drawer");
+            }
+        }
+        // Placement of new captures follows the class.
+        let mut secret = chest_frame("a brand new secret", "study");
+        secret.sensitivity = AdjectiveSensitivity::Secret;
+        let placed_secret = estate.capture(secret, 1_700_000_200_000).unwrap();
+        assert!(hidden_chests.contains(&placed_secret.parent_node_id));
+        let placed_visible = estate.capture(chest_frame("a brand new visible note", "study"), 1_700_000_200_001).unwrap();
+        assert!(!hidden_chests.contains(&placed_visible.parent_node_id) && placed_visible.parent_node_id != room_id.to_string());
+    }
+
     fn chest_frame(content: &str, room: &str) -> CaptureFrame {
         let mut f = CaptureFrame::new(content, CaptureChannel::Typed, room, LatticeAnchor::udc("5"), "bilby", "test-v1");
         f.wing = Some("w".to_string());
@@ -4219,16 +4337,25 @@ mod tests {
             assert_eq!(d.parent_node_id, expected_chest(&d.content, &chests));
         }
         // ADR-027 D1: each chest carries its own root and the room folds
-        // them, so the room root changes shape at the first re-bin; the
-        // incremental rollup and the full recompute must then agree.
-        estate.recompute_all_merkle_roots(1_700_000_101).unwrap();
+        // them. The re-bin itself stores every chest's root and rolls the
+        // room up over them (no recompute pass in between), so a later
+        // incremental rollup folds current sibling roots; the full recompute
+        // must then agree with what the re-bin stored.
+        let mut stored_roots = Vec::new();
         for chest in &chests {
             let node = ns.get_node(Uuid::parse_str(&chest.chest_node_id).unwrap()).unwrap().unwrap();
-            assert!(node.merkle_root.is_some(), "a chest carries its own Merkle root");
+            assert!(node.merkle_root.is_some(), "the re-bin stores a root on every chest it deals");
             assert_eq!(node.merkle_root.unwrap(), estate.compute_chest_merkle_root(node.id).unwrap());
+            stored_roots.push(node.merkle_root);
         }
         let room_root = estate.compute_room_merkle_root(room_id).unwrap();
         assert_ne!(room_root, root_before, "the room root folds its chests' roots");
+        assert_eq!(ns.get_node(room_id).unwrap().unwrap().merkle_root.unwrap(), room_root, "the re-bin rolled the room up");
+        estate.recompute_all_merkle_roots(1_700_000_101).unwrap();
+        let recomputed: Vec<_> = chests.iter()
+            .map(|c| ns.get_node(Uuid::parse_str(&c.chest_node_id).unwrap()).unwrap().unwrap().merkle_root)
+            .collect();
+        assert_eq!(recomputed, stored_roots, "the full recompute agrees with the roots the re-bin stored");
         assert_eq!(ns.get_node(room_id).unwrap().unwrap().merkle_root.unwrap(), room_root);
         // Every room-set read and count covers the chests.
         assert_eq!(estate.store.drawers_in_wing("w").unwrap().len(), 600);
