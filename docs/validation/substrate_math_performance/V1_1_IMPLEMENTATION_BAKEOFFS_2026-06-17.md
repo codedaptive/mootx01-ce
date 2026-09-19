@@ -95,7 +95,7 @@ read for nearest and farthest dense recall?
 - SQLite BLOB per `(source_id, model_id)`.
 - Provider-owned row-aligned mmap pages.
 - In-memory index hydrated from compact binary pages.
-- Any existing vector-store path already used by CorpusKit/VectorKit.
+- Any existing vector-store path already used by CorpusKit/SynapseKit.
 
 **Workloads.**
 

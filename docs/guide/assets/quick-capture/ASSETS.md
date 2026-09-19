@@ -25,6 +25,6 @@ in CAPTURE-PLACEMENT-R1 (code tip `bdaa7b0bc`).
 
 ## Source evidence
 The full CAPTURE-PLACEMENT-R1 verification set (including the AX5 shot and the
-iPad regular shot with its system dialog) lives at
-`docs/analysis/screenshots/CAPTURE-PLACEMENT-R1/` on the code branch. Those are
-evidence captures, not polished guide assets — do not publish them as-is.
+iPad regular shot with its system dialog) is held with the engineering records
+rather than in this repository's published tree. Those are evidence captures,
+not polished guide assets — do not publish them as-is.

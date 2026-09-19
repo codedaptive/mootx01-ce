@@ -6,15 +6,18 @@ EE repo before the sync; everything else is in CE.
 ## 1 · Before the sync
 
 - [ ] **[EE]** Bump plugin/package version: `tools/moot-packager/Data/canonical/capability.json` → `version` matches the release
-- [ ] **[EE]** Regenerate packager outputs:
+- [ ] **[EE]** Regenerate packager outputs — v2 is the live ARIA surface, so
+      run `regen.sh` rather than the packager's raw sub-commands: it builds
+      the packager, emits `distribution/plugin/`, and embeds both
+      installer copies (`EmbeddedArtifactsV2.swift`,
+      `install-bundle-v2.json`) in one step, matching what the binary
+      actually reads. regen.sh always emits v2 and defaults the required
+      selected-release artifact to the registry copy, so the plain form is
+      the release call; pass `--aria-release-artifact <path>` only to
+      override it:
   ```bash
   cd tools/moot-packager
-  swift run moot-packager --canonical Data/canonical --out .out
-  python3 embed-bundle.py .out \
-    ../../apps/mootx01/Sources/MootInstallerCore/Generated/EmbeddedArtifacts.swift \
-    ../../apps/mootx01/rust/src/embedded/install-bundle.json
-  swift run moot-packager --canonical Data/canonical \
-    --plugin-repo "$(git rev-parse --show-toplevel)/distribution/plugin"
+  ./regen.sh
   ```
 - [ ] **[EE]** Commit + push as TWO commits (EE-only canonical/capability.json;
       SHARED regen outputs + stamps) — `scripts/check-commit-scope.sh boundary`
@@ -52,6 +55,11 @@ was clean.
       `sh scripts/prepush_ee_leak_guard.sh`. The guard now allowlists the five
       root dot entries CE tracks and refuses every other one, so an unnamed
       agent-content directory cannot slip through the way `.agents/` did.
+- [ ] **Run the dark variant gate before pushing:** `sh scripts/dark-variants.sh`.
+      Every dark trait and cargo feature (WholeRecordDense, DenseFamilies,
+      AppleEncoders, Miners) must build and test green with zero warnings in
+      the default and the variant build. `release.yml` runs the same script
+      as the `dark-variants` job.
 
 ## 2 · Tag and build
 
