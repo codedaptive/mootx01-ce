@@ -27,7 +27,6 @@
 // handle.
 
 import Foundation
-import MootProductIdentity
 import OSLog
 import GeniusLocusKit
 import IntellectusLib
@@ -138,5 +137,5 @@ public struct EstateDreamingSink: DreamingProposalSink {
     }
 
     /// Marker-failure logger (subsystem/category per the fleet logging rule).
-    private static let sinkLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "NeuronKit")
+    private static let sinkLog = Logger(subsystem: NeuronKitLogging.subsystem, category: "NeuronKit")
 }

@@ -1,5 +1,4 @@
 import Foundation
-import MootProductIdentity
 import GeniusLocusKit
 import LatticeLib
 import LocusKit
@@ -10,7 +9,7 @@ import SubstrateTypes
 ///
 /// Uses subsystem "com.mootx01.kit" and category "NeuronKit" per CLAUDE.md.
 /// Private to this file — callers use the module-level `logger` symbol defined here.
-private let logger = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "NeuronKit")
+private let logger = Logger(subsystem: NeuronKitLogging.subsystem, category: "NeuronKit")
 
 /// Read the topology snapshot cadence from the environment.
 ///

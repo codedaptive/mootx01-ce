@@ -41,7 +41,6 @@
 // does not break the daemon's proposal and diary functions.
 
 import Foundation
-import MootProductIdentity
 import GeniusLocusKit
 import IntellectusLib
 import OSLog
@@ -84,7 +83,7 @@ public struct EstatePerformanceHealthDuty: PerformanceHealthDuty {
     private let kit: GeniusLocusKit
 
     private static let log = Logger(
-        subsystem: MootProductIdentity.Logging.subsystem,
+        subsystem: NeuronKitLogging.subsystem,
         category: "NeuronKit"
     )
 

@@ -34,7 +34,6 @@
 // The daemon never touches CorpusKit directly.
 
 import Foundation
-import MootProductIdentity
 import GeniusLocusKit
 import OSLog
 
@@ -109,7 +108,7 @@ public struct EstateCorpusGrowthProbe: CorpusGrowthProbe {
     private let kit: GeniusLocusKit
 
     private static let log = Logger(
-        subsystem: MootProductIdentity.Logging.subsystem,
+        subsystem: NeuronKitLogging.subsystem,
         category: "NeuronKit"
     )
 

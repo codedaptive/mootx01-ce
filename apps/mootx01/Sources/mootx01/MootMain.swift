@@ -36,10 +36,17 @@ import Foundation
 import GeniusLocusKit
 import MootCoreAIWorker
 import MootInstallerCore
+import MootProductIdentity
+import NeuronKit
 
 @main
 enum MootEntry {
     static func main() async {
+        // NeuronKit logs under whatever subsystem its host names, and this is
+        // the host: one subsystem for the whole product, so one Console
+        // filter still shows everything. Set before any NeuronKit work, since
+        // its loggers bind on first use.
+        NeuronKitLogging.subsystem = MootProductIdentity.Logging.subsystem
         let rawArgs = Array(CommandLine.arguments.dropFirst())
         var args = rawArgs
         #if os(macOS)
