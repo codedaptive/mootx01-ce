@@ -2,11 +2,12 @@
 
 **The engines are open. The intelligence is the product.**
 
-Seventeen libraries and kits from the MOOTx01 Framework are open source under
-the Apache License 2.0 — published today, not on a timer. They are the engines
-MOOTx01 itself runs on: memory storage, knowledge graph, vector search, RAG
-bundles, deterministic grounding, persistence, sync, and the typed substrate
-underneath all of it.
+Twenty-four libraries and kits from the MOOTx01 Framework are open source
+under the Apache License 2.0 — published today, not on a timer. They are the
+engines MOOTx01 itself runs on: memory storage, knowledge graph, vector
+search, RAG bundles, deterministic grounding, persistence, sync, the typed
+substrate underneath all of it, and — since the 1.1 line — the cognitive
+layer that reasons over what memory holds.
 
 If you want to build your own memory system, have at it. These are real,
 production-grade engines, not a teaser. If you want the system that already
@@ -32,7 +33,7 @@ Swift products, Rust crate names, tests, package guides, and source provenance.
 
 ---
 
-## The four venue repositories
+## The five venue repositories
 
 Each venue is generated from the canonical MOOTx01 source tree by the library
 publisher. Every release records its exact source commit in `SOURCE.md` and
@@ -49,6 +50,8 @@ conformance-gated against shared test vectors.
 | `SubstrateML` | Learning and graph algorithms |
 | `SubstrateLib` | Orchestration: verbs and the row-state automaton |
 | `EngramLib` | The typed 256-bit Engram API — the framework's core unit of memory math |
+| `ContextDistillLib` | Context distillation, which SubstrateML and the cognitive layer both resolve through |
+| `MootProductIdentity` | Product identity constants several venues resolve through |
 | `IntellectusLib` | The telemetry floor |
 
 **Use it when:** you want the deterministic, typed foundation — the same
@@ -61,6 +64,7 @@ bit-level contracts MOOTx01 is built on — under your own system.
 | `PersistenceKit` | Storage backends: SQLite, PostgreSQL, InMemory |
 | `QueueKit` | Fill-and-drain job queue |
 | `ConvergenceKit` | Sync implementations: CloudKit, Federation, None |
+| `EstateEncryption` | Estate-at-rest encryption |
 | `ObserverSink` | Telemetry sink plus SQLite stats store |
 | `LoopbackHTTP` | Minimal loopback HTTP transport |
 
@@ -74,6 +78,7 @@ with the same determinism guarantees as the rest of the framework.
 | `LocusKit` | Spatial memory system plus knowledge graph |
 | `SynapseKit` | On-device embeddings plus nearest-neighbour and hybrid search |
 | `CorpusKit` | Content-plus-vector RAG bundles |
+| `FactExtractionKit` | Fact extraction from text |
 
 **Use it when:** you are building memory, search, or retrieval into your own
 application — this is the layer most builders want first.
@@ -146,22 +151,17 @@ licensed, commercial use welcome, no use restriction, no timer.
 ## What MOOTx01 adds
 
 MOOTx01 — this repository — is what happens when those engines get a brain and
-a voice. The product core adds:
+a voice.
 
-**Composed recall — `GeniusLocusKit`.** Not one memory store but N estates,
-with grants, a matrix layer, and recall that composes across them. The SDKs
-give you a memory; MOOTx01 gives you an estate of them that behaves as one.
+The cognitive layer itself is no longer the dividing line. `GeniusLocusKit`,
+`NeuronKit` and `CognitionKit` ship in `moot-cognition` under the same licence
+as everything else — composed recall across estates, hybrid recall fusion, the
+dreaming daemon that consolidates in the background, trust scoring,
+contradiction and drift detection, and the reasoning lenses. You can build all
+of that yourself from the venues.
 
-**The Brain — `NeuronKit`.** Hybrid recall fusion across signals. Shaped
-recall for associative, fusion-steered retrieval. A distilled tier for
-compact factoid answers. The dreaming daemon that consolidates memory in the
-background — strengthening what matters, linking what relates. Bradley-Terry
-trust scoring so the system knows what it believes. Contradiction and drift
-detection so it notices when the story changes.
-
-**Judgment — `CognitionKit`.** Twenty-plus reasoning lenses — themes, drift,
-contradiction, precedence, keystones, free association, trust synthesis — and
-named, composable behaviour recipes that turn tool calls into workflows.
+What MOOTx01 adds is the assembly: those engines wired into one another,
+tuned, and given a voice and a place to live.
 
 **The voice — `AriaMcpKit`.** Sixty-plus `moot_*` tools over the Model Context
 Protocol. Any MCP client — Claude Code, Cursor, Codex, and the rest — speaks
@@ -193,9 +193,8 @@ AI to have one?*
 
 Everything is Apache-2.0 — the venue repositories and this repository grant
 identical rights: everything that license permits, including commercial,
-embedded, and hosted use. The product core — GeniusLocusKit, NeuronKit,
-CognitionKit, VaultKit, and the Community application — carries no use
-restriction and no timer, and the relicense is retroactive over every prior
+embedded, and hosted use. The product core — VaultKit, `AriaMcpKit`, and the
+Community application — carries no use restriction and no timer, and the relicense is retroactive over every prior
 release ([`RELICENSE.md`](RELICENSE.md)). The full plain-language model is in
 [`LICENSING.md`](LICENSING.md); the editions story is in
 [`EDITIONS.md`](EDITIONS.md).
