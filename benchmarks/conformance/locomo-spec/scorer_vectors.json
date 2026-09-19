@@ -1,0 +1,538 @@
+{
+  "_comment": "Conformance vectors for LoCoMoSpecScorer (§1–§5 of LOCOMO_OFFICIAL_PROTOCOL.md). Both the Swift twin (LoCoMoSpecScorer.swift) and the Rust twin (locomo_spec_scorer.rs) must reproduce every expected value exactly (floating-point equality for values that are exact; tolerance 1e-9 for values computed via division). Vectors are chosen to avoid Python round()-vs-f64::round() half-boundary divergence. Porter expectations were generated and checked with nltk==3.9.2 PorterStemmer() in its default NLTK_EXTENSIONS mode; normalization and scoring follow the verbatim LoCoMo rules.",
+
+  "normalize_answer_cases": [
+    {
+      "id": "empty",
+      "input": "",
+      "expected": "",
+      "note": "Empty input → empty output"
+    },
+    {
+      "id": "comma-punctuation-case",
+      "input": "Hello, World!",
+      "expected": "hello world",
+      "note": "Comma stripped in step 1; '!' removed by punctuation step; lowercased"
+    },
+    {
+      "id": "article-and",
+      "input": "a dog and a cat",
+      "expected": "dog cat",
+      "note": "'a' and 'and' removed as whole words by article step"
+    },
+    {
+      "id": "the-article",
+      "input": "The quick brown fox",
+      "expected": "quick brown fox",
+      "note": "'the' removed as whole word (case-insensitive via lowercase step)"
+    },
+    {
+      "id": "apostrophe",
+      "input": "runner's high",
+      "expected": "runners high",
+      "note": "Apostrophe is in Python string.punctuation; removed leaving 'runners'"
+    },
+    {
+      "id": "multi-comma",
+      "input": "one, two, three",
+      "expected": "one two three",
+      "note": "All commas stripped in step 1 (before lowercase)"
+    }
+  ],
+
+  "porter_stem_cases": [
+    {
+      "id": "empty",
+      "input": "",
+      "expected": "",
+      "note": "Empty string returned unchanged"
+    },
+    {
+      "id": "one-char",
+      "input": "a",
+      "expected": "a",
+      "note": "Length ≤ 2: returned unchanged"
+    },
+    {
+      "id": "two-char",
+      "input": "in",
+      "expected": "in",
+      "note": "Length ≤ 2: returned unchanged"
+    },
+    {
+      "id": "two-char-lowercase",
+      "input": "IN",
+      "expected": "in",
+      "note": "NLTK lowercases before the short-word return"
+    },
+    {
+      "id": "step1a-sses",
+      "input": "caresses",
+      "expected": "caress",
+      "note": "Step 1a: SSES → SS (Porter 1980 paper example)"
+    },
+    {
+      "id": "step1a-ies-ponies",
+      "input": "ponies",
+      "expected": "poni",
+      "note": "Step 1a: IES → I (Porter 1980 paper example)"
+    },
+    {
+      "id": "step1a-ies-ties",
+      "input": "ties",
+      "expected": "tie",
+      "note": "NLTK extension: four-letter IES → IE"
+    },
+    {
+      "id": "step1a-tie-control",
+      "input": "tie",
+      "expected": "tie",
+      "note": "Control paired with ties: the uninflected word remains unchanged"
+    },
+    {
+      "id": "step1a-ies-dies",
+      "input": "dies",
+      "expected": "die",
+      "note": "NLTK extension: four-letter IES → IE"
+    },
+    {
+      "id": "step1a-s",
+      "input": "cats",
+      "expected": "cat",
+      "note": "Step 1a: S → '' (Porter 1980 paper example)"
+    },
+    {
+      "id": "step1b-ing-double-nn",
+      "input": "running",
+      "expected": "run",
+      "note": "Step 1b: (*v*) ING → '' then double-consonant -nn → -n (Porter 1980)"
+    },
+    {
+      "id": "step1b-ing-double-mm",
+      "input": "stemming",
+      "expected": "stem",
+      "note": "Step 1b: (*v*) ING → '' then double-consonant -mm → -m"
+    },
+    {
+      "id": "step1b-ing-no-followup",
+      "input": "jumping",
+      "expected": "jump",
+      "note": "Step 1b: (*v*) ING → '' — no double-consonant or *o follow-up needed"
+    },
+    {
+      "id": "step1b-ed-double",
+      "input": "stemmed",
+      "expected": "stem",
+      "note": "Step 1b: (*v*) ED → '' then double-consonant -mm → -m"
+    },
+    {
+      "id": "step1b-ied-four-letter",
+      "input": "died",
+      "expected": "die",
+      "note": "NLTK extension: four-letter IED → IE"
+    },
+    {
+      "id": "step1b-ied-longer",
+      "input": "spied",
+      "expected": "spi",
+      "note": "NLTK extension: longer IED → I"
+    },
+    {
+      "id": "step1b-eed-no-fallthrough",
+      "input": "feed",
+      "expected": "feed",
+      "note": "A failed EED measure does not fall through to the ED rule"
+    },
+    {
+      "id": "step1b-two-letter-vc",
+      "input": "uping",
+      "expected": "upe",
+      "note": "NLTK extension: a two-letter VC stem satisfies ends_cvc"
+    },
+    {
+      "id": "step1c-y-consonant",
+      "input": "fly",
+      "expected": "fli",
+      "note": "NLTK extension: consonant-preceded Y → I without a prior-vowel requirement"
+    },
+    {
+      "id": "step1c-y-vowel",
+      "input": "enjoy",
+      "expected": "enjoy",
+      "note": "NLTK extension: vowel-preceded Y remains Y"
+    },
+    {
+      "id": "step2-recursive-alli",
+      "input": "operationally",
+      "expected": "oper",
+      "note": "NLTK extension recursively re-applies Step 2 after ALLI → AL"
+    },
+    {
+      "id": "step2-bli",
+      "input": "possibly",
+      "expected": "possibl",
+      "note": "Martin/NLTK extension uses BLI → BLE rather than ABLI → ABLE"
+    },
+    {
+      "id": "step2-fulli",
+      "input": "hopefully",
+      "expected": "hope",
+      "note": "NLTK-only FULLI → FUL rule"
+    },
+    {
+      "id": "step2-logi",
+      "input": "geologi",
+      "expected": "geolog",
+      "note": "NLTK-only LOGI → LOG rule with the L included in the measure"
+    },
+    {
+      "id": "irregular-skies",
+      "input": "skies",
+      "expected": "sky",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-skies-uppercase",
+      "input": "SKIES",
+      "expected": "ski",
+      "note": "NLTK lowercases suffix processing but checks its exception pool against the original spelling"
+    },
+    {
+      "id": "irregular-dying",
+      "input": "dying",
+      "expected": "die",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-lying",
+      "input": "lying",
+      "expected": "lie",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-tying",
+      "input": "tying",
+      "expected": "tie",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-news",
+      "input": "news",
+      "expected": "news",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-innings",
+      "input": "innings",
+      "expected": "inning",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-inning",
+      "input": "inning",
+      "expected": "inning",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-outings",
+      "input": "outings",
+      "expected": "outing",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-outing",
+      "input": "outing",
+      "expected": "outing",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-cannings",
+      "input": "cannings",
+      "expected": "canning",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-canning",
+      "input": "canning",
+      "expected": "canning",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-howe",
+      "input": "howe",
+      "expected": "howe",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-proceed",
+      "input": "proceed",
+      "expected": "proceed",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-exceed",
+      "input": "exceed",
+      "expected": "exceed",
+      "note": "NLTK irregular-form pool"
+    },
+    {
+      "id": "irregular-succeed",
+      "input": "succeed",
+      "expected": "succeed",
+      "note": "NLTK irregular-form pool"
+    }
+  ],
+
+  "f1_score_cases": [
+    {
+      "id": "identical",
+      "prediction": "cat",
+      "gold": "cat",
+      "expected_f1": 1.0,
+      "note": "Exact token match after normalise+stem"
+    },
+    {
+      "id": "stem-match",
+      "prediction": "cats",
+      "gold": "cat",
+      "expected_f1": 1.0,
+      "note": "Both 'cats' and 'cat' stem to 'cat' → multiset intersection = 1 → F1=1.0"
+    },
+    {
+      "id": "no-overlap",
+      "prediction": "hello",
+      "gold": "world",
+      "expected_f1": 0.0,
+      "note": "Disjoint token sets → num_same=0 → F1=0.0"
+    },
+    {
+      "id": "partial-extra-token",
+      "prediction": "hello world",
+      "gold": "world",
+      "expected_f1": 0.6666666666666666,
+      "note": "intersection={world:1}, precision=1/2, recall=1/1, F1=2*(1/2)*1/(3/2)=2/3"
+    },
+    {
+      "id": "stem-dogs-running",
+      "prediction": "running dogs",
+      "gold": "dog run",
+      "expected_f1": 1.0,
+      "note": "'running'→'run','dogs'→'dog'; both pairs match after stemming → F1=1.0"
+    }
+  ],
+
+  "multi_answer_f1_cases": [
+    {
+      "id": "perfect",
+      "prediction": "cat, dog",
+      "gold": "cat, dog",
+      "expected": 1.0,
+      "note": "All gold parts maximally matched → mean=1.0"
+    },
+    {
+      "id": "partial",
+      "prediction": "cat, dog",
+      "gold": "cat, feline",
+      "expected": 0.5,
+      "note": "gold 'cat': max(f1('cat','cat'),f1('dog','cat'))=1.0; gold 'feline': max=0.0; mean=0.5"
+    },
+    {
+      "id": "no-match",
+      "prediction": "apple",
+      "gold": "cat, dog",
+      "expected": 0.0,
+      "note": "Neither gold part matches prediction → mean=0.0"
+    }
+  ],
+
+  "exact_match_cases": [
+    {
+      "id": "article-stripped",
+      "prediction": "the cat",
+      "gold": "cat",
+      "expected": 1.0,
+      "note": "normalize('the cat')='cat' → set{'cat'} == set{'cat'} → 1.0"
+    },
+    {
+      "id": "order-independent",
+      "prediction": "cat sat",
+      "gold": "sat cat",
+      "expected": 1.0,
+      "note": "Token sets are order-independent → equal → 1.0"
+    },
+    {
+      "id": "different",
+      "prediction": "hello",
+      "gold": "world",
+      "expected": 0.0,
+      "note": "Different tokens → 0.0"
+    }
+  ],
+
+  "score_question_cases": [
+    {
+      "id": "cat2-f1",
+      "category": 2,
+      "prediction": "cat",
+      "gold": "cat",
+      "expected": 1.0,
+      "note": "Category 2 → f1_score"
+    },
+    {
+      "id": "cat3-semicolon-truncation",
+      "category": 3,
+      "prediction": "2020",
+      "gold": "2020; other data",
+      "expected": 1.0,
+      "note": "Category 3: gold truncated at ';' → '2020' → f1_score('2020','2020')=1.0"
+    },
+    {
+      "id": "cat1-multi-answer",
+      "category": 1,
+      "prediction": "cat, dog",
+      "gold": "cat, feline",
+      "expected": 0.5,
+      "note": "Category 1 → multi_answer_f1; mean([1.0, 0.0])=0.5"
+    },
+    {
+      "id": "cat5-abstain-no-info",
+      "category": 5,
+      "prediction": "No information available here.",
+      "gold": "anything",
+      "expected": 1.0,
+      "note": "Category 5: contains 'no information available' → 1.0"
+    },
+    {
+      "id": "cat5-abstain-not-mentioned",
+      "category": 5,
+      "prediction": "This topic is not mentioned in the conversation.",
+      "gold": "anything",
+      "expected": 1.0,
+      "note": "Category 5: contains 'not mentioned' → 1.0"
+    },
+    {
+      "id": "cat5-no-abstain",
+      "category": 5,
+      "prediction": "The answer is 42.",
+      "gold": "anything",
+      "expected": 0.0,
+      "note": "Category 5: no abstention phrase → 0.0"
+    },
+    {
+      "id": "cat4-f1",
+      "category": 4,
+      "prediction": "dogs",
+      "gold": "dog",
+      "expected": 1.0,
+      "note": "Category 4 → f1_score; both stem to 'dog' → 1.0"
+    }
+  ],
+
+  "evidence_recall_cases": [
+    {
+      "id": "no-context",
+      "context": null,
+      "evidence": ["D1:1"],
+      "expected": 1.0,
+      "note": "No context field → recall 1.0 per §4"
+    },
+    {
+      "id": "empty-evidence",
+      "context": ["S1"],
+      "evidence": [],
+      "expected": 1.0,
+      "note": "Empty evidence → recall 1.0 per §4"
+    },
+    {
+      "id": "session-form-full",
+      "context": ["S3", "S1"],
+      "evidence": ["D3:5", "D1:2"],
+      "expected": 1.0,
+      "note": "Session form: session '3' in {'3','1'} ✓; session '1' in {'3','1'} ✓ → 2/2=1.0"
+    },
+    {
+      "id": "session-form-half",
+      "context": ["S3"],
+      "evidence": ["D3:5", "D1:2"],
+      "expected": 0.5,
+      "note": "Session form: session '3' ✓, session '1' ✗ → 1/2=0.5"
+    },
+    {
+      "id": "dia-form-half",
+      "context": ["D3:5", "D2:1"],
+      "evidence": ["D3:5", "D1:2"],
+      "expected": 0.5,
+      "note": "Dia form: 'D3:5' in context ✓, 'D1:2' not in context ✗ → 1/2=0.5"
+    },
+    {
+      "id": "dia-form-full",
+      "context": ["D3:5", "D1:2"],
+      "evidence": ["D3:5", "D1:2"],
+      "expected": 1.0,
+      "note": "Dia form: both evidence items in context → 2/2=1.0"
+    }
+  ],
+
+  "aggregate_cases": [
+    {
+      "id": "two-categories",
+      "scores": [
+        {"category": 4, "score": 1.0, "recall": 1.0},
+        {"category": 4, "score": 0.0, "recall": 0.0},
+        {"category": 2, "score": 1.0, "recall": 1.0}
+      ],
+      "expected": {
+        "overall": 0.667,
+        "total_questions": 3,
+        "overall_mean_recall": 0.667,
+        "by_category_order": [4, 1, 2, 3, 5],
+        "category_accuracy": {
+          "1": 0.0,
+          "2": 1.0,
+          "3": 0.0,
+          "4": 0.5,
+          "5": 0.0
+        },
+        "category_question_count": {
+          "1": 0,
+          "2": 1,
+          "3": 0,
+          "4": 2,
+          "5": 0
+        }
+      },
+      "note": "Two cat-4 (mean=0.5) + one cat-2 (1.0); overall=(1+0+1)/3=0.667"
+    },
+    {
+      "id": "all-categories",
+      "scores": [
+        {"category": 1, "score": 1.0, "recall": 1.0},
+        {"category": 2, "score": 1.0, "recall": 1.0},
+        {"category": 3, "score": 1.0, "recall": 1.0},
+        {"category": 4, "score": 1.0, "recall": 1.0},
+        {"category": 5, "score": 1.0, "recall": 1.0}
+      ],
+      "expected": {
+        "overall": 1.0,
+        "total_questions": 5,
+        "overall_mean_recall": 1.0,
+        "by_category_order": [4, 1, 2, 3, 5],
+        "category_accuracy": {
+          "1": 1.0,
+          "2": 1.0,
+          "3": 1.0,
+          "4": 1.0,
+          "5": 1.0
+        },
+        "category_question_count": {
+          "1": 1,
+          "2": 1,
+          "3": 1,
+          "4": 1,
+          "5": 1
+        }
+      },
+      "note": "One perfect question per category → all accuracies 1.0, overall 1.0"
+    }
+  ]
+}
