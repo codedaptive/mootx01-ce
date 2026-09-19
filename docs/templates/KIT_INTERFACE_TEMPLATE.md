@@ -1,7 +1,7 @@
 ---
 title: <PackageName> Interface
 version: MAJOR.MINOR.PATCH
-status: draft | review | active | deprecated | superseded
+status: draft | review | active | accepted-1.1-target | deprecated | superseded
 date: <YYYY-MM-DD>
 description: Public API surface of <PackageName> — the signatures that satisfy <PACKAGE>_SPEC.md.
 spec_type: kit | protocol | encoder

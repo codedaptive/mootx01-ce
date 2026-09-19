@@ -18,11 +18,10 @@ There are two source-repository editions and three application product levels:
 - The private EE repository owns **MOOTx01 Enterprise**, the organizational
   deployment and assurance product.
 
-EE remains the canonical, noisy agent-development workshop. Community changes
-are built and security-tested in an EE worktree, then published through the
-declarative Community replacement contract. The ordinary SHARED backporter is
-not part of application publication. CE does not ingest EE history and the app
-directory is an `EDITION-SURFACE`, never a byte-for-byte shared path.
+The application directory is an `EDITION-SURFACE`, never a byte-for-byte shared
+path: each edition owns the app it ships, and neither is derived from the other
+file by file. What Community carries is stated here, in this record, rather than
+inferred from what Enterprise happens to contain.
 
 ## Capability ownership
 
@@ -58,20 +57,16 @@ Community ⊂ Pro ⊂ Enterprise
 The edition is not read from UserDefaults, an environment variable, a remote
 claim, or user-controlled data.
 
-## Publication rule
+## What a Community release contains
 
-All implementation work lands in EE first. A CE publication must:
+A Community release carries the Community application surface and nothing
+beyond it: no Enterprise source, entitlements or identifiers, no maintainer
+documentation or agent artifacts. Its dependency pins are the reviewed ones and
+it builds and tests against an exact substrate revision rather than resolving
+packages afresh, so a release is reproducible from what it ships.
 
-1. start from a reviewed EE commit;
-2. select only the Community application surface;
-3. contain no Pro/Enterprise source, entitlements, identifiers, internal docs,
-   agent artifacts, or private history;
-4. preserve the reviewed dependency pins and build/test against the exact CE
-   substrate revision without automatic package resolution;
-5. record the EE source commit and the resulting CE commit.
-
-The same rule extends through `packages/apple`: Pro App Intents and Foundation
-Models code are EE-only, `MootIntentCore` is SHARED, and the package manifest is
-an edition-owned surface installed by the Community replacement contract.
+The same division runs through `packages/apple`: the Enterprise App Intents and
+Foundation Models code is Enterprise-only, `MootIntentCore` is shared, and each
+edition owns the package manifest describing what it actually ships.
 
 No change to the CE repository is part of this decision's implementation.
