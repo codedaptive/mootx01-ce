@@ -45,10 +45,11 @@ compliance programs) — see the [plain-language licensing
 guide](LICENSING.md), [`EDITIONS.md`](EDITIONS.md), and the binding
 [`LICENSE`](LICENSE).
 
-> **Development branch:** this branch carries the active 1.1 beta
-> (`1.1.0-beta-05`). The public release links below install stable 1.0. To
-> test 1.1, build this checkout, pin the commit, and use a backed-up estate —
-> see the [1.1 development instructions](docs/start-here/DEVELOPMENT_BETA.md).
+> **Development branch:** 1.1.0 has shipped and the public release links below
+> install it. This branch runs ahead of the release; to test what is on it
+> rather than the release, build this checkout, pin the commit, and use a
+> backed-up estate — see the
+> [development instructions](docs/start-here/DEVELOPMENT_BETA.md).
 
 ## Install in 60 seconds
 
@@ -58,7 +59,7 @@ Pick your platform, run two commands, done.
 |---|---|
 | **macOS** (installer) | Download the notarized [`.pkg`](https://github.com/codedaptive/mootx01-ce/releases/latest) and double-click — a setup assistant walks you through it |
 | **macOS / Linux** (Homebrew) | `brew install codedaptive/mootx01-ce/mootx01` |
-| **macOS / Linux** (script) | `curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh \| sh` |
+| **macOS / Linux** (script) | `curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.1.x/install.sh \| sh` |
 | **Windows** (installer) | Download [`setup.exe`](https://github.com/codedaptive/mootx01-ce/releases/latest) and double-click |
 | **Windows** (winget) | `winget install Codedaptive.MOOTx01` |
 | **Windows** (script) | See [PowerShell install](#1--install-the-binary) below |
@@ -192,7 +193,7 @@ Upgrades arrive with `brew upgrade`.
 **macOS / Linux — script**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.1.x/install.sh | sh
 ```
 
 **Windows — native installer (recommended)**
@@ -209,7 +210,7 @@ winget install Codedaptive.MOOTx01
 
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.1.x/install.ps1 -OutFile install.ps1
 # Review install.ps1 before running it, then:
 powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```

@@ -1,9 +1,86 @@
 # Changelog
 
 All notable code changes to MOOTx01 are recorded here. Versions follow
-`VERSIONING.md`: stable releases use `MAJOR.MINOR.PATCH`; the active 1.1
-development line uses the explicit SemVer pre-release
-`1.1.0-beta-YY`.
+`VERSIONING.md`: stable releases use `MAJOR.MINOR.PATCH`; pre-releases of a
+line in development use an explicit SemVer qualifier, `1.1.0-beta-YY` or
+`1.1.0-rcN`.
+
+## 1.1.0 — 2026-09-18
+
+**The 1.1 line becomes the released version.** 1.1.0 supersedes 1.0.40 as the
+version `mootx01 upgrade`, Homebrew, winget and the plugin marketplace resolve;
+the 1.0 line is retired.
+
+What arrives with it, gathered from the 1.1 development line: the resumable,
+outcome-aware KGFact extraction workflow in both ports; native matrix records
+in place of the snapshot blob; a per-estate duty worker that pays one bounded
+batch per duty per cadence, so a fast lane no longer waits behind a slow one;
+the incremental anomaly sweep; estate encryption at rest by default; the
+benchmark suite published under `benchmarks/`; and the Claude Code plugin
+registering its MCP server as `memory`, with allowlist migration on upgrade.
+
+Users on 1.0.40 move by running `mootx01 upgrade`, `brew upgrade mootx01`, or
+their platform's usual update path. The estate migrates on first open.
+
+## Relicensed to Apache-2.0 — 2026-08-16
+
+**MOOTx01 is now open source under the Apache License, Version 2.0 —
+retroactively, over every prior release.** The FSL-1.1-ALv2 grant and its
+two-year conversion timer are superseded; there is no use restriction, no
+Competing Use clause, and no commercial-license tier ladder. See
+`RELICENSE.md` for the retroactive grant, `LICENSING.md` for the new
+plain-language model, `EDITIONS.md` for the edition structure, and
+`TRADEMARKS.md` for the trademark policy. No code changes in this entry.
+
+## Relicensed to Apache-2.0 — 2026-08-16
+
+**MOOTx01 is now open source under the Apache License, Version 2.0 —
+retroactively, over every prior release.** The FSL-1.1-ALv2 grant and its
+two-year conversion timer are superseded; there is no use restriction, no
+Competing Use clause, and no commercial-license tier ladder. See
+`RELICENSE.md` for the retroactive grant, `LICENSING.md` for the new
+plain-language model, `EDITIONS.md` for the edition structure, and
+`TRADEMARKS.md` for the trademark policy. No code changes in this entry.
+
+## Relicensed to Apache-2.0 — 2026-08-16
+
+**MOOTx01 is now open source under the Apache License, Version 2.0 —
+retroactively, over every prior release.** The FSL-1.1-ALv2 grant and its
+two-year conversion timer are superseded; there is no use restriction, no
+Competing Use clause, and no commercial-license tier ladder. See
+`RELICENSE.md` for the retroactive grant, `LICENSING.md` for the new
+plain-language model, `EDITIONS.md` for the edition structure, and
+`TRADEMARKS.md` for the trademark policy. No code changes in this entry.
+
+## Relicensed to Apache-2.0 — 2026-08-16
+
+**MOOTx01 is now open source under the Apache License, Version 2.0 —
+retroactively, over every prior release.** The FSL-1.1-ALv2 grant and its
+two-year conversion timer are superseded; there is no use restriction, no
+Competing Use clause, and no commercial-license tier ladder. See
+`RELICENSE.md` for the retroactive grant, `LICENSING.md` for the new
+plain-language model, `EDITIONS.md` for the edition structure, and
+`TRADEMARKS.md` for the trademark policy. No code changes in this entry.
+
+## Relicensed to Apache-2.0 — 2026-08-16
+
+**MOOTx01 is now open source under the Apache License, Version 2.0 —
+retroactively, over every prior release.** The FSL-1.1-ALv2 grant and its
+two-year conversion timer are superseded; there is no use restriction, no
+Competing Use clause, and no commercial-license tier ladder. See
+`RELICENSE.md` for the retroactive grant, `LICENSING.md` for the new
+plain-language model, `EDITIONS.md` for the edition structure, and
+`TRADEMARKS.md` for the trademark policy. No code changes in this entry.
+
+## Relicensed to Apache-2.0 — 2026-08-16
+
+**MOOTx01 is now open source under the Apache License, Version 2.0 —
+retroactively, over every prior release.** The FSL-1.1-ALv2 grant and its
+two-year conversion timer are superseded; there is no use restriction, no
+Competing Use clause, and no commercial-license tier ladder. See
+`RELICENSE.md` for the retroactive grant, `LICENSING.md` for the new
+plain-language model, `EDITIONS.md` for the edition structure, and
+`TRADEMARKS.md` for the trademark policy. No code changes in this entry.
 
 ## Relicensed to Apache-2.0 — 2026-08-16
 
