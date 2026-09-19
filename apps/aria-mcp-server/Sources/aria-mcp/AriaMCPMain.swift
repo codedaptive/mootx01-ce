@@ -343,10 +343,14 @@ struct AriaMCPMain {
                 fputs("ARIA_MCP fatal: MOOTX01_HTTP_PORT='\(rawHTTPPort)' is not a valid TCP port (0–65535).\n", stderr)
                 exit(1)
             }
-            // Resident HTTP mode: pass useDefault: true so the daemon wires
-            // PersistenceStatsSink to the moot-mgr default path. Telemetry is
-            // durable by default in resident mode; stdio mode stays opt-in.
-            let statsStorePath = AriaResident.statsStorePath(useDefault: true)
+            // Resident HTTP mode on a registered estate: useDefault: true wires
+            // PersistenceStatsSink to the moot-mgr default path, so telemetry
+            // is durable by default. A transient estate (a `--db <dir>` or
+            // `--in-memory` open) gets no store: it is not the operator's
+            // daemon, and its snapshots in the install's store put a scratch
+            // estate in front of the operator's on the dashboard (2026-09-18;
+            // the same rule as `mootx01 serve`). stdio mode stays opt-in.
+            let statsStorePath = registered ? AriaResident.statsStorePath(useDefault: true) : nil
             let config = AriaResident.ResidentConfig(
                 port: portValue,
                 maxBodyBytes: AriaResident.httpMaxBodyBytes(),
