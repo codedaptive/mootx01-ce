@@ -18,9 +18,8 @@
          Distribution XML schema defines it here and Installer ignores it
          anywhere else — it then assumes the package is Intel-only and
          prompts Apple Silicon Macs to install Rosetta before opening it.
-         The value below is the template default; build-pkg.sh rewrites it
-         to the target arch at build time so the x86_64 pkg remains
-         installable on Intel Macs. -->
+         arm64 is the only value the release produces: the build targets
+         macOS 27, which Apple ships for Apple silicon alone. -->
     <options hostArchitectures="arm64" />
 
     <!-- Welcome, license, and conclusion panels -->
