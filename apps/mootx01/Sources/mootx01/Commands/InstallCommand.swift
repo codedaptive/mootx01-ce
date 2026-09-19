@@ -861,7 +861,7 @@ struct InstallCommand: AsyncParsableCommand {
         switch LaunchAgent.activateDaemonBundleEnabled(homeDirectory: home) {
         case let .installed(plistPath, endpointURL):
             print("")
-            print("  ✓ Community daemon provider running (launchd: \(DaemonBundle.launchAgentLabel))")
+            print("  ✓ Community daemon provider registered and started (launchd: \(DaemonBundle.launchAgentLabel))")
             print("    MCP endpoint: \(endpointURL)")
             print("    LaunchAgent: \(plistPath)")
         case let .launchctlFailed(message):
@@ -881,8 +881,44 @@ struct InstallCommand: AsyncParsableCommand {
         if let output = census.output, census.code == 0 {
             print("  Census (read-only, provider-reported):")
             print("    \(output)")
+            if let sentence = censusSentence(output) {
+                print("  \(sentence)")
+            }
         } else {
             print("  ⓘ Census unavailable (provider exit \(census.code)).")
+        }
+        // Bootstrap proved registration, not hosting: the provider takes
+        // its own census and activates its estate after launchd starts it,
+        // and either may decline. Give it a few seconds, then report what
+        // it did rather than what launchd did.
+        let port = Int(ProcessInfo.processInfo.environment["MOOTX01_HTTP_PORT"] ?? "") ?? MootPaths.defaultResidentPort
+        if ResidentPortProbe.waitUntilListening(port: port, deadlineMs: 5_000) {
+            print("  Provider: port \(port) answering (unverified — not proof of readiness)")
+        } else {
+            print("  ✗ Provider is registered but not hosting.")
+            for line in ProviderLastExit.explanationLines(homeDirectory: home) {
+                print("  \(line)")
+            }
+        }
+    }
+
+    /// One sentence for the census dispositions that stop the provider from
+    /// hosting. The disposition strings are the provider's wire vocabulary
+    /// (`EstateDisposition.wireEncoding`); the two named here are the ones a
+    /// user has to act on, and the rest need no sentence because the
+    /// provider proceeds.
+    private func censusSentence(_ censusJSON: String) -> String? {
+        guard let data = censusJSON.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let disposition = object["disposition"] as? String
+        else { return nil }
+        switch disposition {
+        case "multiple-estates-hard-stop":
+            return "✗ More than one estate candidate was found and not all of them can be verified; the provider will not host until only one remains."
+        case "canonical-unobservable":
+            return "✗ The provider could not observe its own estate location, so it will not host; check the bundle signature."
+        default:
+            return nil
         }
     }
     #endif

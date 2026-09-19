@@ -140,6 +140,13 @@ public enum LaunchAgent {
 
     // MARK: - MACD-2c2 — the daemon-bundle LaunchAgent (KONG-4)
 
+    /// The provider bundle's launchd stdout log filename. The provider
+    /// prints its one-line exit report to stdout, so this file is where
+    /// `ProviderLastExit` reads why a registered provider is not hosting.
+    public static let providerStdoutLogName = "mootx01-provider.out.log"
+    /// The provider bundle's launchd stderr log filename.
+    public static let providerStderrLogName = "mootx01-provider.err.log"
+
     /// The DISABLED-install bundle-form daemon plist: ProgramArguments point
     /// INSIDE the bundle's `Contents/MacOS` (never a raw binary with
     /// "serve"), `RunAtLoad` and `KeepAlive` are false, and the label is the
@@ -151,8 +158,8 @@ public enum LaunchAgent {
         return makePlist(
             label: DaemonBundle.launchAgentLabel,
             programArguments: DaemonBundle.programArguments(homeDirectory: homeDirectory),
-            stdoutPath: logsDir.appendingPathComponent("mootx01-provider.out.log").path,
-            stderrPath: logsDir.appendingPathComponent("mootx01-provider.err.log").path,
+            stdoutPath: logsDir.appendingPathComponent(providerStdoutLogName).path,
+            stderrPath: logsDir.appendingPathComponent(providerStderrLogName).path,
             runAtLoad: false,
             keepAlive: false
         )
@@ -176,8 +183,8 @@ public enum LaunchAgent {
         return makePlist(
             label: DaemonBundle.launchAgentLabel,
             programArguments: DaemonBundle.programArguments(homeDirectory: homeDirectory),
-            stdoutPath: logsDir.appendingPathComponent("mootx01-provider.out.log").path,
-            stderrPath: logsDir.appendingPathComponent("mootx01-provider.err.log").path,
+            stdoutPath: logsDir.appendingPathComponent(providerStdoutLogName).path,
+            stderrPath: logsDir.appendingPathComponent(providerStderrLogName).path,
             runAtLoad: true,   // ENABLED: start at login
             keepAlive: true    // ENABLED: restart on unexpected exit
         )

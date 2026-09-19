@@ -67,13 +67,22 @@ struct StatusCommand: AsyncParsableCommand {
         let registration: LaunchAgent.DaemonRegistrationObservation =
             (legacyRegistered || bundleRegistered) ? .registered : .none
         let port: LaunchAgent.DaemonPortObservation =
-            portIsListening(port: residentPort) ? .answering : .unbound
+            ResidentPortProbe.isListening(port: residentPort) ? .answering : .unbound
         print("Server: \(LaunchAgent.observedServerStatus(registration: registration, port: port, providerReportedState: providerReportedState))")
         if bundleRegistered {
             print("Daemon provider bundle: enabled registration present (launchd: \(DaemonBundle.launchAgentLabel))")
         }
+        // "registered (not started)" on its own sends the user to the logs.
+        // The provider wrote why it declined to host as its exit report;
+        // quote it here so the next step (usually `mootx01 upgrade`) is on
+        // the status screen rather than in a file.
+        if providerReportedState == nil, bundleRegistered, port == .unbound {
+            for line in ProviderLastExit.explanationLines(homeDirectory: home) {
+                print(line)
+            }
+        }
         #else
-        print("Server: \(portIsListening(port: residentPort) ? "port answering (unverified — not proof of readiness)" : "not running")")
+        print("Server: \(ResidentPortProbe.isListening(port: residentPort) ? "port answering (unverified — not proof of readiness)" : "not running")")
         #endif
         // A PID file whose process is verifiably a live mootx01 binary is an
         // OBSERVATION worth surfacing (identity-verified, still not
@@ -132,27 +141,6 @@ struct StatusCommand: AsyncParsableCommand {
         // kill(pid, 0) on a stale PID file reports an unrelated process as a
         // "running" server. The PID counts only if it is a mootx01 binary.
         ProcessIdentity.isLiveProcess(pid)
-    }
-
-    /// True if something accepts a TCP connection on 127.0.0.1:port. Used as the
-    /// authoritative liveness signal for the resident HTTP daemon, which runs
-    /// under launchd and does not own the CLI PID file.
-    private func portIsListening(port: Int, timeoutMs: Int = 400) -> Bool {
-        let fd = socket(AF_INET, SOCK_STREAM, 0)
-        guard fd >= 0 else { return false }
-        defer { close(fd) }
-        var tv = timeval(tv_sec: 0, tv_usec: Int32(timeoutMs * 1000))
-        setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, socklen_t(MemoryLayout<timeval>.size))
-        var addr = sockaddr_in()
-        addr.sin_family = sa_family_t(AF_INET)
-        addr.sin_port = in_port_t(port).bigEndian
-        inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr)
-        let rc = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
-                connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
-            }
-        }
-        return rc == 0
     }
 
     private func formatBytes(_ bytes: Int) -> String {
