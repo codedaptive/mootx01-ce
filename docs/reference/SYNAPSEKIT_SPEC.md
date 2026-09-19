@@ -1,20 +1,20 @@
 ---
-title: VectorKit Specification
-version: 1.10.1
+title: SynapseKit Specification
+version: 2.3.0
 status: accepted-1.1-target
-date: 2026-08-26
-description: "Behavioral specification for VectorKit: invariants, conformance requirements, and the contract it guarantees."
+date: 2026-09-07
+description: "Behavioral specification for SynapseKit: invariants, conformance requirements, and the contract it guarantees. 2.1.0: I-10 schema-ledger continuity across the VectorKit → SynapseKit rename (prepareSchemaLedger before migrate; a conflicted ledger warns and opens). 2.0.0: the int8 quantisation policy is ratified (I-4a): int8 rows are written and read, the fail-closed rejection and its error case are gone, and the encoder span-row surface (writeSpanVectors / spanVectors / deleteSpanVectors) lands over the existing vectors table. 2.2.0: reclaimWholeRecordFloatRows, the whole-record float vacuum the GeniusLocusKit 1.6→1.7 capsule runs. 2.3.0: the .vec sidecar (format 0x0003) carries the serving-generation stamp it was built under and a store accepts it only when the stamp equals the registry and the live count equals the serving-row count, both ports."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
-  - VECTORKIT_INTERFACE.md  (the API surface this spec contracts)
+  - SYNAPSEKIT_INTERFACE.md  (the API surface this spec contracts)
   - ENGRAMLIB_SPEC.md  (the typed 256-bit Engram and its similarity operations)
   - SUBSTRATELIB_SPEC.md  (the canonical FloatSimHash projection this kit calls)
   - PERSISTENCEKIT_SPEC.md  (the Storage/RowStore backend the vector store wraps)
   - GENIUSLOCUS_ARCHITECTURE_SPEC.md  (rung-3 vectors, invariants I-4 and I-12)
   - the kit-ownership contract  (storage moved onto PersistenceKit)
 purpose: |
-  VectorKit is the on-device embedding and approximate-nearest-neighbour
+  SynapseKit is the on-device embedding and approximate-nearest-neighbour
   layer for one estate. It defines the `EmbeddingProvider` abstraction
   (text → model-tagged 256-bit `Engram`), the built-in deterministic
   `FloatSimHashEmbeddingProvider`, and a PersistenceKit-backed
@@ -26,11 +26,11 @@ purpose: |
   INTERFACE document carries the signatures.
 ---
 
-# VectorKit Specification
+# SynapseKit Specification
 
 ## § 1 — What this package is
 
-VectorKit is the substrate kit that turns text into vectors and finds
+SynapseKit is the substrate kit that turns text into vectors and finds
 the nearest stored vectors to a probe. It does two jobs and only two:
 it generates embeddings through the `EmbeddingProvider` abstraction, and
 it stores and retrieves those embeddings through `VectorStore`. A vector
@@ -51,7 +51,7 @@ vectors.
 This package is a **Kit**: it manages persisted state (the `vectors`
 table) and has a lifecycle (an opened `Storage` handle). It does not own
 tokenizers, model bundles, model identity, or BM25 keyword scoring —
-those live in CorpusKit. VectorKit supplies the low-level building block
+those live in CorpusKit. SynapseKit supplies the low-level building block
 ("host supplies inference, kit supplies the canonical projection and the
 model-tagged store"); CorpusKit composes it into standalone or attached RAG
 indexes.
@@ -85,11 +85,11 @@ This specification defines:
 
 This specification does NOT define:
 
-- API signatures — those live in `VECTORKIT_INTERFACE.md`.
+- API signatures — those live in `SYNAPSEKIT_INTERFACE.md`.
 - The fingerprint representation, kernel dispatch, or the FloatSimHash
   projection math — those are SubstrateLib's (`SUBSTRATELIB_SPEC.md`).
 - Hamming distance, batch distance, and the k-nearest primitive over
-  engrams — those are EngramLib's (`ENGRAMLIB_SPEC.md`); VectorKit
+  engrams — those are EngramLib's (`ENGRAMLIB_SPEC.md`); SynapseKit
   delegates to them.
 - The storage backend (SQLite + sqlite-vec, PostgreSQL + pgvector,
   InMemory), backend selection, and the row/vector index protocols —
@@ -105,7 +105,7 @@ SubstrateLib          PersistenceKit
 EngramLib                 │
    ▲   (Engram, distance) │
    └──────────┬───────────┘
-          VectorKit        ← this package
+          SynapseKit        ← this package
               ▲
           CorpusKit        (standalone content or attached derived RAG index)
               ▲
@@ -120,7 +120,7 @@ Foundation, OSLog.
 **Consumed by:** CorpusKit. CorpusKit's `HybridRecall` takes a
 `VectorStore` directly, and its three concrete embedding providers
 (`MiniLMTextProvider`, `MPNetTextProvider`, `EmbeddingGemmaProvider`)
-conform to VectorKit's `EmbeddingProvider` directly, building on the
+conform to SynapseKit's `EmbeddingProvider` directly, building on the
 canonical FloatSimHash projection that
 `FloatSimHashEmbeddingProvider` also uses. GeniusLocusKit composes
 CorpusKit transitively.
@@ -131,7 +131,7 @@ CorpusKit transitively.
 vector stored carries a `modelID` and `modelVersion`. The provider
 declares them, `addVector` persists them, and `VectorMatch` carries the
 `modelID` back. There is no path that stores or returns an untagged
-vector. This is VectorKit's realization of architecture invariant I-4.
+vector. This is SynapseKit's realization of architecture invariant I-4.
 
 **I-2 (cross-model comparison is forbidden):** a Hamming distance is
 only meaningful between engrams produced by the same `(modelID,
@@ -159,18 +159,51 @@ Int8 payloads (kind=2) carry `dim` quantized bytes plus a non-null
 `scale` for dequantization. Each row declares its type; callers must
 not compare payloads across kinds.
 
-**I-4a (int8 writes rejected until quantization policy is ratified):**
-`VectorStore.addPayload` / `add_payload` and `addPayloads` / `add_payloads`
-REJECT any payload whose `kind` is `.int8` / `Int8`, fail-closed, with
-`VectorKitError.int8QuantizationPolicyUndefined` /
-`VectorKitError::Int8QuantizationPolicyUndefined`. The `.int8` / `Int8`
-variant and its `scale` field are retained in `VectorPayload` (no-removal
-doctrine) so a future quantization-policy ratification does not require an
-API change. The read-side decode path (`decodePayload` / `decode_payload`) is
-symmetric: it returns `nil` (Swift) / `Err(Int8QuantizationPolicyUndefined)`
-(Rust) for any int8 row, preventing silent consumption of hand-crafted rows.
-There are zero existing int8 producers; this invariant is a precondition
-guard for a latent trap. See arch spec §10.3.
+**I-4a (int8 quantisation policy, ratified):** int8 payloads follow the
+symmetric per-vector policy implemented by SubstrateKernel `Int8Vec` /
+`int8_vec` (ENCODER_RERANK_CONTRACT §4): for an L2-normalised float32
+vector `v`, `scale = max_i |v_i| / 127` (`scale = 1` when the maximum is 0),
+`q_i = clamp(round_half_away_from_zero(v_i / scale), -127, 127)`; the row
+stores `q` (`dim` bytes, two's complement) and `scale` (REAL, never NULL).
+Dequantisation is `q_i × scale`; a float query `u` scores a stored int8
+vector as `(Σ u_i × q_i) × scale` with no renormalisation. Both ports match
+`q` and `scale` bit for bit on the shared fixture
+`Tests/Fixtures/encoder/int8_vectors.json` (20 vectors at dims 8, 384 and
+768 plus edge vectors) and `dotQuery` within 1e-5 (C-15). `addPayload` /
+`addPayloads` / `replaceModelVectors` / `reconcileModelVectors` accept int8
+payloads and store them table-only, like float32: int8 rows never enter the
+resident Hamming array or a float index. The read side (`decodePayload` /
+`decode_payload`) treats an int8 row without a `scale` or with a byte count
+other than `dim` as malformed and skips it.
+
+**I-4b (encoder span rows):** the encoder-rerank stage stores ONE `vectors`
+row per span of a drawer: `item_id` = the drawer UUID, `vector_index` = the
+span index (0-based, span order), `kind = 2`, `dim` = the model dimension,
+`payload` = the int8 bytes, `scale` = the per-vector scale, `generation` =
+the model's serving generation, `ext` = the JSON object
+`{"cv":"<content_version>","e":<end_word>,"s":<start_word>}` (sorted keys,
+minimal escaping, byte-identical across ports) where `content_version` is
+the drawer's `content_hash` at encode time. Whole-record encoder vectors are
+never stored. `writeSpanVectors(itemID:modelID:modelVersion:spans:filedAt:)`
+/ `write_span_vectors` replaces the item's span set under that model in ONE
+transaction (delete the serving-generation int8 rows, insert the new set), so
+a reader never sees a mix of old and new spans; a second write replaces,
+never appends. `spanVectors(itemIDs:modelID:)` / `span_vectors` returns the
+serving-generation rows keyed by item id in span order, chunking the id list
+at 900 per statement; items with no rows are absent. `deleteSpanVectors` /
+`delete_span_vectors` removes an item's span rows across all generations.
+`reclaimRetiredVectorRows(retiredModelIDs:)` / `reclaim_retired_vector_rows`
+is the `mootx01 upgrade` maintenance pass: it deletes every row of the named
+model ids and every row at a non-serving generation (models with a shadow
+build in flight are skipped), with the matching `hnsw_graph` rows, and
+rebuilds the resident binary index from the table when anything was deleted.
+`reclaimWholeRecordFloatRows()` / `reclaim_whole_record_float_rows` is the
+GeniusLocusKit 1.6→1.7 capsule's pass: it deletes every `vectors` row of kind
+1 (float32) and every `hnsw_graph` row, drops the resident float and HNSW
+state, and always rebuilds the resident binary index and the `.vec` sidecar
+from the surviving rows so the sidecar's live count and generation match the
+serving table; kind 0 and kind 2 rows are never touched, and a second call
+deletes nothing and rewrites an identical sidecar.
 
 **I-5 (empty input is the zero engram):** every `EmbeddingProvider`
 returns the substrate's canonical zero engram (`Engram.zero` /
@@ -185,10 +218,10 @@ InMemory); backend selection is an application-layer concern via
 `EstateConfiguration`. Per architecture invariant I-12, the substrate
 provides storage and the application does not bring its own.
 
-**I-7 (delegation of distance):** VectorKit performs no Hamming math of
+**I-7 (delegation of distance):** SynapseKit performs no Hamming math of
 its own. `findNearest` delegates the batch bitcount to EngramLib, which
 routes to the substrate kernel (BNNS / NEON accelerated where
-available). VectorKit therefore inherits EngramLib's and SubstrateLib's
+available). SynapseKit therefore inherits EngramLib's and SubstrateLib's
 scalar-reference and cross-port parity guarantees.
 
 **I-8 (`ext` forward-compat slot, the forward-compatible ext-slot contract):** the `vectors` table carries one
@@ -197,12 +230,49 @@ for future per-vector typed metadata. In 1.0 `ext` is inert — written NULL /
 omitted on insert and never read; it carries no behavior. Provisioned during the
 1.0.0 free-migration window. See the forward-compatible ext-slot contract.
 
-**I-9 (GLK canonical identity and scoped ownership):** VectorKit treats
+**I-9 (GLK canonical identity and scoped ownership):** SynapseKit treats
 `itemID` as opaque. In GLK, CorpusKit-derived vector rows use canonical
 `Drawer.id`; passage/index-unit IDs are permitted only in standalone
 CorpusKit. Every composed vector row also belongs to a declared lane/model
 scope so Corpus rebuild, expunge, and migration can delete their own rows
 without touching unrelated Drawer-keyed vectors.
+
+**I-10 (schema-ledger continuity across a kit-id rename):** the vector
+tier's two PersistenceKit schema-version ledger rows are keyed by stored kit
+ids, `VectorStore.kitID` (`SynapseKit`, ladder at v6) and
+`VectorRepresentationClaims.kitID` (`SynapseKitClaims`, v1). Both stores name
+the ids those rows carried under earlier names of the kit, oldest first:
+`formerKitIDs` / `FORMER_KIT_IDS` = `["VectorKit"]` and `["VectorKitClaims"]`
+(the tier was renamed because the old name collides with Apple's MapKit
+VectorKit framework). A populated estate opened before the rename keys its
+rows by the former ids; a `migrate(to:)` under the current id that finds no
+row treats the estate as version 0 and replays the ladder against the current
+layout — the v5→v6 step rebuilds `vectors` through a copy table that folds
+every row's `generation` to 0 (darkening a swapped estate's recall) and fails
+outright when a serving and a shadow row share a key. Therefore every open
+path calls `prepareSchemaLedger(storage:)` / `prepare_schema_ledger` on each
+store BEFORE `migrate(to:)` of that store's declaration. The preparation moves
+each former-id row to the current id through `Storage.renameSchemaKit(from:to:)`
+(PERSISTENCEKIT_SPEC I-7a), keeping version and applied-at: `.renamed` and
+`.noRow` (fresh estate, or one already on the current id) pass with nothing
+else changed; `.conflict` (rows under both ids) leaves both rows in place,
+emits one warning through the kit logger naming both ids and versions, and
+returns normally — the estate stays openable, and the `migrate(to:)` that
+follows reads its ladder position from the current-id row, so no step
+replays. This is the same warn-and-leave-rows policy the GeniusLocusKit
+1.4 → 1.5 capsule applies to the same ledger; refusing to open would remove
+access to an estate's existing data. Only a failed rename call (storage
+error) throws `SynapseKitError.storeUnavailable` / `StoreUnavailable`; the
+operator resolves the duplicate row. CorpusKit's standalone constructors (`Corpus`,
+`CorpusContentEngine`) and GeniusLocusKit's 1.4 → 1.5 capsule both read the
+pair from these constants, so there is one source of the rename. Pinned
+regression, both ports: ledger row `VectorKit` v6 plus one `vectors` row at
+generation 3 → after preparation and migrate the row is at generation 3 and
+the ledger carries one row for the store, under `SynapseKit`; without
+preparation the same estate replays and the row reads generation 0. Conflict
+pin, both ports: the same estate plus a `SynapseKit` v6 row → preparation
+returns, both ledger rows keep v6, and after migrate the row is still at
+generation 3.
 
 ## § 5 — Behavioral contracts
 
@@ -230,8 +300,24 @@ sidecar by calling `flush()` at a quiesce point (e.g. end of an import
 loop, before process exit, on a periodic checkpoint). Crash safety is
 preserved: the `vectors` table is the durable authoritative store; a stale
 or absent sidecar is rebuilt from the table on the next store open
-(detected by comparing the sidecar `live_count` header field against the
-table's live binary-row count).
+(detected by two checks, both required: the sidecar's serving-generation
+stamp, the `vector_generations` registry (model_id, serving_generation) it
+was built under and written into the format 0x0003 header, must equal the
+registry read at open; and the sidecar `live_count` header field must equal
+the table's serving-generation binary-row count — the same row set the
+sidecar is built from, so superseded rows still awaiting reclaim after a
+shadow swap do not count; both ports apply the serving-generation predicate
+to the count exactly as they apply it to the rebuild fetch). The stamp is
+what tells a sidecar built from the previous generation apart from the
+current one when the two generations hold the same number of rows, which a
+full reindex commonly does: a crash between the registry flip of
+`publishShadowGeneration` and its sidecar rebuild leaves the old vectors in
+the sidecar under the new generation's name, and the count alone accepted
+them. Every rebuild passes the registry it fetched the rows with
+(`rebuild(from:generations:)` / `rebuild_from(records, generations)`), so the
+stamp and the rows are always written together. A sidecar at format 0x0001
+or 0x0002 fails to parse, the store starts empty, and the sidecar is rebuilt
+once under the new format.
 
 **B-3b (batch write amortisation):** `addPayloads(_ batch:)` /
 `add_payloads(batch)` is the import and migration path. For a batch of
@@ -260,7 +346,7 @@ the bulk re-embed path for a single model. It performs:
    (O(N) — avoids the O(N²) cost of N individual `addPayload` removes and adds
    each of which rebuilds the full index partition).
 
-Invariants: Int8 payloads are rejected fail-closed (I-4a), same as `addPayloads`.
+Invariants: Int8 payloads are accepted and written table-only (I-4a), same as `addPayloads`.
 Any in-flight deferred-index window is published before the table write, so the
 resident index is consistent at the point the transaction begins. Float (Lane D)
 index state for the model is invalidated and rebuilt lazily on the next
@@ -332,7 +418,7 @@ per-call determinism (B-1) and error surface (B-2) carry through
 unchanged. Providers MAY override for throughput (batched CoreML graphs
 on Swift, ONNX batch-dim inference on Rust); overriding implementations
 MUST preserve order, per-element determinism, and the empty-input
-contract. `embedBatch` is part of VectorKit's `EmbeddingProvider` so the
+contract. `embedBatch` is part of SynapseKit's `EmbeddingProvider` so the
 three CorpusKit providers (MiniLM, mpnet, EmbeddingGemma) consume one
 batched surface across both ports.
 
@@ -402,10 +488,10 @@ four-way bit-identical).
 
 ## § 6 — Error model (conceptual)
 
-VectorKit surfaces all failures through `VectorKitError` (per the
+SynapseKit surfaces all failures through `SynapseKitError` (per the
 MOOTx01 standard — structured enum cases, never optionals plus logging).
 The concrete cases and their per-language shapes are in
-`VECTORKIT_INTERFACE.md § 4`.
+`SYNAPSEKIT_INTERFACE.md § 4`.
 
 | Category | Trigger | Recovery posture |
 |---|---|---|
@@ -413,7 +499,7 @@ The concrete cases and their per-language shapes are in
 | `modelUnavailable` | The requested model is not loaded or not available on this platform. | Abort the embed; the model must be provisioned first. |
 | `storeUnavailable` | The vector store could not be opened, or a row failed to decode (e.g. a typed payload whose byte count disagrees with its declared `kind`/`dim` — a binary payload that is not 32 bytes, or a float32 payload that is not `dim × 4`). | Surface; indicates a storage / schema fault, not transient. |
 | `notFound` | A query found no matching row. (Reserved; current reads model "absent" as `nil` / empty rather than throwing.) | Treat as empty result. |
-| `int8QuantizationPolicyUndefined` | An `.int8` payload was submitted to `addPayload` / `add_payload` or `addPayloads` / `add_payloads`. The quantization policy has not been ratified; the write is rejected fail-closed (I-4a). | Use `.float` / `Float32` or the binary Engram lane until a policy is ratified. |
+| `invalidPayload` (span rows) | A `writeSpanVectors` set disagrees on dimension, carries an empty vector, repeats a span index, or inverts a word range (I-4b). | Fix the caller; nothing was written (the check precedes the transaction). |
 
 Point reads (`getVector`) and listings (`vectors`, `findByKeyword`,
 `findNearest`) model "nothing matched" as `nil` / empty, not as an
@@ -478,18 +564,38 @@ suite asserts `sidecarWriteCount <= expectedBatches + 1`.
 
 **C-12 (crash-safe write-behind):** a store opened after a process kill
 mid-write-behind-batch recovers correctly: the sidecar `live_count`
-mismatches the table binary-row count, the stale sidecar is discarded,
+mismatches the table's serving-generation binary-row count, the stale sidecar is discarded,
 and the array is rebuilt once from the `vectors` table. Search results
 after recovery are identical to results before the kill.
+
+**C-12a (crash-safe publish, equal counts):** a store opened after a process
+kill between the registry flip of `publishShadowGeneration` and its sidecar
+rebuild, where the retired and the new generation hold the same number of
+rows, rebuilds once from the table and serves the new generation: the
+sidecar's generation stamp differs from the registry even though the live
+count matches. The rebuilt sidecar is accepted by the next open. Pinned by
+`SidecarFreshnessTests.swift` and `rust/tests/sidecar_freshness_tests.rs`.
 
 **C-13 (GLK identity and selective deletion):** attached Corpus fixtures write
 only Drawer-keyed vector items. Deleting/rebuilding the Corpus-owned scope
 leaves an unrelated GLK lane for the same Drawer byte-identical and recallable.
 
+**C-14 (top-K boundary ties, shared vector):** both ports assert the shared
+fixture `packages/kits/SynapseKit/Tests/Conformance/hamming_topk_boundary_ties.json`
+(300 fingerprints around one probe: a 45-way tie at the K=10 boundary and a
+50-way tie at the K=80 boundary, with byte-identical payload pairs inside the
+tie groups; insertion order is a deterministic shuffle) on every binary engine:
+BruteForceIndex, MIHIndex at m=16 and m=4, and `findNearest` / `find_nearest`
+on the brute-force tier and on the MIH tier (MIH forced active below the
+default threshold through the init threshold). Each engine returns exactly K
+hits in the B-6 order (distance ASC, vecHash ASC, itemID ASC). The expected
+lists are one shared file with the vecHash of every entry recorded, so the
+ports are pinned to one list and one hash definition, not to each other.
+
 ## § 8 — Self-report telemetry
 
 VectorStore emits
-`vectorkit.*` metrics via IntellectusLib when monitoring is enabled. Off
+`synapsekit.*` metrics via IntellectusLib when monitoring is enabled. Off
 by default (the global enabled gate is `false`); the off-path cost is
 one `AtomicBool` load + branch per emit site (~1 ns, negligible).
 
@@ -503,15 +609,15 @@ result computation path.
 
 | Metric name | Value | Tags | Emitted by |
 |---|---|---|---|
-| `vectorkit.index.insert_latency_ms` | Wall time for the upsert round-trip (ms) | `kit="VectorKit"`, `model_id=<modelID>` | `addVector` / `addPayload` / `add_vector` / `add_payload` |
-| `vectorkit.index.batch_insert_latency_ms` | Wall time for the full batch (table writes + one index build), in ms | `kit="VectorKit"`, `batch_size=<N>` | `addPayloads(_:)` / `add_payloads` |
-| `vectorkit.search.latency_ms` | Wall time for the full findNearest scan + top-K + sort (ms) | `kit="VectorKit"`, `model_id=<modelID>` | `findNearest` / `find_nearest` |
-| `vectorkit.search.result_count` | Number of matches returned (≤ limit) | `kit="VectorKit"`, `model_id=<modelID>` | `findNearest` / `find_nearest` |
-| `vectorkit.search.keyword_result_count` | Number of distinct item IDs returned | `kit="VectorKit"` | `findByKeyword` / `find_by_keyword` |
+| `synapsekit.index.insert_latency_ms` | Wall time for the upsert round-trip (ms) | `kit="SynapseKit"`, `model_id=<modelID>` | `addVector` / `addPayload` / `add_vector` / `add_payload` |
+| `synapsekit.index.batch_insert_latency_ms` | Wall time for the full batch (table writes + one index build), in ms | `kit="SynapseKit"`, `batch_size=<N>` | `addPayloads(_:)` / `add_payloads` |
+| `synapsekit.search.latency_ms` | Wall time for the full findNearest scan + top-K + sort (ms) | `kit="SynapseKit"`, `model_id=<modelID>` | `findNearest` / `find_nearest` |
+| `synapsekit.search.result_count` | Number of matches returned (≤ limit) | `kit="SynapseKit"`, `model_id=<modelID>` | `findNearest` / `find_nearest` |
+| `synapsekit.search.keyword_result_count` | Number of distinct item IDs returned | `kit="SynapseKit"` | `findByKeyword` / `find_by_keyword` |
 
 ### Tags
 
-- `kit`: always `"VectorKit"` — identifies the emitting kit.
+- `kit`: always `"SynapseKit"` — identifies the emitting kit.
 - `model_id`: the `modelID` argument to the operation. Present on insert
   and search metrics; absent from keyword metrics (keyword search is not
   model-scoped).
@@ -572,9 +678,10 @@ Crash safety is independent of the sidecar amortisation policy.
 The `vectors` SQLite table is the single durable authoritative store at all
 times. The `.vec` sidecar is a regenerable cache. On next open,
 `VectorStore._ensureIndexBuilt` / `ensure_index_built_locked` compares the
-sidecar `live_count` header field against the table's live binary-row count:
-if they disagree the sidecar is discarded and the array is rebuilt from the
-table. The rebuild is paid once per process start in the stale path; on the
+sidecar `live_count` header field against the table's serving-generation
+binary-row count: if they disagree the sidecar is discarded and the array is
+rebuilt from the table. A sidecar that is current is NOT rebuilt on an estate
+whose table still holds superseded generations pending reclaim. The rebuild is paid once per process start in the stale path; on the
 happy path (sidecar current) the array is loaded with one OS read (mmap).
 
 ### Cross-restart persistence (both ports) — conformance requirement
@@ -601,7 +708,7 @@ that:
 
 This requirement is gated in both ports: Swift
 `findNearestSurvivesReopenSQLite` / `floatIndexSurvivesReopenSQLite`
-(VectorKitTests) and Rust `find_nearest_survives_reopen_sqlite`,
+(SynapseKitTests) and Rust `find_nearest_survives_reopen_sqlite`,
 `find_nearest_survives_reopen_sqlite_with_sidecar`,
 `float_index_survives_reopen_sqlite`. The row decoders MUST tolerate the
 primitives the SQLite backend returns on read-back (`id` as TEXT, `filed_at`
@@ -627,7 +734,7 @@ field counts stale-sidecar rebuilds from the table (0 in the normal path).
 ## § 10 — VectorStore lifecycle (destroyAllVectors)
 
 `destroyAllVectors` (Swift) / `destroy_all_vectors` (Rust) deletes all rows
-from the `vectors` table. It is a standalone VectorKit administrative primitive
+from the `vectors` table. It is a standalone SynapseKit administrative primitive
 for a store whose caller owns every row. It is forbidden for a composed GLK
 store because multiple lanes/models can share the table; GLK uses exact
 item/lane/model deletion or a CorpusKit-owned scope delete instead.
@@ -640,6 +747,63 @@ item/lane/model deletion or a CorpusKit-owned scope delete instead.
   Rust uses `StoragePredicate::IsTrue` (always-true predicate). Both delete all rows.
 
 ## Changelog
+
+### 2.3.0 -- 2026-09-07
+The `.vec` sidecar format is 0x0003: the header carries the serving-generation
+stamp (the `vector_generations` registry the array was built under, ascending
+model_id, byte-identical across ports). B-3a: a store accepts a sidecar only
+when the stamp equals the registry read at open AND the live count equals
+the serving-generation row count; every rebuild writes the stamp with the
+rows. C-12a pins the equal-count publish crash both ports. Sidecars at
+0x0001 or 0x0002 are rejected and rebuilt once.
+
+### 2.2.0 -- 2026-09-07
+`reclaimWholeRecordFloatRows()` / `reclaim_whole_record_float_rows()` on
+`VectorStore`, both ports: the whole-record float vacuum the GeniusLocusKit
+1.6→1.7 capsule runs (GENIUSLOCUSKIT_SPEC I-26). Deletes every `vectors` row
+of kind 1 and every `hnsw_graph` row, drops the resident float and HNSW
+state, rebuilds the binary index and the `.vec` sidecar from the surviving
+rows, returns the two row counts. Kind 0 and kind 2 rows are untouched;
+idempotent. Additive (MINOR).
+
+### 2.1.0 -- 2026-09-07
+New I-10 (schema-ledger continuity across a kit-id rename): `VectorStore`
+and `VectorRepresentationClaims` name their current ledger id (`kitID` /
+`KIT_ID`) and the ids that row carried before (`formerKitIDs` /
+`FORMER_KIT_IDS`, `["VectorKit"]` and `["VectorKitClaims"]`), and expose
+`prepareSchemaLedger(storage:)` / `prepare_schema_ledger`, which every open
+path calls before `migrate(to:)` so a populated pre-rename estate never
+replays the vector ladder (v5→v6 folds every `generation` to 0). `.noRow`
+and `.renamed` pass; `.conflict` (rows under both ids) leaves both rows,
+logs one warning, and returns so the estate still opens and `migrate(to:)`
+runs under the current id without replaying; only a failed rename call
+throws `storeUnavailable`. The CorpusKit standalone constructors and the GeniusLocusKit 1.4 → 1.5
+capsule read the pair from these constants (one source). Additive (MINOR).
+
+### 2.0.0 -- 2026-09-05
+I-4a rewritten: the int8 quantisation policy is ratified (symmetric
+per-vector, SubstrateKernel `Int8Vec`), so int8 payloads are written and
+read like float32 (table-only) and the fail-closed rejection is gone. The
+error case `int8QuantizationPolicyUndefined` / `Int8QuantizationPolicyUndefined`
+is removed (BREAKING; MAJOR). New I-4b: encoder span rows over the existing
+`vectors` table and the `writeSpanVectors` / `spanVectors` /
+`deleteSpanVectors` / `reclaimRetiredVectorRows` surface (both ports). New
+C-15: the shared int8 conformance fixture `int8_vectors.json`, asserted by
+both ports (`q`, `scale` bit-exact; `dotQuery` within 1e-5).
+
+### 1.12.0 -- 2026-09-05
+Sidecar freshness (B-3a, C-12, § 9): the count compared against the sidecar
+`live_count` is the table's serving-generation binary-row count — the row set
+the sidecar is built from — not every binary row. The Swift port counted every
+binary row, so any estate holding superseded generations pending reclaim
+rebuilt and rewrote its sidecar on every open while the Rust port loaded it;
+both ports now apply the serving-generation predicate. Added C-14: the shared
+top-K boundary-tie conformance vector (`hamming_topk_boundary_ties.json`)
+asserted by BruteForceIndex, MIHIndex (m=16, m=4), and both VectorStore index
+tiers in both ports. Additive requirement (MINOR).
+
+### 1.11.0 -- 2026-09-04
+Renamed from VectorKit to SynapseKit. The name VectorKit collides with an Apple private framework in MapKit. All behavioral contracts, invariants, and conformance requirements are unchanged. File renamed from VECTORKIT_SPEC.md to SYNAPSEKIT_SPEC.md. Additive rename (MINOR).
 
 ### 1.10.1 -- 2026-08-26
 
@@ -738,7 +902,7 @@ last answered a float nearest-neighbour query.
 
 **New public API:** `beginShadowGeneration(modelIDs:)`, `publishShadowGeneration(modelIDs:)`,
 `reclaimSupersededGenerations(batchLimit:)`, `peakShadowStorageBytes(for:)`,
-`lastServedGraphGeneration(for:)`. See VECTORKIT_INTERFACE.md §1.9.0 for signatures.
+`lastServedGraphGeneration(for:)`. See SYNAPSEKIT_INTERFACE.md §1.9.0 for signatures.
 
 **Swift-only (Unit A):** The Rust port (Unit B) is a sequenced follow-up mission.
 

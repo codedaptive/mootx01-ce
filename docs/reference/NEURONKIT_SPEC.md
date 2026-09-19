@@ -1,9 +1,9 @@
 ---
 title: NeuronKit Specification
-version: 1.19.1
+version: 1.27.0
 status: active
-date: 2026-08-26
-description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees."
+date: 2026-09-15
+description: "Behavioral specification for NeuronKit: invariants, conformance requirements, and the contract it guarantees. 1.22.1: wording only — hedging vocabulary removed from the prose; no contract change. 1.22.2: separated the surviving mathematical distillation lens from inline hydration. 1.25.0: DenseFamilies and WholeRecordDense feature references removed; float lane and dense-fused composition are always-active. 1.26.0: the maintenance engine is three category-scoped checks driven by the GeniusLocusKit maintenance-family standing signals; the governor tick no longer pumps it."
 spec_type: kit
 authors: MOOTx01 maintainers
 package: NeuronKit
@@ -53,7 +53,8 @@ families of function:
 - **Autonomic functions.** Background daemons that mine substrate state
   and *propose* changes for human confirmation: the dreaming daemon
   (latent-association discovery, § 3.1), the maintenance daemon
-  (five health scans + the audit-chain integrity monitor, § 3.2 / § 3.5).
+  (three health checks — tombstone grace, quiet-row decay, by-reference
+  drift — plus the audit-chain integrity monitor, § 3.2 / § 3.5).
   Each is a Swift `actor` that ticks on a schedule and on demand, and
   whose only writes are proposals plus one cycle diary entry. They
   never mutate the substrate directly.
@@ -92,8 +93,9 @@ This specification defines:
 - The dreaming daemon: its seam architecture, the seven-step tick, the
   contrastive-confidence and EWC++ consolidation math, and the
   never-create-Tunnels structural guarantee.
-- The maintenance daemon: the five health scans, the audit-chain monitor,
-  and the never-remediate structural guarantee.
+- The maintenance daemon: the three health checks, the audit-chain monitor,
+  the category-scoped cycle entry, and the never-remediate structural
+  guarantee.
 - The reasoning functions: lattice-anchor inference, hybrid recall
   (RRF + MMR), standalone MMR, context synthesis, branch operations,
   the migration benchmark, tournament ranking, and Bradley-Terry.
@@ -209,7 +211,7 @@ non-conformant. (Consistent with B-3.)
 ## § 5 — Behavioral contracts
 
 **B-1 (substrate access discipline):** NeuronKit never executes SQL and
-never calls LocusKit, VectorKit, CorpusKit, PersistenceKit, or QueueKit
+never calls LocusKit, SynapseKit, CorpusKit, PersistenceKit, or QueueKit
 write APIs directly. The GeniusLocusKit estate verb surface is the only
 substrate boundary. EngramLib (`distance`), EideticLib (`lookup`), and
 SubstrateML (the gated lens primitives) are typed-math / lookup
@@ -243,6 +245,23 @@ and touches it not at all (C-9). The lenses (§ 7) touch no estate at all
 state emits no duplicate proposals. Each daemon keeps an actor-isolated
 set of already-proposed candidate keys; a key already proposed in a
 prior cycle is suppressed and counted, never re-emitted.
+
+**B-4a (category-scoped maintenance):** the maintenance engine runs three
+checks — tombstone grace (tombstoned rows older than
+`tombstoneGraceSeconds`), quiet-row decay (active rows untouched for longer
+than `decayWindowSeconds`) and by-reference drift (LearnedReference rows
+whose source drift is at or above `byReferenceDriftThreshold`).
+`MaintenanceDaemon.triggerMaintenanceCycle(now:categories:)` /
+`MaintenanceDaemon::run_cycle_scoped(now, reader, sink, categories)` run
+only the selected categories: an unselected category reads no seam and
+contributes no candidates, while the audit-chain monitor, the Q-ID-pending
+retry and the cycle diary entry run on every call. `triggerMaintenanceCycle(now:)`
+/ `run_cycle` and `pump(now:)` run all three. The governor tick does not pump
+the maintenance daemon: the three GeniusLocusKit maintenance-family standing
+signals (`maintenance-daemon` hourly → tombstone, `decay-sweep` daily →
+decay, `by-reference-validity` weekly → by-reference) are the engine's only
+cadence, each registered only while the estate's `maintenance` preference is
+on. `GovernorReport` carries no maintenance field.
 
 **B-5 (deterministic engines):** every NeuronKit computation is a
 deterministic function of its inputs. No engine reads the wall clock —
@@ -455,6 +474,18 @@ relative to neutral. Labels must be unique; empty input ⇒ empty output;
 sentinel. Returned strongest first, ties by ascending label. Result:
 `[PreferenceStrength { label, strength, confidenceLow, confidenceHigh, endorsements, dismissals }]`.
 
+**Preference governor window (both ports).** On the autonomic-governor
+cadence the preference fit runs over the most-recent 1,000 recall traces
+by ascending `recalledAt`/`recalled_at`, not the full retained history.
+The window (named `preferenceTracesWindowLimit` in Swift,
+`PREFERENCE_TRACES_WINDOW_LIMIT` in Rust) is applied as a suffix of the
+ascending-ordered result from `recentRecallTraces`/`recent_recall_traces`.
+Older traces are excluded on each cadence tick; their influence is the
+decay. A full refit over all retained traces is triggered only on an
+explicit `reindex` or `dream` call. The prune cycle bounds total trace
+retention independently. Both ports must agree exactly — parity is
+absolute.
+
 ### § 7.4 — Prediction lens (action → outcome)
 
 **Anticipation — the learned action→outcome model.** Surfaces
@@ -513,9 +544,10 @@ Result: `[CalibratedValue { claimed, calibrated, isCalibrated }]`.
 
 ### § 7.6 — Diffusion lenses (node-layer motion)
 
-The diffusion family is the time-axis peer of distillation: where distillation
-extracts structure FROM content at ingest, diffusion tracks how a node's content
-and classification EVOLVE over time. The node-layer lens is the first shipped tier.
+The diffusion family tracks changes to node content and classification
+over time. The distillation lens extracts content features for mathematical
+callers. Inline text hydration uses ContextDistillLib. The node-layer lens
+is the first shipped diffusion tier.
 
 **NodeMotion — node-layer motion model.** Folds a node's HLC-ordered audit
 entries (via `UnifiedAuditLog`) into a decay-weighted motion model. The decay
@@ -674,6 +706,20 @@ The GLK-bound entry points `NodeMotionLens.run` / `.anomaly` are
 Swift-only and are NOT part of the C-18 parity obligation — only the pure
 `fold` and `classify` algorithms that the estate-reading entry points wrap.
 
+**C-19 (key-insight excerpts respect provenance sensitivity, fail closed):**
+`ContextSynthesizer.synthesize` / `synthesize` quotes first-line excerpts
+only from rows whose provenance sensitivity (bits 30-35 of the drawer's
+`provenance` bitmap, raw = `(provenance >> 30) & 0x3f`) classifies as
+admissible: raw 0 (normal) or raw 1 (elevated). A row classified
+confidential, secret, or carrying an out-of-range raw contributes no
+excerpt. A row with no metadata entry (absent or short `meta` vector in
+Rust; missing lookup in Swift) is treated as restricted and contributes
+nothing: the gate fails closed, never open. The summary line and the
+currently-believed rate keep counting every row, so a restricted row is
+counted but never quoted. Both ports agree on the excerpt list for every
+shared vector; a port that quotes a restricted or metadata-less row is
+non-conformant.
+
 **C-Det (cross-port determinism):** for every shared test vector, the
 Swift and Rust ports agree bit-for-bit on the reasoning engines AND the
 lenses they both implement — lattice-anchor inference, hybrid-recall
@@ -796,12 +842,12 @@ assembles a WEIGHTED graph over SubstrateML's existing weighted adjacency:
 Evidence hierarchy: tunnel (explicit) > kgFact (derived semantic) > lattice
 (derived classification). Lattice bonding groups live drawers sharing a
 non-empty `udcCode` in a star topology: hub = earliest `filedAt`, ties broken
-by `id` ascending (deterministic across permuted input orders). VectorKit kNN
+by `id` ascending (deterministic across permuted input orders). SynapseKit kNN
 semantic bonding over `udcCode` remains a follow-on.
 
 KGFact bonding is a syntactic proxy: drawers that filed facts with identical
 `subject` strings are weakly connected. Full semantic resolution
-(subject → drawers via VectorKit kNN) remains a follow-on.
+(subject → drawers via SynapseKit kNN) remains a follow-on.
 
 Nothing new descends to the substrate layer: SubstrateML's
 `CommunityDetection.detect` and `EigenvalueCentrality.compute` already take
@@ -1116,7 +1162,73 @@ confidence ≤ 0.3775406778 < 0.7 and never emits regardless of `attempts`
 
 *End of NeuronKit Specification.*
 
+## Security repair contract
+
+### Runtime signal reconciliation
+
+The Rust resident host may reconcile standing-signal registrations before a
+governor tick. A reconciliation failure skips that tick so a stale
+registration cannot fire while its authorization cannot be established.
+Signal removal is idempotent and removes its subscriptions.
+
 ## Changelog
+
+### 1.27.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 1.26.0 -- 2026-09-14
+
+The maintenance engine is three checks — tombstone grace, quiet-row decay,
+by-reference drift — with a category-scoped entry
+(`triggerMaintenanceCycle(now:categories:)` / `run_cycle_scoped`), recorded
+as B-4a. The governor tick no longer pumps the maintenance daemon; the three
+GeniusLocusKit maintenance-family standing signals drive one category each
+under the `maintenance` estate preference, and `GovernorReport` carries no
+maintenance field. "Five health scans" wording corrected in § 1 and § 2.
+
+### 1.24.0 -- 2026-09-13
+
+C-19 added: key-insight excerpts are drawn only from provenance-admissible
+rows (sensitivity raw 0 or 1 in bits 30-35 of `provenance`), and a row with
+no metadata entry contributes nothing (fail closed). The summary line and
+currently-believed rate still count every row. Records the behaviour that
+landed with the KEYINSIGHTS-PROV ruling in both ports
+(`ContextSynthesizer.makeKeyInsights` / `make_key_insights`). Gated in
+Swift by AriaMcpKit's `DenseRowSensitivityGateTests` and in Rust by the
+unit tests inside `context_synthesizer.rs`; NEURONKIT_INTERFACE 1.22.0
+carries the signatures.
+
+### 1.23.0 -- 2026-09-07
+
+Whole-record float index duties become an opt-in unit, both ports. The
+`HNSWGraphMaintenance` seam keeps `reclaimSupersededGenerations` /
+`reclaim_superseded_generations` in every build (engram rows regenerate on a
+basis swap); `rebuildFloatIndex` / `rebuild_float_index` (THETA) and
+`compactFloatIndexTombstones` / `compact_float_index_tombstones` (BETA), the
+daemon calls that fire them and the `neuronkit.dream.hnsw_rebuild*` /
+`hnsw_compact*` counters exist only under the `WholeRecordDense` trait
+(`MOOTX01_WHOLE_RECORD_DENSE`) / the `whole-record-dense` cargo feature. The
+`dense-fused` reduction composition is gated the same way: precise recall
+scores with `.raw`, where the dense column is never filled without the
+whole-record lane (GENIUSLOCUSKIT_SPEC 3.7.0). `ReductionSignal.dense` and the
+`weighted-all` composition are unchanged. The Rust reduction conformance test
+skips fixture cases whose composition is not compiled in.
+
+### 1.22.2 -- 2026-09-06
+
+Encoder Rerank Program — adornments dark. `ContextSynthesizer` no longer
+accepts or reads active adornments. `synthesize` (Swift: `from:estate:maxKeyInsights:`,
+Rust: `synthesize(&page, &meta, max_key_insights)`) uses first-line content
+excerpts only. The `activeAdornments` parameter and all adornment-augmentation
+behavior are removed. `autonomic_governor::register_default_standing_signals`
+no longer accepts an `adornment_cycle` parameter (W4 GeniusLocusKit will
+remove the matching parameter from `default_standing_signal_specs` under its
+own worker). AdornmentLib is dark behind `MOOTX01_MINERS` / `miners` switch.
+
+### 1.20.0 -- 2026-09-04
+Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
 
 ### 1.19.1 -- 2026-08-26
 
@@ -1187,7 +1299,7 @@ parameter.
 
 - Dream-cycle bracketing (A3): every cycle is bracketed by a minted
   session id delivered through the sink's lifecycle hooks. An aborted
-  cycle (throw) emits no end marker, which honestly records the abort in
+  cycle (throw) emits no end marker, which records the abort as such in
   the audit trail. CYCLE-dreamt time becomes attributable from the audit
   log alone (benchmark reset C3/C4 derivation input).
 
@@ -1316,6 +1428,8 @@ RECENCY-SHALL-NOT-DOMINATE invariant while SessionHybridFusion applies bounded
 temporal-window + speaker-aware boosts as a secondary sort key. No invariant
 change; this is a conformance annotation only.- **1.17.0 (2026-08-20)** — The `lattice` reduction signal is now cookbook §8.3 (W2.5 Track S): 1 − LatticeDistance with reference alphas 0.5/0.5, the Wikidata half a depth-4 BFS over the pinned QIDClosure adjacency. Replaces the earlier prefix-share approximation. §8.3 semantics: null Q-ID = maximally far on that axis (identical UDC without Q-IDs scores 0.5); a fully unanchored QUERY stays neutral (0.5). ReductionQuery and ReductionCandidate gain the `qid` anchor half (candidate reads Drawer.wikidataQID).
 
+- **v1.21.0 (2026-09-04)** — Preference governor window: the autonomic-governor cadence preference fit now runs over the most-recent 1,000 recall traces (by ascending recalledAt), not the full retained history. Named constant `preferenceTracesWindowLimit` (Swift) / `PREFERENCE_TRACES_WINDOW_LIMIT` (Rust) = 1,000. Both ports apply a suffix cap on the ascending-sorted result; parity is absolute. Doc entry added to § 7.3. (PREF-1)
+
 - **v1.16.0 (2026-08-20)** — QueryDateWindow gains the date-seeking intent scanner (`isDateSeekingQuery` / `is_date_seeking_query`): deterministic token-bigram detection of questions that ASK FOR a date ("when did/was/will/is", "what/which date/day/year/month", "how long ago"). ReductionCandidate gains `filedAt`/`filed_at` (body-free, paired with eventTime) so recall can distinguish real-dated memories from streaming captures. Golden-pinned both ports.
 
 - **v1.15.0 (2026-08-19)** — QueryDateWindow gains the sliding-window expansion primitive: paddedWindow(window:days:) widens both bounds by N civil days (Hinnant day arithmetic, no clock, time-of-day suffixes preserved); shiftISODay is the underlying date shifter. Rust twins padded_window/shift_iso_day. Golden-pinned across month, leap-February, and year edges in both ports.
@@ -1323,3 +1437,7 @@ change; this is a conformance annotation only.- **1.17.0 (2026-08-20)** — The 
 - **v1.14.0 (2026-08-19)** — Added QueryDateWindow (Reduction/): deterministic absolute-date-expression parsing (day/month-year/month-only/year forms; month-only expands against a caller-supplied year span) and inclusive UTC window containment. The query-date reading consumed by the CognitionKit temporal_recall recipe. No clock, no locale; golden-pinned in both ports.
 
 
+
+### 1.22.2 -- 2026-09-06
+
+Separated the surviving mathematical distillation lens from inline hydration.

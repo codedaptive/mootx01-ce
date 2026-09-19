@@ -1,8 +1,8 @@
 ---
 title: SubstrateML Interface
-version: 1.6.0
+version: 1.8.0
 status: active
-date: 2026-08-20
+date: 2026-09-15
 description: Public API surface for SubstrateML in both the Swift and Rust ports.
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -2287,7 +2287,30 @@ target dependencies (authority: `the package-dependency rule`).
 
 `Cargo.toml` — `intellectus-lib = { path = "../../IntellectusLib/rust" }` added.
 
+## Security repair contract
+
+### Cancellable Jacobi decomposition
+
+Swift `JacobiSVD.decompose(A:rank:sweeps:shouldCancel:) throws -> SVDResult`
+and Rust `JacobiSvd::decompose_cancellable(a, rank, sweeps, should_cancel)
+-> Result<SvdResult, JacobiSvdCancelled>` check cancellation before allocation,
+before each sweep, between tournament rounds, and before result construction.
+Swift throws `JacobiSVDCancelled`. A cancelled operation returns no partial
+factors. The existing non-cancellable entry points use the same arithmetic.
+
 ## Changelog
+
+### 1.8.0 — 2026-09-15
+
+Updated the security repair contract and cross-port API guarantees above.
+
+
+### 1.7.0 -- 2026-09-02
+
+- `DistillationPipelineVersion` (Swift) and `DISTILLATION_PIPELINE_VERSION`
+  (Rust `token_compaction`) are removed. Readers take the converter ID from
+  `GeniusLocusKit.distillationConverterID` / `genius_locus_kit::distillation_converter_id()`
+  (GENIUSLOCUSKIT_INTERFACE 2.11.0).
 
 ### 1.2.0 -- 2026-08-06
 

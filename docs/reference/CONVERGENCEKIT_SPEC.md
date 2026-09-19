@@ -1,9 +1,8 @@
 ---
 title: ConvergenceKit Specification
-version: 1.6
+version: 1.7
 status: active
-date: 2026-08-26
-date: 2026-08-26
+date: 2026-09-08
 description: "Behavioral specification for ConvergenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -850,6 +849,23 @@ configured test container (C-12, C-13, C-14 use `CloudKitDatabaseFake` to run
 without a live CloudKit container).
 
 ## Changelog
+
+### 1.7 -- 2026-09-08
+- **CKError classification change (W1b-8):** `.participantAlreadyInvited`
+  (`CKErrorTaxonomy.swift:250`) reclassified from retryable (`@unknown
+  default` path) to `permanent(.other(...))`. Previously the error fell to
+  the retryable backoff arc; it is now treated as a configuration-level
+  permanent failure and parks the outbox entry. The other two codes added
+  in the same pass — `.batchRequestFailed` and `.assetNotAvailable` — were
+  already on paths that produce the same outcome they had under `@unknown
+  default` and carry no classification change.
+- **OSLog subsystem consolidation (I1b-2):** five ConvergenceKit subsystem
+  strings (`com.mootx01.synckit.cloudkit`, `com.mootx01.synckit.federation`,
+  `com.mootx01.convergencekit.federation`, and their category variants)
+  collapsed into the single product subsystem `com.mootx01.kit` (category
+  names preserved). Operator runbooks or `log stream --subsystem` filters
+  that reference the old values return no output after this change; update
+  filter expressions to `--subsystem com.mootx01.kit`.
 
 ### 1.6 -- 2026-08-26
 Ladder repair: develop/1.1.x (MACD-3D) and the benchmark lane each

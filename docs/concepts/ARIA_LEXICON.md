@@ -95,7 +95,7 @@ The lexicon is a contract, and a contract that is not a first-class object canno
 
 The module carries no behavior. It is the vocabulary, nothing more, so that everything above it can conform to one definition and a harness can check the Swift and Rust ports against each other.
 
-The lexicon sits at the foundation, above SubstrateLib and PersistenceKit and below LocusKit, VectorKit, and CorpusKit, because every one of them and every ARIA surface conforms to it. GeniusLocusKit implements the unified nine-verb surface against this lexicon as the composition layer. The lexicon defines the words; GeniusLocusKit performs them.
+The lexicon sits at the foundation, above SubstrateLib and PersistenceKit and below LocusKit, SynapseKit, and CorpusKit, because every one of them and every ARIA surface conforms to it. GeniusLocusKit implements the unified nine-verb surface against this lexicon as the composition layer. The lexicon defines the words; GeniusLocusKit performs them.
 
 ---
 

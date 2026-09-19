@@ -1,8 +1,8 @@
 ---
 title: EideticLib Specification
-version: 1.2.0
+version: 1.3.0
 status: active
-date: 2026-07-16
+date: 2026-09-04
 description: "Behavioral specification for EideticLib: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -68,7 +68,7 @@ This specification does NOT define:
 - The anchor code rung's place in the memory ladder or the provenance
   fields it feeds — see `GENIUSLOCUS_ARCHITECTURE_SPEC.md`.
 - How an estate stores or indexes anchors — see `LOCUSKIT_SPEC.md`
-  and `VECTORKIT_SPEC.md`.
+  and `SYNAPSEKIT_SPEC.md`.
 
 ## § 3 — Position in the kit family
 
@@ -278,6 +278,10 @@ that don't exercise language-specific edge cases. Verified in Swift
 `SegmenterTests` and Rust `tests/segmenter_tests.rs`.
 
 ## Changelog
+
+### 1.3.0 -- 2026-09-04
+
+- Cross-reference updated: VECTORKIT_SPEC.md and VECTORKIT_INTERFACE.md renamed to SYNAPSEKIT_SPEC.md and SYNAPSEKIT_INTERFACE.md; VectorKit renamed to SynapseKit throughout. No behavioral changes.
 
 ### 1.2.0 -- 2026-07-16
 Corrected I-3, B-3, and C-2 to document the two distinct unresolved-input

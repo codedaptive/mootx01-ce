@@ -74,7 +74,6 @@ toolbar (the everyday tab bar stays as it is):
 - **Federation** — share selected memories with another Mootx01 estate on your
   local network, on demand, for a limited time.
 - **Miners** — optional automatic capture from Calendar and Contacts.
-- **Packets** — the work-packet list, detail, and lineage trace.
 
 Advanced Mode persists across launches. You can switch it back off any time from
 **Settings**; if you turn it off while viewing an Advanced destination, the app

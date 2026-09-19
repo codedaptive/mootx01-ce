@@ -1,9 +1,9 @@
 ---
 title: CognitionKit Interface
-version: 1.15.0
+version: 2.5.0
 status: active
-date: 2026-08-25
-description: Public API surface for CognitionKit in both the Swift and Rust ports.
+date: 2026-09-14
+description: "Interface contract for COGNITIONKIT."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -488,58 +488,11 @@ pub fn run_estate_divergence<F: Fn() -> RecallFrame>(
 ) -> Result<EstateDivergence, RecipeRunError>;
 ```
 
-## § 6a — Distillation-family recipes (SPEC § 4.5)
+## § 6a: Recall recipes (SPEC § 4.5)
 
-Three catalog-registered `Recipe`-conforming types that operate on the
-distilled memory tier. All declare empty `requiredCapabilities`. The Rust
-entry points are synchronous over `EstateCoordinator` (async↔sync seam
-sanctioned, same pattern as the live-seam recipes).
-
-### Consolidate
-
-**Swift**
-
-```swift
-public struct Consolidate: Recipe {
-    public struct Input: Sendable {
-        public let clusterID: String?   // accepted no-op; sweep is estate-wide
-        public let includeHeld: Bool    // accepted no-op; sweep skips only tombstoned items
-        public init(clusterID: String? = nil, includeHeld: Bool = false)
-    }
-    public struct Output: Sendable {
-        public let factoidsProduced: Int
-        public init(factoidsProduced: Int)
-    }
-    public let name = "consolidate"
-    public let version = "1.0.0"
-    public let description: String
-    public let requiredCapabilities: [NeuronKitCapability]  // []
-    public init()
-    public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
-}
-```
-
-**Rust**
-
-```rust
-pub struct ConsolidateInput { pub cluster_id: Option<String>, pub include_held: bool }
-impl ConsolidateInput { pub fn new() -> Self; }  // defaults: None, false
-
-pub struct ConsolidateOutput { pub factoids_produced: usize }
-
-pub fn run_consolidate(
-    _input: &ConsolidateInput,
-    coord: &EstateCoordinator,
-    handle: &EstateHandle,
-    now: i64,
-) -> Result<ConsolidateOutput, VerbDispatchError>;
-```
-
-`clusterID`/`cluster_id` and `includeHeld`/`include_held` are accepted
-no-ops in both ports. The sweep delegates entirely to
-`GeniusLocusKit.distillItemsSweep` / `EstateCoordinator::distill_items_sweep`,
-which operates estate-wide. Note: Rust returns `VerbDispatchError` (not
-`RecipeRunError`) because the sweep cannot surface a recipe-guard error.
+Distilled recall searches original records and renders their content inline.
+The stored-representation recipes are retired. Walk recall retains its
+separate graph traversal contract.
 
 ### DistilledRecall
 
@@ -555,26 +508,22 @@ public enum DistilledDiscriminationLevel: Sendable, Equatable {
 
 public struct DistilledMatch: Sendable, Equatable, Codable {
     public let id: String
-    public let prose: String
-    public let confidence: Float32
-    public let sourceCount: Int
-    public let snr: Float32
-    public let deltaType: String?
-    public let uncertain: Bool
-    public let injectionDepth: InjectionDepth
-    public init(id: String, prose: String, confidence: Float32, sourceCount: Int,
-                snr: Float32, deltaType: String?, uncertain: Bool,
-                injectionDepth: InjectionDepth)
+    public let text: String
+    public let tokenCount: Int64
+    public let originalTokenCount: Int64
+    public let score: Double
+    public let parentNodeId: String
+    public init(id: String, text: String, tokenCount: Int64,
+                originalTokenCount: Int64, score: Double, parentNodeId: String)
 }
 
 public struct DistilledRecall: Recipe {
     public struct Input: Sendable {
         public let query: String
-        public let filter: LocusKit.Filter   // default .unconfirmed
+        public let filter: LocusKit.Filter   // default .currentlyBelieve
         public let limit: Int                // default 20
-        public let pool: Int                 // default max(limit * 5, 50)
-        public init(query: String, filter: LocusKit.Filter = .unconfirmed,
-                    limit: Int = 20, pool: Int? = nil)
+        public init(query: String, filter: LocusKit.Filter = .currentlyBelieve,
+                    limit: Int = 20)
     }
     public struct Output: Sendable {
         public let matches: [DistilledMatch]
@@ -582,11 +531,32 @@ public struct DistilledRecall: Recipe {
         public init(matches: [DistilledMatch], discrimination: DistilledDiscriminationLevel)
     }
     public let name = "distilled_recall"
-    public let version = "1.0.0"
+    public let version = "2.0.0"
     public let description: String
     public let requiredCapabilities: [NeuronKitCapability]  // []
     public init()
     public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
+}
+
+public struct DistilledSavings: Sendable, Equatable, Codable {
+    public let returnedTokens: Int64
+    public let originalTokens: Int64
+    public let savedTokens: Int64       // negative means growth
+    public let savedPercent: Int64      // 0 when originalTokens is 0
+    public let estimated: Bool
+    public let estimator: String
+    public let skim: DistilledSkim?     // absent when skim was not applied
+    public let display: String
+    public static let estimatorName = "ContextDistillLib.estimateTokens (TokenCompaction v1)"
+    // Compute savedTokens = originalTokens - distilledTokens - (skimOmittedTokens ?? 0).
+    // savedPercent = savedTokens * 100 / originalTokens, half-away-from-zero; 0 when originalTokens is 0.
+    // display follows the grammar in ARIA_V2_CONTRACT.md §Search and projection / Distilled recall savings.
+    public static func measure(originalTokens: Int64, distilledTokens: Int64,
+                               skimOmittedTokens: Int64?) -> DistilledSavings
+}
+
+public struct DistilledSkim: Sendable, Equatable, Codable {
+    public let omittedTokens: Int64
 }
 
 public func classifyDistilledDiscrimination(_ scores: [Double]) -> DistilledDiscriminationLevel
@@ -599,13 +569,12 @@ public func classifyDistilledDiscrimination(_ scores: [Double]) -> DistilledDisc
 pub enum DistilledDiscriminationLevel { Single, High, Medium, Low }
 
 pub struct DistilledMatch {
-    pub id: String, pub prose: String, pub confidence: f32,
-    pub source_count: usize, pub snr: f32, pub delta_type: Option<String>,
-    pub uncertain: bool, pub injection_depth: InjectionDepth,
+    pub id: String, pub text: String, pub token_count: i64,
+    pub original_token_count: i64, pub score: f64, pub parent_node_id: String,
 }
 
 pub struct DistilledRecallInput {
-    pub query: String, pub limit: usize, pub pool: usize, pub filter: Filter,
+    pub query: String, pub limit: usize, pub filter: Filter,
 }
 impl DistilledRecallInput {
     pub fn new(query: impl Into<String>) -> Self;
@@ -618,12 +587,41 @@ pub struct DistilledRecallOutput {
     pub discrimination: DistilledDiscriminationLevel,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DistilledSavings {
+    pub returned_tokens: i64,
+    pub original_tokens: i64,
+    pub saved_tokens: i64,       // negative means growth
+    pub saved_percent: i64,      // 0 when original_tokens is 0
+    pub estimated: bool,
+    pub estimator: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skim: Option<DistilledSkim>,  // absent when skim was not applied
+    pub display: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DistilledSkim { pub omitted_tokens: i64 }
+
+pub const ESTIMATOR_NAME: &str = "ContextDistillLib.estimateTokens (TokenCompaction v1)";
+
+// saved_tokens = original_tokens - distilled_tokens (skim is separate).
+// saved_percent = saved_tokens * 100 / original_tokens, half-away-from-zero; 0 when original_tokens is 0.
+// display follows the grammar in ARIA_V2_CONTRACT.md §Search and projection / Distilled recall savings.
+pub fn measure_distilled_savings(
+    original_tokens: i64,
+    distilled_tokens: i64,
+    skim_omitted_tokens: Option<i64>,
+) -> DistilledSavings;
+
 pub fn run_distilled_recall(
     input: &DistilledRecallInput,
     coord: &EstateCoordinator,
     handle: &EstateHandle,
-    _now: i64,  // accepted for API parity; unused — Hamming NN is clock-free
-) -> Result<DistilledRecallOutput, RecipeRunError>;
+    now: i64,  // deterministic recall clock
+) -> Result<DistilledRecallOutput, VerbDispatchError>;
 
 pub fn classify_distilled_discrimination(scores: &[f64]) -> DistilledDiscriminationLevel;
 ```
@@ -711,86 +709,54 @@ pub fn is_confident(scores: &[f64]) -> bool;
 
 Stop criterion (both ports): `topGap = (s0 - s1) / max(|s0|, eps) ≥ 0.25`.
 Empty list → not confident (escalate). Single result → confident (stop).
-Catalog entry 30 in both ports. MCP surface: `moot_recall_walk`.
+Catalog entry 29 in both ports. MCP surface: `moot_recall_walk`.
 
-### Recollect
+### SimilarRecall (SPEC § 4.6)
 
-**Swift**
+The paraphrase door: nearest drawers by whole-record LSA vector, lane order,
+no fusion, no rerank. Both ports wrap the GeniusLocusKit verb and project
+`PreciseMatch` rows.
+
+**Swift** (`SimilarRecall.swift`)
 
 ```swift
-public struct ExpandedSource: Sendable, Equatable, Codable {
-    public let id: String
-    public let room: String
-    public let content: String
-    public init(id: String, room: String, content: String)
-}
-
-public enum RecollectError: Error, Sendable, Equatable {
-    case notADistilledDrawer(id: String)
-    case factoidNotFound(id: String)
-    case noSourceTunnels(id: String)
-}
-
-public struct Recollect: Recipe {
+public struct SimilarRecall: Recipe {
     public struct Input: Sendable {
-        public let factoidDrawerID: String
-        public init(factoidDrawerID: String)
+        public let query: String
+        public let limit: Int
+        public let filter: LocusKit.Filter
+        public init(query: String, limit: Int, filter: LocusKit.Filter)
     }
     public struct Output: Sendable {
-        public let factoidID: String
-        public let prose: String
-        public let confidence: Float32
-        public let sourceCount: Int
-        public let deltaType: String?
-        public let sources: [ExpandedSource]
-        // No public init — Output is constructed internally by run().
+        public let matches: [PreciseMatch]     // nearest-first; score = raw cosine in [−1, 1]
+        public init(matches: [PreciseMatch])
     }
-    public let name = "recollect"
+    public init()
+    public let name = "similar_recall"
     public let version = "1.0.0"
     public let description: String
-    public let requiredCapabilities: [NeuronKitCapability]  // []
-    public init()
+    public let requiredCapabilities: [NeuronKitCapability]   // []
     public func run(input: Input, estate: EstateHandle, kit: GeniusLocusKit) async throws -> Output
 }
 ```
 
-**Rust**
+**Rust** (`similar_recall.rs`; re-exported as `run_similar_recall`, `SimilarRecallOutput`)
 
 ```rust
-pub struct ExpandedSource { pub id: String, pub room: String, pub content: String }
-
-pub enum RecollectError {
-    FactoidNotFound { id: String },
-    NotADistilledDrawer { id: String },
-    NoSourceTunnels { id: String },
-    VerbDispatch(String),  // propagated VerbDispatchError
-}
-impl std::fmt::Display for RecollectError;
-impl From<VerbDispatchError> for RecollectError;
-
-pub struct RecollectInput { pub factoid_drawer_id: String }
-impl RecollectInput { pub fn new(factoid_drawer_id: impl Into<String>) -> Self; }
-
-pub struct RecollectOutput {
-    pub factoid_id: String, pub prose: String, pub confidence: f32,
-    pub source_count: usize, pub delta_type: Option<String>,
-    pub sources: Vec<ExpandedSource>,
-}
-
-pub fn run_recollect(
-    input: &RecollectInput,
-    coord: &EstateCoordinator,
-    handle: &EstateHandle,
-    _now: i64,  // accepted for API compatibility; by-ids hydration is clock-free
-) -> Result<RecollectOutput, RecollectError>;
+pub struct SimilarRecallOutput { pub matches: Vec<PreciseMatch> }   // nearest-first; score = raw cosine in [-1, 1]
+pub fn run(
+    coord: &EstateCoordinator, handle: &EstateHandle,
+    query: &str, limit: usize, filter: Filter, now: i64,
+    node_names: &HashMap<String, (String, String)>,   // room-name resolution for the match projection
+) -> Result<SimilarRecallOutput, RecipeRunError>;
 ```
 
-**Swift/Rust parity note for RecollectError:** Swift raises `RecollectError` (3
-cases); Rust adds a fourth `VerbDispatch(String)` arm to propagate substrate
-I/O errors that Swift surfaces as `throw` (the `async throws` boundary). The
-three structural invariant cases match byte-for-byte in their `Display`/
-`description` strings. There is no `RecipeRunError` wrapper: the error is
-`RecollectError` on both ports.
+### Retired recipes
+
+`Consolidate`, `Recollect` and `Redistill` are removed from both recipe
+catalogs. Use source drawer IDs for full hydration and `DistilledRecall`
+for an inline compact rendering. See
+[the retirement ledger](../decisions/DECISION_RETIRED_TECHNIQUES_LEDGER.md).
 
 ## § 6b — Dataset analysis utilities (non-catalog)
 
@@ -975,7 +941,7 @@ pub fn recipe_names() -> Vec<String>;
 The descriptor strings and field shape match across versions byte-for-byte
 (SPEC § 8, C-8). The catalog lists exactly the recipes present in both
 versions; a recipe enters only when both ports land together (SPEC § 8).
-Today that is all thirty shipped recipes: the two foundational recipes
+The catalog includes: the two foundational recipes
 **grounded_synthesis** and **migration_benchmark**; the twenty reasoning
 lenses (`keystones`, `constellation`, `free_association`, `latent_themes`,
 `theme_weather`, `bias`, `drift`, `cohesion`, `lens_contradiction`,
@@ -984,9 +950,8 @@ lenses (`keystones`, `constellation`, `free_association`, `latent_themes`,
 `moment`, `rhythm`, `precedence`, `complexity`); the three
 knowledge-discovery recipes `association_rules`, `apriori_rules`, and
 `formal_concepts`; the steerable-fusion recipe `shaped_recall`; the
-exploratory-recall recipe `recall_exploratory`; and the three
-distillation-family recipes `consolidate`, `distilled_recall`, and
-`recollect`.
+exploratory-recall recipe `recall_exploratory`; and inline
+`distilled_recall`.
 
 **Catalog-only lens note:** `cohesion`, `lens_contradiction`, and
 `node_motion` are registered as descriptors in both versions but their
@@ -1131,23 +1096,19 @@ every row, so it is stated once here rather than repeated:
 | Formal concepts output | `FormalConcepts.Output` (`FormalConcepts.swift:117`) | `FormalConceptsOutput` struct (`formal_concepts_recipe.rs:79`) | public both | Swift nested `Output` / Rust flat `FormalConceptsOutput`; same fields | `FormalConceptsTests.swift` + `formal_concepts_recipe.rs #[cfg(test)]` | Confirmed |
 | Precise-recall match | `PreciseMatch` (`PreciseRecall.swift:9`) | `PreciseMatch` (`precise_recall.rs:66`) | public both | identical 4-field struct: `id: String`, `room: String`, `content: String`, `score: Double`/`f64` — the ranked result of one precise-recall candidate. Swift camelCase / Rust snake_case fields — idiom. | `CognitionKitTests.swift` (precise-recall suite) / `precise_recall.rs #[cfg(test)]` | Confirmed |
 | Precise-recall runner | `PreciseRecall` (`PreciseRecall.swift:66`) | `run_precise_recall` free fn + `DEFAULT_POOL as PRECISE_DEFAULT_POOL` (`precise_recall.rs:82`) | Swift public caseless-enum namespace / Rust pub free fn | Swift caseless-enum namespace `PreciseRecall.run(kit:handle:query:filter:limit:pool:composition:)` (async throws) / Rust free `run_precise_recall(coord, query, filter, limit, pool, composition)` (sync Result) — sanctioned recipe idiom: Swift-type-namespace ↔ Rust-free-run_*-fn; async↔sync seam. `defaultPool`/`DEFAULT_POOL` = 30 on both ports. | `CognitionKitTests.swift` / `precise_recall.rs #[cfg(test)]` | **Confirmed (swift enum namespace / Rust free-fn idiom)** |
+| Similar-recall recipe | `SimilarRecall` struct (`SimilarRecall.swift:8`) | `run_similar_recall` free fn + `SimilarRecallOutput` struct (`similar_recall.rs:23`) | public both | Swift `Recipe` struct (async) with nested `Input` (query/limit/filter) + `Output` (matches: [PreciseMatch]) / Rust free fn taking `node_names` for room resolution + flat `SimilarRecallOutput`; name `similar_recall`, version `1.0.0`, no required capabilities; both wrap `similarRecall` / `similar_recall` and project `PreciseMatch` rows with raw-cosine scores | `SimilarRecallTests.swift` ; `aria_v2_similar_recall_tests.rs` (AriaMcpKit) | Confirmed |
 | Shaped-recall recipe | `ShapedRecall` struct (`ShapedRecall.swift`) | `run_shaped_recall` free fn + `ShapedRecallOutput` struct (`shaped_recall.rs`) | public both | Swift `Recipe` struct (async) `ShapedRecall().run(input:estate:kit:)` with nested `Input` (query/preset/filter/limit) + `Output` (matches/appliedPreset) / Rust free `run_shaped_recall(coord, handle, query, preset, filter, limit, now)` (sync Result) returning `ShapedRecallOutput`. Resolves a named GLK `RecallShape.preset` and runs `.unionBest`/`.matrixAware` recall with it; `"balanced"`/unknown ⇒ unsteered. Reuses `PreciseMatch` for matches. Registered as `shaped_recall` in the catalog. | `ShapedRecallTests.swift` / `shaped_recall.rs #[cfg(test)]` | Confirmed |
 | Exploratory-recall recipe | `ExploratoryRecall` struct (`ExploratoryRecall.swift`) | `run_exploratory_recall` free fn + `ExploratoryRecallOutput` struct (`exploratory_recall_recipe.rs`) | public both | Swift `Recipe` struct (async) with nested `Input` (wing/seedDrawerID/steps/restartProbability/k) + `Output` (results/visitedCount) / Rust free `run_exploratory_recall(coord, handle, wing, seed_drawer_id, steps, restart_probability, k)` (sync Result) returning `ExploratoryRecallOutput`. Both build a RowId adjacency from the tunnel graph, derive the RNG seed via FNV hash64, and delegate to `SubstrateML.RandomWalks.walkWithRestart`/`walk_with_restart`. Excludes seed from results; k=0 returns all. Declares `exploratoryRecall` capability. | `ExploratoryRecallTests.swift` (7 tests) / `exploratory_recall_recipe.rs #[cfg(test)]` (7 tests, CK-ER-1..7) | Confirmed |
 | Exploratory result | `ExploratoryResult` struct (`ExploratoryRecall.swift`) | `ExploratoryResult` struct (`exploratory_recall_recipe.rs`) | public both | `drawerID`/`drawer_id`: UUID string; `visitCount`/`visit_count`: Int/u64 — visit count for that drawer. Sorted descending by visit count, then ascending by drawer id (stable tie-break, cross-version identical). | `ExploratoryRecallTests.swift` + `exploratory_recall_recipe.rs #[cfg(test)]` | Confirmed |
 
-### Distillation-family recipes (SPEC § 4.5)
+### Inline distilled recall (SPEC § 4.5)
 
-| Concept | Swift symbol | Rust symbol | Visibility | Shape rule | Test/vector binding | Status |
-|---|---|---|---|---|---|---|
-| Consolidate recipe | `Consolidate` struct (`Consolidate.swift:31`) | `run_consolidate` fn + `ConsolidateInput`/`ConsolidateOutput` structs (`consolidate.rs`) | public both | Swift `Recipe` struct (async) / Rust free fn (sync). `clusterID`/`cluster_id` and `includeHeld`/`include_held` are no-ops on both ports (API-stability parameters). Rust error type is `VerbDispatchError` (not `RecipeRunError`) — no recipe-guard error possible. | `ConsolidateTests.swift` + `consolidate.rs #[cfg(test)]` | Confirmed |
-| Consolidate input | `Consolidate.Input` (`Consolidate.swift:36`) | `ConsolidateInput` struct (`consolidate.rs`) | public both | Swift nested / Rust flat; `clusterID`/`cluster_id` (Optional String), `includeHeld`/`include_held` (Bool/bool) | `ConsolidateTests.swift` + `consolidate.rs #[cfg(test)]` | Confirmed |
-| Consolidate output | `Consolidate.Output` (`Consolidate.swift:73`) | `ConsolidateOutput` struct (`consolidate.rs`) | public both | `factoidsProduced`/`factoids_produced`: Int/usize — count of factoid drawers produced | `ConsolidateTests.swift` + `consolidate.rs #[cfg(test)]` | Confirmed |
-| Distilled discrimination level | `DistilledDiscriminationLevel` enum (`DistilledRecall.swift:36`) | `DistilledDiscriminationLevel` enum (`distilled_recall.rs:49`) | public both | 4 cases `single/Single`, `high/High`, `medium/Medium`, `low/Low`; same thresholds (HIGH_MARGIN=0.25, LOW_MARGIN=0.05, LOW_SPREAD=0.15) | `DistilledRecallTests.swift` + `distilled_recall.rs #[cfg(test)]` | Confirmed |
-| Distilled match | `DistilledMatch` struct (`DistilledRecall.swift:48`) | `DistilledMatch` struct (`distilled_recall.rs:64`) | public both | `id`, `prose`, `confidence: Float32/f32`, `sourceCount`/`source_count`, `snr`, `deltaType`/`delta_type` (Optional String), `uncertain`, `injectionDepth`/`injection_depth: InjectionDepth`. Swift additionally conforms to `Codable` (InjectionDepth serialised as raw String name). | `DistilledRecallTests.swift` + `distilled_recall.rs #[cfg(test)]` | Confirmed |
-| DistilledRecall recipe | `DistilledRecall` struct (`DistilledRecall.swift:142`) | `run_distilled_recall` fn + `DistilledRecallInput`/`DistilledRecallOutput` structs (`distilled_recall.rs`) | public both | Swift `Recipe` struct (async) / Rust free fn (sync; `_now` accepted for API parity, unused). Discrimination classifier also public in Rust (`classify_distilled_discrimination`). | `DistilledRecallTests.swift` + `distilled_recall.rs #[cfg(test)]` | Confirmed |
-| Expanded source | `ExpandedSource` struct (`Recollect.swift:23`) | `ExpandedSource` struct (`recollect.rs:56`) | public both | `id: String`, `room: String`, `content: String`; identical. Swift additionally conforms to `Codable`. | `RecollectTests.swift` + `recollect.rs #[cfg(test)]` | Confirmed |
-| Recollect error | `RecollectError` enum (`Recollect.swift:41`) | `RecollectError` enum (`recollect.rs:74`) | public both | Swift: 3 cases (`notADistilledDrawer(id:)`, `factoidNotFound(id:)`, `noSourceTunnels(id:)`). Rust: same 3 structural cases (named fields) + `VerbDispatch(String)` arm for substrate I/O errors (the `async throws` boundary absorbs these in Swift). `Display`/`description` strings match for the 3 structural cases. | `RecollectTests.swift` + `recollect.rs #[cfg(test)]` | Confirmed |
-| Recollect recipe | `Recollect` struct (`Recollect.swift:69`) | `run_recollect` fn + `RecollectInput`/`RecollectOutput` structs (`recollect.rs`) | public both | Swift `Recipe` struct (async throws `RecollectError`) / Rust free fn (`Result<RecollectOutput, RecollectError>`; `_now` accepted for API compatibility, unused). Output fields: `factoidID`/`factoid_id`, `prose`, `confidence`, `sourceCount`/`source_count`, `deltaType`/`delta_type`, `sources: [ExpandedSource]`. | `RecollectTests.swift` + `recollect.rs #[cfg(test)]` | Confirmed |
+| Surface | Swift | Rust | Contract |
+|---|---|---|---|
+| Recall recipe | `DistilledRecall` | `run_distilled_recall` | Original-record ranking with inline compact hydration |
+| Match | `DistilledMatch` | `DistilledMatch` | Source ID and text with distilled and original token counts, score and parent node ID |
+| Discrimination | `DistilledDiscriminationLevel` | `DistilledDiscriminationLevel` | Computed from recall scores |
+| Savings | `DistilledSavings` | `DistilledSavings` | Applied by the ARIA v2 surface over emitted rows; estimated tokens returned vs original, signed saving and percent, estimator name, optional skim block, display line; shared vector `distilled_savings_vectors.json` |
 
 ### Dataset analysis utilities (non-catalog, SPEC § 4b)
 
@@ -1240,7 +1201,69 @@ disabled.
 
 *End of CognitionKit Interface.*
 
+### Text-pair display helper
+
+Text-pair display helper; behavior is specified in SPEC 2.4.0. Reuses the existing
+estimator and display formatter; no new wire fields or implicit Skim invocation.
+
+```swift
+public static func text(
+    original: String, reduced: String, enabled: Bool, skimmed: String? = nil
+) -> String // on DistilledSavings
+
+let line = DistilledSavings.text(original: originalText, reduced: distilledText,
+                                enabled: tokenSaverEnabled, skimmed: previewText)
+```
+
+```rust
+pub fn distilled_savings_text(
+    original: &str, reduced: &str, enabled: bool, skimmed: Option<&str>,
+) -> String; // cognition_kit re-export
+```
+
 ## Changelog
+
+### 2.5.0 -- 2026-09-14
+
+Added the `SimilarRecall` recipe (`similar_recall` `1.0.0`) to § 6a and the
+concordance: Swift `SimilarRecall` with nested `Input` / `Output`, Rust
+`run_similar_recall` + `SimilarRecallOutput`; both wrap the GeniusLocusKit
+paraphrase door and project `PreciseMatch` rows.
+
+### 2.4.0 — 2026-09-13
+
+Add the text-pair savings display helper with an internal enable check and optional skim accounting.
+
+### 2.2.0 -- 2026-09-09
+
+Correction: `DistilledMatch` gains `originalTokenCount: Int64` (Swift) / `original_token_count: i64` (Rust) after `tokenCount`/`token_count`. `DistilledRecall.Output` loses `savings: DistilledSavings` and its init parameter; the two-field init is restored. `DistilledRecallOutput` loses `pub savings: DistilledSavings`. `DistilledSavings`, `DistilledSkim`, `ESTIMATOR_NAME`, and `measure_distilled_savings` remain. §4.5 table: Match row updated to name both token counts; Savings row notes the measurement is applied by the ARIA v2 surface over emitted rows.
+
+### 2.1.0 -- 2026-09-09
+
+Added `DistilledSavings` and `DistilledSkim` types in both Swift and Rust. `DistilledRecall.Output` gains `savings: DistilledSavings` (and updated `init`). `DistilledRecallOutput` gains `pub savings: DistilledSavings`. Swift: `DistilledSavings` is `Sendable, Equatable, Codable` with static `estimatorName` and `measure` factory. Rust: `DistilledSavings` is `serde(rename_all = "camelCase")`, `DistilledSkim` likewise; `ESTIMATOR_NAME` constant and `measure_distilled_savings` free function added. §4.5 table gains a Savings row referencing the shared vector file.
+
+### 2.0.1 -- 2026-09-06
+
+Catalog entry number corrected from 30 to 29 in body text and 1.14.0 changelog entry (walk_recall is the 29th entry; the stale label predated the retirement of Redistill).
+
+### 2.0.0 -- 2026-09-06
+
+Removed Consolidate and Recollect contracts plus the Redistill API. Updated DistilledRecall fields and defaults from both ports. Corrected the catalog description.
+
+### 1.19.0 -- 2026-09-06
+
+Redistill section and concordance rows removed. `Redistill.swift`,
+`redistill.rs`, and the catalog descriptor were deleted (not merely
+unwired from the MCP surface). The §6a Redistill subsection, the three
+concordance rows (recipe, input, output), and the stale 1.18.0/1.17.0/1.16.0
+changelog claims that "redistill retained as substrate" are removed.
+Catalog count corrected to 29.
+
+### 1.18.0 -- 2026-09-05
+
+ENC-W6B: `moot_distill` and `moot_redistill` MCP surfaces retired.
+AriaMcpKit returns `methodNotFound` for both tools. Swift tool count
+drops from 82 to 80 (with vault).
 
 ### 1.15.0 -- 2026-08-25
 
@@ -1260,7 +1283,7 @@ disabled.
   (shares `PreciseMatch`). Constants: `stage1Preset = "session_hybrid"`,
   `stage1Pool = 20`, `stage2Composition = "hamming+text"`,
   `stopThreshold = 0.25`. Helper: `isConfident(_:)` / `is_confident(scores)`.
-  Both ports registered in catalog as entry 30. MCP surface: `moot_recall_walk`.
+  Both ports registered in catalog as entry 29. MCP surface: `moot_recall_walk`.
 
 ### 1.13.0 -- 2026-08-20
 
@@ -1375,5 +1398,3 @@ No change to `ShapedRecall.Input`/`Output` signatures or the `RecallShape` API �
 - **v1.10.0 (2026-08-19)** — TemporalRecall.run gains `grab: TemporalGrab = .pool`; new `TemporalGrab` (pool|dated), `maxPadDays` (10), `rerankCap` (200); `TemporalMatch.padDays: Int?`; `TemporalRecallOutcome.grab`/`appliedPad`. Rust: `TemporalGrab`, `TEMPORAL_MAX_PAD_DAYS`, `TEMPORAL_RERANK_CAP`, `iso_to_epoch_ms`, run(...) gains the grab parameter.
 
 - **v1.9.0 (2026-08-19)** — TemporalRecall surface: `TemporalRecall.run(kit:handle:query:filter:limit:pool:mode:from:to:) -> TemporalRecallOutcome`, `TemporalWindowMode` (loose|tight), `TemporalMatch`, `TemporalRecallError`; Rust `cognition_kit::run_temporal_recall` (+ TEMPORAL_DEFAULT_POOL, epoch_ms_to_iso).
-
-

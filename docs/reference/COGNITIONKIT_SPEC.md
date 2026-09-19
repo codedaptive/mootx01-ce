@@ -1,9 +1,9 @@
 ---
 title: CognitionKit Specification
-version: 1.14.0
+version: 2.5.0
 status: active
-date: 2026-08-21
-description: "Behavioral specification for CognitionKit: invariants, conformance requirements, and the contract it guarantees."
+date: 2026-09-14
+description: "Behavior and invariants for COGNITIONKIT."
 spec_type: kit
 authors: MOOTx01 maintainers
 relates_to:
@@ -26,10 +26,8 @@ purpose: |
   analytics recipes (association_rules, apriori_rules, formal_concepts)
   that mine structural patterns by delegating to SubstrateML engines, the
   exploratory-recall recipe (recall_exploratory) that walks a wing's
-  tunnel graph with restart from a seed drawer, and three
-  distillation-family recipes (consolidate, distilled_recall, recollect)
-  that compact working memory, search the distilled tier, and expand
-  factoids back to their source memories. The companion INTERFACE
+  tunnel graph with restart from a seed drawer, and inline distilled
+  recall over original records. The companion INTERFACE
   document carries the signatures.
 ---
 
@@ -85,13 +83,9 @@ It offers five recipe families:
   `SubstrateML.RandomWalks.walkWithRestart`; declares the
   `exploratoryRecall` capability.
 
-- **Distillation-family recipes (§ 4.5).** Three recipes that operate on
-  the distilled memory tier: `consolidate` (sweep active items and produce
-  factoid drawers), `distilled_recall` (Hamming NN search over the
-  distilled tier, returning factoid prose without embedding inference), and
-  `recollect` (fan out from a factoid to its source memories via
-  `_distilled_from` tunnels). All three have empty `requiredCapabilities`
-  and are read-only except Consolidate, which writes factoid drawers.
+- **Inline distilled recall (§ 4.5).** `distilled_recall` ranks original
+  drawers and compresses their text at read time. It is read-only and
+  declares no required reasoning capabilities.
 
 - **The catalog (§ 8).** An enumerable registry of the recipes that have
   graduated to a product surface, with each recipe's descriptor (name,
@@ -191,7 +185,7 @@ duplicated.
 GeniusLocusKit (the `EstateHandle`, the estate verbs, the recall and
 tunnel reads, branch COW verbs). A recipe reaches the estate only through
 the handle it is passed and reasons only through NeuronKit; it never calls
-a substrate kit (LocusKit, VectorKit, CorpusKit, PersistenceKit, QueueKit)
+a substrate kit (LocusKit, SynapseKit, CorpusKit, PersistenceKit, QueueKit)
 directly (B-2).
 
 **Consumed by:** product surfaces and the agent tool layer. The catalog
@@ -420,46 +414,27 @@ capability.
 64-bit value for the same UUID string, so the walk is reproducible and cross-version
 deterministic on the same input.
 
-## § 4.5 — Distillation-family recipes (3)
+## § 4.5: Inline distilled recall
 
-Three recipes that operate on or with the distilled memory tier — the dense
-factoid drawers produced by the per-item distillation pipeline. All three
-have empty `requiredCapabilities`, obey B-1/B-2 (pure sequencing, no
-direct substrate kit access), and obey I-6 (read-only, deterministic,
-except `consolidate` which produces factoid drawers as its intended side
-effect).
+`DistilledRecall` uses the same original-record recall geometry as exact
+search. Each hit is rendered through ContextDistillLib at read time.
+Its result carries the source drawer ID and compact text alongside a token
+count and recall score. Normal recall containment gates apply.
 
-**Consolidate** (`consolidate`). Triggers an on-demand distillation sweep
-over the estate. Delegates entirely to `GeniusLocusKit.distillItemsSweep` /
-`EstateCoordinator::distill_items_sweep`, which iterates active
-not-yet-distilled items, applies the NeuronKit HMM feature extractor via
-the distillation pipeline, and persists produced factoid drawers in room
-`_distilled`. The `clusterID` and `includeHeld` input parameters are
-accepted for API stability but are currently no-ops at this layer; the
-sweep operates estate-wide. Returns the count of factoid drawers produced.
+The recipe result carries, per match, the token estimate of the distilled text (`tokenCount`) and of the full `content` (`originalTokenCount`), both through the one estimator (`ContextDistillLib.estimateTokens`, `TokenCompaction v1`). The kit defines the savings measurement (`DistilledSavings`) and the display grammar as pure functions gated by the shared vector; the recipe does not sum them. The ARIA surface sums over the rows it actually emits, so withheld bodies never count on either side. Growth is an increase (positive `savedTokens` is a saving; negative is growth). The skim field is defined but absent until `PassageViews.skim` is applied; its value is set by the caller when present. Both ports produce identical values from identical inputs; whether the ARIA surfaces feed them identical inputs depends on the emitted row set, which the Swift 50-row recall cap can shorten.
 
-**DistilledRecall** (`distilled_recall`). Dense-tier recall: searches the
-distilled memory tier using structural fingerprint Hamming nearest-neighbor
-over the `distillation-features-v1` VectorKit lane. No embedding model
-inference required; no full corpus scan. Returns `DistilledMatch` records
-(drawer UUID, factoid prose, confidence, source count, SNR, delta type,
-uncertainty flag, injection depth) and a `DistilledDiscriminationLevel`
-signal (how well the top result separates from the rest). The
-discrimination signal is derived from the confidence-score gap between
-rank-1 and rank-2 matches. Hydration is frame-aware and enforces the
-sensitivity ceiling; tombstoned or restricted drawers are excluded before
-DIST content is parsed.
+**Text-pair display helper.** It returns only the display string, checks the
+caller-supplied enable flag internally before counting, and returns an empty
+string when disabled. Original and reduced text must describe the same authorized
+content. An optional actual skim preview supplies the additional omitted count;
+absence means no skim stage. If the preview grows, report direct original-to-final
+growth/reduction rather than a negative omission. Counts include any legends in
+the supplied text, exclude this display line itself, and remain advisory estimates.
+The helper neither applies Skim nor changes recall or a stored preference.
 
-**Recollect** (`recollect`). Fan-out from a distilled factoid to its
-source memories. Follows the outgoing `_distilled_from` tunnel graph from
-a `_distilled` drawer and returns the full episodic content of the M
-source memories that produced it. Three error gates enforce structural
-invariants: `factoidNotFound` (the drawer ID is not in this estate);
-`notADistilledDrawer` (the drawer exists but carries no DIST header);
-`noSourceTunnels` (the factoid has no outgoing `_distilled_from` tunnels,
-indicating it predates tunnel wiring). Source memories are ordered
-oldest→newest by tunnel `filedAt`; withdrawn sources are silently skipped,
-so `sourceCount` (from the DIST header) may exceed `sources.count`.
+`Consolidate`, `Recollect` and `Redistill` are removed. The stored factoid
+tier and stored-distillation sweeps are no longer recipe contracts. See
+[the retirement ledger](../decisions/DECISION_RETIRED_TECHNIQUES_LEDGER.md).
 
 **Association rules** (`association_rules`). Recalls a frame via the estate handle,
 projects each drawer's categorical facets (kind, channel, sensitivity, room) into a
@@ -483,12 +458,29 @@ Duquenne–Guigues canonical basis of sound logical implications. Declares the
 
 **Engine location.** The analytics engines (`mineAssociationRules`, `AprioriMining`,
 `BoundedConceptMiner`) live in SubstrateML and are reached without a NeuronKit lens.
-This is sanctioned: B-2's prohibition names the substrate kits (LocusKit, VectorKit,
+This is sanctioned: B-2's prohibition names the substrate kits (LocusKit, SynapseKit,
 CorpusKit, PersistenceKit, QueueKit); it does not prohibit calling the gated math
 libraries in SubstrateML. The analytics recipes remain conformant with B-1 (no
 algorithm in the recipe body — the recipe shapes inputs; the engine owns the
 computation) and I-1 (no re-implementation of the mining algorithms). Do not alter
 B-1 or B-2 on account of the analytics recipes.
+
+## § 4.6 — Similar-recall recipe (1)
+
+**Similar recall** (`similar_recall`, version `1.0.0`): the paraphrase door.
+Swift `SimilarRecall` (`Recipe`, `Input(query:limit:filter:)` →
+`Output(matches:)`) and Rust `run_similar_recall` (`SimilarRecallOutput`)
+wrap `GeniusLocusKit.similarRecall` / `EstateCoordinator::similar_recall`:
+the estate's corpus engine is probed on its default float slot — the
+whole-record LSA lane — for the `limit` nearest drawers, which are hydrated
+through `filter` and returned in the lane's own nearest-first order as
+`PreciseMatch` rows (`id`, `room`, `content`, `score`) whose `score` is the
+raw cosine similarity in [−1, 1]. No fusion and no rerank (B-1: the recipe
+carries no math of its own). `requiredCapabilities` is empty. An estate with
+no registered corpus engine, or a lane that is dark for the query, yields
+zero matches rather than an error. Its named consumer is the ARIA
+`moot_recall_similar` operation. Like precise recall it runs from the
+recipe type / free function directly and is not a catalog descriptor.
 
 ## § 5 — The read-sequence-shape archetype
 
@@ -562,7 +554,7 @@ an algorithm has leaked across its boundary.
 
 **B-2 (no direct substrate access):** a recipe reads and writes only
 through NeuronKit or the passed estate handle. It never calls a substrate
-kit (LocusKit, VectorKit, CorpusKit, PersistenceKit, QueueKit) directly and
+kit (LocusKit, SynapseKit, CorpusKit, PersistenceKit, QueueKit) directly and
 executes no SQL.
 
 **B-3 (no autonomic destructive action):** a recipe never auto-promotes a
@@ -603,7 +595,7 @@ present in one version and absent from the other. A recipe registered in
 the catalog is registered in both versions or in neither. This applies to
 all recipe families: the two foundational recipes, the twenty lens
 recipes, the three analytics recipes, the exploratory-recall recipe, and
-the three distillation-family recipes. The thirty catalog entries are
+inline distilled recall. The catalog entries are
 listed in the concordance in `COGNITIONKIT_INTERFACE.md` § 7.
 
 ## § 9 — Invariants
@@ -755,6 +747,34 @@ is on or off (C-Det extension: the telemetry path does not affect output).
 
 ## Changelog
 
+### 2.5.0 -- 2026-09-14
+
+Added § 4.6: the `similar_recall` recipe (`1.0.0`), the paraphrase door over
+the whole-record LSA lane wrapping `GeniusLocusKit.similarRecall` /
+`EstateCoordinator::similar_recall`; nearest-first, no fusion, no rerank,
+raw-cosine scores, both ports.
+
+### 2.4.0 — 2026-09-13
+
+Add the text-pair savings display helper with an internal enable check and optional skim accounting.
+
+### 2.3.0 -- 2026-09-09
+
+§ 4.5: the cross-port identity of the savings measurement is stated over identical inputs, with the Swift 50-row recall cap named as the reason the ARIA surfaces can feed different inputs.
+
+### 2.2.0 -- 2026-09-09
+
+§ 4.5 corrected: the recipe carries per-match `originalTokenCount` and `tokenCount`, not a summed `savings` field. The kit defines `DistilledSavings` and the display grammar as pure functions; the ARIA surface sums over the rows it actually emits. Withheld bodies never count on either side.
+
+### 2.1.0 -- 2026-09-09
+
+§ 4.5 extended: the `DistilledRecall` recipe output carries a `savings: DistilledSavings` field computed from the returned matches. Documents the measurement: original from `content`, returned from distilled text, same estimator (`ContextDistillLib.estimateTokens / TokenCompaction v1`) in both ports, estimates marked, growth reported as an increase, skim field defined but absent until applied, cross-port identical for identical estates, returned-records only.
+
+### 2.0.0 -- 2026-09-06
+
+Removed stored-factoid recipe contracts and documented inline recall over
+original records.
+
 ### 1.14.0 -- 2026-08-21
 
 - New recipe WalkRecall (`walk_recall`, D10): escalation-ladder recall that runs
@@ -881,5 +901,4 @@ SessionHybridTests.swift (12 tests), session_hybrid_fusion.rs (9 tests).- **1.12
 - **v1.10.0 (2026-08-19)** — TemporalRecall v2 (rulings Q1–Q3, 2026-08-19): (1) TemporalGrab arm — pool (lexical grab only) or dated (grab unioned with a date-indexed EventAfter/EventBefore store fetch over the max-padded windows); (2) sliding-window expansion — the window widens ±1 day at a time while members < limit, hard cap ±10, each member carrying its padDays distance; (3) deterministic within-window re-rank — members are affinity-folded by the PreciseRecall composition machinery and ordered pad-first (date proximity primary, affinity secondary), bounded by rerankCap 200 with coarse-order overflow. Outcome gains grab and appliedPad; matches gain padDays.
 
 - **v1.9.0 (2026-08-19)** — Added TemporalRecall recipe: window resolution (explicit from/to wins over the query parse; tight without a window fails loud), wide body-free coarse grab (default pool 120), loose (membership-first stable re-rank, nothing dropped) and tight (filter) modes, late hydration of survivors. Decision record DECISION_SEARCH_STRATEGY_RECIPES_2026-08-19 item 4.
-
 

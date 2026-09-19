@@ -12,7 +12,7 @@ date: "2026-06-16"
 
 ## Before you begin
 
-- One of: **macOS 15+** (Swift build), **Linux** x86_64/arm64, or **Windows** x86_64 (both Rust builds) — all host a local estate; see [Linux and Windows](#linux-and-windows) for those paths
+- One of: **macOS 27+ on Apple silicon** (Swift build), **Linux** x86_64/arm64, or **Windows** x86_64 (both Rust builds) — all host a local estate; see [Linux and Windows](#linux-and-windows) for those paths
 - At least one supported AI client installed: **Claude Desktop**, **Claude Code**,
   **Cursor**, **Cline**, **Continue**, or **Grok CLI**
 - The `mootx01` binary built or downloaded from the release archive and
@@ -352,7 +352,7 @@ lives at:
 
 - **macOS** — `~/Library/Application Support/com.mootx01.ce/`
 - **Linux** — `~/.local/share/mootx01/` (or `$XDG_DATA_HOME/mootx01/`)
-- **Windows** — `%LOCALAPPDATA%\MOOTx01\`
+- **Windows** — `%LOCALAPPDATA%\com.mootx01.ce\`
 
 A full uninstall run from a terminal then **offers** to remove that data (the
 estate databases and the moot-mgr history). Removal always requires typing
