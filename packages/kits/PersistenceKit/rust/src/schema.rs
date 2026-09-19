@@ -296,3 +296,88 @@ pub enum SchemaOperation {
         postgresql: Option<String>,
     },
 }
+
+// ── Ladder shape ─────────────────────────────────────────────────────────
+
+/// One column a migration ladder adds: the check target of a schema repair.
+/// Twin of Swift `LadderColumn`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct LadderColumn {
+    pub table: String,
+    pub column: String,
+}
+
+impl std::fmt::Display for LadderColumn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}.{}", self.table, self.column)
+    }
+}
+
+impl SchemaDeclaration {
+    /// True when `stored` is a version this ladder cannot move: nonzero, no
+    /// hop starts at it, and at least one hop starts below it. Such a
+    /// version sits inside the ladder's range with no entry — a pre-release
+    /// LocusKit estate at 11–18, for example. Replaying the hops above it
+    /// and stamping the declared version would mark the estate current with
+    /// every skipped hop's objects missing, so a runner must refuse instead.
+    ///
+    /// A stored version below every hop is not a hole: the base CREATE
+    /// carried those versions and the ladder replays on top of it, which is
+    /// how every kit whose ladder starts above 1 has always opened. A
+    /// ladder with no hops never has a hole. Twin of Swift
+    /// `ladderHasHole(atStoredVersion:)`.
+    pub fn ladder_has_hole(&self, stored: i32) -> bool {
+        if stored <= 0 || stored >= self.version || self.migrations.is_empty() {
+            return false;
+        }
+        if self.migrations.iter().any(|m| m.from_version == stored) {
+            return false;
+        }
+        self.migrations.iter().any(|m| m.from_version < stored)
+    }
+
+    /// The hops that start at or above `from_version`, in ladder order: the
+    /// set a repair replays. Twin of Swift `ladderHops(fromVersion:)`.
+    pub fn ladder_hops(&self, from_version: i32) -> Vec<&Migration> {
+        let mut hops: Vec<&Migration> = self
+            .migrations
+            .iter()
+            .filter(|m| m.from_version >= from_version)
+            .collect();
+        hops.sort_by_key(|m| m.from_version);
+        hops
+    }
+
+    /// Every column the hops from `from_version` up add. A storage backend
+    /// probes these to tell a stamped-but-incomplete estate from a healthy
+    /// one; the ledger row alone cannot. Twin of Swift
+    /// `ladderColumns(fromVersion:)`.
+    pub fn ladder_columns(&self, from_version: i32) -> Vec<LadderColumn> {
+        let mut ordered: Vec<LadderColumn> = Vec::new();
+        for hop in self.ladder_hops(from_version) {
+            for op in &hop.operations {
+                if let SchemaOperation::AddColumn { table, column } = op {
+                    let reference = LadderColumn { table: table.clone(), column: column.name.clone() };
+                    if !ordered.contains(&reference) {
+                        ordered.push(reference);
+                    }
+                }
+            }
+        }
+        ordered
+    }
+
+    /// The refusal a runner returns for a hole, worded for the person who
+    /// sees it. Twin of Swift `ladderHoleError(atStoredVersion:)`.
+    pub fn ladder_hole_error(&self, stored: i32) -> crate::error::StorageError {
+        crate::error::StorageError::MigrationFailed {
+            version: stored,
+            reason: format!(
+                "kit {} declares no migration from stored schema version {stored}; \
+                 opening would stamp version {} without the skipped objects. \
+                 This estate needs a build whose ladder starts at {stored}.",
+                self.kit_id, self.version
+            ),
+        }
+    }
+}

@@ -1142,6 +1142,16 @@ fn apply_schema(inner: &mut Inner, schema: &SchemaDeclaration) -> StorageResult<
 
     let current = current_version(conn);
     if current < schema.version {
+        // A stored version inside the ladder's range with no hop starting
+        // at it is a hole, not a fresh estate. Replaying the hops above it
+        // and stamping the declared version below would mark the estate
+        // current with every skipped hop's objects missing — which is how a
+        // pre-release LocusKit estate at 11–18 came to read 20 with no
+        // `ssc_facts` column (2026-09-19). Refuse before anything mutates.
+        // Twin of the Swift SQLiteBackend check.
+        if schema.ladder_has_hole(current) {
+            return Err(schema.ladder_hole_error(current));
+        }
         let mut pending: Vec<&crate::schema::Migration> = schema
             .migrations
             .iter()
@@ -1218,6 +1228,65 @@ fn normalize_legacy_migration_timestamps(conn: &rusqlite::Connection) -> Storage
 }
 
 /// Execute one declared migration operation (Swift `applyOperation` parity).
+/// True when `table` has a column named `column`. PRAGMA table_info returns
+/// one row per column with the name at index 1; a table that does not exist
+/// returns no rows, and a failed probe reads as absent so the callers'
+/// idempotent DDL takes the conservative branch. Twin of the Swift
+/// `SQLiteBackend.columnExists`.
+fn column_exists(conn: &rusqlite::Connection, table: &str, column: &str) -> bool {
+    conn.prepare(&format!("PRAGMA table_info(\"{table}\")"))
+        .and_then(|mut stmt| {
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let name: String = row.get(1)?;
+                if name == column {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        })
+        .unwrap_or(false)
+}
+
+impl SqliteStorage {
+    /// The columns `schema`'s ladder adds from `from_version` up that this
+    /// file lacks. Empty when the objects behind the ledger row all exist.
+    /// The ledger row says which version was stamped; this says whether
+    /// the objects behind it exist, which is the question a repair has to
+    /// ask. Twin of Swift `SQLiteStorage.missingLadderColumns`.
+    pub fn missing_ladder_columns(
+        &self,
+        schema: &SchemaDeclaration,
+        from_version: i32,
+    ) -> StorageResult<Vec<crate::schema::LadderColumn>> {
+        let guard = self.inner.lock().unwrap();
+        Ok(schema
+            .ladder_columns(from_version)
+            .into_iter()
+            .filter(|c| !column_exists(&guard.conn, &c.table, &c.column))
+            .collect())
+    }
+
+    /// Replay every hop from `from_version` up without touching the ledger:
+    /// the repair for an estate stamped current while a hop was skipped.
+    /// Every operation the runner applies is idempotent (AddColumn and
+    /// DropColumn probe first; DDL is IF NOT EXISTS), so a hop the estate
+    /// already carries is a no-op and a replay that dies midway can simply
+    /// run again. Twin of Swift `SQLiteStorage.replayLadder`.
+    pub fn replay_ladder(&self, schema: &SchemaDeclaration, from_version: i32) -> StorageResult<()> {
+        let guard = self.inner.lock().unwrap();
+        for hop in schema.ladder_hops(from_version) {
+            for op in &hop.operations {
+                apply_migration_operation(&guard.conn, op).map_err(|e| StorageError::MigrationFailed {
+                    version: schema.version,
+                    reason: format!("ladder replay from {from_version}: {e}"),
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
 fn apply_migration_operation(
     conn: &rusqlite::Connection,
     op: &crate::schema::SchemaOperation,
@@ -1240,20 +1309,7 @@ fn apply_migration_operation(
         Op::AddColumn { table, column } => {
             // Idempotent: skip when present (fresh DBs create the latest
             // layout before replaying migrations).
-            let exists: bool = conn
-                .prepare(&format!("PRAGMA table_info(\"{table}\")"))
-                .and_then(|mut stmt| {
-                    let mut rows = stmt.query([])?;
-                    while let Some(row) = rows.next()? {
-                        let name: String = row.get(1)?;
-                        if name == column.name {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(false)
-                })
-                .unwrap_or(false);
-            if !exists {
+            if !column_exists(conn, table, &column.name) {
                 let mut sql = format!(
                     "ALTER TABLE \"{table}\" ADD COLUMN \"{}\" {}",
                     column.name,
@@ -1274,20 +1330,7 @@ fn apply_migration_operation(
             // drop (a fresh estate creates the latest layout, a re-run of the
             // capsule finds the column gone). SQLite has no DROP COLUMN IF
             // EXISTS, so probe the table's columns and skip when absent.
-            let exists: bool = conn
-                .prepare(&format!("PRAGMA table_info(\"{table}\")"))
-                .and_then(|mut stmt| {
-                    let mut rows = stmt.query([])?;
-                    while let Some(row) = rows.next()? {
-                        let name: String = row.get(1)?;
-                        if name == *column_name {
-                            return Ok(true);
-                        }
-                    }
-                    Ok(false)
-                })
-                .unwrap_or(false);
-            if exists {
+            if column_exists(conn, table, column_name) {
                 exec(&format!(
                     "ALTER TABLE \"{table}\" DROP COLUMN \"{column_name}\""
                 ))?;

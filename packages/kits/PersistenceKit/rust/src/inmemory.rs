@@ -423,6 +423,11 @@ fn apply_migrations_inner(state: &mut State, schema: &SchemaDeclaration) -> Stor
     // `current_schema_version()` still returns a sensible value (the max
     // across all kits that have opened on this storage instance).
     let kit_current = state.kit_schema_versions.get(&schema.kit_id).copied().unwrap_or(0);
+    // Same refusal as the SQLite runner: a stored version the ladder has no
+    // hop for must not be stamped over (see sqlite::apply_schema).
+    if schema.ladder_has_hole(kit_current) {
+        return Err(schema.ladder_hole_error(kit_current));
+    }
     let mut pending: Vec<_> = schema
         .migrations
         .iter()

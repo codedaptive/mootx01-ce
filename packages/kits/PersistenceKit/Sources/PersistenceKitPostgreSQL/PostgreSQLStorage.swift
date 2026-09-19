@@ -209,6 +209,11 @@ actor PostgreSQLBackend {
         // returns a meaningful value. The global key holds the maximum version
         // written by any kit that has opened on this storage instance.
         let current = try await readSchemaVersion(kitID: schema.kitID, connection: conn)
+        // Same refusal as the SQLite runner: a stored version the ladder
+        // has no hop for must not be stamped over (see SQLiteBackend).
+        if schema.ladderHasHole(atStoredVersion: current) {
+            throw schema.ladderHoleError(atStoredVersion: current)
+        }
         let pending = schema.migrations
             .filter { $0.fromVersion >= current && $0.toVersion <= schema.version }
             .sorted(by: { $0.fromVersion < $1.fromVersion })

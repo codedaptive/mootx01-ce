@@ -78,9 +78,9 @@ pub const KIT_ID: &str = "LocusKit";
 /// kg_facts identity trio, idx_drawers_filedAt, the recall_trace attribution
 /// trio, encoder_models, ssc_facts) and never creates the v16–v18 adornment
 /// or distilled objects. `mootx01 upgrade` decides with `upgrade_path`
-/// BEFORE opening the schema, because persistence-kit's runner stamps the
-/// declared version whenever no ladder entry matches, which would silently
-/// mark an unsupported estate current.
+/// BEFORE opening the schema so the refusal names the version and the
+/// remedy; persistence-kit's runner refuses a stored version inside the
+/// ladder's range with no hop starting at it (a ladder hole) on its own.
 ///
 /// Version history (versions before the ladder live in the base CREATE):
 /// v2 keys.ext; v3 nodes; v4 parent_node_id replaces wing/room; v5
@@ -118,10 +118,11 @@ pub enum SchemaUpgradePath {
 }
 
 /// Decide the upgrade path for `stored_version`. Read the ledger raw and
-/// call this BEFORE `Storage::open`: the runner stamps `SCHEMA_VERSION`
-/// whenever no ladder entry matches, so an unsupported estate opened blind
-/// would be marked current with none of the v20 objects in place. Mirrors
-/// Swift `LocusKitSchema.upgradePath(storedVersion:)`.
+/// call this BEFORE `Storage::open` so the refusal names the version and
+/// the remedy. The runner refuses on its own when the stored version sits
+/// inside the ladder's range with no hop starting at it (a ladder hole), so
+/// no other opener can stamp such an estate current either. Mirrors Swift
+/// `LocusKitSchema.upgradePath(storedVersion:)`.
 pub fn upgrade_path(stored_version: i32) -> SchemaUpgradePath {
     match stored_version {
         0 => SchemaUpgradePath::Fresh,

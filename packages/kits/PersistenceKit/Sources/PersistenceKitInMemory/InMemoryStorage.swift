@@ -314,6 +314,11 @@ actor InMemoryStateActor {
         // `currentSchemaVersion()` still returns a sensible value (the max
         // across all kits that have opened on this storage instance).
         let kitCurrent = state.kitSchemaVersions[schema.kitID] ?? 0
+        // Same refusal as the SQLite runner: a stored version the ladder
+        // has no hop for must not be stamped over (see SQLiteBackend).
+        if schema.ladderHasHole(atStoredVersion: kitCurrent) {
+            throw schema.ladderHoleError(atStoredVersion: kitCurrent)
+        }
         let pending = schema.migrations
             .filter { $0.fromVersion >= kitCurrent && $0.toVersion <= schema.version }
             .sorted(by: { $0.fromVersion < $1.fromVersion })

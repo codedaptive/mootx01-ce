@@ -547,11 +547,14 @@ struct UpgradeCommand: AsyncParsableCommand {
     ///   - 19 → open the schema, which applies the single v19 → v20 hop.
     ///   - no row → fresh; anything else → REFUSE, naming the version found,
     ///     and return false so the caller skips every later step.
-    /// The refusal must come first because PersistenceKit's runner stamps the
-    /// declared version whenever no ladder entry matches: any later step's open
-    /// would mark an estate at 11–18 as 20 with none of the v20 objects in
-    /// place. Pre-release development estates at 11–18 are moved to a supported
-    /// version by the schema surgery script, never by this command.
+    /// The refusal comes first so the message names the version and the
+    /// remedy; PersistenceKit's runner refuses a stored version its ladder
+    /// has no hop for on its own (a ladder hole), so no opener can stamp an
+    /// estate at 11–18 as 20. Estates stamped that way by builds before
+    /// 2026-09-19 are repaired in the `.current` branch: the ladder's columns
+    /// are probed and the hops replayed when one is missing. Pre-release
+    /// development estates at 11–18 are moved to a supported version by the
+    /// schema surgery script, never by this command.
     ///
     /// Also runs the CorpusKit basis ladder and stamps an unstamped 1.0.x
     /// estate at format 1.0 so the migration chain seeds it.
@@ -587,6 +590,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                 // The ledger row, read before any schema open (see the doc comment).
                 let stored = try await storage.currentSchemaVersion(for: LocusKitSchema.kitID)
                 var stampedFormat = false
+                var repairedColumns = 0
                 switch LocusKitSchema.upgradePath(storedVersion: stored) {
                 case .unsupported(let found):
                     print("""
@@ -602,6 +606,29 @@ struct UpgradeCommand: AsyncParsableCommand {
                     // version gate above remains the only authority for schema
                     // acceptance before an open can mutate the estate.
                     try await storage.open(schema: LocusKitSchema.schema)
+                    // The ledger row is not proof of the objects behind it. A
+                    // pre-release estate at 11–18 opened by a build older than
+                    // 2026-09-19 was stamped 20 with the v10 → v19 hop never
+                    // applied (the runner now refuses that; estates stamped
+                    // before it did are in the field). Probe every column the
+                    // ladder adds and replay the hops when one is missing —
+                    // every hop operation is idempotent, so a healthy estate
+                    // is untouched and a partial replay can run again.
+                    let missing = try await storage.missingLadderColumns(
+                        schema: LocusKitSchema.schema, fromVersion: LocusKitSchema.supportedUpgradeFloor)
+                    if !missing.isEmpty {
+                        print("  ⓘ schema: the ledger says \(LocusKitSchema.version) but \(missing.count) ladder column(s) are missing (\(missing.map(\.description).joined(separator: ", "))); replaying the v\(LocusKitSchema.supportedUpgradeFloor) → v\(LocusKitSchema.version) ladder")
+                        try await storage.replayLadder(
+                            schema: LocusKitSchema.schema, fromVersion: LocusKitSchema.supportedUpgradeFloor)
+                        let still = try await storage.missingLadderColumns(
+                            schema: LocusKitSchema.schema, fromVersion: LocusKitSchema.supportedUpgradeFloor)
+                        guard still.isEmpty else {
+                            print("  ✗ schema repair: \(still.map(\.description).joined(separator: ", ")) still missing after the replay. Run `mootx01 upgrade` to retry.")
+                            await storage.close()
+                            return false
+                        }
+                        repairedColumns = missing.count
+                    }
                     // CorpusKit's basis ladder (v2 single-blob → v4 chunked, with
                     // part_index in the PRIMARY KEY). GeniusLocusKit opens CorpusKit
                     // through the attached profile, which creates the component tables
@@ -622,7 +649,7 @@ struct UpgradeCommand: AsyncParsableCommand {
                         try await formatStore.stamp(.v1_0, now: Date())
                         stampedFormat = true
                     }
-                    print("  ✓ schema: already at LocusKit schema \(LocusKitSchema.version)\(stampedFormat ? "; estate format stamped 1.0 for the migration chain" : "")")
+                    print("  ✓ schema: already at LocusKit schema \(LocusKitSchema.version)\(repairedColumns > 0 ? "; \(repairedColumns) missing ladder column(s) restored" : "")\(stampedFormat ? "; estate format stamped 1.0 for the migration chain" : "")")
                 case .fresh:
                     print("  ✓ schema: no LocusKit ledger row; schema \(LocusKitSchema.version) is created on the first open")
                 case .upgrade(let from):

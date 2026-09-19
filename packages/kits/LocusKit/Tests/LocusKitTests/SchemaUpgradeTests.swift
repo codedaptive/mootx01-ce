@@ -386,4 +386,57 @@ struct SchemaUpgradeTests {
             #expect(LocusKitSchema.upgradePath(storedVersion: found) == .unsupported(found: found))
         }
     }
+
+    @Test("a pre-release estate at 12 is refused by the runner, not stamped 20")
+    func schema12IsRefusedNotStamped() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        do {
+            // A beta estate: schema-10 tables with the ledger at 12 (stamped
+            // by a ladder-less declaration, the way a beta build wrote it).
+            let stamp = TestStorage.sqlite(url)
+            try await stamp.open(schema: Self.schema10)
+            await stamp.close()
+            let beta = TestStorage.sqlite(url)
+            try await beta.open(schema: SchemaDeclaration(kitID: "LocusKit", version: 12, tables: Self.schema10.tables))
+            #expect(try await beta.currentSchemaVersion(for: "LocusKit") == 12)
+            await beta.close()
+        }
+        let storage = TestStorage.sqlite(url)
+        await #expect(throws: StorageError.self) {
+            try await storage.open(schema: LocusKitSchema.schema)
+        }
+        #expect(try await storage.currentSchemaVersion(for: "LocusKit") == 12, "the ledger must not move")
+        #expect(!(await columnsExist(storage, table: "drawers", columns: ["ssc_facts"])))
+        await storage.close()
+    }
+
+    @Test("an estate stamped 20 without the v19 objects is repaired by replaying the ladder")
+    func stamped20WithoutObjectsIsRepaired() async throws {
+        let url = TestStorage.tempURL()
+        defer { TestStorage.cleanup(url) }
+        do {
+            // What builds before 2026-09-19 left behind: schema-10 tables, ledger 20.
+            let stamp = TestStorage.sqlite(url)
+            try await stamp.open(schema: Self.schema10)
+            await stamp.close()
+            let blind = TestStorage.sqlite(url)
+            try await blind.open(schema: SchemaDeclaration(kitID: "LocusKit", version: LocusKitSchema.version, tables: Self.schema10.tables))
+            #expect(try await blind.currentSchemaVersion(for: "LocusKit") == LocusKitSchema.version)
+            await blind.close()
+        }
+        let storage = TestStorage.sqlite(url)
+        try await storage.open(schema: LocusKitSchema.schema)
+        let missing = try await storage.missingLadderColumns(schema: LocusKitSchema.schema, fromVersion: LocusKitSchema.supportedUpgradeFloor)
+        #expect(missing.contains(LadderColumn(table: "drawers", column: "ssc_facts")))
+        #expect(missing.contains(LadderColumn(table: "kg_facts", column: "evidenceQuote")))
+        try await storage.replayLadder(schema: LocusKitSchema.schema, fromVersion: LocusKitSchema.supportedUpgradeFloor)
+        #expect(try await storage.missingLadderColumns(schema: LocusKitSchema.schema, fromVersion: LocusKitSchema.supportedUpgradeFloor).isEmpty)
+        #expect(await columnsExist(storage, table: "drawers", columns: ["ssc_facts", "subject", "subject_pipeline_version", "subject_at"]))
+        #expect(await columnsExist(storage, table: "kg_facts", columns: ["addedBy", "foreignSourceKey", "foreignRecordID", "evidenceQuote", "sourceDigest", "searchProjection"]))
+        #expect(await columnsExist(storage, table: "container_fingerprints", columns: ["operationalAND"]))
+        #expect(!(await columnsExist(storage, table: "drawers", columns: ["distilled"])), "the replay never resurrects retired objects")
+        #expect(try await storage.currentSchemaVersion(for: "LocusKit") == LocusKitSchema.version)
+        await storage.close()
+    }
 }

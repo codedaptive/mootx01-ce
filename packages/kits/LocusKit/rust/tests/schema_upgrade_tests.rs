@@ -503,3 +503,62 @@ fn upgrade_path_refuses_every_version_but_fresh_floor_and_current() {
         assert_eq!(schema::upgrade_path(found), SchemaUpgradePath::Unsupported { found });
     }
 }
+
+fn open_sqlite(path: &str) -> SqliteStorage {
+    let config = EstateConfiguration::new(
+        Uuid::new_v4(),
+        BackendConfiguration::Sqlite { path: path.to_string(), busy_timeout_secs: 5.0 },
+    );
+    SqliteStorage::new(config).expect("sqlite storage")
+}
+
+#[test]
+fn a_pre_release_estate_at_12_is_refused_by_the_runner_not_stamped_20() {
+    let db = TempDb::new();
+    {
+        // A beta estate: schema-10 tables with the ledger at 12 (stamped by a
+        // ladder-less declaration, the way a beta build wrote it).
+        let stamp = open(&db.path);
+        stamp.open(&schema_10()).expect("stamp schema 10");
+        stamp.close().unwrap();
+        let beta = open(&db.path);
+        beta.open(&SchemaDeclaration::new("LocusKit", 12, schema_10().tables)).expect("stamp 12");
+        assert_eq!(beta.current_schema_version_for("LocusKit").unwrap(), 12);
+        beta.close().unwrap();
+    }
+    let storage = open(&db.path);
+    assert!(storage.open(&schema::schema()).is_err(), "a ladder hole must be refused");
+    assert_eq!(storage.current_schema_version_for("LocusKit").unwrap(), 12, "the ledger must not move");
+    assert!(!columns_exist(&storage, "drawers", &["ssc_facts"]));
+}
+
+#[test]
+fn an_estate_stamped_20_without_the_v19_objects_is_repaired_by_replaying_the_ladder() {
+    let db = TempDb::new();
+    {
+        // What builds before 2026-09-19 left behind: schema-10 tables, ledger 20.
+        let stamp = open(&db.path);
+        stamp.open(&schema_10()).expect("stamp schema 10");
+        stamp.close().unwrap();
+        let blind = open(&db.path);
+        blind
+            .open(&SchemaDeclaration::new("LocusKit", SCHEMA_VERSION, schema_10().tables))
+            .expect("stamp 20 blind");
+        assert_eq!(blind.current_schema_version_for("LocusKit").unwrap(), SCHEMA_VERSION);
+        blind.close().unwrap();
+    }
+    let sqlite = open_sqlite(&db.path);
+    let declaration = schema::schema();
+    sqlite.open(&declaration).expect("current: nothing to migrate");
+    let missing = sqlite.missing_ladder_columns(&declaration, schema::SUPPORTED_UPGRADE_FLOOR).unwrap();
+    assert!(missing.iter().any(|c| c.table == "drawers" && c.column == "ssc_facts"));
+    assert!(missing.iter().any(|c| c.table == "kg_facts" && c.column == "evidenceQuote"));
+    sqlite.replay_ladder(&declaration, schema::SUPPORTED_UPGRADE_FLOOR).expect("replay");
+    assert!(sqlite.missing_ladder_columns(&declaration, schema::SUPPORTED_UPGRADE_FLOOR).unwrap().is_empty());
+    let storage: Arc<dyn Storage> = Arc::new(sqlite);
+    assert!(columns_exist(&storage, "drawers", &["ssc_facts", "subject", "subject_pipeline_version", "subject_at"]));
+    assert!(columns_exist(&storage, "kg_facts", &["addedBy", "foreignSourceKey", "foreignRecordID", "evidenceQuote", "sourceDigest", "searchProjection"]));
+    assert!(columns_exist(&storage, "container_fingerprints", &["operationalAND"]));
+    assert!(!columns_exist(&storage, "drawers", &["distilled"]), "the replay never resurrects retired objects");
+    assert_eq!(storage.current_schema_version_for("LocusKit").unwrap(), SCHEMA_VERSION);
+}

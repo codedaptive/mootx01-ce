@@ -102,6 +102,18 @@ public final class SQLiteStorage: Storage, Sendable {
         try await backend.applyMigrations(schema)
     }
 
+    /// The columns `schema`'s ladder adds from `fromVersion` up that this
+    /// file lacks. Empty when the objects behind the ledger row all exist.
+    public func missingLadderColumns(schema: SchemaDeclaration, fromVersion: Int) async throws -> [LadderColumn] {
+        try await backend.missingLadderColumns(schema: schema, fromVersion: fromVersion)
+    }
+
+    /// Replay `schema`'s hops from `fromVersion` up, ledger untouched: the
+    /// repair for an estate whose ledger row outran its objects.
+    public func replayLadder(schema: SchemaDeclaration, fromVersion: Int) async throws {
+        try await backend.replayLadder(schema: schema, fromVersion: fromVersion)
+    }
+
     public func transaction<T: Sendable>(
         isolation: IsolationLevel,
         _ block: @Sendable (any StorageTransaction) async throws -> T
@@ -510,6 +522,15 @@ actor SQLiteBackend {
 
         let current = try currentSchemaVersion(kitID: schema.kitID)
         guard current < schema.version else { return }
+        // A stored version inside the ladder's range with no hop starting
+        // at it is a hole, not a fresh estate. Replaying the hops above it
+        // and stamping the declared version below would mark the estate
+        // current with every skipped hop's objects missing — which is how a
+        // pre-release LocusKit estate at 11–18 came to read 20 with no
+        // `ssc_facts` column (2026-09-19). Refuse before anything mutates.
+        if schema.ladderHasHole(atStoredVersion: current) {
+            throw schema.ladderHoleError(atStoredVersion: current)
+        }
 
         let pending = schema.migrations
             .filter { $0.fromVersion >= current && $0.toVersion <= schema.version }
@@ -536,6 +557,42 @@ actor SQLiteBackend {
         let final = try currentSchemaVersion(kitID: schema.kitID)
         if final < schema.version {
             try recordSchemaVersion(kitID: schema.kitID, version: schema.version)
+        }
+    }
+
+    /// The columns the ladder adds from `fromVersion` up that this file does
+    /// not have. Empty on a healthy estate. The ledger row says which
+    /// version was stamped; this says whether the objects behind it exist,
+    /// which is the question a repair has to ask.
+    func missingLadderColumns(schema: SchemaDeclaration, fromVersion: Int) throws -> [LadderColumn] {
+        try schema.ladderColumns(fromVersion: fromVersion).filter {
+            try !columnExists(table: $0.table, column: $0.column)
+        }
+    }
+
+    /// Replay every hop from `fromVersion` up in one transaction without
+    /// touching the ledger: the repair for an estate stamped current while
+    /// a hop was skipped. Every operation the runner applies is idempotent
+    /// (addColumn and dropColumn probe first; DDL is IF NOT EXISTS), so a
+    /// hop the estate already carries is a no-op and a replay that dies
+    /// midway can simply run again.
+    func replayLadder(schema: SchemaDeclaration, fromVersion: Int) throws {
+        try registerTableDeclarations(from: schema)
+        let hops = schema.ladderHops(fromVersion: fromVersion)
+        try connection.exec("BEGIN IMMEDIATE")
+        do {
+            for hop in hops {
+                for op in hop.operations {
+                    try applyOperation(op)
+                }
+            }
+            try connection.exec("COMMIT")
+        } catch {
+            try? connection.exec("ROLLBACK")
+            throw StorageError.migrationFailed(
+                version: schema.version,
+                reason: "ladder replay from \(fromVersion): \(error)"
+            )
         }
     }
 

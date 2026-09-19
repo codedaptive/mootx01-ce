@@ -334,11 +334,14 @@ fn run_matrix_records_upgrade(record: &EstateRecord) -> bool {
 ///   - 19 → open the schema, which applies the single v19 → v20 hop.
 ///   - no row → fresh; anything else → REFUSE, naming the version found,
 ///     and return false so the caller skips every later step.
-/// The refusal must come first because persistence-kit's runner stamps the
-/// declared version whenever no ladder entry matches: any later step's open
-/// would mark an estate at 11–18 as 20 with none of the v20 objects in place.
-/// Pre-release development estates at 11–18 are moved to a supported version
-/// by the schema surgery script, never by this command.
+/// The refusal comes first so the message names the version and the remedy;
+/// persistence-kit's runner refuses a stored version its ladder has no hop
+/// for on its own (a ladder hole), so no opener can stamp an estate at 11–18
+/// as 20. Estates stamped that way by builds before 2026-09-19 are repaired
+/// in the `Current` arm: the ladder's columns are probed and the hops
+/// replayed when one is missing. Pre-release development estates at 11–18
+/// are moved to a supported version by the schema surgery script, never by
+/// this command.
 /// Also runs the CorpusKit basis ladder and stamps an unstamped 1.0.x estate
 /// at format 1.0 so the migration chain seeds it.
 /// Twin of Swift `UpgradeCommand.runSchemaUpgrade`.
@@ -373,13 +376,17 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                         busy_timeout_secs: 5.0,
                     },
                 );
-                let storage: Arc<dyn Storage> =
-                    Arc::new(SqliteStorage::new(config).map_err(|e| e.to_string())?);
+                // The concrete handle stays in scope for the ladder repair,
+                // which is a SQLite-only surface; everything else goes
+                // through the trait object.
+                let sqlite = Arc::new(SqliteStorage::new(config).map_err(|e| e.to_string())?);
+                let storage: Arc<dyn Storage> = sqlite.clone();
                 // The ledger row, read before any schema open (see the doc comment).
                 let stored = storage
                     .current_schema_version_for(schema::KIT_ID)
                     .map_err(|e| e.to_string())?;
                 let mut stamped_format = false;
+                let mut repaired_columns = 0usize;
                 let outcome = match schema::upgrade_path(stored) {
                     SchemaUpgradePath::Unsupported { found } => Err(format!(
                         "refused: this estate is at LocusKit schema {found}.\n    This build upgrades schema {} (CE 1.0.35/1.0.37) and serves schema {}; nothing was changed.\n    A pre-release development estate at 11–18 is moved to a supported version by the schema surgery script, not by this build; a newer estate needs a newer build.",
@@ -391,6 +398,43 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                         // timestamps. The raw version gate above remains the only
                         // authority for schema acceptance before an open mutates.
                         storage.open(&schema::schema()).map_err(|e| e.to_string())?;
+                        // The ledger row is not proof of the objects behind it. A
+                        // pre-release estate at 11–18 opened by a build older than
+                        // 2026-09-19 was stamped 20 with the v10 → v19 hop never
+                        // applied (the runner now refuses that; estates stamped
+                        // before it did are in the field). Probe every column the
+                        // ladder adds and replay the hops when one is missing —
+                        // every hop operation is idempotent, so a healthy estate
+                        // is untouched and a partial replay can run again.
+                        let declaration = schema::schema();
+                        let missing = sqlite
+                            .missing_ladder_columns(&declaration, schema::SUPPORTED_UPGRADE_FLOOR)
+                            .map_err(|e| e.to_string())?;
+                        if !missing.is_empty() {
+                            let names: Vec<String> = missing.iter().map(|c| c.to_string()).collect();
+                            println!(
+                                "  ⓘ schema: the ledger says {} but {} ladder column(s) are missing ({}); replaying the v{} → v{} ladder",
+                                schema::SCHEMA_VERSION,
+                                missing.len(),
+                                names.join(", "),
+                                schema::SUPPORTED_UPGRADE_FLOOR,
+                                schema::SCHEMA_VERSION
+                            );
+                            sqlite
+                                .replay_ladder(&declaration, schema::SUPPORTED_UPGRADE_FLOOR)
+                                .map_err(|e| e.to_string())?;
+                            let still = sqlite
+                                .missing_ladder_columns(&declaration, schema::SUPPORTED_UPGRADE_FLOOR)
+                                .map_err(|e| e.to_string())?;
+                            if !still.is_empty() {
+                                let names: Vec<String> = still.iter().map(|c| c.to_string()).collect();
+                                return Err(format!(
+                                    "repair: {} still missing after the replay. Run `mootx01 upgrade` to retry.",
+                                    names.join(", ")
+                                ));
+                            }
+                            repaired_columns = missing.len();
+                        }
                         // CorpusKit's basis ladder (v2 single-blob → v4 chunked, with
                         // part_index in the PRIMARY KEY). GeniusLocusKit opens CorpusKit
                         // through the attached profile, which creates the component tables
@@ -412,8 +456,13 @@ fn run_schema_upgrade(record: &EstateRecord) -> bool {
                             stamped_format = true;
                         }
                         Ok(format!(
-                            "already at LocusKit schema {}{}",
+                            "already at LocusKit schema {}{}{}",
                             schema::SCHEMA_VERSION,
+                            if repaired_columns > 0 {
+                                format!("; {repaired_columns} missing ladder column(s) restored")
+                            } else {
+                                String::new()
+                            },
                             if stamped_format { "; estate format stamped 1.0 for the migration chain" } else { "" }
                         ))
                     }

@@ -228,3 +228,74 @@ public extension TableDeclaration {
         createdHlcColumn != nil
     }
 }
+
+// MARK: - Ladder shape
+
+/// One column a migration ladder adds: the check target of a schema repair.
+public struct LadderColumn: Sendable, Equatable, Hashable, CustomStringConvertible {
+    public let table: String
+    public let column: String
+
+    public init(table: String, column: String) {
+        self.table = table
+        self.column = column
+    }
+
+    public var description: String { "\(table).\(column)" }
+}
+
+extension SchemaDeclaration {
+    /// True when `stored` is a version this ladder cannot move: nonzero, no
+    /// hop starts at it, and at least one hop starts below it. Such a
+    /// version sits inside the ladder's range with no entry — a pre-release
+    /// LocusKit estate at 11–18, for example. Replaying the hops above it
+    /// and stamping the declared version would mark the estate current with
+    /// every skipped hop's objects missing, so a runner must refuse instead.
+    ///
+    /// A stored version below every hop is not a hole: the base CREATE
+    /// carried those versions and the ladder replays on top of it, which is
+    /// how every kit whose ladder starts above 1 has always opened. A
+    /// ladder with no hops never has a hole.
+    public func ladderHasHole(atStoredVersion stored: Int) -> Bool {
+        guard stored > 0, stored < version, !migrations.isEmpty else { return false }
+        if migrations.contains(where: { $0.fromVersion == stored }) { return false }
+        return migrations.contains(where: { $0.fromVersion < stored })
+    }
+
+    /// The hops that start at or above `fromVersion`, in ladder order: the
+    /// set a repair replays.
+    public func ladderHops(fromVersion: Int) -> [Migration] {
+        migrations
+            .filter { $0.fromVersion >= fromVersion }
+            .sorted(by: { $0.fromVersion < $1.fromVersion })
+    }
+
+    /// Every column the hops from `fromVersion` up add. A storage backend
+    /// probes these to tell a stamped-but-incomplete estate from a healthy
+    /// one; the ledger row alone cannot.
+    public func ladderColumns(fromVersion: Int) -> [LadderColumn] {
+        var seen: Set<LadderColumn> = []
+        var ordered: [LadderColumn] = []
+        for hop in ladderHops(fromVersion: fromVersion) {
+            for op in hop.operations {
+                if case .addColumn(let table, let column) = op {
+                    let ref = LadderColumn(table: table, column: column.name)
+                    if seen.insert(ref).inserted { ordered.append(ref) }
+                }
+            }
+        }
+        return ordered
+    }
+
+    /// The refusal a runner throws for a hole, worded for the person who
+    /// sees it: which kit, which version, and that a newer or older build
+    /// is the only thing that moves it.
+    public func ladderHoleError(atStoredVersion stored: Int) -> StorageError {
+        .migrationFailed(
+            version: stored,
+            reason: "kit \(kitID) declares no migration from stored schema version \(stored); "
+                + "opening would stamp version \(version) without the skipped objects. "
+                + "This estate needs a build whose ladder starts at \(stored)."
+        )
+    }
+}

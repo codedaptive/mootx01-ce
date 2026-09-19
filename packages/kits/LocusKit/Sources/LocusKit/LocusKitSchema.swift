@@ -111,9 +111,10 @@ public enum LocusKitSchema {
     /// this ladder. The v10 → v19 hop applies only the deltas that survive at
     /// 19 and never creates the v16–v18 adornment or distilled objects.
     /// `mootx01 upgrade` decides with `upgradePath(storedVersion:)` BEFORE
-    /// opening the schema, because PersistenceKit's runner stamps the declared
-    /// version whenever no ladder entry matches, which would silently mark an
-    /// unsupported estate current.
+    /// opening the schema so the refusal names the version and the remedy.
+    /// PersistenceKit's runner refuses on its own when the stored version
+    /// sits inside the ladder's range with no hop starting at it (a ladder
+    /// hole), so no other opener can stamp such an estate current either.
     ///
     /// Version history (versions before the ladder live in the base CREATE):
     /// v2 keys.ext; v3 nodes; v4 parent_node_id replaces wing/room; v5
