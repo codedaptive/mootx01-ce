@@ -3722,7 +3722,7 @@ impl DrawerStore for DrawerStoreCore {
         // resolve wing/room names to parent_node_id via
         // NodeStore create-on-demand, then update parent_node_id.
         if to_room.is_some() || to_wing.is_some() {
-            let (current_parent_id, content) = {
+            let (current_parent_id, content, moved_adjectives) = {
                 let rows = self
                     .storage
                     .row_store()
@@ -3738,9 +3738,20 @@ impl DrawerStore for DrawerStoreCore {
                     )
                     .map_err(map_storage_err)?;
                 rows.first()
-                    .map(|r| (string_value_of(r.get("parent_node_id")), string_value_of(r.get("content"))))
+                    .map(|r| (
+                        string_value_of(r.get("parent_node_id")),
+                        string_value_of(r.get("content")),
+                        match r.get("adjectiveBitmap") { Some(TypedValue::Int(v)) | Some(TypedValue::Bitmap(v)) => *v, _ => 0 },
+                    ))
                     .unwrap_or_default()
             };
+            // A restricted or secret drawer is placed only among hidden chests
+            // (`NodeStore::placement_parent`); bits 6-11 of the adjective
+            // bitmap carry the sensitivity the containment gate enforces.
+            let moved_hidden = matches!(
+                crate::adjectives::AdjectiveSensitivity::from_raw(bit_field::extract_field(moved_adjectives, 6, 6)),
+                crate::adjectives::AdjectiveSensitivity::Restricted | crate::adjectives::AdjectiveSensitivity::Secret
+            );
             let current_names = self
                 .resolve_node_names(&[current_parent_id.clone()])?;
             let current = current_names
@@ -3757,7 +3768,7 @@ impl DrawerStore for DrawerStoreCore {
                 let room_node = ns.create_node(resolved_room, wing_node.id, now)?;
                 // Chest placement (ADR-026, spec § 12): a moved drawer is
                 // filed by its content key under the target room.
-                let parent_node_id = ns.placement_parent(room_node.id, &content)?;
+                let parent_node_id = ns.placement_parent(room_node.id, &content, moved_hidden)?;
                 update_vals.insert(
                     "parent_node_id".to_string(),
                     TypedValue::Text(parent_node_id.to_string()),

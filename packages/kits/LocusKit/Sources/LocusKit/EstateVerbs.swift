@@ -197,7 +197,8 @@ public extension Estate {
         // Chest placement (ADR-026, spec § 12): the room itself until it has
         // been re-binned, then the chest the content key selects.
         let parentNodeId = try await nodeStore.placementParent(
-            roomId: roomNode.id, content: frame.content)
+            roomId: roomNode.id, content: frame.content,
+            hidden: Self.isHiddenForPlacement(frame.sensitivity))
 
         let drawer = Drawer(
             content: frame.content,
@@ -396,7 +397,8 @@ public extension Estate {
             // batch itself re-binned, which it never does, so the per-frame
             // read is one cached node query per room.
             let parentNodeId = try await nodeStore.placementParent(
-                roomId: triple.roomNodeId, content: frame.content)
+                roomId: triple.roomNodeId, content: frame.content,
+                hidden: Self.isHiddenForPlacement(frame.sensitivity))
             let drawer = Drawer(
                 content: frame.content,
                 parentNodeId: parentNodeId.uuidString,
@@ -530,7 +532,7 @@ public extension Estate {
         guard let roomNode = try await existingRoomNode(wing: wing, room: room) else { return [] }
         var ranges: [ChestRange] = []
         for chest in try await nodeStore.activeChests(roomId: roomNode.id) {
-            guard let low = MortonKey(hex: chest.displayName) else {
+            guard let low = MortonKey(hex: NodeStore.chestLowKeyHex(name: chest.displayName)) else {
                 throw LocusKitError.invalidContent(
                     "chest \(chest.id) under \(wing)/\(room) is not named by a placement key")
             }
@@ -592,23 +594,38 @@ public extension Estate {
             throw LocusKitError.invalidContent("rebinRoom: room \(wing)/\(room) does not exist")
         }
         let drawers = try await store.drawersIn(wing: wing, room: room)
-        var keyed: [(key: MortonKey, id: String, parent: String)] = drawers.map {
-            (ChestPlacement.key(ContentFingerprint.fingerprint(of: $0.content)), $0.id, $0.parentNodeId)
-        }
-        // Ties on the key break on the id so the deal is deterministic.
-        keyed.sort { $0.key == $1.key ? $0.id < $1.id : $0.key < $1.key }
-        let ranges = ChestPlacement.deal(sortedKeys: keyed.map(\.key), fill: ChestPlacement.fill)
-
         var assignments: [(chestId: UUID, drawerIds: [String])] = []
         var kept = Set<UUID>()
-        var start = 0
-        for range in ranges {
-            let chest = try await nodeStore.createChest(roomId: roomNode.id, lowKeyHex: range.low.hex, now: now)
-            kept.insert(chest.id)
-            let chunk = keyed[start..<(start + range.count)]
-            let moving = chunk.filter { $0.parent != chest.id.uuidString }.map(\.id)
-            assignments.append((chest.id, moving))
-            start += range.count
+        var chestCount = 0
+        // Two deals: the visible drawers and the hidden (restricted or
+        // secret) ones, each into chests of its own class, so a hidden
+        // drawer never decides which chest a visible drawer lands in
+        // (`NodeStore.chestName`).
+        for hidden in [false, true] {
+            var keyed: [(key: MortonKey, id: String, parent: String)] = drawers
+                .filter { Self.isHiddenForPlacement($0.adjectiveSensitivity) == hidden }
+                .map { (ChestPlacement.key(ContentFingerprint.fingerprint(of: $0.content)), $0.id, $0.parentNodeId) }
+            if keyed.isEmpty { continue }
+            // Ties on the key break on the id so the deal is deterministic.
+            keyed.sort { $0.key == $1.key ? $0.id < $1.id : $0.key < $1.key }
+            let ranges = ChestPlacement.deal(sortedKeys: keyed.map(\.key), fill: ChestPlacement.fill)
+            // Identical content gives identical keys; a second range at the
+            // same low key is its own chest, named by ordinal.
+            var ordinals: [String: Int] = [:]
+            var start = 0
+            for range in ranges {
+                let hex = range.low.hex
+                let ordinal = ordinals[hex, default: 0]
+                ordinals[hex] = ordinal + 1
+                let name = NodeStore.chestName(lowKeyHex: hex, hidden: hidden, ordinal: ordinal)
+                let chest = try await nodeStore.createChest(roomId: roomNode.id, name: name, now: now)
+                kept.insert(chest.id)
+                chestCount += 1
+                let chunk = keyed[start..<(start + range.count)]
+                let moving = chunk.filter { $0.parent != chest.id.uuidString }.map(\.id)
+                assignments.append((chest.id, moving))
+                start += range.count
+            }
         }
 
         let changedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
@@ -625,7 +642,7 @@ public extension Estate {
             beforeLatticeAnchor: anchor,
             afterLatticeAnchor: anchor,
             actor: changedBy.isEmpty ? "estate" : changedBy,
-            reason: "room=\(wing)/\(room) drawers=\(drawers.count) chests=\(ranges.count)")
+            reason: "room=\(wing)/\(room) drawers=\(drawers.count) chests=\(chestCount)")
         // The closure is @Sendable: hand it an immutable copy of the plan.
         let plan = assignments
         try await store.storage.transaction(isolation: .serializable) { txn in
@@ -640,7 +657,28 @@ public extension Estate {
         for chest in try await nodeStore.activeChests(roomId: roomNode.id) where !kept.contains(chest.id) {
             _ = try await nodeStore.tombstoneNode(id: chest.id, now: now)
         }
-        return ranges.count
+        // ADR-027 D1: every chest carries its own root and the room folds
+        // them. The deal moved drawers between chests, so each kept chest's
+        // stored root is recomputed here and the room, wing and estate roots
+        // rolled up over them; an incremental rollup after a later write
+        // then folds current sibling roots, never empty or stale ones
+        // (codex finding 2026-09-19).
+        for chestId in kept {
+            let root = try await computeChestMerkleRoot(chestNodeId: chestId)
+            try await nodeStore.updateMerkleRoot(nodeId: chestId, merkleRoot: root, now: now)
+        }
+        try await rollupMerkleRoots(containerNodeId: roomNode.id, now: now)
+        return chestCount
+    }
+
+    /// A restricted or secret drawer is dealt into hidden chests and placed
+    /// only among them (`NodeStore.placementParent`). The adjective
+    /// sensitivity (bits 6–11 of the adjective bitmap) is the field the
+    /// read-side containment gate (`SensitivityFilteredStorage`) enforces,
+    /// so it is the one that decides what an ungranted caller can see and
+    /// therefore the one placement keys on.
+    static func isHiddenForPlacement(_ sensitivity: AdjectiveSensitivity) -> Bool {
+        sensitivity == .restricted || sensitivity == .secret
     }
 
     func addDrawerCovered(_ drawer: Drawer, now: Date) async throws {

@@ -318,7 +318,11 @@ extension GeniusLocusKit {
         let allDrawers = try await estate.drawersIn(containerNodeId: container.nodeId)
         var drawers: [Drawer] = []
         for drawer in allDrawers {
-            if drawer.sensitivity == .restricted || drawer.sensitivity == .secret {
+            // Adjective sensitivity: the field the read-side containment gate
+            // enforces, so the cohort excludes exactly what an ungranted
+            // caller cannot read (the provenance sensitivity is a separate
+            // field capture does not set from the frame).
+            if drawer.adjectiveSensitivity == .restricted || drawer.adjectiveSensitivity == .secret {
                 if drawer.isAnomalous {
                     changed += try await estate.setAnomalousFlag(
                         drawerId: drawer.id, anomalous: false, now: now)

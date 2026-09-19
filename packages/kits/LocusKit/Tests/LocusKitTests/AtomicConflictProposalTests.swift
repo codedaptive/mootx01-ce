@@ -85,7 +85,7 @@ struct AtomicConflictProposalTests {
         let nodes = NodeStore(storage: storage)
         let roomId = UUID(uuidString: source.parentNodeId)!
         let now = Date(timeIntervalSince1970: 1_700_000_002)
-        let chest = try await nodes.createChest(roomId: roomId, lowKeyHex: String(repeating: "0", count: 128), now: now)
+        let chest = try await nodes.createChest(roomId: roomId, name: String(repeating: "0", count: 128), now: now)
         let inChestSource = Drawer(
             id: TestStorage.tid("chest-source"), content: "the service is enabled",
             parentNodeId: chest.id.uuidString, addedBy: "test", filedAt: now, embeddingModelID: "test-model")

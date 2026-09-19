@@ -300,7 +300,7 @@ public extension Estate {
         // Chest placement (ADR-026, spec § 12): a dataset handle is a drawer
         // like any other and is placed by its content key.
         let parentNodeId = try await nodeStore.placementParent(
-            roomId: roomNode.id, content: contentJSON)
+            roomId: roomNode.id, content: contentJSON, hidden: false)
 
         let drawer = Drawer(
             content: contentJSON,

@@ -383,35 +383,80 @@ impl NodeStore {
     /// first chest when the key falls below every low key (spec § 12). The
     /// key is over the content fingerprint, never the stored structural
     /// one (ADR-026 D2). One node query and a binary search over names.
-    pub fn placement_parent(&self, room_id: Uuid, content: &str) -> Result<Uuid, LocusKitError> {
-        let chests = self.active_chests(room_id)?;
+    /// `hidden` selects the class of chest a drawer may join: a restricted
+    /// or secret drawer joins only hidden chests, every other drawer only
+    /// visible ones, so a hidden drawer never moves a visible drawer's
+    /// chest boundary (see `chest_name`). With no chest of the drawer's
+    /// class the drawer sits on the room until the next re-bin deals it.
+    pub fn placement_parent(&self, room_id: Uuid, content: &str, hidden: bool) -> Result<Uuid, LocusKitError> {
+        let chests: Vec<Node> = self
+            .active_chests(room_id)?
+            .into_iter()
+            .filter(|c| Self::chest_is_hidden(&c.lookup_name) == hidden)
+            .collect();
         if chests.is_empty() {
             return Ok(room_id);
         }
         let hex = chest_placement::key(&content_fingerprint::fingerprint(content)).hex();
-        // partition_point: the count of names <= hex; the last of them is the chest.
-        let below = chests.partition_point(|c| c.lookup_name.as_str() <= hex.as_str());
+        // partition_point: the count of low keys <= hex; the last of them is
+        // the chest. Within one low key the ordinal suffixes sort after the
+        // bare name, so the last match is the newest range at that key.
+        let below = chests.partition_point(|c| Self::chest_low_key_hex(&c.lookup_name) <= hex.as_str());
         Ok(if below == 0 { chests[0].id } else { chests[below - 1].id })
     }
 
-    /// The id of the chest named `low_key_hex` under `room_id`, derived rather
+    /// A chest's name: the 128-hex low key of its range, `-hidden` appended
+    /// for a chest of restricted or secret drawers, and `-<n>` appended for
+    /// the n-th further range at the same low key within one deal.
+    ///
+    /// Two reasons the bare key is not enough (codex findings 2026-09-19):
+    /// identical content gives identical keys, so a deal of 500 identical
+    /// captures holds two 250-row ranges at one key and each must be its
+    /// own chest, or one chest silently holds 500; and hidden drawers are
+    /// dealt apart from visible ones so a caller without a sensitivity
+    /// grant cannot read hidden content's placement off the boundaries of
+    /// the visible chests it can probe. The hex prefix keeps name order
+    /// equal to key order within a class. Twin of Swift `NodeStore.chestName`.
+    pub fn chest_name(low_key_hex: &str, hidden: bool, ordinal: usize) -> String {
+        let mut name = low_key_hex.to_string();
+        if hidden {
+            name.push_str("-hidden");
+        }
+        if ordinal > 0 {
+            name.push_str(&format!("-{ordinal}"));
+        }
+        name
+    }
+
+    /// The low key hex a chest name starts with (everything before the
+    /// first `-`).
+    pub fn chest_low_key_hex(name: &str) -> &str {
+        name.split('-').next().unwrap_or(name)
+    }
+
+    /// True when the name marks a chest of restricted or secret drawers.
+    pub fn chest_is_hidden(name: &str) -> bool {
+        name.contains("-hidden")
+    }
+
+    /// The id of the chest named `name` under `room_id`, derived rather
     /// than random so two devices re-binning the same room name the same
     /// chest with the same id and their rows converge under sync (ADR-026
     /// D7). SHA-256 over a fixed prefix, the room id and the name, folded to
     /// a version-5-shaped UUID the same way `deterministic_uuid` folds
     /// drawer ids.
-    pub fn chest_id(room_id: Uuid, low_key_hex: &str) -> Uuid {
-        crate::merkle_rollup::deterministic_uuid(&format!("chest:{}:{}", room_id.to_string().to_lowercase(), low_key_hex))
+    pub fn chest_id(room_id: Uuid, name: &str) -> Uuid {
+        crate::merkle_rollup::deterministic_uuid(&format!("chest:{}:{}", room_id.to_string().to_lowercase(), name))
     }
 
-    /// The chest named `low_key_hex` under `room_id`, created if absent. A
+    /// The chest named `name` (see `chest_name`) under `room_id`, created if absent. A
     /// tombstoned chest with this derived id is brought back rather than
     /// re-inserted: the id is a function of the name, so a later re-bin
     /// that produces the same low key must land on the same row, and a
     /// chest carries nothing but its name, so bringing it back loses no
     /// history. (Rooms and wings keep the no-resurrection guard; chests are
     /// the one node kind whose identity is derived.)
-    pub fn create_chest(&self, room_id: Uuid, low_key_hex: &str, now: i64) -> Result<Node, LocusKitError> {
+    pub fn create_chest(&self, room_id: Uuid, name: &str, now: i64) -> Result<Node, LocusKitError> {
         match self.get_node(room_id)? {
             Some(room) if room.depth == 2 => {}
             _ => {
@@ -420,7 +465,7 @@ impl NodeStore {
                 )))
             }
         }
-        let id = Self::chest_id(room_id, low_key_hex);
+        let id = Self::chest_id(room_id, name);
         if let Some(existing) = self.get_node(id)? {
             if existing.is_active() {
                 return Ok(existing);
@@ -442,8 +487,8 @@ impl NodeStore {
         let mut values = BTreeMap::new();
         values.insert("id".into(), TypedValue::Text(id.to_string()));
         values.insert("parent_id".into(), TypedValue::Text(room_id.to_string()));
-        values.insert("display_name".into(), TypedValue::Text(low_key_hex.to_string()));
-        values.insert("lookup_name".into(), TypedValue::Text(Node::normalize_lookup_name(low_key_hex)));
+        values.insert("display_name".into(), TypedValue::Text(name.to_string()));
+        values.insert("lookup_name".into(), TypedValue::Text(Node::normalize_lookup_name(name)));
         values.insert("depth".into(), TypedValue::Int(Self::CHEST_DEPTH as i64));
         values.insert("lifecycle".into(), TypedValue::Int(0));
         values.insert("created_hlc".into(), TypedValue::Hlc(created_hlc));
