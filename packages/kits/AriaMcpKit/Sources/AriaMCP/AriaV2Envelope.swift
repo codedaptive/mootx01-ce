@@ -1,3 +1,4 @@
+import Foundation
 import AriaMCPWire
 
 /// The final v2 MCP projection.  Typed operation services provide `data` and
@@ -60,6 +61,47 @@ public enum AriaV2Envelope {
             ]),
             "isError": .bool(true),
         ])
+    }
+
+    /// Append the serialized structured payload as the LAST text block of a v2
+    /// result (MCP tools specification, Structured Content: "a tool that
+    /// returns structured content SHOULD also return the serialized JSON in a
+    /// TextContent block").
+    ///
+    /// Why this exists (2026-09-18): Claude Desktop hands the model only the
+    /// `content` text blocks and ignores `structuredContent`; Claude Code does
+    /// the reverse. With the compact line alone in the text block, every v2
+    /// read (estate map, status, drains, help, journal, recall rows) reached
+    /// Desktop as a one-line completion sentence and nothing else. The
+    /// serialized payload as a trailing block gives a text-only client the
+    /// whole answer while `content[0]` keeps its compact line, its hint and
+    /// its coaching block for the clients and tests that read those.
+    ///
+    /// Runs as the last egress transform (position 40, after `report_withheld`
+    /// at 30) so the serialized block reflects every earlier egress edit,
+    /// including redaction. Applied to refusals as well: their structured
+    /// error is data a text-only client needs. Serialization is sorted-key
+    /// and slash-unescaped, so the Rust twin (`render::append_structured_text`)
+    /// produces the same bytes. Idempotent: an identical trailing block is
+    /// not appended twice. A result without `structuredContent` (nothing to
+    /// serialize) or one that cannot be serialized is returned unchanged.
+    public static func appendStructuredText(_ result: JSONValue) -> JSONValue {
+        let options: JSONSerialization.WritingOptions = [.sortedKeys, .withoutEscapingSlashes]
+        guard case .object(var envelope) = result,
+              let structured = envelope["structuredContent"],
+              let data = try? JSONSerialization.data(
+                  withJSONObject: structured.foundationObject, options: options),
+              let serialized = String(data: data, encoding: .utf8)
+        else { return result }
+        var blocks: [JSONValue] = []
+        if case .array(let existing) = envelope["content"] { blocks = existing }
+        if case .object(let last)? = blocks.last,
+           case .string(let text)? = last["text"], text == serialized {
+            return result
+        }
+        blocks.append(.object(["type": .string("text"), "text": .string(serialized)]))
+        envelope["content"] = .array(blocks)
+        return .object(envelope)
     }
 
     /// Attach a coaching hint to a non-error v2 result envelope (RULING 3, §12.5).
