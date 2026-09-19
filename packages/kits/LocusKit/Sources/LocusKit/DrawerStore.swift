@@ -2095,8 +2095,13 @@ public actor DrawerStore {
                         displayName: resolvedRoom, parentId: wingNode.id, now: now)
                     // Chest placement (ADR-026, spec § 12): a moved drawer is
                     // filed by its content key under the target room.
+                    // Adjective sensitivity, bits 6–11 of the adjective bitmap: the
+                    // field the containment gate enforces (`SensitivityFilteredStorage`).
+                    let movedSensitivity = AdjectiveSensitivity(rawValue: Int(
+                        (Self.int64(row["adjectiveBitmap"]) >> 6) & 0x3F)) ?? .normal
                     let parentNodeId = try await nodeStore.placementParent(
-                        roomId: roomNode.id, content: Self.string(row["content"]))
+                        roomId: roomNode.id, content: Self.string(row["content"]),
+                        hidden: movedSensitivity == .restricted || movedSensitivity == .secret)
                     updateValues["parent_node_id"] = .text(parentNodeId.uuidString)
                 }
             }

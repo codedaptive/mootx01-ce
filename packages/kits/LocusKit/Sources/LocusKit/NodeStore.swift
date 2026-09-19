@@ -337,42 +337,79 @@ public actor NodeStore {
     /// first chest when the key falls below every low key (spec § 12). The
     /// key is over the content fingerprint, never the stored structural
     /// one (ADR-026 D2). One node query and a binary search over names.
-    public func placementParent(roomId: UUID, content: String) async throws -> UUID {
-        let chests = try await activeChests(roomId: roomId)
+    /// `hidden` selects the class of chest a drawer may join: a restricted
+    /// or secret drawer joins only hidden chests, every other drawer only
+    /// visible ones, so a hidden drawer never moves a visible drawer's
+    /// chest boundary (see `chestName`). With no chest of the drawer's
+    /// class the drawer sits on the room until the next re-bin deals it.
+    public func placementParent(roomId: UUID, content: String, hidden: Bool) async throws -> UUID {
+        let chests = try await activeChests(roomId: roomId).filter { Self.chestIsHidden(name: $0.lookupName) == hidden }
         guard let first = chests.first else { return roomId }
         let hex = ChestPlacement.key(ContentFingerprint.fingerprint(of: content)).hex
-        // Greatest index whose name <= hex.
+        // The last chest whose low key <= hex. Chests come sorted by name,
+        // and within one low key the ordinal suffixes sort after the bare
+        // name, so the last match is the newest range at that key.
         var lo = 0, hi = chests.count - 1, found = -1
         while lo <= hi {
             let mid = (lo + hi) / 2
-            if chests[mid].lookupName <= hex { found = mid; lo = mid + 1 } else { hi = mid - 1 }
+            if Self.chestLowKeyHex(name: chests[mid].lookupName) <= hex { found = mid; lo = mid + 1 } else { hi = mid - 1 }
         }
         return found >= 0 ? chests[found].id : first.id
     }
 
-    /// The id of the chest named `lowKeyHex` under `roomId`, derived rather
+    /// A chest's name: the 128-hex low key of its range, `-hidden` appended
+    /// for a chest of restricted or secret drawers, and `-<n>` appended for
+    /// the n-th further range at the same low key within one deal.
+    ///
+    /// Two reasons the bare key is not enough (codex findings 2026-09-19):
+    /// identical content gives identical keys, so a deal of 500 identical
+    /// captures holds two 250-row ranges at one key and each must be its
+    /// own chest, or one chest silently holds 500; and hidden drawers are
+    /// dealt apart from visible ones so a caller without a sensitivity
+    /// grant cannot read hidden content's placement off the boundaries of
+    /// the visible chests it can probe. The hex prefix keeps name order
+    /// equal to key order within a class.
+    public static func chestName(lowKeyHex: String, hidden: Bool, ordinal: Int) -> String {
+        var name = lowKeyHex
+        if hidden { name += "-hidden" }
+        if ordinal > 0 { name += "-\(ordinal)" }
+        return name
+    }
+
+    /// The low key hex a chest name starts with (everything before the
+    /// first `-`).
+    public static func chestLowKeyHex(name: String) -> String {
+        name.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).first.map(String.init) ?? name
+    }
+
+    /// True when the name marks a chest of restricted or secret drawers.
+    public static func chestIsHidden(name: String) -> Bool {
+        name.contains("-hidden")
+    }
+
+    /// The id of the chest named `name` under `roomId`, derived rather
     /// than random so two devices re-binning the same room name the same
     /// chest with the same id and their rows converge under sync (ADR-026
     /// D7). SHA-256 over a fixed prefix, the room id and the name, folded
     /// to a version-5-shaped UUID the same way `Estate.deterministicUUID`
     /// folds drawer ids.
-    public static func chestId(roomId: UUID, lowKeyHex: String) -> UUID {
-        Estate.deterministicUUID(from: "chest:\(roomId.uuidString.lowercased()):\(lowKeyHex)")
+    public static func chestId(roomId: UUID, name: String) -> UUID {
+        Estate.deterministicUUID(from: "chest:\(roomId.uuidString.lowercased()):\(name)")
     }
 
-    /// The chest named `lowKeyHex` under `roomId`, created if absent. A
+    /// The chest named `name` (see `chestName`) under `roomId`, created if absent. A
     /// tombstoned chest with this derived id is brought back rather than
     /// re-inserted: the id is a function of the name, so a later re-bin
     /// that produces the same low key must land on the same row, and a
     /// chest carries nothing but its name, so bringing it back loses no
     /// history. (Rooms and wings keep the no-resurrection guard; chests
     /// are the one node kind whose identity is derived.)
-    public func createChest(roomId: UUID, lowKeyHex: String, now: Date) async throws -> Node {
+    public func createChest(roomId: UUID, name: String, now: Date) async throws -> Node {
         guard let room = try await getNode(id: roomId), room.depth == 2 else {
             throw LocusKitError.invalidContent(
                 "NodeStore: chest parent \(roomId) is not a room (spec § 12)")
         }
-        let id = Self.chestId(roomId: roomId, lowKeyHex: lowKeyHex)
+        let id = Self.chestId(roomId: roomId, name: name)
         if let existing = try await getNode(id: id) {
             if existing.isActive { return existing }
             _ = try await storage.rowStore.update(
@@ -397,8 +434,8 @@ public actor NodeStore {
             values: [
                 "id": .uuid(id),
                 "parent_id": .uuid(roomId),
-                "display_name": .text(lowKeyHex),
-                "lookup_name": .text(Node.normalizeLookupName(lowKeyHex)),
+                "display_name": .text(name),
+                "lookup_name": .text(Node.normalizeLookupName(name)),
                 "depth": .int(Int64(Self.chestDepth)),
                 "lifecycle": .int(0),
                 "created_hlc": .hlc(createdHlc),
