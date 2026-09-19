@@ -164,6 +164,22 @@ struct UpgradeCommand: AsyncParsableCommand {
         // active estate. Install-wide work (binary, plugin, agents, encryption
         // offer) belongs to the machine's own estates only, so a transient
         // estate runs the estate migration steps and nothing else.
+        #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG && os(macOS)
+        // A 1.0.x install kept its estate flat in the configuration directory;
+        // the catalog names databases/default/ and its open moves the estate
+        // there. The resident is stopped BEFORE that open, and a default slot
+        // claimed by both layouts is resolved here when it is provable (see
+        // FlatLayoutStep). Whatever `--db` selects, the flat estate is the
+        // machine's default estate, so this runs before any open.
+        if FlatLayoutStep.pending() {
+            let adopted = await ResidentDaemonQuiesce.run(
+                residentServes: true,
+                step: "estate layout migration",
+                daemon: .launchd(homeDirectory: home)
+            ) { await FlatLayoutStep.adopt() } ?? false
+            guard adopted else { throw ExitCode.failure }
+        }
+        #endif
         let estate: EstateRecord
         do {
             estate = try EstateOpen.catalog(selecting: db).active
@@ -171,19 +187,6 @@ struct UpgradeCommand: AsyncParsableCommand {
             print("mootx01 upgrade: \(error)")
             throw ExitCode.failure
         }
-        #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG && os(macOS)
-        // A 1.0.x install kept its estate flat in the configuration directory;
-        // the record above names databases/default/. Move it before any step
-        // opens the record's database (see FlatLayoutStep).
-        if FlatLayoutStep.pending(estate) {
-            let moved = await ResidentDaemonQuiesce.run(
-                residentServes: true,
-                step: "estate layout migration",
-                daemon: .launchd(homeDirectory: home)
-            ) { FlatLayoutStep.migrate(estate) } ?? false
-            guard moved else { throw ExitCode.failure }
-        }
-        #endif
         let estateOnly = backfillOnly || estate.kind == .transient
         let downloader = ReleaseDownloader(
             repo: Self.repoSlug(),

@@ -478,4 +478,55 @@ struct EstateCatalogTests {
         let contents = try FileManager.default.contentsOfDirectory(atPath: data.path)
         #expect(contents == [EstateCatalog.fileName])
     }
+
+    #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG
+    // The flat-layout adoption runs inside the open (FlatLayoutMigration.swift
+    // has the move's own tests); these two pin the seam: the first open of a
+    // machine holding a pre-catalog flat estate moves it into the default
+    // record's directory before any caller can open the database, and an
+    // open that finds both layouts populated refuses and touches nothing.
+    // The default key hook probes the Keychain read-only for accounts no
+    // estate has; nothing is minted.
+
+    @Test func openAdoptsAFlatEstateBeforeReturning() throws {
+        let data = try configuration()
+        defer { try? FileManager.default.removeItem(at: data); EstateCatalog.configurationDirectoryOverride = nil }
+        for name in [EstateCatalogNames.database, EstateCatalogNames.databaseWAL, EstateCatalogNames.vectors] {
+            try Data(name.utf8).write(to: data.appendingPathComponent(name, isDirectory: false))
+        }
+        #expect(FlatLayoutMigration.pending(configurationDirectory: data))
+
+        let catalog = try EstateCatalog.open()
+        let record = catalog.active
+        #expect(record.name == EstateCatalog.defaultName)
+        for name in [EstateCatalogNames.database, EstateCatalogNames.databaseWAL, EstateCatalogNames.vectors] {
+            #expect(FileManager.default.fileExists(atPath: record.directory.appendingPathComponent(name).path), "\(name) adopted")
+            #expect(!FileManager.default.fileExists(atPath: data.appendingPathComponent(name).path), "\(name) gone from the flat layout")
+        }
+        #expect(try Data(contentsOf: record.databaseURL) == Data(EstateCatalogNames.database.utf8))
+        #expect(!FlatLayoutMigration.pending(configurationDirectory: data))
+        // A second open has nothing to adopt and returns the same catalog.
+        #expect(try EstateCatalog.open().active == record)
+    }
+
+    @Test func openRefusesTwoDefaultEstatesAndTouchesNothing() throws {
+        let data = try configuration()
+        defer { try? FileManager.default.removeItem(at: data); EstateCatalog.configurationDirectoryOverride = nil }
+        let record = try EstateCatalog.create().active
+        try FileManager.default.createDirectory(at: record.directory, withIntermediateDirectories: true)
+        try Data("catalog".utf8).write(to: record.databaseURL)
+        let flat = data.appendingPathComponent(EstateCatalogNames.database, isDirectory: false)
+        try Data("flat".utf8).write(to: flat)
+        try Data("v".utf8).write(to: data.appendingPathComponent(EstateCatalogNames.vectors, isDirectory: false))
+
+        #expect(throws: EstateCatalogError.twoDefaultEstates(flat: flat, catalog: record.databaseURL)) {
+            try EstateCatalog.open()
+        }
+        #expect(try Data(contentsOf: flat) == Data("flat".utf8))
+        #expect(try Data(contentsOf: record.databaseURL) == Data("catalog".utf8))
+        #expect(FileManager.default.fileExists(atPath: data.appendingPathComponent(EstateCatalogNames.vectors).path))
+        #expect(!FileManager.default.fileExists(atPath: record.vectorsURL.path))
+        #expect(FlatLayoutMigration.pending(configurationDirectory: data), "still the operator's to resolve")
+    }
+    #endif
 }
