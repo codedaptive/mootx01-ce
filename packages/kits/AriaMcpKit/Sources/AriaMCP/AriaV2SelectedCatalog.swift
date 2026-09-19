@@ -264,7 +264,7 @@ enum AriaV2SelectedCatalog {
             // caller can verify the server's interpretation of a vague or
             // expanded cue.
             properties: recallProperties(extras: ["echo_query": booleanSchema()]),
-            required: ["query"], dataSchema: recallDataSchema()
+            required: ["query"], dataSchema: distilledRecallDataSchema()
         ),
         descriptor(
             identity: "recall_vague", name: AriaV2RecallLensOperation.recallVague.rawValue,
@@ -1701,6 +1701,35 @@ enum AriaV2SelectedCatalog {
 
     private static func recallDataSchema() -> JSONValue {
         lensDataSchema(.lensPartialCue)
+    }
+
+    /// `moot_recall_distilled` declares its own data schema: the shared memory
+    /// row plus a required `capabilities` object that always carries the
+    /// `distillation` savings (ARIA_V2_CONTRACT.md, "Distilled recall savings").
+    private static func distilledRecallDataSchema() -> JSONValue {
+        orderedExactObjectSchema([
+            "results": .object(["type": .string("array"), "items": lensMemoryRowSchema()]),
+            "capabilities": distilledCapabilitiesSchema(),
+        ], required: ["results", "capabilities"])
+    }
+
+    private static func distilledCapabilitiesSchema() -> JSONValue {
+        orderedExactObjectSchema([
+            "discrimination": enumSchema(["low", "medium"]),
+            "distillation": distillationSchema(),
+        ], required: ["distillation"])
+    }
+
+    /// The `skim` object is declared now so schema consumers do not change
+    /// when skim is wired; it is absent until then.
+    private static func distillationSchema() -> JSONValue {
+        orderedExactObjectSchema([
+            "returnedTokens": nonnegativeIntegerSchema(), "originalTokens": nonnegativeIntegerSchema(),
+            "savedTokens": integerSchema(), "savedPercent": integerSchema(),
+            "estimated": booleanSchema(), "estimator": stringSchema(),
+            "skim": orderedExactObjectSchema(["omittedTokens": nonnegativeIntegerSchema()], required: ["omittedTokens"]),
+            "display": stringSchema(),
+        ], required: ["returnedTokens", "originalTokens", "savedTokens", "savedPercent", "estimated", "estimator", "display"])
     }
 
     private static func transcriptRecallDataSchema() -> JSONValue {
