@@ -1,0 +1,17 @@
+{
+  "benchmark" : "crossport",
+  "corpus_digest" : "cafef00d",
+  "embedding_models" : [
+    "binary-default"
+  ],
+  "encode_barrier" : "drain",
+  "estate_posture" : "plaintext-optout",
+  "estate_schema_version" : "1.1",
+  "format_version" : 3,
+  "markers_present" : true,
+  "mootx01_version" : "unknown",
+  "protocol_version" : "test-protocol",
+  "seed" : 424242,
+  "seed_path" : "batch",
+  "variant" : "s"
+}

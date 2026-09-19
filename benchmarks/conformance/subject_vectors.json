@@ -1,0 +1,71 @@
+{
+ "_comment": "Conformance vectors for deterministicSubject / deterministic_subject. Both the Swift leg (SubjectGeneratorTests) and the Rust leg (subject_generator.rs #[cfg(test)]) must produce the expected output for every case. Seed: 0xCAFEBABEDEADBEEF (not used by this algorithm — the function is purely deterministic on its input).",
+ "cases": [
+  {
+   "id": "period-space",
+   "description": "Period followed by space triggers sentence boundary",
+   "input": "Harrow count survey north zone result: 12. Field crew verified the total.",
+   "expected": "Harrow count survey north zone result: 12."
+  },
+  {
+   "id": "question-mark-space",
+   "description": "Question mark followed by space triggers sentence boundary",
+   "input": "What did the Harrow count survey record for the north zone? The answer was 12.",
+   "expected": "What did the Harrow count survey record for the north zone?"
+  },
+  {
+   "id": "exclamation-space",
+   "description": "Exclamation mark followed by space triggers sentence boundary",
+   "input": "Batch B14 lab test output: 74 units! Technician sign-off on file.",
+   "expected": "Batch B14 lab test output: 74 units!"
+  },
+  {
+   "id": "no-boundary-short",
+   "description": "No sentence boundary — entire content returned",
+   "input": "user: Hello world how are you",
+   "expected": "user: Hello world how are you"
+  },
+  {
+   "id": "no-boundary-long",
+   "description": "No sentence boundary with content exceeding 120 chars — truncated to 120",
+   "input": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij",
+   "expected": "abcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghijabcdefghij"
+  },
+  {
+   "id": "decimal-not-boundary",
+   "description": "Period followed by digit is a decimal point, not a sentence boundary",
+   "input": "  Station S-7 log: reading 1.8 m/s at 0800.  More info.",
+   "expected": "Station S-7 log: reading 1.8 m/s at 0800."
+  },
+  {
+   "id": "empty-string",
+   "description": "Empty input returns empty string",
+   "input": "",
+   "expected": ""
+  },
+  {
+   "id": "leading-trailing-whitespace",
+   "description": "Leading and trailing whitespace is stripped before extraction",
+   "input": "  trimmed content. more.",
+   "expected": "trimmed content."
+  },
+  {
+   "id": "boundary-at-end",
+   "description": "Sentence boundary at end of string (no trailing whitespace or text)",
+   "input": "Only one sentence.",
+   "expected": "Only one sentence."
+  },
+  {
+   "id": "period-newline",
+   "description": "Period followed by newline is a sentence boundary",
+   "input": "First sentence.\nSecond sentence.",
+   "expected": "First sentence."
+  },
+  {
+   "id": "crlf-normalized-before-cap",
+   "description": "CRLF pairs are normalized to spaces BEFORE the 120 cap, so the emitted subject can never exceed the contract after per-scalar newline replacement (regression: LongMemEval-m question 8b9d4367, 123 chars)",
+   "input": "alpha beta\r\ngamma delta\r\nxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+   "expected": "alpha beta  gamma delta  xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+  }
+ ]
+}

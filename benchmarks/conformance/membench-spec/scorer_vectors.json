@@ -1,0 +1,130 @@
+{
+  "_comment": "Conformance vectors for membench-spec scorer (§3 correctness, §4 get_recall, aggregation). Both ports (Swift and Rust) must reproduce every expected value to within 1e-9. All values are hand-computable from the Python source in MEMBENCH_OFFICIAL_PROTOCOL.md.",
+  "get_recall_cases": [
+    {
+      "id": "nil-retrieved",
+      "retrieved_step_ids": null,
+      "target_step_ids": [1, 2],
+      "expected_recall": 0.0,
+      "note": "§4: if res == None: return 0 — nil/None input always yields 0"
+    },
+    {
+      "id": "empty-retrieved",
+      "retrieved_step_ids": [],
+      "target_step_ids": [1, 2],
+      "expected_recall": 0.0,
+      "note": "Empty (non-None) retrieved list → deduped {} → ct=0 → 0/2 = 0.0"
+    },
+    {
+      "id": "duplicates-in-retrieved",
+      "retrieved_step_ids": [1, 1, 2],
+      "target_step_ids": [1, 2],
+      "expected_recall": 1.0,
+      "note": "§4: res = list(set(res)) → {1,2}; both in std; ct=2; std_set={1,2}; 2/2 = 1.0"
+    },
+    {
+      "id": "duplicate-targets",
+      "retrieved_step_ids": [1],
+      "target_step_ids": [1, 1, 2],
+      "expected_recall": 0.5,
+      "note": "§4: std_set = set([1,1,2]) = {1,2}; len(std_set)=2; ct=1; 1/2 = 0.5"
+    },
+    {
+      "id": "partial-overlap",
+      "retrieved_step_ids": [1, 3],
+      "target_step_ids": [1, 2],
+      "expected_recall": 0.5,
+      "note": "Retrieved [1,3], targets [1,2]: 1 in std → ct=1; std_set={1,2}; 1/2 = 0.5"
+    },
+    {
+      "id": "no-overlap",
+      "retrieved_step_ids": [3, 4],
+      "target_step_ids": [1, 2],
+      "expected_recall": 0.0,
+      "note": "Retrieved [3,4], targets [1,2]: none in std → ct=0; 0/2 = 0.0"
+    },
+    {
+      "id": "perfect-single-target",
+      "retrieved_step_ids": [5],
+      "target_step_ids": [5],
+      "expected_recall": 1.0,
+      "note": "Retrieved [5], target [5]: ct=1; std_set={5}; 1/1 = 1.0"
+    },
+    {
+      "id": "superset-retrieved",
+      "retrieved_step_ids": [1, 2, 3, 4],
+      "target_step_ids": [1, 2],
+      "expected_recall": 1.0,
+      "note": "Retrieved superset of targets: ct=2; std_set={1,2}; 2/2 = 1.0. Extra retrieved ids do not inflate recall."
+    }
+  ],
+  "answer_equality_cases": [
+    {
+      "id": "exact-match-A",
+      "response": "A",
+      "ground_truth": "A",
+      "expected_correct": true,
+      "note": "§3: exact string equality — 'A' == 'A'"
+    },
+    {
+      "id": "exact-match-D",
+      "response": "D",
+      "ground_truth": "D",
+      "expected_correct": true,
+      "note": "§3: exact string equality — 'D' == 'D'"
+    },
+    {
+      "id": "mismatch-AB",
+      "response": "A",
+      "ground_truth": "B",
+      "expected_correct": false,
+      "note": "§3: 'A' != 'B'"
+    },
+    {
+      "id": "mismatch-CD",
+      "response": "C",
+      "ground_truth": "D",
+      "expected_correct": false,
+      "note": "§3: 'C' != 'D'"
+    },
+    {
+      "id": "case-sensitive",
+      "response": "a",
+      "ground_truth": "A",
+      "expected_correct": false,
+      "note": "§3: plain string equality is case-sensitive — 'a' != 'A'"
+    }
+  ],
+  "aggregation_cases": [
+    {
+      "id": "three-items-two-categories",
+      "items": [
+        {"category": "simple", "agent": "FirstAgent", "correct": true,  "recall": 1.0},
+        {"category": "simple", "agent": "FirstAgent", "correct": true,  "recall": 1.0},
+        {"category": "noisy",  "agent": "FirstAgent", "correct": false, "recall": 0.5}
+      ],
+      "expected_overall_accuracy":    0.6666666666666666,
+      "expected_overall_mean_recall": 0.8333333333333334,
+      "note": "3 items: 2 correct → accuracy=2/3; recall=(1+1+0.5)/3=5/6"
+    },
+    {
+      "id": "single-item-perfect",
+      "items": [
+        {"category": "comparative", "agent": "ThirdAgent", "correct": true, "recall": 1.0}
+      ],
+      "expected_overall_accuracy":    1.0,
+      "expected_overall_mean_recall": 1.0,
+      "note": "Single item, correct, perfect recall → accuracy=1.0, meanRecall=1.0"
+    },
+    {
+      "id": "two-perspectives-mixed",
+      "items": [
+        {"category": "simple", "agent": "FirstAgent",  "correct": true,  "recall": 0.8},
+        {"category": "simple", "agent": "ThirdAgent",  "correct": false, "recall": 0.4}
+      ],
+      "expected_overall_accuracy":    0.5,
+      "expected_overall_mean_recall": 0.6,
+      "note": "2 items across agents: accuracy=(1+0)/2=0.5; meanRecall=(0.8+0.4)/2=0.6"
+    }
+  ]
+}
