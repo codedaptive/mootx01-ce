@@ -1,0 +1,27 @@
+{
+  "model_id": "minilm-l6-v2-w60",
+  "model_version": "1110a243fdf47",
+  "dim": 384,
+  "pooling": "mean",
+  "query_prefix": "",
+  "doc_prefix": "",
+  "window_words": 60,
+  "overlap_divisor": 2,
+  "max_spans": 32,
+  "max_sequence": 256,
+  "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+  "files": [
+    {
+      "path": "config.json",
+      "sha256": "953f9c0d463486b10a6871cc2fd59f223b2c70184f49815e7efbcab5d8908b41"
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
+    },
+    {
+      "path": "model.safetensors",
+      "sha256": "53aa51172d142c89d9012cce15ae4d6cc0ca6895895114379cacb4fab128d9db"
+    }
+  ]
+}
