@@ -8,7 +8,7 @@ relates_to:
   - docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#43-convergencekit-contract
   - docs/reference/FEDERATION_SYNCSERVER_WIRE_PROTOCOL.md
   - docs/reference/CONVERGENCEKIT_SPEC.md
-  - docs/analysis/CVK_WAVEC_FEDERATION_CHARTER.md
+  - CVK_WAVEC_FEDERATION_CHARTER
 supersedes: none
 context:
   - Wave C shipped the Federation transport spine (persistent Ed25519 identity, signed pairing handshake, persistent peers, durable outbox, Relay abstraction with an HTTPS conformer) but no local discovery, no proximity ceremony, and no user surface.

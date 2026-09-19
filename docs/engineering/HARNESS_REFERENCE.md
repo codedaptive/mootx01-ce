@@ -180,7 +180,7 @@ these MUST call the substrate API named below — never a reimplementation
   Empty-union convention: both-empty → 0.0, never 1.0 (no evidence
   must not read as a perfect match). Integer popcount operands make
   the single f64 division bit-identical across ports. Backs the
-  VectorKit `BinaryMetric.jaccard` retrieval lane and the shaped
+  SynapseKit `BinaryMetric.jaccard` retrieval lane and the shaped
   "jaccard" preset (W2.5 Track M1 activation).
 
 #### `or_reduce` — §8.5 — CRC `0x4ee84d73`
@@ -275,7 +275,7 @@ these MUST call the substrate API named below — never a reimplementation
 - **Vector:** `test-harness/vectors/merkle_commitment.json`
 - **What:** Domain-separated SHA-256 Merkle leaf/interior/tombstone/
   empty-root construction plus HMAC-SHA256 keyed commitments over
-  canonical drawer content and VectorKit-sidecar vector bytes. This
+  canonical drawer content and SynapseKit-sidecar vector bytes. This
   is the NT-P0 extension of the I-27 integrity surface; it reuses
   SubstrateKernel `SHA256` and the existing `GrantHKDF`/`hkdf`
   HMAC implementation rather than adding a second HMAC primitive.
@@ -894,7 +894,7 @@ in LatticeLib). Tier 2 grows to 10 ops.
 ### 1.1.0 -- 2026-08-20
 Added `jaccard` as the 30th conformance-gated primitive at CRC
 `0x2fe8941e` (cookbook §8.21, W2.5 Track M1 activation — the
-fingerprint set-overlap metric behind VectorKit's
+fingerprint set-overlap metric behind SynapseKit's
 `BinaryMetric.jaccard`). Tier 1 grows to 10 ops; §0/§2 counts and
 the §2.0 package map updated. Vector file `vectors/jaccard.json`
 (34 cases: 32 seeded pairs cycling identical/complement/subset/

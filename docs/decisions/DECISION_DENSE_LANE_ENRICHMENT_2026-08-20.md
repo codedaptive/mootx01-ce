@@ -1,9 +1,13 @@
 ---
-version: v0.2
-status: accepted
-date: 2026-08-20
+version: 1.0.0
+status: superseded
+date: 2026-09-06
 description: Dense-lane enrichment doctrine — platform-unique evolving dense text, trailer grammar v1, capability-shape parity, engine provenance, benchmark defaults
+superseded_by: ../decisions/DECISION_RETIRED_TECHNIQUES_LEDGER.md
 ---
+
+> Superseded on 2026-09-06. See [the retirement ledger](../decisions/DECISION_RETIRED_TECHNIQUES_LEDGER.md).
+> This document is preserved as history.
 
 # DECISION: Dense-Lane Enrichment
 
@@ -87,3 +91,9 @@ parenthetical trailer:
 
 - **v0.1 (2026-08-20)** — Initial record from the enrichment program
   planning session (Gaps 1/2/3, oracle-gated waves).
+
+## Supersession changelog
+
+### 1.0.0 -- 2026-09-06
+
+Archived the retired contract. The retirement ledger records its disposition.

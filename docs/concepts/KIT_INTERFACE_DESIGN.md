@@ -351,7 +351,7 @@ aggregation families listed below.
 
 ---
 
-### VectorKit (SubstrateLib, EngramLib, PersistenceKit)
+### SynapseKit (SubstrateLib, EngramLib, PersistenceKit)
 
 **Canonical Role:** On-device embeddings and nearest-neighbor search. Model-tagged vectors.
 
@@ -368,9 +368,9 @@ aggregation families listed below.
 - `VectorIndex` — Queryable ANN (HNSW-style)
 
 **Public Functions:**
-- `VectorKit.embed(_ text: String, using: EmbeddingProvider) -> EmbeddingResult?`
-- `VectorKit.findNearest(query: Vector, in: [Vector], k: Int) -> [Match]`
-- `VectorKit.index(_ vectors: [Vector]) -> VectorIndex`
+- `SynapseKit.embed(_ text: String, using: EmbeddingProvider) -> EmbeddingResult?`
+- `SynapseKit.findNearest(query: Vector, in: [Vector], k: Int) -> [Match]`
+- `SynapseKit.index(_ vectors: [Vector]) -> VectorIndex`
 
 **Concrete Providers (CorpusKitProviders target):**
 - `MiniLM`
@@ -385,7 +385,7 @@ aggregation families listed below.
 
 ---
 
-### CorpusKit (VectorKit, PersistenceKit, ConvergenceKit, EngramLib)
+### CorpusKit (SynapseKit, PersistenceKit, ConvergenceKit, EngramLib)
 
 **Canonical Role:** Standalone-capable RAG database with hybrid BM25 + vector retrieval over an interchangeable content source.
 
@@ -410,24 +410,24 @@ aggregation families listed below.
 - Passage sizing follows provider token budgets, not a global character threshold
 
 **Tokenization:**
-- `TokenizerProtocol` — Text tokenization (lives here, not VectorKit)
+- `TokenizerProtocol` — Text tokenization (lives here, not SynapseKit)
 
 **Targets:**
 - `CorpusKit` — Core: content-source contract, tokenizer, BM25, indexing, storage adapters, sync
 - `CorpusKitProviders` — Providers with CoreML models (MiniLM, mpnet, Gemma)
 
 **Key Design:**
-- Tokenization in CorpusKit, not VectorKit
+- Tokenization in CorpusKit, not SynapseKit
 - Providers (with weights) in CorpusKitProviders to keep weights out of core
 - Hybrid retrieval fuses BM25 + vector signals
 - One engine and conformance suite run against both standalone and GLK adapters
 - Result identity is always the content source's canonical identity
 
-**Dependencies:** VectorKit, PersistenceKit, ConvergenceKit, EngramLib
+**Dependencies:** SynapseKit, PersistenceKit, ConvergenceKit, EngramLib
 
 ---
 
-### GeniusLocusKit (LocusKit, CorpusKit, VectorKit, PersistenceKit, ConvergenceKit, QueueKit)
+### GeniusLocusKit (LocusKit, CorpusKit, SynapseKit, PersistenceKit, ConvergenceKit, QueueKit)
 
 **Canonical Role:** Composition layer. Unifies LocusKit and CorpusKit over the same canonical GLK Drawer dataset, runs the Brain layer, and coordinates persistence.
 
@@ -467,7 +467,7 @@ aggregation families listed below.
 - `registerStandingSignal(...) async`
 - `triggerSignal(for: EstateHandle) async`
 
-**Dependencies:** LocusKit, CorpusKit, VectorKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib
+**Dependencies:** LocusKit, CorpusKit, SynapseKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib
 
 ---
 
@@ -614,7 +614,7 @@ aggregation families listed below.
 | **Grammar** | AriaLexiconLib |
 | **Foundation** | SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit, EngramLib |
 | **Grounding** | LatticeLib, EideticLib |
-| **Substrate** | LocusKit, VectorKit, CorpusKit |
+| **Substrate** | LocusKit, SynapseKit, CorpusKit |
 | **Composition** | GeniusLocusKit |
 | **Reasoning** | NeuronKit (implemented, Swift + Rust) |
 | **Behaviour** | CognitionKit (implemented, Swift + Rust) |
@@ -634,9 +634,9 @@ SubstrateLib         (zero deps)
 LatticeLib              (zero deps)
   └── EideticLib      (LatticeLib)
 LocusKit             (SubstrateLib, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
-VectorKit            (SubstrateLib, EngramLib, PersistenceKit)
-  └── CorpusKit         (VectorKit, PersistenceKit, ConvergenceKit, EngramLib)
-GeniusLocusKit       (LocusKit, CorpusKit, VectorKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
+SynapseKit            (SubstrateLib, EngramLib, PersistenceKit)
+  └── CorpusKit         (SynapseKit, PersistenceKit, ConvergenceKit, EngramLib)
+GeniusLocusKit       (LocusKit, CorpusKit, SynapseKit, PersistenceKit, ConvergenceKit, QueueKit, EideticLib)
 NeuronKit            (EideticLib, SubstrateLib, EngramLib, GeniusLocusKit)
 CognitionKit         (NeuronKit, GeniusLocusKit)
 aria-mcp / AriaMcpKit (GeniusLocusKit, NeuronKit)
@@ -707,13 +707,13 @@ When reviewing for placement and shape correctness:
 - [ ] Audit trail complete and immutable
 - [ ] Canonical GLK Drawer content remains single-owner in composed mode
 
-**VectorKit:**
+**SynapseKit:**
 - [ ] Every vector tagged with model ID and version
 - [ ] Cross-model comparisons forbidden
 - [ ] EmbeddingProvider protocol correct
 
 **CorpusKit:**
-- [ ] Tokenization lives here, not VectorKit
+- [ ] Tokenization lives here, not SynapseKit
 - [ ] Hybrid BM25 + vector retrieval
 - [ ] Same engine runs over standalone and injected content sources
 - [ ] Standalone content storage is complete and independently usable
