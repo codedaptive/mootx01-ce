@@ -136,8 +136,12 @@ jobs:
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
         run: |
           IDENTITY="Developer ID Application: Codedaptive, LLC (${{ secrets.APPLE_TEAM_ID }})"
-          MOOT_BIN="apps/mootx01/.build/arm64-apple-macosx/release/mootx01"
-          MGR_BIN="apps/moot-mgr/.build/arm64-apple-macosx/release/moot-mgr"
+          # .build/release is SwiftPM's stable symlink to the products dir.
+          # Swift 6.2 moved the real output to .build/out/Products/Release and
+          # no longer creates a <triple>/release directory at all, so naming the
+          # triple finds nothing on the xcode-27 toolchain.
+          MOOT_BIN="apps/mootx01/.build/release/mootx01"
+          MGR_BIN="apps/moot-mgr/.build/release/moot-mgr"
           for bin in "$MOOT_BIN" "$MGR_BIN"; do
             test -f "$bin"
             test -x "$bin"
@@ -150,7 +154,7 @@ jobs:
           codesign --verify --deep --strict --verbose=2 "$MGR_BIN"
           echo "MOOT_BIN=$MOOT_BIN" >> "$GITHUB_ENV"
           echo "MGR_BIN=$MGR_BIN"  >> "$GITHUB_ENV"
-          echo "DAEMON_BIN=apps/mootx01/.build/arm64-apple-macosx/release/mootx01-daemon" >> "$GITHUB_ENV"
+          echo "DAEMON_BIN=apps/mootx01/.build/release/mootx01-daemon" >> "$GITHUB_ENV"
 
       - name: Notarize binaries
         if: ${{ startsWith(github.ref, 'refs/tags/') && github.event_name == 'push' }}
@@ -236,7 +240,7 @@ jobs:
           # Setup assistant links MootInstallerCore from apps/mootx01 via local
           # path dependency; both packages must be built for the same arch.
           swift build -c release --package-path apps/Mootx01-Setup --product Mootx01Setup
-          SETUP_BIN="apps/Mootx01-Setup/.build/arm64-apple-macosx/release/Mootx01Setup"
+          SETUP_BIN="apps/Mootx01-Setup/.build/release/Mootx01Setup"
           test -f "$SETUP_BIN"
           test -x "$SETUP_BIN"
           file "$SETUP_BIN" | grep -E 'Mach-O.*arm64'
