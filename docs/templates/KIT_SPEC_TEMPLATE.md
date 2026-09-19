@@ -1,7 +1,7 @@
 ---
 title: <PackageName> Specification
 version: MAJOR.MINOR.PATCH
-status: draft | review | active | deprecated | superseded
+status: draft | review | active | accepted-1.1-target | deprecated | superseded
 date: <YYYY-MM-DD>
 description: One-sentence statement of what <PackageName> is and the contract this spec defines.
 spec_type: kit | protocol | encoder

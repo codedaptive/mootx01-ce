@@ -15,7 +15,7 @@ These are the durable definitions. The engineering detail and the release plan l
 
 MOOTx01 is GeniusLocusKit in union with the two BrainKits, NeuronKit and CognitionKit.
 
-- GeniusLocusKit (GLK) is the composition layer and the write surface. It composes LocusKit (spatial memory, canonical GLK Drawers, and the knowledge graph) with CorpusKit (RAG/index machinery over an injected content source, built over VectorKit) into one estate. Both lanes operate on the same Drawer identity: content is stored once in LocusKit, CorpusKit stores only derived retrieval state, and GLK coordinates change-driven indexing through QueueKit over PersistenceKit. CorpusKit's optional standalone passage facility is dark in GLK and therefore dark in MOOTx01.
+- GeniusLocusKit (GLK) is the composition layer and the write surface. It composes LocusKit (spatial memory, canonical GLK Drawers, and the knowledge graph) with CorpusKit (RAG/index machinery over an injected content source, built over SynapseKit) into one estate. Both lanes operate on the same Drawer identity: content is stored once in LocusKit, CorpusKit stores only derived retrieval state, and GLK coordinates change-driven indexing through QueueKit over PersistenceKit. CorpusKit's optional standalone passage facility is dark in GLK and therefore dark in MOOTx01.
 - NeuronKit is the algorithm BrainKit: reasoning functions and autonomic daemons (hybrid recall, the dreaming daemon, branch scoring, and similar).
 - CognitionKit is the behaviour BrainKit: named, composable workflows, the recipes.
 

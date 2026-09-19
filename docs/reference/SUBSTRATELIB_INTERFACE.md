@@ -443,7 +443,7 @@ pub(crate) fn canonical_leaf_bytes(drawer_id: &[u8; 16], content: &[u8],
 ```
 
 `MerkleVectorInput` is a lightweight carrier for embedding vectors
-at SubstrateLib's layer (SubstrateLib cannot import VectorKit — that
+at SubstrateLib's layer (SubstrateLib cannot import SynapseKit — that
 would invert the dependency graph). `canonical_leaf_bytes` is
 `pub(crate)` / `internal` because `keyed_commitment` reuses it with
 a different domain tag. The v2 canonical leaf encoding writes vector

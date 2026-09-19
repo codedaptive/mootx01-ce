@@ -1,8 +1,8 @@
 ---
 title: PersistenceKit Specification
-version: 1.13.0
+version: 1.19.0
 status: active
-date: 2026-08-15
+date: 2026-09-13
 description: "Behavioral specification for PersistenceKit: invariants, conformance requirements, and the contract it guarantees."
 spec_type: kit
 authors: MOOTx01 maintainers
@@ -18,7 +18,7 @@ purpose: |
   AuditLog, and StorageObserver — and ships three conforming backends
   behind it: SQLite, PostgreSQL, and InMemory (tests). PersistenceKit
   owns no vector-search engine: dense-embedding k-NN lives solely in
-  VectorKit (the vector-ownership contract). What every backend guarantees instead is the
+  SynapseKit (the vector-ownership contract). What every backend guarantees instead is the
   vector-storage ACCOMMODATION contract — it accommodates vector
   workloads' storage needs (vector-payload round-trip, bulk hydration at
   scale, count, delete) through the general RowStore / BlobStore surfaces.
@@ -47,7 +47,7 @@ PostgreSQL is deferred to MX-TAB-2.
 PersistenceKit owns no vector-search engine. An earlier wording, "Storage
 surfaces a VectorIndex", was a wording defect; the intent was a
 storage-CAPABILITY guarantee, not a per-backend k-NN engine (the vector-ownership contract).
-Dense-embedding k-NN lives solely in VectorKit. What every backend
+Dense-embedding k-NN lives solely in SynapseKit. What every backend
 guarantees instead is the **vector-storage accommodation contract**:
 it MUST support vector workloads' storage needs — vector-payload
 round-trip, bulk hydration at scale, count, and delete — through the
@@ -105,7 +105,7 @@ This specification defines:
 
 This specification does NOT define:
 
-- Vector (dense-embedding k-NN) search — VectorKit owns it (the vector-ownership contract).
+- Vector (dense-embedding k-NN) search — SynapseKit owns it (the vector-ownership contract).
   PersistenceKit backends accommodate vector storage but run no search.
 - API signatures — those live in `PERSISTENCEKIT_INTERFACE.md`.
 - The audit-event value model, HLC, or fingerprints — those are
@@ -129,7 +129,7 @@ PersistenceKit               ← the Storage protocol + value model
    └── PersistenceKitInMemory    (tests, conformance reference)
    ▲
    ├── LocusKit          (one estate's rows, blobs, audit)
-   ├── VectorKit         (embeddings + in-house k-NN → rows/blobs)
+   ├── SynapseKit         (embeddings + in-house k-NN → rows/blobs)
    ├── CorpusKit         (standalone content or attached derived RAG indexes)
    ├── QueueKit          (durable work queue → rows + observer)
    ├── ConvergenceKit    (outbound replication → observer, TableChange)
@@ -142,7 +142,7 @@ dependency beyond the PostgreSQL backend's `postgres-nio`. (The SQLite
 backend's former `CSQLiteVec` vendored target was removed with the
 vector engine per the vector-ownership contract.)
 
-**Consumed by:** LocusKit, VectorKit, CorpusKit, QueueKit,
+**Consumed by:** LocusKit, SynapseKit, CorpusKit, QueueKit,
 ConvergenceKit, GeniusLocusKit (which opens the concrete backends), and
 the ARIA surfaces transitively.
 
@@ -161,7 +161,7 @@ search. Every backend MUST accommodate vector workloads' storage needs —
 vector-payload round-trip (binary 32-byte and float32 384-d payloads),
 bulk hydration of vector rows at scale, count, and delete — through the
 general RowStore/BlobStore surfaces. Dense-embedding k-NN lives solely
-in VectorKit (the vector-ownership contract). The conformance harness's vector fixtures
+in SynapseKit (the vector-ownership contract). The conformance harness's vector fixtures
 machine-enforce this guarantee on all three backends (§ 7).
 
 **I-2 (raw SQLite, never Core Data):** the SQLite backend is built on
@@ -198,6 +198,35 @@ rollback across committed migrations. Callers inspect
 deployments (multiple kits sharing one `Storage` instance), use
 `currentSchemaVersion(for: kitID)` to query per-kit version; the
 no-arg method returns the global maximum across all kits.
+
+**I-7a (a ledger row follows its kit's rename):** a kit's schema-version
+row is keyed by its `kitID`. When a kit changes its id, the row must move
+with it, or `open`/`migrate` under the new id reads version 0 and replays
+the kit's ladder from the start on a populated estate.
+`renameSchemaKit(from:to:)` moves the row in one step, keeping its version
+and its applied-at instant. It returns `renamed(version:)` when a row under
+the old id moved, `noRow` when no row exists under the old id (nothing
+changes), and `conflict(oldVersion:newVersion:)` when rows exist under both
+ids (nothing changes; the caller decides). The operation never creates a
+version and never runs a migration step. All three backends implement it:
+SQLite rewrites the `_storagekit_migrations` row, PostgreSQL rewrites the
+`schema_version:<kitID>` key of `_storagekit_meta`, InMemory rekeys its
+per-kit map. The first consumer is GeniusLocusKit's 1.4→1.5 capsule
+(GENIUSLOCUSKIT_SPEC I-24), which carries the SynapseKit rename into every
+populated estate.
+
+**I-7b (column steps are idempotent):** `addColumn` and `dropColumn`
+migration operations are idempotent on every backend: a column already
+present is not added again, and a column already absent is not dropped
+again; neither case is an error. The rule exists because the fresh-store
+path creates every table at the latest layout and then replays the ladder
+from version 0, and because a migration capsule replays a kit's ladder on
+estates that may already carry the step. SQLite probes `PRAGMA table_info`
+before either statement; PostgreSQL emits `ADD COLUMN IF NOT EXISTS` and
+`DROP COLUMN IF EXISTS`; InMemory adds or removes the column on its
+declaration and rows. The first `dropColumn` consumer is CorpusKit's
+checkpoint schema v4, which GeniusLocusKit's 1.5→1.6 capsule replays on
+populated estates (GENIUSLOCUSKIT_SPEC I-25).
 
 **I-8 (no Bool stored property on entities):** PersistenceKit stores
 boolean *columns* (`ColumnType.bool`, `TypedValue.bool`) for backends,
@@ -392,7 +421,7 @@ trigger; InMemory rejects in `RowStore.update`/`delete` with
 
 **B-9 (vector-storage accommodation):** PersistenceKit exposes no `knn`
 or any vector-search method — dense-embedding k-NN lives solely in
-VectorKit (the vector-ownership contract). Instead, every backend MUST accommodate a vector
+SynapseKit (the vector-ownership contract). Instead, every backend MUST accommodate a vector
 workload's storage needs through the general `RowStore`/`BlobStore`
 surfaces: (1) a vector-payload row (a 32-byte binary payload column and a
 384-d float32 payload column, stored as `.blob`) round-trips
@@ -490,8 +519,12 @@ and load the same key, then construct the estate with
 `EstateEncryptionConfig.fullDatabase(key:)`. Both ports **dispose the key when the
 estate is removed** (the Rust `db.key` goes with the estate directory; the Apple
 side calls `KeychainKeyStore.deleteKey()`), so a key never outlives the data it
-protected. Estates with no key (tests, pre-lockdown installs) remain plaintext, so
-existing call sites are unchanged.
+protected. Because the Apple account is a hash of the file's path, **a key follows
+a moved estate file**: the layout capsules that move an estate store the existing
+key under the new path's account (`KeychainKeyStore.storeKey`, which refuses to
+overwrite an item) before the file moves, then remove the old item; the Rust
+`db.key` moves with the directory and needs nothing. Estates with no key (tests,
+pre-lockdown installs) remain plaintext, so existing call sites are unchanged.
 
 The key-storage **mechanism** differs by port — a `0600` `db.key` file on Rust
 (Windows/Linux), a Keychain item on Apple — as does FIPS provider (OpenSSL on
@@ -525,8 +558,8 @@ works on SQLite AND PostgreSQL. Mode 3 (whole-file SQLCipher) is SQLite-only
 
 **B-12a (cross-port at-rest format parity — Mode 2 only):** for Mode 2
 (RowEncryption), the Rust SQLite backend encrypts a table's protected
-columns at rest using AES-GCM-256 — `content`, `distilled` and `subject` on
-`drawers` — mirroring the Swift
+columns at rest using AES-GCM-256 — `content` and `subject` on
+`drawers` (schema 19; the `distilled` column was removed in that version) — mirroring the Swift
 `SQLiteBackend.encryptedForWrite`/`decryptedForRead` seam exactly. The
 stored envelope layout is `[12-byte nonce][16-byte GCM tag][ciphertext]`
 on both ports. A Mode 2 column value encrypted by the Swift port can be
@@ -847,7 +880,91 @@ downstream→upstream; the dep direction does not invert the kit topology.
 Authority for the Package.swift / Cargo.toml addition:
 `the package-dependency rule`.
 
+## § 10 — RowKeyDerivation — public derivation contract
+
+`RowKeyDerivation` (Swift: `public enum RowKeyDerivation`; Rust: `pub fn
+deterministic_row_key`) is the public utility for deriving the RowKey that
+the storage layer assigns to a single-column TEXT-primary-key row. It is
+the mechanism behind gap-5 deterministic row minting and is exposed as
+public API so consumers such as LocusKit can compute a row's `rowId` for
+use in audit events without querying the storage layer.
+
+**D-1 (storage agreement):** `RowKeyDerivation.deterministicRowKey(from:)` /
+`deterministic_row_key` returns the SAME value the storage layer assigns as
+the `RowKey` of a single-column TEXT-primary-key row whose id is `stringId`
+/ `string_id`. This contract holds on every backend (SQLite, InMemory,
+PostgreSQL). The gate test in `RowKeyDerivationAgreementTests` (Swift,
+LocusKit test target) and `row_key_public_api_agreement_tests.rs` (Rust,
+PersistenceKit) verifies this invariant for the SQLite backend.
+
+**D-2 (UUID pass-through):** when the id string is a well-formed UUID string,
+the function returns that UUID unchanged. The caller does not need to
+pre-parse.
+
+**D-3 (stable derivation for non-UUID ids):** when the id string is not a
+UUID string, the function derives a stable UUID from SHA-256 of the string
+bytes (first 16 bytes, version nibble set to 0x50, variant bits set to
+0x80). The same input always produces the same output across languages,
+machines, and time.
+
+**D-4 (fail-loud on empty string):** an empty id is a data-quality violation.
+Both ports fail loudly: `assertionFailure` + `OSLog` fault in Swift;
+`debug_assert!` + `eprintln!` in Rust. The random-fallback branch executes
+only for the degenerate input; it does not affect any well-formed PK value.
+
+**Scope:** single-column TEXT primary keys only. This function is not called
+for `.uuid`-typed primary keys or composite PKs; those paths resolve their
+own RowKey by other means.
+
+**Cross-port conformance gate:** `RowKeyDerivationConformanceTests.swift`
+(PersistenceKitTests, Swift) and `row_key_derivation.rs::tests::shared_vector_*`
+(Rust) assert the same hardcoded vectors independently. These are the
+cross-port gate; the agreement tests above are the cross-seam gate (public
+API vs. storage layer).
+
 ## Changelog
+
+### 1.19.0 -- 2026-09-13
+Added `FaultCell`, `FaultingRowStore`, and `FaultingStorage` to the Swift
+`PersistenceKitTestSupport` library target and the Rust `test_support` module
+(gated behind the `test-support` feature flag). These types provide a
+forwarding `Storage` decorator that injects a table-level query fault on
+demand, enabling fail-closed pre-read tests in kits such as GeniusLocusKit.
+The types are absent from production builds.
+
+### 1.18.0 -- 2026-09-12
+Added § 10 (RowKeyDerivation public contract). Documents D-1 through D-4:
+storage-agreement, UUID pass-through, stable derivation, and fail-loud
+precondition. Both ports had the behavior; this section records the four
+invariants now that the type and function are public API.
+
+### 1.17.0 -- 2026-09-08
+A key follows a moved estate file: `KeychainKeyStore.storeKey` stores an
+existing key under the account of the new path without overwriting; the
+GeniusLocusKit layout capsules call it before the file moves. Swift only;
+the Rust `db.key` lives in the estate directory and moves with it.
+
+### 1.16.0 -- 2026-09-06
+
+Added I-7b: `addColumn` and `dropColumn` are idempotent on every backend
+(a present column is not re-added, an absent column is not re-dropped).
+`dropColumn` gains the guard this release: SQLite (both ports) probes the
+table's columns first, PostgreSQL (Swift) emits `DROP COLUMN IF EXISTS`.
+The Rust PostgreSQL backend applies declarations only and replays no
+migration operations; that pre-existing gap is recorded, not changed.
+
+### 1.15.0 -- 2026-09-05
+
+B-12a: removed `distilled` from the protected-column list (schema 19 dropped
+the column; `content` and `subject` remain the two protected columns on `drawers`).
+
+### 1.14.0 -- 2026-09-04
+Added I-7a: `renameSchemaKit(from:to:)` moves a kit's schema-version ledger
+row to a new `kitID`, keeping version and applied-at, with the three outcomes
+`renamed`, `noRow`, and `conflict`. Root cause: the vector tier was renamed
+SynapseKit and its two ledger rows are stored values in every populated
+estate; without a ledger primitive the renamed store would read version 0
+and replay its ladder. Both ports, all three backends.
 
 ### 1.13.0 -- 2026-08-15
 Corrected I-22 default and extended the invariant (RS-01). The residency hint

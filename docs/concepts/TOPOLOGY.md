@@ -2,14 +2,20 @@
 title: MOOTx01 Topology
 status: canon
 authors: MOOTx01 maintainers
-date: 2026-07-20
-version: 1.1.0
+date: 2026-09-11
+version: 1.2.0
 description: A readable front door to the repository — the two products, the kit stack, FDC, the license shape, and how a developer reaches the substrate.
 ---
 
 # MOOTx01 Topology
 
 A readable front door to the repository. Read this once and you should know what the two products are, how the kits stack, what FDC is, what the license shape is, how a developer reaches the substrate, and how an existing app adopts it. Engineering detail lives in `docs/reference/` and `docs/concepts/MOOTX01_AND_ARIA_CANON.md`; this document is the map.
+
+## Current drawing
+
+![MOOTx01 interfaces, estate owners and kit boundaries — diagram revision 1.2.0](topology-assets/mootx01_topology_v1.1.svg)
+
+Diagram revision **1.2.0** depicts the **1.1 product line**; it does not claim a 1.2 product release. The [previous drawing](topology-assets/mootx01_topology_v1.0.svg) is retained. MCP and the stable first-party provider have independent admission and catalogs; ProductDock is a separate stateful licensed connection. The green resident-daemon boundary contains the MCP server transport and adapter alongside 1stPP and ProductDock; these are interface components within one process. Public MCP enablement depends on deployment. Separately launched stdio is an alternate hosting mode. The kit layers below are an in-process detail within the estate owner, not additional services. Rust first-party runtime and browser hosting remain pending.
 
 ## The two products
 
@@ -18,6 +24,12 @@ A readable front door to the repository. Read this once and you should know what
 **ARIA** is the language inside the product. ARIA expands as Augmented Recall and Inference Architecture. It is the interface specification and its grammar — one noun, nine verbs, four adjective categories — not a server, a library, or a product. ARIA is what makes a MOOT portable and reachable across implementations. ARIA stays open and free for everyone; the user's estate stays private to the user. You do not sell ARIA. You sell MOOTx01, and ARIA is the property that makes it portable and ownable.
 
 The grammar is reified in `AriaLexiconLib`, the single source of truth: every call is one verb applied to a noun, optionally constrained by adjectives. The authoritative statements are [`ARIA.md`](ARIA.md) (the interface overview) and [`ARIA_LEXICON.md`](ARIA_LEXICON.md) (the grammar).
+
+### Native runtime ownership
+
+On macOS, the Pro client reaches a resident `mootx01-daemon` over authenticated first-party transport. The daemon is the single process that opens and writes the canonical estate in the signed App Group container. ProductDock is a separate subsystem inside the daemon: it registers attached product capabilities under its own allowlist but does not own the estate or bypass the storage authority. Permitted read projections may use the narrower kit views described below; every estate mutation still crosses the governed GeniusLocusKit write boundary.
+
+On iOS and iPadOS, the app embeds the owner and opens its local estate in-process; there is no resident daemon between the native client and the estate. The Rust first-party HTTP runtime remains pending; existing Rust kit and public MCP implementations are distinct from that missing application-facing runtime.
 
 ## The kit stack
 
@@ -36,7 +48,7 @@ Composition (the write surface)
 Standalone substrate
     LocusKit           Spatial memory + knowledge graph (one estate)
     CorpusKit          Standalone-capable RAG database; indexes an injected content source
-    VectorKit          On-device embeddings + nearest-neighbour search (HNSW)
+    SynapseKit          On-device embeddings + nearest-neighbour search (HNSW)
 
 Grounding
     EideticLib          Text-to-anchor: delegates to LatticeLib's FDC encoder
@@ -80,7 +92,7 @@ Foundation
 
 Foundation has eight kits: the four-package substrate (SubstrateTypes → SubstrateKernel → SubstrateML → SubstrateLib; each consumer depends on the precise sub-package it uses, with no umbrella re-export), PersistenceKit, QueueKit and ConvergenceKit (peers that share SubstrateLib and chain QueueKit and ConvergenceKit on top of PersistenceKit), and the zero-dependency AriaLexiconLib. These are not five independent peers: PersistenceKit takes SubstrateLib and SubstrateTypes; ConvergenceKit and QueueKit take SubstrateLib and PersistenceKit; the substrate split itself defines an internal ordering. The Foundation still bottoms out at SubstrateTypes and AriaLexiconLib, neither of which has any dependency. EngramLib lifts SubstrateLib's bytes into a typed 256-bit Engram. EideticLib sits beside the substrate as a standalone grounding utility: it produces anchors (FDC code + Wikidata Q-ID + confidence) via LatticeLib's FDC encoder and is consumed by the layers above without being part of them — it imports no substrate kit and is licensed independently.
 
-Standalone substrate is three usable databases in their own right: LocusKit for spatial memory and the knowledge graph, VectorKit for on-device semantic search, and CorpusKit for RAG retrieval. Standalone CorpusKit owns its document content and may optionally index token-budgeted passages. Each Kit is shippable on its own.
+Standalone substrate is three usable databases in their own right: LocusKit for spatial memory and the knowledge graph, SynapseKit for on-device semantic search, and CorpusKit for RAG retrieval. Standalone CorpusKit owns its document content and may optionally index token-budgeted passages. Each Kit is shippable on its own.
 
 The grounding pair, LatticeLib and EideticLib, sits beside the substrate rather than under it. LatticeLib is the code-and-data side: the FDC encoder (`FDCMatcher` / `FDCRuntime`) plus the FDC frame and signatures it matches against. EideticLib is the lookup side: `EideticLib.lookup` delegates to LatticeLib's `FDC.encodeAnchor`, canonicalizing a term to a concept bag, matching it against the pinned FDC signatures, and emitting an anchor (FDC code + dominant Wikidata Q-ID + confidence). Both ship with frozen FDC reference artifacts so they work out of the box; neither imports a substrate kit.
 
@@ -92,7 +104,7 @@ The BrainKits sit on top. NeuronKit is the algorithm BrainKit: reasoning functio
 
 A single MOOTx01 instance runs in GLK mode. The write surface is always GLK; every content write creates or supersedes one canonical GLK Drawer through LocusKit, and CorpusKit observes that same object through the injected content source. QueueKit and PersistenceKit coordinate derived indexing work; they do not maintain a duplicate RAG content store. Reads may be taken in narrower lenses on the same instance — a CorpusKit-only query, a LocusKit-only query — but those are read projections over the same Drawer identities, not separate writable stores. Narrowing applies to reads; writing is uniformly GLK.
 
-This applies to estate mode. When consuming kits independently via the SDK (LocusKit, CorpusKit, VectorKit standalone), GLK is not required and writes go directly to the kit. See `packages/SDK.md` for the independently-consumable kit model.
+This applies to estate mode. When consuming kits independently via the SDK (LocusKit, CorpusKit, SynapseKit standalone), GLK is not required and writes go directly to the kit. See `packages/SDK.md` for the independently-consumable kit model.
 
 At the API layer an operator may configure many separate instances of different kinds (for example three CorpusKit, two LocusKit, three GeniusLocus) and route each call to the database it belongs to. That route-to-the-right-database behaviour is an API-layer concern, not something inside a single instance.
 
@@ -174,9 +186,9 @@ Ease of this integration is the product feature: an agent should be able to read
 
 ### Demonstration apps
 
-ARIA_MacOS, ARIA_iOS, and ARIA_Rust are demonstration apps, not end-user products. Their purpose is to show a developer how to use the kits, in two registers at once: they are compile targets that link the libs (or their Rust equivalents), demonstrating the SDK in use, and they are themselves source kits, worked examples a developer reads and reuses. The demos do not need to be polished. Their value is showing that the SDK makes building such apps easy.
+ARIA_MacOS and ARIA_iOS are demonstration apps, not end-user products. Their purpose is to show a developer how to use the kits, in two registers at once: they are compile targets that link the libraries, demonstrating the SDK in use, and they are themselves source kits, worked examples a developer reads and reuses. The demos do not need to be polished. Their value is showing that the SDK makes building such apps easy.
 
-ARIA_Rust is required, not optional: the Swift and Rust implementations are conformance-gated against shared test vectors, and the kits ship Rust ports in parallel. A demonstration set with only Swift apps teaches only one of the two gated ports.
+A native ARIA_Rust demonstration and resident host are future product work. The Swift and Rust kit implementations remain conformance-gated against shared test vectors, but parity in the kits is separate from shipping a Rust native client.
 
 Each demonstration module also carries detailed instructions written for agentic agents, so an agent can read the entire source and program against the kits autonomously. The demo is documentation that compiles, for both a human developer and an agent.
 
@@ -189,3 +201,9 @@ Each demonstration module also carries detailed instructions written for agentic
 | Read the substrate spec | `docs/reference/GENIUSLOCUS_ARCHITECTURE_SPEC.md` |
 | See the visual topology | `docs/concepts/topology-assets/` (SVG diagrams) |
 | Build against the kits | `docs/validation/substrate_math_performance/` (reference + conformance harness) |
+
+## Diagram revision history
+
+### 1.2.0 — 2026-09-11
+
+Added the versioned current drawing with separate ARIA-MCP, ARIA-JSON/1stPP and ProductDock paths; explicit macOS/iOS ownership; permitted reads versus governed ARIA writes; and implementation/validation limits. Preserved the previous SVG.
