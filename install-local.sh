@@ -2,10 +2,11 @@
 #
 # mootx01 OFFLINE / local installer — for testing a locally-built binary.
 #
-# Builds mootx01 from source (NO GitHub download) and places it at
-# ~/.mootx01/bin/mootx01 with a ~/.local/bin symlink — the exact location the
-# release `install.sh` and the `mootx01 install` subcommand use. This is the
-# offline counterpart of install.sh: build locally instead of downloading.
+# Builds mootx01 from source and places it at ~/.mootx01/bin/mootx01 with a
+# ~/.local/bin exec wrapper — the exact layout the release `install.sh` and the
+# `mootx01 install` subcommand produce, SPM resource bundles included. This is
+# the offline counterpart of install.sh for the binaries; the encoder models
+# are release assets either way and are fetched and hash-verified below.
 # On macOS it also builds and places `moot-mgr` (the management console).
 #
 #   ./install-local.sh           # build + place the binary
@@ -28,13 +29,44 @@ ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 mkdir -p "$INSTALL_DIR" "$BIN_DIR"
 
-# Place a freshly built binary and symlink it onto PATH.
+# The PATH entry is an exec WRAPPER, not a symlink: the Swift runtime resolves
+# each Bundle.module target's SPM resource bundle (<Target>_<Target>.bundle)
+# from the directory of the path the binary was INVOKED as, without following a
+# symlink at that path. A symlinked ~/.local/bin/mootx01 looks for the bundles
+# in ~/.local/bin, finds nothing, and fatalErrors on the first resource touch.
+# Same shape install.sh writes and Installer.writePathWrapper writes — keep the
+# three in step.
+write_path_wrapper() {
+  _target="$1"; _entry="$2"
+  rm -f "$_entry"
+  cat > "$_entry" <<WRAP
+#!/bin/sh
+# mootx01 PATH wrapper — exec the real binary from its install dir so
+# SPM resource bundles (<Target>_<Target>.bundle) resolve beside the
+# executable. A symlink here breaks that lookup. Written by install-local.sh;
+# install.sh and Installer.writePathWrapper write the same shape.
+exec "$_target" "\$@"
+WRAP
+  chmod 0755 "$_entry"
+}
+
+# Place a freshly built binary, the SPM resource bundles built beside it, and a
+# PATH wrapper. The bundles are what separates this from a bare `cp`: a build
+# directory holds them next to the executable, and an install that leaves them
+# behind crashes the first time anything classifies or searches.
 place() {  # $1 = product name, $2 = built binary path
   [ -x "$2" ] || { echo "$1: build did not produce $2" >&2; exit 1; }
   install -m 0755 "$2" "$INSTALL_DIR/$1"
-  ln -sf "$INSTALL_DIR/$1" "$BIN_DIR/$1"
+  write_path_wrapper "$INSTALL_DIR/$1" "$BIN_DIR/$1"
   echo "Installed  $INSTALL_DIR/$1   (local build)"
-  echo "Linked     $BIN_DIR/$1"
+  echo "Wrapped    $BIN_DIR/$1"
+  for _bundle in "$(dirname "$2")"/*.bundle; do
+    [ -e "$_bundle" ] || continue
+    _bname="$(basename "$_bundle")"
+    rm -rf "${INSTALL_DIR:?}/$_bname"
+    cp -R "$_bundle" "$INSTALL_DIR/$_bname"
+    echo "Installed  $INSTALL_DIR/$_bname"
+  done
 }
 
 # Platform contract (same split the release lane uses): the Swift port on macOS
@@ -63,6 +95,21 @@ else
     place moot-mgr "$ROOT/apps/moot-mgr/rust/target/release/moot-mgr"
   fi
 fi
+
+# The encoder and fact-extraction models are release assets, not build output,
+# so a source build has to fetch them the same way CI does. fetch-release.sh is
+# idempotent — a already-verified layout exits 0 without downloading — so this
+# costs nothing on the re-run-after-a-code-change path this script is built for.
+if [ "$(uname -s)" = "Darwin" ]; then
+  _model_platform=apple
+else
+  _model_platform=linux
+fi
+_models_root="$(dirname "$INSTALL_DIR")/share/mootx01/models"
+sh "$ROOT/tools/encoder-models/fetch-release.sh" "$_model_platform" \
+  "$_models_root/arctic-embed-s-w60"
+sh "$ROOT/tools/encoder-models/fetch-release.sh" "$_model_platform" \
+  "$_models_root/nuextract-tiny-v1.5" nuextract-tiny-v1.5
 
 case ":$PATH:" in
   *":$BIN_DIR:"*) ;;
