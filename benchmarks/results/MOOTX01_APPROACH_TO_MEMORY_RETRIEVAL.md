@@ -1,75 +1,66 @@
 ---
 title: The Approach to Memory Retrieval in MOOTx01
 release: "1.1"
-date: 2026-09-17
-description: How MOOTx01 finds stored evidence, why it uses several search paths, and where the measured figures live.
+date: 2026-08-28
+description: Public-facing explanation of MOOTx01 retrieval surfaces, measurement-based selection, deterministic limits, and derived-memory markers.
 ---
 
 # The Approach to Memory Retrieval in MOOTx01
 
-Answering a question from memory is two jobs. First find the right records.
-Then turn them into an answer. MOOTx01 keeps the two apart, and measures them
-apart, because a good answer built on the wrong evidence is still wrong — and
-because a system that scores them as one number cannot tell you which half
-failed.
+MOOTx01 separates retrieval—locating stored evidence—from answer generation.
+The benchmark suite measures both stages, but reports them as distinct metrics.
 
-## Six ways to find a record
+## Retrieval surfaces
 
-Ask for "the invoice Ana sent in March" and matching words is enough. Ask
-"what did we decide about pricing?" and the words in the question may appear
-nowhere in the record that answers it. So MOOTx01 searches several ways at
-once:
+- Lexical matching finds records that share query terms.
+- Semantic similarity compares embedding-space meaning.
+- Temporal retrieval weights or filters by capture and event time.
+- Graph traversal follows stored relationships between facts and memories.
+- Structured lookup resolves explicit facts against a known schema.
+- Associative retrieval uses partial cues to broaden candidate discovery.
 
-- **Words.** Records that use the terms you used.
-- **Meaning.** Records that say the same thing in different words.
-- **Time.** Records from the period you are asking about, whether that is when
-  something happened or when it was written down.
-- **Relationships.** Records reached by following a link from a record already
-  found — the person, the project, the document it belongs to.
-- **Known fields.** A direct lookup when the question names something the
-  system stores explicitly, like a date or an owner.
-- **Partial cues.** A half-remembered fragment, widened into candidates worth
-  checking.
+No single surface covers every question shape. Exact lookups, temporal
+questions, aggregation, comparison, supersession, vague cues, and multi-step
+relations require different evidence paths.
 
-Each path is good at a different kind of question. Exact lookups, questions
-about a period, counting, comparison, "what replaced this", vague recollection,
-and questions that need several hops all take different routes to the evidence.
-No one path is best at all of them, which is why there are six rather than one.
+## Measurement-based selection
 
-## Choices are measured, not asserted
+Configuration decisions are derived from full-coverage, per-question benchmark
+records. A comparison holds the corpus, questions, binary, port, scale, and
+answering or judging models fixed, then changes only the retrieval surface or
+composition under study. Reports declare the complete arm identity.
 
-Which paths run, and how their results are combined, is settled by running the
-benchmarks rather than by argument. A comparison holds everything fixed — the
-corpus, the questions, the binary, the port, the scale, and any model used to
-answer or judge — and changes only the one thing under test. Whatever ships as
-the default records the run that chose it, so a setting can always be traced
-back to the measurement behind it.
+Rank-fusion, learned matrix scoring, temporal weighting, broad recall, and
+staged retrieval are treated as measurable alternatives. An arm result is
+comparable only with another arm over the same unit set and evidence contract.
+Door configurations and provisioned lane weights retain the reports and run
+identifiers from which they were selected.
 
-## What finding cannot do on its own
+## Limits of deterministic retrieval
 
-Retrieval locates evidence. It does not count how often something happened
-across many records, decide what you meant when the question is ambiguous, or
-state a fact that exists only as the sum of several records. Those need a
-model, so figures that involve one name the model that produced them. The
-figures that measure MOOTx01 itself — did it find the right evidence, and how
-fast — stay separate and name no model.
+Retrieval can locate evidence; it cannot by itself count occurrences across
+many memories, resolve an underspecified user intent, or state a fact that must
+be synthesized from several records. Model-based answer scores therefore
+measure the full pipeline and name the model. Deterministic evidence-retrieval
+scores measure MOOTx01 directly and remain separate.
 
-## Notes the system writes for itself
+## Derived-memory markers
 
-When the machine is idle, MOOTx01 can read across related memories and write
-short derived notes, each citing the records it came from. A note retires when
-the records under it change. These notes are ordinary memories once written,
-so the six search paths find them like anything else, and nothing about
-retrieval changes when the feature is switched off.
+The optional dreaming pass examines related memories during idle time and
+mints short derived claims with citations. A marker retires when its source
+facts change. Markers are stored retrieval targets, so the query path remains
+deterministic after they are created. The retrieval path remains functional
+when dreaming is disabled.
 
-This closes part of the gap between finding and stating: a count or a
-cross-record conclusion becomes something the system can find, with its sources
-attached, instead of something it must assemble on every question.
+Derived markers address the boundary between finding and stating without
+replacing the retrieval architecture. They make aggregations and multi-record
+claims available as cited memories that the normal retrieval surfaces can
+locate.
 
-## Where the numbers are
+## Verification
 
-`RESULTS.md` lists every measured surface and what each one must cover. The
-page for each benchmark defines its task, its metrics, and how to reproduce it.
-Every published figure names the run it came from, the binary and product
-version, the protocol and schema version, the port and scale, and the models
-involved where there are any.
+`RESULTS.md` catalogs the measured surfaces and required evidence. The
+benchmark-specific pages define coverage and reproduction. Every published
+figure is traceable to an accepted row in `../RESULTS_RECORD.md`, its report,
+binary digest, protocol version, scale, port, and model identities where
+applicable.

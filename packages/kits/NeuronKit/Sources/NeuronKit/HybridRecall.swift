@@ -144,7 +144,7 @@ public func hybridRecall(
     // When the caller used .default AND the manifest differs from the spec,
     // build a new RecallFrameTuning from the manifest's four knobs.
     // pageSize is not a manifest concern and is always taken from the caller.
-    let resolvedTuning: RecallFrameTuning
+    var resolvedTuning: RecallFrameTuning
     if tuning == .default && manifestTuning != .default {
         resolvedTuning = RecallFrameTuning(
             bm25Weight: manifestTuning.rrfBm25Weight,
@@ -154,6 +154,15 @@ public func hybridRecall(
             pageSize: tuning.pageSize)
     } else {
         resolvedTuning = tuning
+    }
+    // Chest-aware diversity (ADR-027 D3): the caller's flag, else the estate
+    // preference `chest_recall_diversity`; off is byte-for-byte the shingle term.
+    if !resolvedTuning.chestDiversity,
+       (try? await glk.provisionedPreference(.chestRecallDiversity, for: handle)) == .on {
+        resolvedTuning = RecallFrameTuning(
+            bm25Weight: resolvedTuning.bm25Weight, vectorWeight: resolvedTuning.vectorWeight,
+            rrfK: resolvedTuning.rrfK, mmrLambda: resolvedTuning.mmrLambda,
+            pageSize: resolvedTuning.pageSize, chestDiversity: true)
     }
 
     let frameRows = try await glk.recall(handle, frame)
@@ -309,18 +318,26 @@ public struct RecallFrameTuning: Sendable, Equatable {
     /// across substrate and reasoning layers.
     public let pageSize: Int
 
+    /// ADR-027 D3: when true, two candidates whose `parentNodeId` is the
+    /// same container score 1.0 in the MMR similarity before any shingle
+    /// compare. `hybridRecall` turns it on when the estate preference
+    /// `chest_recall_diversity` reads on; a caller sets it to force it.
+    public let chestDiversity: Bool
+
     public init(
         bm25Weight: Float = 0.3,
         vectorWeight: Float = 0.7,
         rrfK: Int = 60,
         mmrLambda: Float = 0.7,
-        pageSize: Int = 50
+        pageSize: Int = 50,
+        chestDiversity: Bool = false
     ) {
         self.bm25Weight = bm25Weight
         self.vectorWeight = vectorWeight
         self.rrfK = rrfK
         self.mmrLambda = mmrLambda
         self.pageSize = pageSize
+        self.chestDiversity = chestDiversity
     }
 
     /// Spec-default tuning (k = 60, λ = 0.7, page size 50).
@@ -498,7 +515,10 @@ internal enum HybridRecallEngine {
             let (lo, hi) = a < b ? (a, b) : (b, a)
             let key = lo &* drawers.count &+ hi
             if let cached = pairMemo[key] { return cached }
-            let value = ShingleSimilarity.similarity(shingleSets[lo], shingleSets[hi])
+            // ADR-027 D3: one container, one topic; the shingle term otherwise.
+            let value: Float = tuning.chestDiversity
+                && drawers[lo].parentNodeId.lowercased() == drawers[hi].parentNodeId.lowercased()
+                ? 1.0 : ShingleSimilarity.similarity(shingleSets[lo], shingleSets[hi])
             pairMemo[key] = value
             return value
         }

@@ -141,7 +141,7 @@ private func median(_ values: [Double]) -> Double {
     .enabled(if: arcticFactoryProofEnabled, "requires pinned Arctic weights and ONNX reference")
 )
 struct ArcticFactoryProofTests {
-    @Test("CoreML factory matches ONNX and records timing")
+    @Test("Core AI factory matches ONNX and records timing")
     func factoryMatchesONNX() async throws {
         let environment = ProcessInfo.processInfo.environment
         let modelPath = try #require(environment["MOOT_ENCODER_MODEL_DIR"])
@@ -208,7 +208,7 @@ struct ArcticFactoryProofTests {
                     .resolvingSymlinksInPath().standardizedFileURL)
 
         let loadStarted = ContinuousClock.now
-        let encoder = try SpanEncoderFactory.make(
+        let encoder = try await SpanEncoderFactory.make(
             spec: spec,
             modelDirectory: resolvedModelDirectory)
         let coldLoadMS = elapsedMS(since: loadStarted)

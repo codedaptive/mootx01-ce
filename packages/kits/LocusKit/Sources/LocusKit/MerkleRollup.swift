@@ -54,27 +54,44 @@ extension Estate {
     /// marker). Deterministic: each room's `now` comes from its own drawers'
     /// `filedAt`, never a wall clock. Mirrors Rust `Estate::rollup_rooms_for_drawers`.
     public func rollupRoomsForDrawers(_ drawerIds: [String]) async throws {
-        // room node id → latest filedAt among this batch's drawers in that room.
-        var rooms: [UUID: Date] = [:]
+        // container node id → latest filedAt among this batch's drawers in
+        // it. The container is the drawer's parent: its chest, or the room
+        // when the room holds it directly (ADR-027 D1).
+        var containers: [UUID: Date] = [:]
         let drawers = try await store.getDrawers(ids: drawerIds)
         for drawer in drawers {
-            guard let room = UUID(uuidString: drawer.parentNodeId) else { continue }
-            if let existing = rooms[room] {
-                if drawer.filedAt > existing { rooms[room] = drawer.filedAt }
+            guard let container = UUID(uuidString: drawer.parentNodeId) else { continue }
+            if let existing = containers[container] {
+                if drawer.filedAt > existing { containers[container] = drawer.filedAt }
             } else {
-                rooms[room] = drawer.filedAt
+                containers[container] = drawer.filedAt
             }
         }
-        for (room, now) in rooms {
-            try await rollupMerkleRoots(roomNodeId: room, now: now)
+        for (container, now) in containers {
+            try await rollupMerkleRoots(containerNodeId: container, now: now)
         }
     }
 
     public func rollupMerkleRoots(
-        roomNodeId: UUID,
+        containerNodeId: UUID,
         now: Date
     ) async throws {
-        // Step 1: Room root — hash over active drawers in this room.
+        // ADR-027 D1: a chest carries its own root. When the write landed in
+        // a chest, hash that chest first (one container, not the room), then
+        // fold the room over its chests' stored roots.
+        guard let container = try await nodeStore.getNode(id: containerNodeId) else {
+            rollupLog.warning("MerkleRollup: container node \(containerNodeId) not found")
+            return
+        }
+        let roomNodeId: UUID
+        if container.depth == NodeStore.chestDepth, let chestRoom = container.parentId {
+            let chestRoot = try await computeChestMerkleRoot(chestNodeId: container.id)
+            try await nodeStore.updateMerkleRoot(nodeId: container.id, merkleRoot: chestRoot, now: now)
+            roomNodeId = chestRoom
+        } else {
+            roomNodeId = container.id
+        }
+        // Step 1: Room root — the room's direct drawers and its chests' roots.
         let roomRoot = try await computeRoomMerkleRoot(roomNodeId: roomNodeId)
         try await nodeStore.updateMerkleRoot(
             nodeId: roomNodeId,
@@ -124,12 +141,13 @@ extension Estate {
     /// of `adjectiveBitmap` (mask 0x3F). Including withdrawn drawers in the
     /// snapshot would allow retrieval of content that the user retracted,
     /// violating snapshot completeness (WS2-F1, fixed 2026-06-28).
-    func computeRoomMerkleRoot(roomNodeId: UUID) async throws -> MerkleRoot {
+    /// The leaf hashes of the live, non-withdrawn drawers filed directly
+    /// under one container node (a room or a chest).
+    private func containerLeafHashes(containerNodeId: UUID) async throws -> [(UUID, ContentHash)] {
         let rows = try await store.storage.rowStore.query(
             table: "drawers",
             where: .and([
-                .eq(Column(table: "drawers", name: "parent_node_id"),
-                    .text(roomNodeId.uuidString)),
+                .eq(Column(table: "drawers", name: "parent_node_id"), .text(containerNodeId.uuidString)),
                 // Exclude tombstoned drawers (irreversible deletion).
                 .isNull(Column(table: "drawers", name: "tombstonedAt")),
                 // Exclude withdrawn drawers (state 18, bits 0-5 of adjectiveBitmap).
@@ -163,8 +181,32 @@ extension Estate {
             }
             childHashes.append((drawerUUID, contentHash))
         }
+        return childHashes
+    }
 
-        return MerkleHash.interior(childHashes: childHashes)
+    /// ADR-027 D1: one chest's root, the interior hash over its live drawers.
+    func computeChestMerkleRoot(chestNodeId: UUID) async throws -> MerkleRoot {
+        MerkleHash.interior(childHashes: try await containerLeafHashes(containerNodeId: chestNodeId))
+    }
+
+    /// The room root. A room with no chests hashes its direct drawers as it
+    /// always did, so an estate never re-binned computes the same root it
+    /// did. A room with chests folds its chests' STORED roots (id order, the
+    /// same fold the wing applies over rooms) plus, when drawers sit on the
+    /// room directly, one entry under the room's own id for their interior
+    /// hash. Only the touched chest is rehashed by a rollup; the others are
+    /// read back.
+    func computeRoomMerkleRoot(roomNodeId: UUID) async throws -> MerkleRoot {
+        let direct = try await containerLeafHashes(containerNodeId: roomNodeId)
+        let chests = try await nodeStore.activeChests(roomId: roomNodeId)
+        if chests.isEmpty {
+            return MerkleHash.interior(childHashes: direct)
+        }
+        var childRoots: [(UUID, MerkleRoot)] = chests.map { ($0.id, $0.merkleRoot ?? MerkleRoot.empty) }
+        if !direct.isEmpty {
+            childRoots.append((roomNodeId, MerkleHash.interior(childHashes: direct)))
+        }
+        return MerkleHash.interior(childRoots: childRoots)
     }
 
     // MARK: - Wing and estate root
@@ -209,6 +251,11 @@ extension Estate {
         for wing in wings {
             let rooms = try await nodeStore.childNodes(parentId: wing.id)
             for room in rooms {
+                // Chests first (ADR-027 D1), so the room fold reads fresh roots.
+                for chest in try await nodeStore.activeChests(roomId: room.id) {
+                    let chestRoot = try await computeChestMerkleRoot(chestNodeId: chest.id)
+                    try await nodeStore.updateMerkleRoot(nodeId: chest.id, merkleRoot: chestRoot, now: now)
+                }
                 let roomRoot = try await computeRoomMerkleRoot(roomNodeId: room.id)
                 try await nodeStore.updateMerkleRoot(
                     nodeId: room.id,

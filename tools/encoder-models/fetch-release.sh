@@ -81,11 +81,24 @@ select_model() {
         arctic-embed-s-w60)
             RELEASE_TAG="models-arctic-embed-s-w60"
             APPLE_ASSET="arctic-embed-s-w60-apple.tar.gz"
-            APPLE_SHA256="88e476c51999e7ecf8548084cf0e43bb88b92be298a79d50cc5fb974fb6e2d0a"
+            # ADR-029: the Apple asset is the Core AI ArcticEmbedS.aimodel plus vocab.txt.
+            APPLE_SHA256="dad804e6e4326b77d7fed9424c9ac21c7505b6fa710197d4024277b48ab3ffb8"
             LINUX_ASSET="arctic-embed-s-w60-linux.tar.gz"
             LINUX_SHA256="5f71131f1452c15da4f94481b7b1e3fbf7d9ad9b67289e39a3e8b964f100533c"
             MANIFEST_PREFIX="encoder-models"
             VERIFY_MODE="encoder"
+            ;;
+        ms-marco-minilm-l6-cross-v1)
+            # The retrieval-time cross encoder (CROSSENCODER_SPEC): Core AI
+            # MsMarcoMinilmL6CrossV1.aimodel plus vocab.txt on Apple, the HF
+            # triple plus vocab.txt on Linux.
+            RELEASE_TAG="models-ms-marco-minilm-l6-cross-v1"
+            APPLE_ASSET="ms-marco-minilm-l6-cross-v1-apple.tar.gz"
+            APPLE_SHA256="a4dfbc3ae0a13b1ec9f95940b9e0bb54931ae3d9942cfe8426179b09ce52cdf9"
+            LINUX_ASSET="ms-marco-minilm-l6-cross-v1-linux.tar.gz"
+            LINUX_SHA256="4e651c91e9a6c60ab811c4b21ca43d566ab70340e5d1bee9bb52613677ab586f"
+            MANIFEST_PREFIX="cross-encoder-models"
+            VERIFY_MODE="cross-encoder"
             ;;
         nuextract-tiny-v1.5)
             RELEASE_TAG="models-nuextract-tiny-v1.5"
@@ -97,7 +110,7 @@ select_model() {
             VERIFY_MODE="nuextract"
             ;;
         *)
-            die "unknown model-id '${MODEL_ID}'; use arctic-embed-s-w60 or nuextract-tiny-v1.5"
+            die "unknown model-id '${MODEL_ID}'; use arctic-embed-s-w60, ms-marco-minilm-l6-cross-v1 or nuextract-tiny-v1.5"
             ;;
     esac
 }
@@ -124,6 +137,20 @@ verify_layout() {
                 --overlap-divisor 2 \
                 --max-spans 32 \
                 --max-sequence 512
+            ;;
+        cross-encoder)
+            "${PYTHON_BIN}" "${SCRIPT_DIR}/manifest_tools.py" verify-cross \
+                --manifest "${MANIFEST_FILE}" \
+                --root "${root}" \
+                --platform "${PLATFORM}" \
+                --model-id "${MODEL_ID}" \
+                --hf-repo "cross-encoder/ms-marco-MiniLM-L-6-v2" \
+                --revision "233902d25c440f23af6f7d6e94d2946bac0bee0a" \
+                --max-sequence 512 \
+                --pool 50 \
+                --head 30 \
+                --spans 3 \
+                --rrf-k 60
             ;;
         nuextract)
             "${PYTHON_BIN}" "${SCRIPT_DIR}/manifest_tools.py" verify-nuextract \

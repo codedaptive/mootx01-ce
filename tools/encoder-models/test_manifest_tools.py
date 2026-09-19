@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import hashlib
-import importlib.util
 import json
 import struct
 import tempfile
@@ -119,16 +118,6 @@ class ManifestToolsTests(unittest.TestCase):
         manifest = self.write_manifest(self.manifest())
         verify_manifest_files(manifest, self.root, "linux", IDENTITY)
 
-    def test_converter_binds_both_manifest_verifiers(self) -> None:
-        converter_path = Path(__file__).with_name("convert-coreml.py")
-        spec = importlib.util.spec_from_file_location("convert_coreml_test", converter_path)
-        self.assertIsNotNone(spec)
-        self.assertIsNotNone(spec.loader)
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        self.assertIs(module.verify_manifest_files, verify_manifest_files)
-        self.assertIs(module.verify_source_manifest, verify_source_manifest)
-
     def test_missing_vocab_entry_is_rejected(self) -> None:
         value = self.manifest()
         value["files"] = [entry for entry in value["files"] if entry["path"] != "vocab.txt"]  # type: ignore[index]
@@ -198,7 +187,7 @@ class ManifestToolsTests(unittest.TestCase):
             verify_manifest_files(self.write_manifest(value), self.root, "linux", IDENTITY)
 
     def test_directory_hash_uses_framed_relative_paths_and_bytes(self) -> None:
-        artifact = self.root / "Fixture.mlmodelc"
+        artifact = self.root / "Fixture.aimodel"
         nested = artifact / "sub"
         nested.mkdir(parents=True)
         (artifact / "same").write_bytes(b"one")

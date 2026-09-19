@@ -5266,16 +5266,30 @@ impl EstateCoordinator {
         threshold: f32,
         now: i64,
     ) -> Result<usize, VerbDispatchError> {
+        // The whole-estate form: every container rescored whole, every
+        // roster replaced (ADR-026). The resident pays the incremental duty
+        // instead.
         let estate = self.estate_for_verb(handle)?;
+        let checkpoints = self.fact_checkpoints(handle).map_err(|e| {
+            VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                verb: "anomaly_flag_sweep".to_string(), reason: format!("checkpoints: {e:?}"),
+            })
+        })?;
         let rooms = estate
             .room_level_fingerprints()
             .map_err(|e| remap("anomaly_flag_sweep", "", e))?;
         let mut changed: usize = 0;
         for entry in &rooms {
-            changed += crate::brain::anomaly_flag_sweep::score_room(
-                &estate, &entry.wing, &entry.room, threshold, now,
-            )
-            .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
+            let containers = crate::brain::anomaly_flag_sweep::containers_of(estate, &entry.wing, &entry.room)
+                .map_err(|e| remap("anomaly_flag_sweep", &entry.room, e))?;
+            for (container, _) in containers {
+                changed += crate::brain::anomaly_flag_sweep::score_container(
+                    estate, &checkpoints, &container, threshold, true, now,
+                )
+                .map_err(|e| VerbDispatchError::Verb(VerbError::UnderlyingEstateFailure {
+                    verb: "anomaly_flag_sweep".to_string(), reason: format!("{e:?}"),
+                }))?;
+            }
         }
         Ok(changed)
     }
@@ -6264,6 +6278,7 @@ impl EstateCoordinator {
         // so the tiered contradiction search reuses the identical pass —
         // see `contradiction_candidate_pairs` below.
         let candidate_pairs = self.contradiction_candidate_pairs(
+            estate,
             vector_store,
             &probe_ids,
             &drawers_by_id,
@@ -6387,6 +6402,7 @@ impl EstateCoordinator {
     #[allow(clippy::too_many_arguments)]
     fn contradiction_candidate_pairs(
         &self,
+        estate: &locus_kit::estate::Estate,
         vector_store: &Arc<VectorStore>,
         probe_ids: &[String],
         drawers_by_id: &std::collections::HashMap<&str, &locus_kit::drawer::Drawer>,
@@ -6479,6 +6495,50 @@ impl EstateCoordinator {
                         (source_id, pd_id.clone())
                     };
                     candidate_pairs.push((a, b));
+                }
+            }
+        }
+
+        // Lane 3 — chest-mates (ADR-027 D2), behind the estate preference
+        // `chest_contradiction_candidates` (default off). Each probe drawer is
+        // paired with every live drawer of its own container: two drawers in
+        // one chest already share content, which is where value divergence
+        // and negation sit. Bounded at the chest capacity per probe; the
+        // canonical-pair deduplication above applies unchanged. Twin of the
+        // Swift lane.
+        let chest_mates_on = matches!(
+            estate.meta(crate::estate_preference::EstatePreferenceKey::ChestContradictionCandidates.as_str()),
+            Ok(Some(ref v)) if v == crate::estate_preference::EstatePreferenceValue::On.as_str()
+        );
+        if chest_mates_on {
+            let mut seen_containers: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut probe_drawer_ids: Vec<&str> = probe_ids.iter().map(String::as_str).collect();
+            probe_drawer_ids.sort();
+            probe_drawer_ids.dedup();
+            for pd_id in &probe_drawer_ids {
+                let Some(probe) = drawers_by_id.get(pd_id) else { continue };
+                if !seen_containers.insert(probe.parent_node_id.clone()) {
+                    continue;
+                }
+                let Ok(mates) = estate.drawers_in_container(&probe.parent_node_id) else { continue };
+                // Every probe in this container pairs with every mate; probes
+                // sharing a container are covered by the one read.
+                for p_id in &probe_drawer_ids {
+                    let Some(p) = drawers_by_id.get(p_id) else { continue };
+                    if p.parent_node_id != probe.parent_node_id {
+                        continue;
+                    }
+                    for mate in &mates {
+                        if mate.id == p.id {
+                            continue;
+                        }
+                        let key = pair_key(&p.id, &mate.id);
+                        if !seen_pairs.insert(key) {
+                            continue;
+                        }
+                        let (a, b) = if p.id < mate.id { (p.id.clone(), mate.id.clone()) } else { (mate.id.clone(), p.id.clone()) };
+                        candidate_pairs.push((a, b));
+                    }
                 }
             }
         }
@@ -6732,9 +6792,16 @@ impl EstateCoordinator {
                 ..LexicalLaneScan::empty()
             };
         };
+        // The estate behind the handle: lane 3 (ADR-027 D2) reads a probe's
+        // container-mates from it. A handle with a vector store always has
+        // its estate open; a miss degrades to the empty pass like the hunter.
+        let Ok(estate) = self.estate_for(handle) else {
+            return LexicalLaneScan::empty();
+        };
         let probe_ids = vector_store.recent_item_ids(probe_limit).unwrap_or_default();
         let probes_scanned = probe_ids.len();
         let candidate_pairs = self.contradiction_candidate_pairs(
+            estate,
             vector_store,
             &probe_ids,
             drawers_by_id,
@@ -8102,12 +8169,19 @@ impl EstateCoordinator {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let prior_room = if moves_room {
+        // The anomaly sweep's unit is the container a drawer sits in
+        // (ADR-026): the one it leaves is readable only before the move.
+        let container_of = |parent: &str| -> Option<crate::brain::anomaly_flag_sweep::AnomalyContainer> {
+            let names = crate::brain::anomaly_flag_sweep::resolve_room_names(&estate, std::iter::once(parent));
+            let (wing, room) = names.get(parent)?;
+            Some(crate::brain::anomaly_flag_sweep::AnomalyContainer {
+                node_id: parent.to_string(), wing: wing.clone(), room: room.clone(),
+            })
+        };
+        let prior_container = if moves_room {
             estate.get_drawers(&[row_id]).ok().and_then(|drawers| {
                 let drawer = drawers.into_iter().next()?;
-                let names = crate::brain::anomaly_flag_sweep::resolve_room_names(
-                    &estate, std::iter::once(drawer.parent_node_id.as_str()));
-                names.get(&drawer.parent_node_id).cloned()
+                container_of(&drawer.parent_node_id)
             })
         } else {
             None
@@ -8118,15 +8192,13 @@ impl EstateCoordinator {
         if moves_room {
             if let Ok(drawers) = estate.get_drawers(&[row_id]) {
                 if let Some(drawer) = drawers.into_iter().next() {
-                    let names = crate::brain::anomaly_flag_sweep::resolve_room_names(
-                        &estate, std::iter::once(drawer.parent_node_id.as_str()));
-                    if let Some((new_wing, new_room)) = names.get(&drawer.parent_node_id) {
-                        let _ = self.mark_anomaly_sweep_room_dirty(handle, new_wing, new_room, now);
+                    if let Some(container) = container_of(&drawer.parent_node_id) {
+                        let _ = self.mark_anomaly_sweep_container_dirty(handle, &container, now);
                     }
                 }
             }
-            if let Some((old_wing, old_room)) = prior_room {
-                let _ = self.mark_anomaly_sweep_room_dirty(handle, &old_wing, &old_room, now);
+            if let Some(container) = prior_container {
+                let _ = self.mark_anomaly_sweep_container_dirty(handle, &container, now);
             }
         }
         Ok(())
@@ -11892,6 +11964,37 @@ impl EstateCoordinator {
     /// topical diversity. Bit ordinals are the five candidate-supply lanes
     /// (see `source_masks` in `recall_scored_multi_lane`). Returns 0 when both
     /// masks are zero (no shared lane evidence — fully dissimilar).
+    /// The MMR similarity of two slots: 1.0 when both sit in one container
+    /// and chest-aware diversity is in force (ADR-027 D3), else the shingle
+    /// Jaccard over their sets, else the source-mask Jaccard when a body is
+    /// unavailable (the fallback rule).
+    fn union_best_pair_similarity(
+        container_a: &Option<String>, container_b: &Option<String>,
+        shingles_a: &Option<BTreeSet<String>>, shingles_b: &Option<BTreeSet<String>>,
+        mask_a: u16, mask_b: u16,
+    ) -> f32 {
+        if let (Some(ca), Some(cb)) = (container_a, container_b) {
+            if ca == cb {
+                return 1.0;
+            }
+        }
+        match (shingles_a, shingles_b) {
+            (Some(a), Some(b)) => substrate_ml::shingle_similarity::similarity_sets(a, b),
+            _ => Self::source_mask_jaccard(mask_a, mask_b),
+        }
+    }
+
+    /// Each slot's container for the MMR term: its `parent_node_id`
+    /// (lowercase) when chest-aware diversity is in force, else `None`.
+    fn union_best_mmr_containers(
+        id_refs: &[&str], drawer_index: &HashMap<String, Drawer>, chest_diversity: bool,
+    ) -> Vec<Option<String>> {
+        id_refs.iter().map(|id| {
+            if !chest_diversity { return None; }
+            drawer_index.get(*id).map(|d| d.parent_node_id.to_lowercase())
+        }).collect()
+    }
+
     fn source_mask_jaccard(a: u16, b: u16) -> f32 {
         let or_bits = a | b;
         if or_bits == 0 {
@@ -11997,6 +12100,10 @@ impl EstateCoordinator {
         content_key: &[&str],
         shingles: &[Option<BTreeSet<String>>],
         subjects: &[&str],
+        // ADR-027 D3: each slot's container (its `parent_node_id`, lowercase)
+        // when chest-aware diversity is in force, else all `None`; two slots
+        // sharing a container score 1.0 before any shingle compare.
+        containers: &[Option<String>],
         lambda: f32,
         similarity_scale: f32,
         limit: usize,
@@ -12030,10 +12137,8 @@ impl EstateCoordinator {
             unselected.remove(pos);
             selected.push(best_idx);
             for &i in unselected.iter() {
-                let sim = match (&shingles[best_idx], &shingles[i]) {
-                    (Some(a), Some(b)) => substrate_ml::shingle_similarity::similarity_sets(a, b),
-                    _ => Self::source_mask_jaccard(source_masks[best_idx], source_masks[i]),
-                };
+                let sim = Self::union_best_pair_similarity(
+                    &containers[best_idx], &containers[i], &shingles[best_idx], &shingles[i], source_masks[best_idx], source_masks[i]);
                 if sim > max_sim[i] {
                     max_sim[i] = sim;
                 }
@@ -12278,6 +12383,14 @@ impl EstateCoordinator {
         force_vector_hamming_error: Option<String>,
         force_embed_error: Option<String>,
     ) -> Result<GLKRecallResult, VerbDispatchError> {
+        // Chest-aware diversity (ADR-027 D3): the request's override, else the
+        // estate preference `chest_recall_diversity`; off is byte-for-byte the
+        // shingle term. Resolved once per recall, read at both MMR phases.
+        let chest_diversity = match request.chest_diversity {
+            Some(flag) => flag,
+            None => matches!(estate.meta(EstatePreferenceKey::ChestRecallDiversity.as_str()),
+                             Ok(Some(ref v)) if v == EstatePreferenceValue::On.as_str()),
+        };
         // W2.5 R(b): merge the estate's PROVISIONED default lane weights
         // (optimizer-owned, manifest key `lane_weights`, JSON of lane key →
         // signed float) into the request shape. Precedence per key mirrors
@@ -13782,11 +13895,12 @@ impl EstateCoordinator {
             let subjects: Vec<&str> = id_refs.iter().map(|id| {
                 drawer_index.get(*id).and_then(|d| d.subject.as_deref()).unwrap_or("")
             }).collect();
+            let containers = Self::union_best_mmr_containers(&id_refs, &drawer_index, chest_diversity);
             // ρ = budget.redistribution keeps the similarity term on the
             // redistributed relevance scale (COL-2; see union_best_mmr_select).
             let selected = Self::union_best_mmr_select(
                 &col_final, &source_masks, &admissible, &content_key, &shingles,
-                &subjects, lambda, budget.redistribution, request.limit, &mut degraded_stages);
+                &subjects, &containers, lambda, budget.redistribution, request.limit, &mut degraded_stages);
 
             fused_scored = selected.into_iter().map(|i| {
                 let id = ordered_ids[i].clone();
@@ -14129,12 +14243,13 @@ impl EstateCoordinator {
                 let subjects: Vec<&str> = id_refs.iter().map(|id| {
                     drawer_index.get(*id).and_then(|d| d.subject.as_deref()).unwrap_or("")
                 }).collect();
+                let containers = Self::union_best_mmr_containers(&id_refs, &drawer_index, chest_diversity);
                 // No budget touches the normalised fused score, so the
                 // similarity term runs at scale 1.0 (Swift: similarityScale is
                 // 1.0 for every scoring other than .matrixAware).
                 let selected = Self::union_best_mmr_select(
                     &scores, &source_masks, &admissible, &content_key, &shingles,
-                    &subjects, lambda, 1.0, request.limit, &mut degraded_stages);
+                    &subjects, &containers, lambda, 1.0, request.limit, &mut degraded_stages);
                 // Step 11 columns: the normalised buffer values and the step 9
                 // score, in the tuple order the hit construction reads.
                 fused_scored = selected.into_iter().map(|i| {

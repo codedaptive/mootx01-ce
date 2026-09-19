@@ -91,6 +91,33 @@ Network mode resolves the exact 40-character revision into a local HF snapshot
 and applies the same source-manifest identity and digest checks before loading
 the model.
 
+## The Apple asset is Core AI (ADR-028 E4, ADR-029)
+
+Every Apple profile ships one asset, `<artifact>.aimodel`, exported from the
+pinned snapshot by `export-coreai.py` through coreai-torch: dynamic batch
+(1...64) and sequence (1...512), float32. Sentence encoders return `pooled`
+`[B, 384]` (CLS); the cross encoder (`--kind cross-encoder`) returns `logits`
+`[B]`. `build-all.sh` runs the export for the Apple side and needs the Core
+AI PyTorch environment named by `COREAI_PYTHON` (coreai-torch with its
+runtime); there is no CoreML converter any more.
+
+```bash
+COREAI_PYTHON=/path/to/coreai-torch/.venv/bin/python \
+PYTHON_BIN="$ENCODER_PYTHON" \
+bash "$ENCODER_REPO_ROOT/tools/encoder-models/build-all.sh" \
+  --profile arctic \
+  --output-root "$ENCODER_OUTPUT_ROOT" \
+  --source-dir "$ARCTIC_SOURCE" \
+  --force
+```
+
+The export writes `<artifact>.aimodel`, `<artifact>.export.json` (source
+digests, shapes, the fixture's float32 reference vectors or logits, the
+exported-program vs HF max abs difference, and the all-pad-row finiteness
+check that stands in for the earlier FP16 NaN regression) and `vocab.txt`
+under `apple/`, and records the asset as the apple manifest's one
+`aimodel_dir` entry.
+
 ## Verify and record Linux artifacts
 
 Normal operation verifies the authoritative manifest. It requires exact model
@@ -147,12 +174,12 @@ overrides prevent the rebuild from changing either checked-in floor record.
 ## Build the cross encoder
 
 The cross encoder is a BERT sequence classifier. `--profile minilm-cross`
-converts it with `--kind cross-encoder`: three fixed `[1,512]` Int32 inputs
-(`input_ids`, `attention_mask`, `token_type_ids`) and one Float32 `logits`
-output of shape `[1,1]`. The pooler and classifier stay inside the graph; the
-Rust runtime reads them from the same safetensors (`bert.pooler.dense`,
-`classifier`). Model id `ms-marco-minilm-l6-cross-v1`, artifact
-`MsMarcoMinilmL6CrossV1.mlmodelc`.
+exports it with `--kind cross-encoder`: three Int32 inputs (`input_ids`,
+`attention_mask`, `token_type_ids`) of shape `[B, L]`, B in 1...64 and L in
+1...512, and one Float32 `logits` output of shape `[B]`. The pooler and
+classifier stay inside the graph; the Rust runtime reads them from the same
+safetensors (`bert.pooler.dense`, `classifier`). Model id
+`ms-marco-minilm-l6-cross-v1`, artifact `MsMarcoMinilmL6CrossV1.aimodel`.
 
 ```bash
 CROSS_OUTPUT_ROOT=/Volumes/llm_models/benchmark/work/encoder-models/ms-marco-minilm-l6-cross-v1

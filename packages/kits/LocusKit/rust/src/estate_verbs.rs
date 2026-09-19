@@ -79,7 +79,25 @@ use substrate_kernel::bit_field;
 use substrate_lib::row_state::RowVerb;
 
 use crate::estate_types::RowID;
+use engram_lib::chest_placement;
+use engram_lib::morton_key::MortonKey;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
+use substrate_ml::content_fingerprint;
+
+/// The audit verb of a room re-bin: one estate-anchored event per re-bin
+/// (row id = the room node), never one per moved drawer. Moves within a
+/// room are placement, not content or state change (ADR-026 D4).
+pub const CHEST_REBIN_VERB: &str = "chestRebin";
+
+/// One chest of a room, as `Estate::chests_in` reports it: the chest node,
+/// the low placement key its name encodes, and its live drawer count. Never
+/// persisted; a chest's name is its only stored fact (spec § 12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChestRange {
+    pub chest_node_id: String,
+    pub low_key: MortonKey,
+    pub count: usize,
+}
 
 /// Result of `Estate::get_drawers_matching_frame`: the frame-admissible drawers
 /// plus the set of ids whose rows physically loaded.
@@ -215,11 +233,9 @@ impl Estate {
         &self,
         drawers: &[Drawer],
     ) -> BTreeMap<String, (String, String)> {
-        let node_store = match &self.node_store {
-            Some(ns) => ns,
-            None => return BTreeMap::new(),
-        };
-        // Collect unique parent_node_ids.
+        // One resolver: the store's `resolve_node_names` walks a parent that
+        // is a room or a chest (ADR-026) to (wing, room). An unresolvable
+        // store yields an empty map, as before.
         let parent_ids: BTreeSet<String> = drawers
             .iter()
             .filter(|d| !d.parent_node_id.is_empty())
@@ -228,28 +244,241 @@ impl Estate {
         if parent_ids.is_empty() {
             return BTreeMap::new();
         }
-        // Resolve each room node → (wing_name, room_name).
-        let mut result = BTreeMap::new();
-        for pid in &parent_ids {
-            let room_uuid = match Uuid::parse_str(pid) {
-                Ok(u) => u,
-                Err(_) => continue,
-            };
-            let room_node = match node_store.get_node(room_uuid) {
-                Ok(Some(n)) => n,
-                _ => continue,
-            };
-            let wing_name = if let Some(wing_uuid) = room_node.parent_id {
-                match node_store.get_node(wing_uuid) {
-                    Ok(Some(w)) => w.display_name,
-                    _ => String::new(),
-                }
-            } else {
-                String::new()
-            };
-            result.insert(pid.clone(), (wing_name, room_node.display_name));
+        let ids: Vec<String> = parent_ids.into_iter().collect();
+        self.store.resolve_node_names(&ids).unwrap_or_default()
+    }
+
+    // -----------------------------------------------------------------------
+    // Chests (ADR-026, spec § 12)
+    // -----------------------------------------------------------------------
+
+    /// The room node named by wing and room, or `None` when either is
+    /// absent. Never creates: a read or a re-bin of a room that does not
+    /// exist is a caller error, not an occasion to make one.
+    fn existing_room_node(&self, wing: &str, room: &str) -> Result<Option<crate::node::Node>, LocusKitError> {
+        let ns = match &self.node_store {
+            Some(ns) => ns,
+            None => return Ok(None),
+        };
+        let root = match ns.root_node()? {
+            Some(r) => r,
+            None => return Ok(None),
+        };
+        let wing_node = match ns.find_node(wing, root.id)? {
+            Some(w) => w,
+            None => return Ok(None),
+        };
+        ns.find_node(room, wing_node.id)
+    }
+
+    /// The room's active chests with their low keys and live drawer counts,
+    /// in key order. Empty for a room that has never been re-binned or does
+    /// not exist. A read model: nothing here is stored beyond the chest
+    /// node's name. Mirrors Swift `Estate.chests(in:room:)`.
+    pub fn chests_in(&self, wing: &str, room: &str) -> Result<Vec<ChestRange>, LocusKitError> {
+        let room_node = match self.existing_room_node(wing, room)? {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+        let ns = self.node_store.as_ref().expect("existing_room_node found a room, so the node store exists");
+        let storage = self.store.storage().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable("chests_in: no storage".to_string())
+        })?;
+        let mut ranges = Vec::new();
+        for chest in ns.active_chests(room_node.id)? {
+            let low = MortonKey::from_hex(&chest.display_name).ok_or_else(|| {
+                LocusKitError::InvalidContent(format!(
+                    "chest {} under {wing}/{room} is not named by a placement key", chest.id
+                ))
+            })?;
+            let count = storage
+                .row_store()
+                .count(
+                    "drawers",
+                    Some(&persistence_kit::predicate::StoragePredicate::And(vec![
+                        persistence_kit::predicate::StoragePredicate::Eq(
+                            persistence_kit::types::Column::new("drawers", "parent_node_id"),
+                            persistence_kit::types::TypedValue::Text(chest.id.to_string()),
+                        ),
+                        persistence_kit::predicate::StoragePredicate::IsNull(
+                            persistence_kit::types::Column::new("drawers", "tombstonedAt"),
+                        ),
+                    ])),
+                )
+                .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+            ranges.push(ChestRange { chest_node_id: chest.id.to_string(), low_key: low, count });
         }
-        result
+        Ok(ranges)
+    }
+
+    /// The room's containers with live drawer counts, in key order: its
+    /// chests, and the room itself first (low key zero) when drawers are
+    /// filed directly on it, which is every room never re-binned and, for a
+    /// moment, a room a capture reached while a re-bin ran. The unit the
+    /// anomaly sweep scores and the re-bin duty measures against
+    /// `chest_placement::CAPACITY`. Empty for an absent or empty room.
+    /// Mirrors Swift `Estate.containers(in:room:)`.
+    pub fn containers_in(&self, wing: &str, room: &str) -> Result<Vec<ChestRange>, LocusKitError> {
+        let room_node = match self.existing_room_node(wing, room)? {
+            Some(r) => r,
+            None => return Ok(Vec::new()),
+        };
+        let storage = self.store.storage().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable("containers_in: no storage".to_string())
+        })?;
+        let direct = storage
+            .row_store()
+            .count(
+                "drawers",
+                Some(&persistence_kit::predicate::StoragePredicate::And(vec![
+                    persistence_kit::predicate::StoragePredicate::Eq(
+                        persistence_kit::types::Column::new("drawers", "parent_node_id"),
+                        persistence_kit::types::TypedValue::Text(room_node.id.to_string()),
+                    ),
+                    persistence_kit::predicate::StoragePredicate::IsNull(
+                        persistence_kit::types::Column::new("drawers", "tombstonedAt"),
+                    ),
+                ])),
+            )
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        let mut ranges = Vec::new();
+        if direct > 0 {
+            ranges.push(ChestRange { chest_node_id: room_node.id.to_string(), low_key: MortonKey { words: [0; 8] }, count: direct });
+        }
+        ranges.extend(self.chests_in(wing, room)?);
+        Ok(ranges)
+    }
+
+    /// The live drawers filed directly under one container, a room or a
+    /// chest (spec § 12), in the room read's order. The per-container read
+    /// the anomaly sweep scores. Mirrors Swift `Estate.drawersIn(containerNodeId:)`.
+    pub fn drawers_in_container(&self, container_node_id: &str) -> Result<Vec<Drawer>, LocusKitError> {
+        let storage = self.store.storage().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable("drawers_in_container: no storage".to_string())
+        })?;
+        let (rows, _skipped) = storage
+            .row_store()
+            .query_skip_corrupt(
+                "drawers",
+                Some(&persistence_kit::predicate::StoragePredicate::And(vec![
+                    persistence_kit::predicate::StoragePredicate::Eq(
+                        persistence_kit::types::Column::new("drawers", "parent_node_id"),
+                        persistence_kit::types::TypedValue::Text(container_node_id.to_string()),
+                    ),
+                    persistence_kit::predicate::StoragePredicate::IsNull(
+                        persistence_kit::types::Column::new("drawers", "tombstonedAt"),
+                    ),
+                ])),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        let mut drawers = crate::drawer_store_inmemory::decode_rows_skip_corrupt(&rows, "drawers_in_container")?;
+        drawers.sort_by(|a, b| {
+            a.filed_at.cmp(&b.filed_at).then_with(|| a.content.cmp(&b.content)).then_with(|| a.id.cmp(&b.id))
+        });
+        Ok(drawers)
+    }
+
+    /// Re-bin a room: every live drawer in the room's subtree is keyed by
+    /// its content (ADR-026 D2), sorted, and dealt into ⌈n / fill⌉ chests
+    /// named by their low keys; the drawer moves land in one transaction
+    /// with one audit event, and chests the deal did not produce are
+    /// tombstoned. Idempotent: a second re-bin of an unchanged room moves
+    /// nothing and names the same chests with the same derived ids, which
+    /// is what lets two synced devices converge (D7). Returns the chest
+    /// count. A room with no live drawers ends with no chests. `now` is
+    /// epoch milliseconds, the store's clock unit. Mirrors Swift
+    /// `Estate.rebinRoom(wing:room:now:)`.
+    ///
+    /// The chest nodes are created before the move transaction, so a
+    /// failed transaction can leave an empty chest behind; the next re-bin
+    /// reuses or tombstones it, and an empty chest changes no read.
+    pub fn rebin_room(&self, wing: &str, room: &str, now: i64) -> Result<usize, LocusKitError> {
+        let room_node = self.existing_room_node(wing, room)?.ok_or_else(|| {
+            LocusKitError::InvalidContent(format!("rebin_room: room {wing}/{room} does not exist"))
+        })?;
+        let ns = self.node_store.as_ref().expect("existing_room_node found a room, so the node store exists");
+        let storage = self.store.storage().ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable("rebin_room: no storage".to_string())
+        })?;
+        let drawers = self.store.drawers_in_wing_room(wing, room)?;
+        let mut keyed: Vec<(MortonKey, String, String)> = drawers
+            .iter()
+            .map(|d| (chest_placement::key(&content_fingerprint::fingerprint(&d.content)), d.id.clone(), d.parent_node_id.clone()))
+            .collect();
+        // Ties on the key break on the id so the deal is deterministic.
+        keyed.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+        let keys: Vec<MortonKey> = keyed.iter().map(|k| k.0).collect();
+        let ranges = chest_placement::deal(&keys, chest_placement::FILL);
+
+        let mut assignments: Vec<(Uuid, Vec<String>)> = Vec::new();
+        let mut kept: HashSet<Uuid> = HashSet::new();
+        let mut start = 0usize;
+        for range in &ranges {
+            let chest = ns.create_chest(room_node.id, &range.low.hex(), now)?;
+            kept.insert(chest.id);
+            let chest_id = chest.id.to_string();
+            let moving: Vec<String> = keyed[start..start + range.count]
+                .iter()
+                .filter(|k| k.2 != chest_id)
+                .map(|k| k.1.clone())
+                .collect();
+            assignments.push((chest.id, moving));
+            start += range.count;
+        }
+
+        let changed_by = self.store.read_manifest().map(|m| m.owner_identifier).unwrap_or_default();
+        let actor = if changed_by.is_empty() { "estate".to_string() } else { changed_by };
+        let stamp = ns.generate_hlc(now);
+        let zero = (0i64, 0i64, 0i64);
+        let anchor = substrate_lib::verbs::LatticeAnchor::udc("000");
+        let row_id = substrate_lib::verbs::RowId(room_node.id.as_u128());
+        let estate_uuid = self.estate_uuid().as_u128();
+        let event = substrate_lib::verbs::AuditEvent {
+            event_id: substrate_lib::audit_gate::content_id(estate_uuid, row_id, &stamp, CHEST_REBIN_VERB, zero, anchor),
+            estate_uuid,
+            row_id,
+            hlc: stamp,
+            verb: CHEST_REBIN_VERB.to_string(),
+            before_bitmaps: Some(zero),
+            after_bitmaps: zero,
+            before_lattice_anchor: Some(anchor),
+            after_lattice_anchor: anchor,
+            actor,
+            reason: Some(format!("room={wing}/{room} drawers={} chests={}", drawers.len(), ranges.len())),
+        };
+        let audit_row = crate::drawer_store_inmemory::pk_audit_event_from(&event);
+        storage
+            .transaction(persistence_kit::storage::IsolationLevel::Serializable, &mut |txn| {
+                for (chest_id, drawer_ids) in &assignments {
+                    if drawer_ids.is_empty() {
+                        continue;
+                    }
+                    let mut values = BTreeMap::new();
+                    values.insert(
+                        "parent_node_id".to_string(),
+                        persistence_kit::types::TypedValue::Text(chest_id.to_string()),
+                    );
+                    txn.row_store().update(
+                        "drawers",
+                        values,
+                        &persistence_kit::predicate::StoragePredicate::In(
+                            persistence_kit::types::Column::new("drawers", "id"),
+                            drawer_ids.iter().map(|id| persistence_kit::types::TypedValue::Text(id.clone())).collect(),
+                        ),
+                    )?;
+                }
+                txn.audit_log().append(audit_row.clone())
+            })
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        for chest in ns.active_chests(room_node.id)? {
+            if !kept.contains(&chest.id) {
+                ns.tombstone_node(chest.id, now)?;
+            }
+        }
+        Ok(ranges.len())
     }
 
     // -----------------------------------------------------------------------
@@ -420,6 +649,9 @@ impl Estate {
         })?;
         let wing_node = node_store.create_node(&wing_name, root.id, now)?;
         let room_node = node_store.create_node(&room_name, wing_node.id, now)?;
+        // Chest placement (ADR-026, spec § 12): the room itself until it has
+        // been re-binned, then the chest the content key selects.
+        let parent_node_id = node_store.placement_parent(room_node.id, &frame.content)?;
 
         // Stamp a lineage id: use the caller's if provided, otherwise fresh.
         let lineage_id = frame.lineage_id.unwrap_or_else(Uuid::new_v4);
@@ -428,7 +660,7 @@ impl Estate {
         let mut drawer = Drawer::new(
             drawer_id,
             frame.content,
-            room_node.id.to_string(),
+            parent_node_id.to_string(),
             frame.added_by,
             now,
             frame.embedding_model_id,
@@ -623,10 +855,15 @@ impl Estate {
             // drawer. When absent, fall back to the batch `now` — identical
             // to all pre-v1.2 behavior where every drawer uses the batch clock.
             let drawer_filed_at = frame.capture_date.unwrap_or(now);
+            // Chest placement (ADR-026, spec § 12), per drawer: a room's
+            // chests can differ between two frames of one batch only if the
+            // batch itself re-binned, which it never does, so the per-frame
+            // read is one node query per room.
+            let parent_node_id = node_store.placement_parent(room_node.id, &frame.content)?;
             let mut drawer = Drawer::new(
                 drawer_id,
                 frame.content,
-                room_node.id.to_string(),
+                parent_node_id.to_string(),
                 frame.added_by,
                 drawer_filed_at,
                 frame.embedding_model_id,
@@ -2188,9 +2425,11 @@ impl Estate {
             Some(reason.unwrap_or("withdrawn via Estate.withdraw")),
             now,
         )?;
-        // NT-L3: Merkle rollup after state change.
-        if let Ok(room_uuid) = Uuid::parse_str(&drawer.parent_node_id) {
-            let _ = self.rollup_merkle_roots(room_uuid, now);
+        // NT-L3: Merkle rollup after state change, from the drawer's
+        // container: its chest, or the room when the room holds it directly
+        // (ADR-027 D1).
+        if let Ok(container) = Uuid::parse_str(&drawer.parent_node_id) {
+            let _ = self.rollup_merkle_roots(container, now);
         }
         Ok(())
     }
@@ -2271,24 +2510,26 @@ impl Estate {
         } else {
             lineage_ids.iter().map(String::as_str).collect()
         };
-        let mut affected_room_ids: std::collections::HashSet<Uuid> =
+        // Each member's container: its chest, or the room when the room
+        // holds it directly (ADR-027 D1).
+        let mut affected_container_ids: std::collections::HashSet<Uuid> =
             std::collections::HashSet::new();
         for id in &ids_to_fetch {
             if let Ok(Some(d)) = self.store.get_drawer(id) {
-                if let Ok(room_uuid) = Uuid::parse_str(&d.parent_node_id) {
-                    affected_room_ids.insert(room_uuid);
+                if let Ok(container) = Uuid::parse_str(&d.parent_node_id) {
+                    affected_container_ids.insert(container);
                 }
             }
         }
 
         let outcome = self.store
             .expunge_gated(row_id, &changed_by, reason_opt, now, seal_audit, sensitivity_ceiling)?;
-        // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
-        // contained any lineage member — not just the room of the
+        // NT-L3: Merkle rollup after expunge. Roll up ALL containers that
+        // held any lineage member — not just the container of the
         // initiating drawer — so cross-room lineage expunge keeps every
         // affected room's root correct (WS2-F2, fixed 2026-06-28).
-        for room_uuid in affected_room_ids {
-            let _ = self.rollup_merkle_roots(room_uuid, now);
+        for container in affected_container_ids {
+            let _ = self.rollup_merkle_roots(container, now);
         }
         // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling
         // is not a success, and a layer that summarises it as one is the
@@ -3416,12 +3657,12 @@ impl Estate {
             .ok_or_else(|| LocusKitError::DrawerNotFound { id: frame.b.clone() })?;
 
         // Resolve wing/room names from the node tree for each drawer's
-        // parent_node_id. Room node (depth 2) → parent is wing node (depth 1).
+        // parent_node_id, which is a room or a chest under one (ADR-026).
         // Falls back to empty strings if node_store is unavailable.
         let resolve_names = |parent_node_id: &str| -> (String, String) {
             if let Some(ref ns) = self.node_store {
-                let room_uuid = Uuid::parse_str(parent_node_id).ok();
-                let room_node = room_uuid.and_then(|u| ns.get_node(u).ok().flatten());
+                let parent_uuid = Uuid::parse_str(parent_node_id).ok();
+                let room_node = parent_uuid.and_then(|u| ns.room_node_for_parent(u).ok().flatten());
                 let room_name = room_node
                     .as_ref()
                     .map(|n| n.display_name.clone())
@@ -3881,6 +4122,179 @@ mod tests {
         assert_eq!(entry.fingerprint.adjective, expected_adj);
         assert_eq!(entry.fingerprint.operational, expected_op);
         assert_eq!(entry.fingerprint.provenance, expected_prov);
+    }
+
+    /// ADR-026: a chest is a depth-3 node under a room. A room read is the
+    /// subtree (drawers on the room itself plus every chest), and a drawer
+    /// parented to a chest still resolves to (wing, room).
+    #[test]
+    fn room_read_covers_chests_and_a_chest_resolves_to_its_room() {
+        let estate = make_estate();
+        let on_room = basic_capture(&estate, "on the room", "study");
+        let names = estate.store.resolve_node_names(&[on_room.parent_node_id.clone()]).unwrap();
+        let (wing, room) = names.get(&on_room.parent_node_id).cloned().expect("room names");
+        assert_eq!(room, "study");
+        let node_store = estate.node_store().expect("node store").clone();
+        let room_node = Uuid::parse_str(&on_room.parent_node_id).expect("room node id");
+        let chest = node_store.create_node("chest-1", room_node, 1_700_000_002_000).unwrap();
+        assert_eq!(chest.depth, 3);
+        let in_chest = Drawer::new(
+            Uuid::new_v4().to_string(), "in the chest", chest.id.to_string(), "alice",
+            1_700_000_003_000, "test-v1",
+        );
+        estate.store.add_drawer(&in_chest, 1_700_000_003_000).unwrap();
+        basic_capture(&estate, "elsewhere", "kitchen");
+
+        let read: Vec<String> = estate
+            .store
+            .drawers_in_wing_room(&wing, "study")
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect();
+        assert_eq!(read, vec![on_room.id.clone(), in_chest.id.clone()], "the room read is the subtree, in filed_at order");
+
+        let resolved = estate.store.resolve_node_names(&[chest.id.to_string()]).unwrap();
+        assert_eq!(resolved.get(&chest.id.to_string()).cloned(), Some((wing.clone(), "study".to_string())));
+    }
+
+    // --- chests (ADR-026, spec § 12); twins of ChestTests.swift ---
+
+    fn chest_frame(content: &str, room: &str) -> CaptureFrame {
+        let mut f = CaptureFrame::new(content, CaptureChannel::Typed, room, LatticeAnchor::udc("5"), "bilby", "test-v1");
+        f.wing = Some("w".to_string());
+        f
+    }
+
+    fn key_hex(content: &str) -> String {
+        chest_placement::key(&content_fingerprint::fingerprint(content)).hex()
+    }
+
+    /// Spec § 12 placement rule over a chest list, computed independently of
+    /// `NodeStore::placement_parent`.
+    fn expected_chest(content: &str, chests: &[ChestRange]) -> String {
+        let hex = key_hex(content);
+        chests
+            .iter()
+            .filter(|c| c.low_key.hex() <= hex)
+            .last()
+            .unwrap_or(&chests[0])
+            .chest_node_id
+            .clone()
+    }
+
+    fn audit_count(estate: &Estate) -> usize {
+        estate.store.storage().unwrap().audit_log().count().unwrap()
+    }
+
+    #[test]
+    fn chest_rebin_deals_sorted_keys_into_derived_chests() {
+        let estate = make_estate();
+        let frames: Vec<CaptureFrame> = (0..600).map(|i| chest_frame(&format!("note {i} on topic {}", i % 7), "study")).collect();
+        let drawers = estate.capture_batch(frames, 1_700_000_001_000).unwrap();
+        let ns = estate.node_store().unwrap().clone();
+        let room_id = Uuid::parse_str(&drawers[0].parent_node_id).unwrap();
+        assert_eq!(ns.get_node(room_id).unwrap().unwrap().depth, 2, "before a re-bin a drawer sits on the room");
+        let root_before = estate.compute_room_merkle_root(room_id).unwrap();
+        let audit_before = audit_count(&estate);
+
+        assert_eq!(estate.rebin_room("w", "study", 1_700_000_100_000).unwrap(), 3);
+        let chests = estate.chests_in("w", "study").unwrap();
+        assert_eq!(chests.iter().map(|c| c.count).collect::<Vec<_>>(), vec![250, 250, 100]);
+        let mut lows: Vec<MortonKey> = chests.iter().map(|c| c.low_key).collect();
+        lows.sort();
+        assert_eq!(lows, chests.iter().map(|c| c.low_key).collect::<Vec<_>>(), "chests come back in key order");
+        for chest in &chests {
+            assert_eq!(chest.chest_node_id, crate::node_store::NodeStore::chest_id(room_id, &chest.low_key.hex()).to_string());
+            assert_eq!(ns.get_node(Uuid::parse_str(&chest.chest_node_id).unwrap()).unwrap().unwrap().depth, 3);
+        }
+        assert_eq!(audit_count(&estate), audit_before + 1, "one event per re-bin");
+
+        let after = estate.store.drawers_in_wing_room("w", "study").unwrap();
+        let ids_after: HashSet<String> = after.iter().map(|d| d.id.clone()).collect();
+        assert_eq!(ids_after, drawers.iter().map(|d| d.id.clone()).collect::<HashSet<_>>());
+        let chest_ids: HashSet<String> = chests.iter().map(|c| c.chest_node_id.clone()).collect();
+        for d in &after {
+            assert!(chest_ids.contains(&d.parent_node_id));
+            assert_eq!(d.parent_node_id, expected_chest(&d.content, &chests));
+        }
+        // ADR-027 D1: each chest carries its own root and the room folds
+        // them, so the room root changes shape at the first re-bin; the
+        // incremental rollup and the full recompute must then agree.
+        estate.recompute_all_merkle_roots(1_700_000_101).unwrap();
+        for chest in &chests {
+            let node = ns.get_node(Uuid::parse_str(&chest.chest_node_id).unwrap()).unwrap().unwrap();
+            assert!(node.merkle_root.is_some(), "a chest carries its own Merkle root");
+            assert_eq!(node.merkle_root.unwrap(), estate.compute_chest_merkle_root(node.id).unwrap());
+        }
+        let room_root = estate.compute_room_merkle_root(room_id).unwrap();
+        assert_ne!(room_root, root_before, "the room root folds its chests' roots");
+        assert_eq!(ns.get_node(room_id).unwrap().unwrap().merkle_root.unwrap(), room_root);
+        // Every room-set read and count covers the chests.
+        assert_eq!(estate.store.drawers_in_wing("w").unwrap().len(), 600);
+        assert_eq!(estate.store.list_wings().unwrap().iter().map(|w| w.drawer_count).collect::<Vec<_>>(), vec![600]);
+        assert_eq!(estate.store.list_rooms(Some("w")).unwrap().iter().map(|r| r.drawer_count).collect::<Vec<_>>(), vec![600]);
+
+        let parents_before: BTreeMap<String, String> = after.iter().map(|d| (d.id.clone(), d.parent_node_id.clone())).collect();
+        assert_eq!(estate.rebin_room("w", "study", 1_700_000_200_000).unwrap(), 3);
+        assert_eq!(estate.chests_in("w", "study").unwrap(), chests);
+        for d in estate.store.drawers_in_wing_room("w", "study").unwrap() {
+            assert_eq!(parents_before[&d.id], d.parent_node_id);
+        }
+        assert_eq!(audit_count(&estate), audit_before + 2);
+    }
+
+    #[test]
+    fn chest_capture_and_reanchor_place_by_key_and_withdraw_rolls_up() {
+        let estate = make_estate();
+        let frames: Vec<CaptureFrame> = (0..300).map(|i| chest_frame(&format!("entry {i} about {}", i % 5), "study")).collect();
+        estate.capture_batch(frames, 1_700_000_001_000).unwrap();
+        estate.rebin_room("w", "study", 1_700_000_100_000).unwrap();
+        let chests = estate.chests_in("w", "study").unwrap();
+        assert_eq!(chests.len(), 2);
+        let ns = estate.node_store().unwrap().clone();
+
+        let fresh = estate.capture(chest_frame("a fresh note about gardening", "study"), 1_700_000_101_000).unwrap();
+        assert_eq!(fresh.parent_node_id, expected_chest(&fresh.content, &chests));
+
+        let elsewhere = estate.capture(chest_frame("moved from the kitchen", "kitchen"), 1_700_000_102_000).unwrap();
+        assert_eq!(ns.get_node(Uuid::parse_str(&elsewhere.parent_node_id).unwrap()).unwrap().unwrap().depth, 2);
+        estate.reanchor(&elsewhere.id, Some("study"), None, None).unwrap();
+        let moved = estate.store.get_drawer(&elsewhere.id).unwrap().unwrap();
+        assert_eq!(moved.parent_node_id, expected_chest(&moved.content, &chests));
+        assert_eq!(estate.store.drawers_in_wing_room("w", "study").unwrap().len(), 302);
+        assert!(estate.store.drawers_in_wing_room("w", "kitchen").unwrap().is_empty());
+
+        estate.withdraw(&fresh.id, None, 1_700_000_103_000).unwrap();
+        let room = ns.room_node_for_parent(Uuid::parse_str(&fresh.parent_node_id).unwrap()).unwrap().unwrap();
+        assert!(ns.get_node(room.id).unwrap().unwrap().merkle_root.is_some(), "withdraw rolled the room up through its chest");
+    }
+
+    #[test]
+    fn chest_empty_room_rebin_retires_chests_and_revives_them_by_id() {
+        let estate = make_estate();
+        let frames: Vec<CaptureFrame> = (0..3).map(|i| chest_frame(&format!("short {i}"), "study")).collect();
+        let drawers = estate.capture_batch(frames, 1_700_000_001_000).unwrap();
+        estate.rebin_room("w", "study", 1_700_000_100_000).unwrap();
+        let chests = estate.chests_in("w", "study").unwrap();
+        assert_eq!(chests.len(), 1);
+        for d in &drawers {
+            estate.reanchor(&d.id, Some("attic"), None, None).unwrap();
+        }
+        assert_eq!(estate.rebin_room("w", "study", 1_700_000_200_000).unwrap(), 0);
+        assert!(estate.chests_in("w", "study").unwrap().is_empty());
+        let ns = estate.node_store().unwrap().clone();
+        let retired = ns.get_node(Uuid::parse_str(&chests[0].chest_node_id).unwrap()).unwrap().unwrap();
+        assert!(retired.is_tombstoned());
+        let back = estate.capture(chest_frame("short again", "study"), 1_700_000_201_000).unwrap();
+        let room_id = Uuid::parse_str(&back.parent_node_id).unwrap();
+        assert_eq!(ns.get_node(room_id).unwrap().unwrap().depth, 2);
+        assert_eq!(estate.rebin_room("w", "study", 1_700_000_300_000).unwrap(), 1);
+        let revived = estate.chests_in("w", "study").unwrap();
+        assert_eq!(revived[0].chest_node_id, crate::node_store::NodeStore::chest_id(room_id, &revived[0].low_key.hex()).to_string());
+        assert!(ns.get_node(Uuid::parse_str(&revived[0].chest_node_id).unwrap()).unwrap().unwrap().is_active());
+        assert!(estate.chests_in("w", "no-such-room").unwrap().is_empty());
+        assert!(estate.rebin_room("w", "no-such-room", 1_700_000_400_000).is_err());
     }
 
     #[test]

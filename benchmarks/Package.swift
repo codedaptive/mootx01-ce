@@ -20,7 +20,7 @@ import PackageDescription
 // Package-relative dependency paths below are resolved from there.
 let package = Package(
     name: "mcp-benchmarker",
-    platforms: [.macOS(.v26)],
+    platforms: [.macOS("27.0")],
     products: [
         .executable(name: "mcp-benchmarker", targets: ["benchmarker-bin"]),
         // The core library surface that extension subpackages build on. Core

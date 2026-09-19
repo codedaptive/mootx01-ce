@@ -65,7 +65,7 @@ def directory_sha256(directory: Path) -> str:
 
 
 def artifact_digest(path: Path, file_type: str | None) -> str:
-    if file_type in {"mlmodelc_dir", "directory"}:
+    if file_type in {"aimodel_dir", "directory"}:
         return directory_sha256(path)
     if file_type is not None:
         raise ManifestError(f"unsupported manifest file type {file_type!r}")
@@ -220,11 +220,14 @@ def validate_coverage(manifest: dict[str, Any], platform: str) -> list[dict[str,
                 f"linux manifest coverage must be exactly {sorted(LINUX_PATHS)}, got {sorted(paths)}"
             )
     elif platform == "apple":
-        model_entries = [entry for entry in entries if entry.get("type") == "mlmodelc_dir"]
+        # ADR-029: an apple manifest covers exactly vocab.txt and one
+        # aimodel_dir, the Core AI asset the macOS 27 / iOS 27 seams batch
+        # through.
+        model_entries = [entry for entry in entries if entry.get("type") == "aimodel_dir"]
         if len(model_entries) != 1 or paths != {"vocab.txt", model_entries[0]["path"]}:
-            raise ManifestError("apple manifest must cover exactly vocab.txt and one mlmodelc_dir")
-        if not model_entries[0]["path"].endswith(".mlmodelc"):
-            raise ManifestError("apple directory artifact must end in .mlmodelc")
+            raise ManifestError("apple manifest must cover exactly vocab.txt and one aimodel_dir")
+        if not model_entries[0]["path"].endswith(".aimodel"):
+            raise ManifestError("apple Core AI artifact must end in .aimodel")
     else:
         raise ManifestError(f"unsupported platform {platform!r}")
     return entries

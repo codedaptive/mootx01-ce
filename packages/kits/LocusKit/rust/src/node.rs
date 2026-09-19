@@ -42,7 +42,7 @@ pub struct Node {
     /// All resolution, uniqueness enforcement, and index keys use this field.
     pub lookup_name: String,
 
-    /// Tree depth: 0 = estate, 1 = wing, 2 = room. Write-once, no reparent.
+    /// Tree depth: 0 = estate, 1 = wing, 2 = room, 3 = chest. Write-once, no reparent.
     pub depth: i32,
 
     /// Lifecycle state: 0 = active, 1 = tombstoned (§5).

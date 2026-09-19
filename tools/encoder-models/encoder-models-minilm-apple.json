@@ -13,13 +13,29 @@
   "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
   "files": [
     {
-      "path": "MiniLM-L6-v2.mlmodelc",
+      "path": "MiniLM-L6-v2.aimodel",
       "sha256": "FILL_IN_AFTER_COREML_CONVERSION",
-      "type": "mlmodelc_dir"
+      "type": "aimodel_dir"
     },
     {
       "path": "vocab.txt",
       "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
     }
-  ]
+  ],
+  "ext": {
+    "coreai_export": {
+      "dtype": "float32",
+      "batch": [
+        1,
+        64
+      ],
+      "sequence": [
+        1,
+        512
+      ],
+      "output": "pooled",
+      "coreai_torch": "0.4.2",
+      "pooling": "mean"
+    }
+  }
 }

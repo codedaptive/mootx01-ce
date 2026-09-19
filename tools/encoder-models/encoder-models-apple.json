@@ -12,9 +12,9 @@
   "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
   "files": [
     {
-      "path": "ArcticEmbedS.mlmodelc",
-      "sha256": "6c44eca8a3347ed5a20fb7c22d4fd08ea58d4422e3fbadc963db28fdb42aef42",
-      "type": "mlmodelc_dir"
+      "path": "ArcticEmbedS.aimodel",
+      "sha256": "813b34cf567a3c7771d6b14659a34de551b4da8b57b40023644a597aa10876a6",
+      "type": "aimodel_dir"
     },
     {
       "path": "vocab.txt",
@@ -32,13 +32,6 @@
       "model.safetensors": "0350e62666ee2403db0223fc7cef6293c951cc63d1d2e71468da9a5aea3b544a",
       "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
     },
-    "coreml_compute_units": "all",
-    "coreml_compute_precision": "float32",
-    "coreml_output": {
-      "name": "last_hidden_state",
-      "dtype": "float32"
-    },
-    "coreml_deployment_target": "macOS15",
     "directory_hash_algorithm": "mootx01-directory-sha256-v1",
     "artifacts": {
       "mlpackage": {
@@ -72,6 +65,20 @@
         "discovery_warnings": [],
         "compile_warnings": []
       }
+    },
+    "coreai_export": {
+      "dtype": "float32",
+      "batch": [
+        1,
+        64
+      ],
+      "sequence": [
+        1,
+        512
+      ],
+      "output": "pooled",
+      "coreai_torch": "0.4.2",
+      "pooling": "cls"
     }
   }
 }

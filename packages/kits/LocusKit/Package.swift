@@ -27,8 +27,8 @@ import PackageDescription
 let package = Package(
     name: "LocusKit",
     platforms: [
-        .macOS(.v26),
-        .iOS(.v26),
+        .macOS("27.0"),
+        .iOS("27.0"),
     ],
     products: [
         .library(
@@ -52,6 +52,9 @@ let package = Package(
         .package(path: "../../libs/SubstrateTypes"),
         .package(path: "../../libs/SubstrateKernel"),
         .package(path: "../../libs/SubstrateML"),
+        // EngramLib supplies the chest placement key (`ChestPlacement`,
+        // `MortonKey`; ADR-026, spec § 12). A lib below the kits, no cycle.
+        .package(path: "../../libs/EngramLib"),
         .package(name: "PersistenceKit", path: "../PersistenceKit"),
         // IntellectusLib is the zero-dep telemetry floor. LocusKit emits
         // path, recall, and KG-fact operation metrics via Intellectus.report(_:),
@@ -76,6 +79,7 @@ let package = Package(
                 .product(name: "SubstrateTypes", package: "SubstrateTypes"),
                 .product(name: "SubstrateKernel", package: "SubstrateKernel"),
                 .product(name: "SubstrateML", package: "SubstrateML"),
+                .product(name: "EngramLib", package: "EngramLib"),
                 .product(name: "PersistenceKit", package: "PersistenceKit"),
                 "IntellectusLib",
                 .product(name: "LatticeLib", package: "LatticeLib"),

@@ -50,7 +50,7 @@ Input:
   --allow-network    Permit downloads/HF resolution when no source dir is given.
 
 Outputs:
-  OUTPUT_ROOT/apple  .mlpackage, .mlmodelc, vocab.txt
+  OUTPUT_ROOT/apple  <artifact>.aimodel, its export record, vocab.txt (Core AI, ADR-029)
   OUTPUT_ROOT/linux  config.json, tokenizer.json, model.safetensors, vocab.txt
 
 Overrides:
@@ -235,29 +235,40 @@ FETCH_ARGS=(
   --output-dir "$OUTPUT_ROOT/linux"
   --manifest "$LINUX_MANIFEST"
 )
-CONVERT_ARGS=(
-  "${COMMON_ARGS[@]}"
-  --kind "$KIND"
-  --output-dir "$OUTPUT_ROOT/apple"
-  --manifest "$APPLE_MANIFEST"
-  --source-manifest "$LINUX_MANIFEST"
-  --artifact-name "$ARTIFACT_NAME"
-  --vocab "$OUTPUT_ROOT/linux/vocab.txt"
-)
 if [ -n "$SOURCE_DIR" ]; then
   FETCH_ARGS+=(--source-dir "$SOURCE_DIR")
-  CONVERT_ARGS+=(--model-source "$SOURCE_DIR")
-else
-  CONVERT_ARGS+=(--allow-network)
 fi
 [ "$RECORD_LINUX_MANIFEST" -eq 1 ] && FETCH_ARGS+=(--record-manifest)
-[ "$FORCE" -eq 1 ] && CONVERT_ARGS+=(--force)
 
 echo "=== Preparing and verifying Linux/Windows artifacts ==="
 PYTHON_BIN="$PYTHON_BIN" bash "$SCRIPT_DIR/fetch-rust-triple.sh" "${FETCH_ARGS[@]}"
 
-echo "=== Converting and verifying Apple artifacts ==="
-"$PYTHON_BIN" "$SCRIPT_DIR/convert-coreml.py" "${CONVERT_ARGS[@]}"
+echo "=== Exporting and verifying the Apple artifact (Core AI) ==="
+# ADR-029: one Apple runtime. The export runs from the Core AI PyTorch
+# environment named by COREAI_PYTHON (coreai-torch and its runtime); it needs
+# --source-dir, the verified local snapshot, and writes <artifact>.aimodel,
+# its export record and vocab.txt under apple/, recording the asset in the
+# apple manifest as its one aimodel_dir entry.
+if [ -z "${COREAI_PYTHON:-}" ]; then
+  echo "COREAI_PYTHON must name the Core AI PyTorch environment's python (coreai-torch installed)" >&2
+  exit 2
+fi
+if [ -z "$SOURCE_DIR" ]; then
+  echo "the Core AI export needs --source-dir (a verified local snapshot)" >&2
+  exit 2
+fi
+COREAI_ARGS=(
+  --kind "$KIND"
+  --source-dir "$SOURCE_DIR"
+  --output-dir "$OUTPUT_ROOT/apple"
+  --artifact-name "$ARTIFACT_NAME"
+  --max-sequence "$MAX_SEQUENCE"
+  --vocab "$OUTPUT_ROOT/linux/vocab.txt"
+  --manifest "$APPLE_MANIFEST"
+)
+[ "$KIND" = "encoder" ] && COREAI_ARGS+=(--dim "$DIM")
+[ "$FORCE" -eq 1 ] && COREAI_ARGS+=(--force)
+"$COREAI_PYTHON" "$SCRIPT_DIR/export-coreai.py" "${COREAI_ARGS[@]}"
 
 LINUX_VOCAB="$($PYTHON_BIN "$SCRIPT_DIR/manifest_tools.py" "$VERIFY_COMMAND" \
   --manifest "$LINUX_MANIFEST" --root "$OUTPUT_ROOT/linux" --platform linux \

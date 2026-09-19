@@ -1,7 +1,7 @@
 ---
 title: Benchmark Results Register
 release: "1.1"
-date: 2026-09-17
+date: 2026-08-28
 description: Catalog of benchmark result surfaces, required coverage, evidence, and authoritative detail pages.
 ---
 
@@ -10,14 +10,6 @@ description: Catalog of benchmark result surfaces, required coverage, evidence, 
 This register defines the result surfaces for release 1.1. Each detail page is
 the authoritative location for figures in that class and identifies the source
 report and parameter sidecar from which every published value is copied.
-
-## Status at this release
-
-The suite is built and runs end to end from the Makefile: setup, corpus
-seeding, artifact build, measurement, judging, and release qualification. The
-runs are under way.
-
-Figures land here when the runs finish. Until then every cell reads `pending`.
 
 | Surface | Required coverage | Primary figures | Detail |
 |---|---|---|---|
@@ -35,25 +27,6 @@ Figures land here when the runs finish. Until then every cell reads `pending`.
 | Storage matrix | complete fixed matrix corpus | conversion failures and ranked-list divergences | [`BENCHMARK_MATRIX.md`](BENCHMARK_MATRIX.md) |
 | Timing and throughput | fixed landscape and recorded machine profile | four latency families and separately scoped throughput | [`BENCHMARK_TIMING_THROUGHPUT.md`](BENCHMARK_TIMING_THROUGHPUT.md) |
 | Substrate math | complete vector gate plus named workload | conformance, drift, and separately scoped kernel timing | [`BENCHMARK_SUBSTRATE_MATH.md`](BENCHMARK_SUBSTRATE_MATH.md) |
-
-## Published figures
-
-| Surface | Swift | Rust | Run identifier |
-|---|---|---|---|
-| LoCoMo retrieval | pending | pending | pending |
-| LoCoMo published QA | pending | pending | pending |
-| LongMemEval-s retrieval | pending | pending | pending |
-| LongMemEval-s judged QA | pending | pending | pending |
-| LMEB | pending | pending | pending |
-| ConvoMem judged QA | pending | pending | pending |
-| MemBench retrieval | pending | pending | pending |
-| MemBench published protocol | pending | pending | pending |
-| Supersession | pending | pending | pending |
-| Journey | pending | pending | pending |
-| Gauntlet | pending | pending | pending |
-| Storage matrix | pending | pending | pending |
-| Timing and throughput | pending | pending | pending |
-| Substrate math | pending | pending | pending |
 
 ## Identity required beside every figure
 

@@ -129,18 +129,20 @@ else:
           f"{n_indexed} == {n_drawers}")
 
 # Room and wing distribution: exact per-name counts against the seed's
-# own projection. The drawer's parent node is its room; the room's
-# parent is its wing. In --partial mode the landed rows must still name
-# ONLY rooms/wings from the projection (no foreign names) and no room
-# may exceed its seed count.
+# own projection. The drawer's parent node is its room, or a chest under
+# its room (depth 3, ADR-026) once the room has been re-binned; the
+# room's parent is its wing. In --partial mode the landed rows must still
+# name ONLY rooms/wings from the projection (no foreign names) and no
+# room may exceed its seed count.
 seed_rooms = collections.Counter(r["room"] for r in records)
 seed_wings = collections.Counter(r["wing"] for r in records)
+ROOM_OF_PARENT = (
+    "JOIN nodes p ON d.parent_node_id = p.id "
+    "JOIN nodes r ON r.id = CASE WHEN p.depth = 3 THEN p.parent_id ELSE p.id END ")
 est_rooms = collections.Counter(dict(q(
-    "SELECT r.display_name, COUNT(*) FROM drawers d "
-    "JOIN nodes r ON d.parent_node_id = r.id GROUP BY r.display_name")))
+    "SELECT r.display_name, COUNT(*) FROM drawers d " + ROOM_OF_PARENT + "GROUP BY r.display_name")))
 est_wings = collections.Counter(dict(q(
-    "SELECT w.display_name, COUNT(*) FROM drawers d "
-    "JOIN nodes r ON d.parent_node_id = r.id "
+    "SELECT w.display_name, COUNT(*) FROM drawers d " + ROOM_OF_PARENT +
     "JOIN nodes w ON r.parent_id = w.id GROUP BY w.display_name")))
 
 

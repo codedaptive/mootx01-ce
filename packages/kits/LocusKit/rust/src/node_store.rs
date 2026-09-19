@@ -26,6 +26,8 @@
 
 use crate::error::LocusKitError;
 use crate::node::Node;
+use engram_lib::chest_placement;
+use substrate_ml::content_fingerprint;
 use persistence_kit::predicate::{OrderClause, OrderDirection, StoragePredicate};
 use persistence_kit::storage::Storage;
 use persistence_kit::types::{Column, StorageRow, TypedValue};
@@ -111,11 +113,13 @@ impl NodeStore {
             ))
         })?;
 
-        // I-NT-2: depth = parent.depth + 1, max 2.
+        // I-NT-2: depth = parent.depth + 1, max 3. Depth 3 is a chest, the
+        // internal container below a room (ADR-026, LocusKit spec § 12);
+        // chests never nest, so nothing sits below depth 3.
         let child_depth = parent.depth + 1;
-        if child_depth > 2 {
+        if child_depth > 3 {
             return Err(LocusKitError::InvalidContent(format!(
-                "NodeStore: depth {} exceeds maximum 2 (I-NT-2)",
+                "NodeStore: depth {} exceeds maximum 3 (I-NT-2)",
                 child_depth
             )));
         }
@@ -309,6 +313,149 @@ impl NodeStore {
             .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
 
         self.get_node(id)
+    }
+
+    /// The active node named `display_name` under `parent_id`, resolved the
+    /// way `create_node` resolves (normalised lookup name), without creating
+    /// it. `None` when absent.
+    pub fn find_node(&self, display_name: &str, parent_id: Uuid) -> Result<Option<Node>, LocusKitError> {
+        self.find_active_node(&Node::normalize_lookup_name(display_name), parent_id)
+    }
+
+    // ------------------------------------------------------------------
+    // Chests (ADR-026, spec § 12)
+    // ------------------------------------------------------------------
+
+    /// The depth of a chest: the internal container below a room. Chests
+    /// never nest, so this is also the tree's maximum depth (I-NT-2).
+    pub const CHEST_DEPTH: i32 = 3;
+
+    /// The active chests under a room, sorted by name. A chest's name is
+    /// its low placement key as 128 lowercase hex characters, so name order
+    /// is key order and each chest runs from its own name up to the next.
+    /// Empty for a room that has never been re-binned.
+    pub fn active_chests(&self, room_id: Uuid) -> Result<Vec<Node>, LocusKitError> {
+        let rows = self
+            .storage
+            .row_store()
+            .query(
+                T_NODES,
+                Some(&StoragePredicate::And(vec![
+                    uuid_eq("parent_id", room_id),
+                    StoragePredicate::Eq(col("depth"), TypedValue::Int(Self::CHEST_DEPTH as i64)),
+                    StoragePredicate::Eq(col("lifecycle"), TypedValue::Int(0)),
+                ])),
+                &[],
+                None,
+                None,
+            )
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        let mut chests = rows.iter().map(node_from_row).collect::<Result<Vec<_>, _>>()?;
+        chests.sort_by(|a, b| a.lookup_name.cmp(&b.lookup_name));
+        Ok(chests)
+    }
+
+    /// The room a drawer's parent denotes: the node itself when the parent
+    /// is a room, its parent when the parent is a chest. Every reader that
+    /// needs "the room" from `Drawer.parent_node_id` goes through here, so
+    /// chests stay invisible above LocusKit (spec § 12). `None` for an
+    /// unknown id or a node that is neither a room nor a chest.
+    pub fn room_node_for_parent(&self, parent_id: Uuid) -> Result<Option<Node>, LocusKitError> {
+        let node = match self.get_node(parent_id)? {
+            Some(n) => n,
+            None => return Ok(None),
+        };
+        if node.depth == 2 {
+            return Ok(Some(node));
+        }
+        if node.depth != Self::CHEST_DEPTH {
+            return Ok(None);
+        }
+        match node.parent_id {
+            Some(room_id) => self.get_node(room_id),
+            None => Ok(None),
+        }
+    }
+
+    /// Where a drawer with this content is filed under this room: the room
+    /// itself when the room has no chests, otherwise the chest whose low
+    /// key is the greatest not above the drawer's placement key, or the
+    /// first chest when the key falls below every low key (spec § 12). The
+    /// key is over the content fingerprint, never the stored structural
+    /// one (ADR-026 D2). One node query and a binary search over names.
+    pub fn placement_parent(&self, room_id: Uuid, content: &str) -> Result<Uuid, LocusKitError> {
+        let chests = self.active_chests(room_id)?;
+        if chests.is_empty() {
+            return Ok(room_id);
+        }
+        let hex = chest_placement::key(&content_fingerprint::fingerprint(content)).hex();
+        // partition_point: the count of names <= hex; the last of them is the chest.
+        let below = chests.partition_point(|c| c.lookup_name.as_str() <= hex.as_str());
+        Ok(if below == 0 { chests[0].id } else { chests[below - 1].id })
+    }
+
+    /// The id of the chest named `low_key_hex` under `room_id`, derived rather
+    /// than random so two devices re-binning the same room name the same
+    /// chest with the same id and their rows converge under sync (ADR-026
+    /// D7). SHA-256 over a fixed prefix, the room id and the name, folded to
+    /// a version-5-shaped UUID the same way `deterministic_uuid` folds
+    /// drawer ids.
+    pub fn chest_id(room_id: Uuid, low_key_hex: &str) -> Uuid {
+        crate::merkle_rollup::deterministic_uuid(&format!("chest:{}:{}", room_id.to_string().to_lowercase(), low_key_hex))
+    }
+
+    /// The chest named `low_key_hex` under `room_id`, created if absent. A
+    /// tombstoned chest with this derived id is brought back rather than
+    /// re-inserted: the id is a function of the name, so a later re-bin
+    /// that produces the same low key must land on the same row, and a
+    /// chest carries nothing but its name, so bringing it back loses no
+    /// history. (Rooms and wings keep the no-resurrection guard; chests are
+    /// the one node kind whose identity is derived.)
+    pub fn create_chest(&self, room_id: Uuid, low_key_hex: &str, now: i64) -> Result<Node, LocusKitError> {
+        match self.get_node(room_id)? {
+            Some(room) if room.depth == 2 => {}
+            _ => {
+                return Err(LocusKitError::InvalidContent(format!(
+                    "NodeStore: chest parent {room_id} is not a room (spec § 12)"
+                )))
+            }
+        }
+        let id = Self::chest_id(room_id, low_key_hex);
+        if let Some(existing) = self.get_node(id)? {
+            if existing.is_active() {
+                return Ok(existing);
+            }
+            let mut values = BTreeMap::new();
+            values.insert("lifecycle".into(), TypedValue::Int(0));
+            values.insert("tombstoned_hlc".into(), TypedValue::Null);
+            values.insert("tombstoned_at".into(), TypedValue::Null);
+            values.insert("updated_at".into(), TypedValue::Timestamp(now));
+            self.storage
+                .row_store()
+                .update(T_NODES, values, &uuid_eq("id", id))
+                .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+            return self.get_node(id)?.ok_or_else(|| {
+                LocusKitError::DatabaseUnavailable(format!("NodeStore: chest {id} vanished after revival"))
+            });
+        }
+        let created_hlc = self.hlc.lock().unwrap().send(now);
+        let mut values = BTreeMap::new();
+        values.insert("id".into(), TypedValue::Text(id.to_string()));
+        values.insert("parent_id".into(), TypedValue::Text(room_id.to_string()));
+        values.insert("display_name".into(), TypedValue::Text(low_key_hex.to_string()));
+        values.insert("lookup_name".into(), TypedValue::Text(Node::normalize_lookup_name(low_key_hex)));
+        values.insert("depth".into(), TypedValue::Int(Self::CHEST_DEPTH as i64));
+        values.insert("lifecycle".into(), TypedValue::Int(0));
+        values.insert("created_hlc".into(), TypedValue::Hlc(created_hlc));
+        values.insert("created_at".into(), TypedValue::Timestamp(now));
+        values.insert("updated_at".into(), TypedValue::Timestamp(now));
+        self.storage
+            .row_store()
+            .insert(T_NODES, values)
+            .map_err(|e| LocusKitError::DatabaseUnavailable(e.to_string()))?;
+        self.get_node(id)?.ok_or_else(|| {
+            LocusKitError::DatabaseUnavailable("NodeStore: chest create failed after insert".to_string())
+        })
     }
 
     // ------------------------------------------------------------------
@@ -587,8 +734,11 @@ pub(crate) mod tests {
         let root = store.create_root("Estate", 1000).unwrap();
         let wing = store.create_node("Wing", root.id, 1001).unwrap();
         let room = store.create_node("Room", wing.id, 1002).unwrap();
-        // Attempt depth 3 — should fail.
-        let err = store.create_node("Sub", room.id, 1003).unwrap_err();
+        // Depth 3 is a chest (ADR-026): admitted under a room.
+        let chest = store.create_node("Chest", room.id, 1003).unwrap();
+        assert_eq!(chest.depth, 3);
+        // Chests never nest: depth 4 is refused (I-NT-2 max 3).
+        let err = store.create_node("Sub", chest.id, 1004).unwrap_err();
         match err {
             LocusKitError::InvalidContent(msg) => {
                 assert!(msg.contains("I-NT-2"), "expected I-NT-2: {}", msg);

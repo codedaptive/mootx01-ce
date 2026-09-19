@@ -9,6 +9,8 @@
 #![allow(clippy::too_many_arguments)]
 
 pub mod anomaly;
+pub mod cohesion_roster;
+pub mod content_fingerprint;
 pub mod apriori_mining;
 pub mod association_rule_mining;
 pub mod formal_concept_analysis;

@@ -1,5 +1,7 @@
+import EngramLib
 import Foundation
 import IntellectusLib
+import PersistenceKit
 import SubstrateML
 import SubstrateKernel
 // ─────────────────────────────────────────────────────────────────
@@ -17,6 +19,18 @@ import SubstrateKernel
 // ─────────────────────────────────────────────────────────────────
 import SubstrateLib
 import SubstrateTypes
+
+/// One chest of a room, as `Estate.chests(in:room:)` reports it: the chest
+/// node, the low placement key its name encodes, and its live drawer count.
+/// Never persisted; a chest's name is its only stored fact (spec § 12).
+public struct ChestRange: Sendable, Equatable {
+    public let chestNodeId: String
+    public let lowKey: MortonKey
+    public let count: Int
+    public init(chestNodeId: String, lowKey: MortonKey, count: Int) {
+        self.chestNodeId = chestNodeId; self.lowKey = lowKey; self.count = count
+    }
+}
 
 /// Estate verbs — `capture`, `recall`, `mutate`, `withdraw`,
 /// `expunge`, `reanchor`, `learn`, `propose`, `associate`.
@@ -180,10 +194,14 @@ public extension Estate {
             displayName: wingName, parentId: root.id, now: now)
         let roomNode = try await nodeStore.createNode(
             displayName: roomName, parentId: wingNode.id, now: now)
+        // Chest placement (ADR-026, spec § 12): the room itself until it has
+        // been re-binned, then the chest the content key selects.
+        let parentNodeId = try await nodeStore.placementParent(
+            roomId: roomNode.id, content: frame.content)
 
         let drawer = Drawer(
             content: frame.content,
-            parentNodeId: roomNode.id.uuidString,
+            parentNodeId: parentNodeId.uuidString,
             addedBy: frame.addedBy,
             filedAt: now,
             // Two-clock ingest (ING-01): a caller doing bulk historical
@@ -373,9 +391,15 @@ public extension Estate {
             // batch wall-clock `now` is used — byte-identical to all existing
             // capture paths where no captureDate is supplied.
             let drawerFiledAt = frame.captureDate ?? now
+            // Chest placement (ADR-026, spec § 12), per drawer: a room's
+            // chests can differ between two frames of one batch only if the
+            // batch itself re-binned, which it never does, so the per-frame
+            // read is one cached node query per room.
+            let parentNodeId = try await nodeStore.placementParent(
+                roomId: triple.roomNodeId, content: frame.content)
             let drawer = Drawer(
                 content: frame.content,
-                parentNodeId: triple.roomNodeId.uuidString,
+                parentNodeId: parentNodeId.uuidString,
                 addedBy: frame.addedBy,
                 filedAt: drawerFiledAt,
                 eventTime: frame.eventTime ?? drawerFiledAt,
@@ -480,6 +504,145 @@ public extension Estate {
     // Internal rather than private so extensions in other LocusKit source files
     // (e.g. DatasetHandle.swift) can call this without duplicating the container-
     // fingerprint OR-in logic. Access stays module-internal; no public API change.
+    // MARK: - Chests (ADR-026, spec § 12)
+
+    /// The audit verb of a room re-bin: one estate-anchored event per re-bin
+    /// (row id = the room node), never one per moved drawer. Moves within a
+    /// room are placement, not content or state change (ADR-026 D4).
+    public static let chestRebinVerb = "chestRebin"
+
+    /// The room node named by wing and room, or nil when either is absent.
+    /// Never creates: a read or a re-bin of a room that does not exist is
+    /// a caller error, not an occasion to make one.
+    func existingRoomNode(wing: String, room: String) async throws -> Node? {
+        guard let root = try await nodeStore.rootNode(),
+              let wingNode = try await nodeStore.findNode(displayName: wing, parentId: root.id) else {
+            return nil
+        }
+        return try await nodeStore.findNode(displayName: room, parentId: wingNode.id)
+    }
+
+    /// The room's active chests with their low keys and live drawer counts,
+    /// in key order. Empty for a room that has never been re-binned or does
+    /// not exist. A read model: nothing here is stored beyond the chest
+    /// node's name.
+    public func chests(in wing: String, room: String) async throws -> [ChestRange] {
+        guard let roomNode = try await existingRoomNode(wing: wing, room: room) else { return [] }
+        var ranges: [ChestRange] = []
+        for chest in try await nodeStore.activeChests(roomId: roomNode.id) {
+            guard let low = MortonKey(hex: chest.displayName) else {
+                throw LocusKitError.invalidContent(
+                    "chest \(chest.id) under \(wing)/\(room) is not named by a placement key")
+            }
+            let count = try await store.storage.rowStore.count(
+                table: "drawers",
+                where: .and([
+                    .eq(Column(table: "drawers", name: "parent_node_id"), .text(chest.id.uuidString)),
+                    .isNull(Column(table: "drawers", name: "tombstonedAt")),
+                ]))
+            ranges.append(ChestRange(chestNodeId: chest.id.uuidString, lowKey: low, count: count))
+        }
+        return ranges
+    }
+
+    /// The room's containers with live drawer counts, in key order: its
+    /// chests, and the room itself first (low key zero) when drawers are
+    /// filed directly on it, which is every room never re-binned and, for a
+    /// moment, a room a capture reached while a re-bin ran. The unit the
+    /// anomaly sweep scores and the re-bin duty measures against
+    /// `ChestPlacement.capacity`. Empty for an absent or empty room.
+    public func containers(in wing: String, room: String) async throws -> [ChestRange] {
+        guard let roomNode = try await existingRoomNode(wing: wing, room: room) else { return [] }
+        var ranges: [ChestRange] = []
+        let direct = try await store.storage.rowStore.count(
+            table: "drawers",
+            where: .and([
+                .eq(Column(table: "drawers", name: "parent_node_id"), .text(roomNode.id.uuidString)),
+                .isNull(Column(table: "drawers", name: "tombstonedAt")),
+            ]))
+        if direct > 0 {
+            ranges.append(ChestRange(chestNodeId: roomNode.id.uuidString,
+                                     lowKey: MortonKey(words: [UInt64](repeating: 0, count: 8)), count: direct))
+        }
+        ranges.append(contentsOf: try await chests(in: wing, room: room))
+        return ranges
+    }
+
+    /// The live drawers filed directly under one container, a room or a
+    /// chest (spec § 12). The per-container read the anomaly sweep scores.
+    public func drawersIn(containerNodeId: String) async throws -> [Drawer] {
+        try await store.drawersIn(parentNodeId: containerNodeId)
+    }
+
+    /// Re-bin a room: every live drawer in the room's subtree is keyed by
+    /// its content (ADR-026 D2), sorted, and dealt into ⌈n / fill⌉ chests
+    /// named by their low keys; the drawer moves land in one transaction
+    /// with one audit event, and chests the deal did not produce are
+    /// tombstoned. Idempotent: a second re-bin of an unchanged room moves
+    /// nothing and names the same chests with the same derived ids, which
+    /// is what lets two synced devices converge (D7). Returns the chest
+    /// count. A room with no live drawers ends with no chests.
+    ///
+    /// The chest nodes are created before the move transaction, so a
+    /// failed transaction can leave an empty chest behind; the next re-bin
+    /// reuses or tombstones it, and an empty chest changes no read.
+    @discardableResult
+    public func rebinRoom(wing: String, room: String, now: Date) async throws -> Int {
+        guard let roomNode = try await existingRoomNode(wing: wing, room: room) else {
+            throw LocusKitError.invalidContent("rebinRoom: room \(wing)/\(room) does not exist")
+        }
+        let drawers = try await store.drawersIn(wing: wing, room: room)
+        var keyed: [(key: MortonKey, id: String, parent: String)] = drawers.map {
+            (ChestPlacement.key(ContentFingerprint.fingerprint(of: $0.content)), $0.id, $0.parentNodeId)
+        }
+        // Ties on the key break on the id so the deal is deterministic.
+        keyed.sort { $0.key == $1.key ? $0.id < $1.id : $0.key < $1.key }
+        let ranges = ChestPlacement.deal(sortedKeys: keyed.map(\.key), fill: ChestPlacement.fill)
+
+        var assignments: [(chestId: UUID, drawerIds: [String])] = []
+        var kept = Set<UUID>()
+        var start = 0
+        for range in ranges {
+            let chest = try await nodeStore.createChest(roomId: roomNode.id, lowKeyHex: range.low.hex, now: now)
+            kept.insert(chest.id)
+            let chunk = keyed[start..<(start + range.count)]
+            let moving = chunk.filter { $0.parent != chest.id.uuidString }.map(\.id)
+            assignments.append((chest.id, moving))
+            start += range.count
+        }
+
+        let changedBy = (try? await store.readManifest().ownerIdentifier) ?? ""
+        let stamp = await nodeStore.generateHLC(nowMs: Int64(now.timeIntervalSince1970 * 1000))
+        let zero: (adjective: Int64, operational: Int64, provenance: Int64) = (0, 0, 0)
+        let anchor = SubstrateTypes.LatticeAnchor.udc("000")
+        let event = AuditEvent(
+            estateUuid: estateUUID,
+            rowId: roomNode.id,
+            hlc: stamp,
+            verb: Self.chestRebinVerb,
+            beforeBitmaps: zero,
+            afterBitmaps: zero,
+            beforeLatticeAnchor: anchor,
+            afterLatticeAnchor: anchor,
+            actor: changedBy.isEmpty ? "estate" : changedBy,
+            reason: "room=\(wing)/\(room) drawers=\(drawers.count) chests=\(ranges.count)")
+        // The closure is @Sendable: hand it an immutable copy of the plan.
+        let plan = assignments
+        try await store.storage.transaction(isolation: .serializable) { txn in
+            for (chestId, drawerIds) in plan where !drawerIds.isEmpty {
+                _ = try await txn.rowStore.update(
+                    table: "drawers",
+                    values: ["parent_node_id": .text(chestId.uuidString)],
+                    where: .in(Column(table: "drawers", name: "id"), drawerIds.map { .text($0) }))
+            }
+            try await txn.auditLog.append(event)
+        }
+        for chest in try await nodeStore.activeChests(roomId: roomNode.id) where !kept.contains(chest.id) {
+            _ = try await nodeStore.tombstoneNode(id: chest.id, now: now)
+        }
+        return ranges.count
+    }
+
     func addDrawerCovered(_ drawer: Drawer, now: Date) async throws {
         try await store.addDrawer(drawer, now: now)
         // Resolve wing/room display names from the node tree for the
@@ -1066,9 +1229,10 @@ public extension Estate {
             reason: reason ?? "withdrawn via Estate.withdraw",
             now: now
         )
-        // NT-L3: Merkle rollup after state change.
-        if let roomNodeId = UUID(uuidString: drawer.parentNodeId) {
-            try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
+        // NT-L3: Merkle rollup after state change, from the drawer's
+        // container (its chest, or the room holding it directly; ADR-027 D1).
+        if let container = UUID(uuidString: drawer.parentNodeId) {
+            try await rollupMerkleRoots(containerNodeId: container, now: now)
         }
     }
 
@@ -1153,7 +1317,7 @@ public extension Estate {
         let lineageIds = try await store.lineageChain(for: rowID)
         let idsToFetch = lineageIds.isEmpty ? [rowID] : lineageIds
         let lineageDrawers = (try? await store.getDrawers(ids: idsToFetch)) ?? [drawer]
-        let affectedRoomIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
+        let affectedContainerIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
 
         let outcome = try await store.expungeGated(
             drawerId: rowID,
@@ -1167,8 +1331,8 @@ public extension Estate {
         // contained any lineage member — not just the room of the
         // initiating drawer — so cross-room lineage expunge keeps every
         // affected room's root correct (WS2-F2, fixed 2026-06-28).
-        for roomNodeId in affectedRoomIds {
-            try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
+        for container in affectedContainerIds {
+            try await rollupMerkleRoots(containerNodeId: container, now: now)
         }
         // Invariant (SPEC B-8b, MXE-FA): an expunge that refused a sibling
         // is not a success, and a layer that summarises it as one is the
@@ -1225,7 +1389,7 @@ public extension Estate {
         let lineageIds = try await store.lineageChain(for: rowID)
         let idsToFetch = lineageIds.isEmpty ? [rowID] : lineageIds
         let lineageDrawers = (try? await store.getDrawers(ids: idsToFetch)) ?? [drawer]
-        let affectedRoomIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
+        let affectedContainerIds = Set(lineageDrawers.compactMap { UUID(uuidString: $0.parentNodeId) })
 
         let outcome = try await store.expungeGated(
             drawerId: rowID,
@@ -1237,8 +1401,8 @@ public extension Estate {
         )
         // NT-L3: Merkle rollup after expunge. Roll up ALL rooms that
         // contained any lineage member (WS2-F2, fixed 2026-06-28).
-        for roomNodeId in affectedRoomIds {
-            try await rollupMerkleRoots(roomNodeId: roomNodeId, now: now)
+        for container in affectedContainerIds {
+            try await rollupMerkleRoots(containerNodeId: container, now: now)
         }
         // Invariant (SPEC B-8b, MXE-FA): the whole outcome flows up —
         // unsealed event AND refusedSiblingIDs — so GLK can scope its

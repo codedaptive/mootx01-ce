@@ -71,8 +71,8 @@ fn anomaly_duty_scores_only_touched_rooms() {
     let outlier = capture(&coord, &handle, OUTLIER);
 
     // Never scored: the room is owed.
-    let owed_before = coord.anomaly_sweep_owed_rooms(&handle, NOW).expect("owed");
-    assert!(owed_before.iter().any(|(w, r)| w == WING && r == ROOM), "{owed_before:?}");
+    let owed_before = coord.anomaly_sweep_owed_containers(&handle, NOW).expect("owed");
+    assert!(owed_before.iter().any(|c| c.wing == WING && c.room == ROOM), "{owed_before:?}");
     assert_eq!(coord.duty_debt(&handle, DutyKind::AnomalySweep).expect("debt"), owed_before.len());
 
     // One batch wide enough for every owed room scores them all and flags the outlier.
@@ -93,8 +93,9 @@ fn anomaly_duty_scores_only_touched_rooms() {
 
     // A write into the room makes exactly that room owed again.
     capture(&coord, &handle, COHORT[0]);
-    let owed_after = coord.anomaly_sweep_owed_rooms(&handle, NOW + 1).expect("owed");
-    assert_eq!(owed_after, vec![(WING.to_string(), ROOM.to_string())]);
+    let owed_after = coord.anomaly_sweep_owed_containers(&handle, NOW + 1).expect("owed");
+    assert_eq!(owed_after.len(), 1);
+    assert_eq!((owed_after[0].wing.as_str(), owed_after[0].room.as_str()), (WING, ROOM));
 }
 
 /// F4: a reanchor that moves a drawer to another room owes BOTH rooms a
@@ -127,7 +128,7 @@ fn anomaly_duty_owes_both_rooms_after_a_cross_room_move() {
         "seed content for the destination room", CaptureChannel::Typed, DEST_ROOM,
         LatticeAnchor::udc("000"), "anomaly-duty", "test-embed-v1");
     coord.capture(&handle, dest_frame, NOW).expect("seed capture");
-    let owed_before_move = coord.anomaly_sweep_owed_rooms(&handle, NOW).expect("owed");
+    let owed_before_move = coord.anomaly_sweep_owed_containers(&handle, NOW).expect("owed");
     let settled = coord
         .run_anomaly_sweep_batch(&handle, owed_before_move.len(), NOW)
         .expect("settle batch");
@@ -139,13 +140,48 @@ fn anomaly_duty_owes_both_rooms_after_a_cross_room_move() {
         .reanchor(&handle, &moved, Some(DEST_ROOM), Some(WING), None)
         .expect("reanchor");
 
-    let owed_after_move = coord.anomaly_sweep_owed_rooms(&handle, NOW + 1).expect("owed");
+    let owed_after_move = coord.anomaly_sweep_owed_containers(&handle, NOW + 1).expect("owed");
     assert!(
-        owed_after_move.iter().any(|(w, r)| w == WING && r == ROOM),
+        owed_after_move.iter().any(|c| c.wing == WING && c.room == ROOM),
         "the source room must be owed a rescoring — {owed_after_move:?}"
     );
     assert!(
-        owed_after_move.iter().any(|(w, r)| w == WING && r == DEST_ROOM),
+        owed_after_move.iter().any(|c| c.wing == WING && c.room == DEST_ROOM),
         "the destination room must be owed a rescoring — {owed_after_move:?}"
     );
+}
+
+/// The resident scores rooms with the coordinator lock released: the batch
+/// is three phases, and the middle one (`anomaly_sweep_score`) takes only
+/// the work the prepare phase handed out, never the coordinator. Proves the
+/// split form pays exactly what the inline batch pays: the same rooms
+/// scored, the same outlier flagged, the same debt settled to zero. Twin of
+/// the Swift resident's detached `scoreRoom` loop.
+#[test]
+fn anomaly_sweep_split_phases_pay_the_same_as_the_inline_batch() {
+    let (coord, handle) = provision();
+    for content in COHORT {
+        capture(&coord, &handle, content);
+    }
+    let outlier = capture(&coord, &handle, OUTLIER);
+    let owed = coord.anomaly_sweep_owed_containers(&handle, NOW).expect("owed");
+    assert!(owed.iter().any(|c| c.wing == WING && c.room == ROOM), "{owed:?}");
+
+    let work = coord.anomaly_sweep_prepare(&handle, owed.len(), NOW).expect("prepare");
+    assert_eq!(work.containers, owed, "prepare hands out exactly the owed containers");
+    // Nothing here touches `coord`: the scoring runs on the cloned estate.
+    let scored = genius_locus_kit::brain::anomaly_flag_sweep::anomaly_sweep_score(&work, NOW).expect("score");
+    assert_eq!(scored, owed, "every prepared container is scored, in order");
+    assert_eq!(coord.anomaly_sweep_settle(&handle, &scored, NOW).expect("settle"), owed.len());
+
+    let estate = coord.estate_for(&handle).expect("estate");
+    let flagged: Vec<String> = estate
+        .drawers_in_wing_room(WING, ROOM)
+        .expect("room")
+        .into_iter()
+        .filter(|d| d.is_anomalous())
+        .map(|d| d.id)
+        .collect();
+    assert_eq!(flagged, vec![outlier], "the split form flags the same outlier as the batch");
+    assert_eq!(coord.duty_debt(&handle, DutyKind::AnomalySweep).expect("debt"), 0, "settle clears the debt");
 }

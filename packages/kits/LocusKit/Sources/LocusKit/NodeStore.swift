@@ -10,7 +10,7 @@
 //     are invisible to resolution (§5 no-resurrection guard).
 //   - CRUD: getNode, childNodes (active only), tombstoneNode, rootNode.
 //   - Invariant enforcement at write time: I-NT-1 single root,
-//     I-NT-2 depth consistency (parent.depth + 1, max 2),
+//     I-NT-2 depth consistency (parent.depth + 1, max 3; depth 3 = chest, ADR-026),
 //     I-NT-4 name uniqueness within parent (active only),
 //     I-NT-5 referential integrity on parent_id.
 //
@@ -26,7 +26,9 @@
 import Foundation
 import MootProductIdentity
 import OSLog
+import EngramLib
 import PersistenceKit
+import SubstrateML
 import SubstrateTypes
 
 private let nodeStoreLog = Logger(subsystem: MootProductIdentity.Logging.subsystem, category: "LocusKit.NodeStore")
@@ -78,7 +80,7 @@ public actor NodeStore {
     /// returns the existing node (first-casing wins). If absent, creates
     /// a new node. Tombstoned nodes are invisible to resolution (§5).
     ///
-    /// Enforces: I-NT-2 (depth = parent.depth + 1, max 2),
+    /// Enforces: I-NT-2 (depth = parent.depth + 1, max 3),
     /// I-NT-4 (no duplicate active lookupName under same parent),
     /// I-NT-5 (parent must exist).
     ///
@@ -100,11 +102,13 @@ public actor NodeStore {
                 "NodeStore: parent node \(parentId) does not exist (I-NT-5)")
         }
 
-        // I-NT-2: depth = parent.depth + 1, max 2.
+        // I-NT-2: depth = parent.depth + 1, max 3. Depth 3 is a chest, the
+        // internal container below a room (ADR-026, LocusKit spec § 12);
+        // chests never nest, so nothing sits below depth 3.
         let childDepth = parent.depth + 1
-        if childDepth > 2 {
+        if childDepth > 3 {
             throw LocusKitError.invalidContent(
-                "NodeStore: depth \(childDepth) exceeds maximum 2 (I-NT-2)")
+                "NodeStore: depth \(childDepth) exceeds maximum 3 (I-NT-2)")
         }
 
         // Resolution: find active node by lookupName under this parent.
@@ -281,6 +285,131 @@ public actor NodeStore {
         )
 
         return try await getNode(id: id)
+    }
+
+    /// The active node named `displayName` under `parentId`, resolved the
+    /// way `createNode` resolves (normalised lookup name), without creating
+    /// it. Nil when absent.
+    public func findNode(displayName: String, parentId: UUID) async throws -> Node? {
+        try await findActiveNode(lookupName: Node.normalizeLookupName(displayName), parentId: parentId)
+    }
+
+    // MARK: - Chests (ADR-026, spec § 12)
+
+    /// The depth of a chest: the internal container below a room. Chests
+    /// never nest, so this is also the tree's maximum depth (I-NT-2).
+    public static let chestDepth = 3
+
+    /// The active chests under a room, sorted by name. A chest's name is
+    /// its low placement key as 128 lowercase hex characters, so name order
+    /// is key order and each chest runs from its own name up to the next.
+    /// Empty for a room that has never been re-binned.
+    public func activeChests(roomId: UUID) async throws -> [Node] {
+        let rows = try await storage.rowStore.query(
+            table: Self.table,
+            where: .and([
+                .eq(Self.col("parent_id"), .uuid(roomId)),
+                .eq(Self.col("depth"), .int(Int64(Self.chestDepth))),
+                .eq(Self.col("lifecycle"), .int(0)),
+            ]),
+            orderBy: [],
+            limit: nil,
+            offset: nil
+        )
+        return try rows.map { try nodeFromRow($0) }.sorted { $0.lookupName < $1.lookupName }
+    }
+
+    /// The room a drawer's parent denotes: the node itself when the parent
+    /// is a room, its parent when the parent is a chest. Every reader that
+    /// needs "the room" from `Drawer.parentNodeId` goes through here, so
+    /// chests stay invisible above LocusKit (spec § 12). Nil for an unknown
+    /// id or a node that is neither a room nor a chest.
+    public func roomNode(forParent parentId: UUID) async throws -> Node? {
+        guard let node = try await getNode(id: parentId) else { return nil }
+        if node.depth == 2 { return node }
+        guard node.depth == Self.chestDepth, let roomId = node.parentId else { return nil }
+        return try await getNode(id: roomId)
+    }
+
+    /// Where a drawer with this content is filed under this room: the room
+    /// itself when the room has no chests, otherwise the chest whose low
+    /// key is the greatest not above the drawer's placement key, or the
+    /// first chest when the key falls below every low key (spec § 12). The
+    /// key is over the content fingerprint, never the stored structural
+    /// one (ADR-026 D2). One node query and a binary search over names.
+    public func placementParent(roomId: UUID, content: String) async throws -> UUID {
+        let chests = try await activeChests(roomId: roomId)
+        guard let first = chests.first else { return roomId }
+        let hex = ChestPlacement.key(ContentFingerprint.fingerprint(of: content)).hex
+        // Greatest index whose name <= hex.
+        var lo = 0, hi = chests.count - 1, found = -1
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            if chests[mid].lookupName <= hex { found = mid; lo = mid + 1 } else { hi = mid - 1 }
+        }
+        return found >= 0 ? chests[found].id : first.id
+    }
+
+    /// The id of the chest named `lowKeyHex` under `roomId`, derived rather
+    /// than random so two devices re-binning the same room name the same
+    /// chest with the same id and their rows converge under sync (ADR-026
+    /// D7). SHA-256 over a fixed prefix, the room id and the name, folded
+    /// to a version-5-shaped UUID the same way `Estate.deterministicUUID`
+    /// folds drawer ids.
+    public static func chestId(roomId: UUID, lowKeyHex: String) -> UUID {
+        Estate.deterministicUUID(from: "chest:\(roomId.uuidString.lowercased()):\(lowKeyHex)")
+    }
+
+    /// The chest named `lowKeyHex` under `roomId`, created if absent. A
+    /// tombstoned chest with this derived id is brought back rather than
+    /// re-inserted: the id is a function of the name, so a later re-bin
+    /// that produces the same low key must land on the same row, and a
+    /// chest carries nothing but its name, so bringing it back loses no
+    /// history. (Rooms and wings keep the no-resurrection guard; chests
+    /// are the one node kind whose identity is derived.)
+    public func createChest(roomId: UUID, lowKeyHex: String, now: Date) async throws -> Node {
+        guard let room = try await getNode(id: roomId), room.depth == 2 else {
+            throw LocusKitError.invalidContent(
+                "NodeStore: chest parent \(roomId) is not a room (spec § 12)")
+        }
+        let id = Self.chestId(roomId: roomId, lowKeyHex: lowKeyHex)
+        if let existing = try await getNode(id: id) {
+            if existing.isActive { return existing }
+            _ = try await storage.rowStore.update(
+                table: Self.table,
+                values: [
+                    "lifecycle": .int(0),
+                    "tombstoned_hlc": .null,
+                    "tombstoned_at": .null,
+                    "updated_at": .timestamp(now),
+                ],
+                where: .eq(Self.col("id"), .uuid(id))
+            )
+            guard let revived = try await getNode(id: id) else {
+                throw LocusKitError.databaseUnavailable("NodeStore: chest \(id) vanished after revival")
+            }
+            return revived
+        }
+        let nowMs = Int64(now.timeIntervalSince1970 * 1000)
+        let createdHlc = hlc.send(now: nowMs)
+        _ = try await storage.rowStore.insert(
+            table: Self.table,
+            values: [
+                "id": .uuid(id),
+                "parent_id": .uuid(roomId),
+                "display_name": .text(lowKeyHex),
+                "lookup_name": .text(Node.normalizeLookupName(lowKeyHex)),
+                "depth": .int(Int64(Self.chestDepth)),
+                "lifecycle": .int(0),
+                "created_hlc": .hlc(createdHlc),
+                "created_at": .timestamp(now),
+                "updated_at": .timestamp(now),
+            ]
+        )
+        guard let created = try await getNode(id: id) else {
+            throw LocusKitError.databaseUnavailable("NodeStore: chest create failed after insert")
+        }
+        return created
     }
 
     // MARK: - Merkle root update (NT-L3)

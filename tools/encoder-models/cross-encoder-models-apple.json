@@ -10,9 +10,9 @@
   "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
   "files": [
     {
-      "path": "MsMarcoMinilmL6CrossV1.mlmodelc",
-      "sha256": "64408d04b908bde091afc704370e22623e2cd7df22a501a264c64eaafd7d17a4",
-      "type": "mlmodelc_dir"
+      "path": "MsMarcoMinilmL6CrossV1.aimodel",
+      "sha256": "778b65eff17c3b1e42231609b890960161b8c008d52a998a8071b1497faefaff",
+      "type": "aimodel_dir"
     },
     {
       "path": "vocab.txt",
@@ -30,13 +30,6 @@
       "model.safetensors": "821d1aa69520101d6e0737f78a042ae25b19e5cb9160701909d10434f4aeb0ae",
       "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
     },
-    "coreml_compute_units": "all",
-    "coreml_compute_precision": "float32",
-    "coreml_output": {
-      "name": "logits",
-      "dtype": "float32"
-    },
-    "coreml_deployment_target": "macOS15",
     "directory_hash_algorithm": "mootx01-directory-sha256-v1",
     "artifacts": {
       "mlpackage": {
@@ -70,6 +63,19 @@
         "discovery_warnings": [],
         "compile_warnings": []
       }
+    },
+    "coreai_export": {
+      "dtype": "float32",
+      "batch": [
+        1,
+        64
+      ],
+      "sequence": [
+        1,
+        512
+      ],
+      "output": "logits",
+      "coreai_torch": "0.4.2"
     }
   }
 }

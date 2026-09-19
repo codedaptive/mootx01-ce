@@ -199,6 +199,70 @@ struct SpanEncodeDutyTests {
         }
     }
 
+    // MARK: - Counting encoder (ADR-028 E1)
+
+    /// A fake encoder that counts its `encodeSpans` calls and throws when a
+    /// span text carries the word `poison`, so a batch holding one bad
+    /// drawer fails as a batch and only that drawer fails on its own.
+    private final class CountingEncoder: SpanEncoder, @unchecked Sendable {
+        let spec: EncoderModelSpec
+        private let lock = NSLock()
+        private var _calls = 0
+        var calls: Int { lock.withLock { _calls } }
+
+        init() {
+            spec = EncoderModelSpec(
+                modelID: "counting-model", modelVersion: "v1", dim: 4,
+                queryPrefix: "Q:", docPrefix: "D:", pooling: .mean,
+                tokenizerHash: "abc123", windowWords: 3, overlapDivisor: 2,
+                maxSpans: 4, maxSequence: 512)
+        }
+
+        struct Poisoned: Error {}
+
+        func encodeQuery(_ text: String) async throws -> [Float] { [0.5, -0.5, 0.25, -0.25] }
+
+        func encodeSpans(_ spans: [String]) async throws -> [[Float]] {
+            lock.withLock { _calls += 1 }
+            if spans.contains(where: { $0.contains("poison") }) { throw Poisoned() }
+            return spans.map { _ in [0.5, -0.5, 0.25, -0.25] }
+        }
+    }
+
+    @Test("ADR-028 E1: one encoder call covers every pending drawer in the batch")
+    func batchEncodesWithOneEncoderCall() async throws {
+        let context = FakeContext(items: fiveItems())
+        let writer = FakeWriter()
+        let encoder = CountingEncoder()
+
+        let result = try await SpanEncodeDuty._encodeBatch(
+            context: context, encoder: encoder, writer: writer, limit: 64, now: t0)
+
+        #expect(result.encoded == 5)
+        #expect(result.failed == 0)
+        #expect(encoder.calls == 1, "the batch is one round trip through the encoder")
+        #expect(await writer.callCount() == 5, "the vectors are dealt back to every drawer")
+    }
+
+    @Test("ADR-028 E1: a failed batch falls back per drawer and only the bad drawer fails")
+    func batchFailureFallsBackPerDrawer() async throws {
+        var items = fiveItems()
+        items[2] = (id: "drawer-2", content: "this drawer holds poison words for the encoder")
+        let context = FakeContext(items: items)
+        let writer = FakeWriter()
+        let encoder = CountingEncoder()
+
+        let result = try await SpanEncodeDuty._encodeBatch(
+            context: context, encoder: encoder, writer: writer, limit: 64, now: t0)
+
+        #expect(result.encoded == 4, "the four clean drawers are encoded on their own")
+        #expect(result.failed == 1, "the poisoned drawer alone fails")
+        #expect(encoder.calls == 6, "one batch call, then one call per drawer")
+        #expect(await context.isIndexed("drawer-2") == false, "bit 27 stays clear for retry")
+        #expect(await writer.spanCount(for: "drawer-2") == 0)
+        #expect(await writer.callCount() == 4)
+    }
+
     // MARK: - Test 1: pump with fake encoder sets bit 27 and writes spans
 
     @Test("pump with fake encoder: 5 drawers encoded, bit 27 set, span rows written")
