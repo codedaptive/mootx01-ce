@@ -1,0 +1,81 @@
+{
+  "kind": "cross_encoder",
+  "model_id": "ms-marco-minilm-l6-cross-v1",
+  "model_version": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+  "max_sequence": 512,
+  "pool": 50,
+  "head": 30,
+  "spans": 3,
+  "rrf_k": 60,
+  "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+  "files": [
+    {
+      "path": "MsMarcoMinilmL6CrossV1.aimodel",
+      "sha256": "778b65eff17c3b1e42231609b890960161b8c008d52a998a8071b1497faefaff",
+      "type": "aimodel_dir"
+    },
+    {
+      "path": "vocab.txt",
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  ],
+  "ext": {
+    "hf_repo": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "hf_revision": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+    "source": "huggingface-pinned-revision",
+    "source_manifest_sha256": "065460814bc1c0e5f99141a14d28eae69c6da69da5aa4bfc2dc4f3e482877356",
+    "source_files": {
+      "config.json": "380e02c93f431831be65d99a4e7e5f67c133985bf2e77d9d4eba46847190bacc",
+      "tokenizer.json": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66",
+      "model.safetensors": "821d1aa69520101d6e0737f78a042ae25b19e5cb9160701909d10434f4aeb0ae",
+      "vocab.txt": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    },
+    "directory_hash_algorithm": "mootx01-directory-sha256-v1",
+    "artifacts": {
+      "mlpackage": {
+        "path": "MsMarcoMinilmL6CrossV1.mlpackage",
+        "sha256": "e7f83da885669b0113259160f7a733718d6098669d0beb74c78ea3b8cc0cdced",
+        "size_bytes": 90929908,
+        "role": "conversion_intermediate_not_shipped"
+      },
+      "mlmodelc": {
+        "path": "MsMarcoMinilmL6CrossV1.mlmodelc",
+        "size_bytes": 90937318,
+        "role": "shipped"
+      }
+    },
+    "converter_script_sha256": "b4b974c13705aa215e68e786e4da723740d6cbd37cc3f507320f75209d398302",
+    "tools": {
+      "python": "3.11.15",
+      "coremltools": "9.0",
+      "numpy": "1.26.4",
+      "torch": "2.7.0",
+      "transformers": "4.51.3",
+      "xcode": {
+        "version": "Xcode 27.0",
+        "build_version": "Build version 27A5218g",
+        "developer_dir": "/Applications/Xcode-beta.app/Contents/Developer",
+        "warnings": []
+      },
+      "coremlcompiler": {
+        "path": "/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/coremlcompiler",
+        "sha256": "946fca15b0ea36e51d675a50fc1d846fa338d8241cd3944e3d3e203762e40d81",
+        "discovery_warnings": [],
+        "compile_warnings": []
+      }
+    },
+    "coreai_export": {
+      "dtype": "float32",
+      "batch": [
+        1,
+        64
+      ],
+      "sequence": [
+        1,
+        512
+      ],
+      "output": "logits",
+      "coreai_torch": "0.4.2"
+    }
+  }
+}
