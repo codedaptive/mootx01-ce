@@ -1,10 +1,10 @@
-# VectorKit Interface Doctrine
+# SynapseKit Interface Doctrine
 
-For coding agents using VectorKit in product code or downstream kits.
+For coding agents using SynapseKit in product code or downstream kits.
 
 ## 1. The kit is PersistenceKit-backed
 
-VectorKit's storage is `any Storage` from PersistenceKit. The application picks the backend (InMemory for tests, SQLite for Apple-platform deployment, PostgreSQL for server-side). VectorKit does not open SQLite directly any more.
+SynapseKit's storage is `any Storage` from PersistenceKit. The application picks the backend (InMemory for tests, SQLite for Apple-platform deployment, PostgreSQL for server-side). SynapseKit does not open SQLite directly any more.
 
 ```swift
 let storage = SQLiteStorage(configuration: EstateConfiguration(
@@ -43,13 +43,13 @@ Do not invent ad-hoc projections. Sign-bit folding, hash-into-bits, etc. are gon
 
 ## 4. Tokenization belongs in CorpusKit (mission 7)
 
-VectorKit currently embeds a deterministic stand-in tokenizer inside `MiniLMProvider` so the provider can ship before CorpusKit lands. After mission 7, tokenization moves to CorpusKit and providers consume it through CorpusKit's tokenizer protocol. Do not extend the MiniLMProvider tokenizer; it is internal and migrating.
+SynapseKit currently embeds a deterministic stand-in tokenizer inside `MiniLMProvider` so the provider can ship before CorpusKit lands. After mission 7, tokenization moves to CorpusKit and providers consume it through CorpusKit's tokenizer protocol. Do not extend the MiniLMProvider tokenizer; it is internal and migrating.
 
 If you need text tokenization in a non-MiniLM context today, wait for CorpusKit. If you need it before CorpusKit lands, file a decision record.
 
 ## 5. Hybrid retrieval composes elsewhere
 
-VectorKit's `findByKeyword` is a coarse substring filter on drawer IDs, kept for backward compatibility with hybrid-retrieval callers that need a fast pre-filter. Full BM25 keyword search with proper tokenization lives in CorpusKit. Composition of vector + keyword scoring (RRF, MMR) lives in NeuronKit's hybrid recall (paper section 10.2). VectorKit stays focused on vector primitives.
+SynapseKit's `findByKeyword` is a coarse substring filter on drawer IDs, kept for backward compatibility with hybrid-retrieval callers that need a fast pre-filter. Full BM25 keyword search with proper tokenization lives in CorpusKit. Composition of vector + keyword scoring (RRF, MMR) lives in NeuronKit's hybrid recall (paper section 10.2). SynapseKit stays focused on vector primitives.
 
 ## 6. The schema is owned by VectorStore
 
@@ -65,7 +65,7 @@ If your call sites need sub-linear retrieval today, gate them on corpus size or 
 
 ## 8. Sendable everywhere
 
-VectorStore is an actor. Its public methods are async. EmbeddingProvider is `Sendable`. StoredVector and VectorMatch are `Sendable` value types. If you wrap VectorKit in another kit, that kit's public surface stays `Sendable` too.
+VectorStore is an actor. Its public methods are async. EmbeddingProvider is `Sendable`. StoredVector and VectorMatch are `Sendable` value types. If you wrap SynapseKit in another kit, that kit's public surface stays `Sendable` too.
 
 ## 9. When in doubt, file a decision record
 
@@ -74,7 +74,7 @@ If you find yourself wanting to:
 - Bypass the model tag (modelID, modelVersion) on stored vectors
 - Add a new projection besides FloatSimHash
 - Expose VectorStore internals (the underlying Storage, the schema, the table name)
-- Add a kit dependency from VectorKit on something other than SubstrateLib, EngramLib, or PersistenceKit
+- Add a kit dependency from SynapseKit on something other than SubstrateLib, EngramLib, or PersistenceKit
 - Cross the kit boundary into CorpusKit-shaped tokenization concerns
 
 Stop. Update the owning reference specification and engineering master before
