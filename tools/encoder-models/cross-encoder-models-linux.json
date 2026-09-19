@@ -1,0 +1,34 @@
+{
+  "kind": "cross_encoder",
+  "model_id": "ms-marco-minilm-l6-cross-v1",
+  "model_version": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+  "max_sequence": 512,
+  "pool": 50,
+  "head": 30,
+  "spans": 3,
+  "rrf_k": 60,
+  "tokenizer_hash": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3",
+  "files": [
+    {
+      "path": "config.json",
+      "sha256": "380e02c93f431831be65d99a4e7e5f67c133985bf2e77d9d4eba46847190bacc"
+    },
+    {
+      "path": "tokenizer.json",
+      "sha256": "d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66"
+    },
+    {
+      "path": "model.safetensors",
+      "sha256": "821d1aa69520101d6e0737f78a042ae25b19e5cb9160701909d10434f4aeb0ae"
+    },
+    {
+      "path": "vocab.txt",
+      "sha256": "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    }
+  ],
+  "ext": {
+    "hf_repo": "cross-encoder/ms-marco-MiniLM-L-6-v2",
+    "hf_revision": "233902d25c440f23af6f7d6e94d2946bac0bee0a",
+    "source": "huggingface-pinned-revision"
+  }
+}
