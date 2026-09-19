@@ -28,10 +28,6 @@
 @_exported import GLKMigrationV1_8ToV1_9
 #endif
 
-#if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG
-@_exported import GLKMigrationFlatLayoutToCatalog
-#endif
-
 #if GLK_MIGRATION_APP_CONTAINER_TO_CATALOG
 @_exported import GLKMigrationAppContainerToCatalog
 #endif

@@ -11,7 +11,12 @@
 //       ports have an identical funnel shape.
 //
 //   (b) EstateCatalog.open or EstateCatalog.open(selecting:) when a name
-//       or path is given.
+//       or path is given. On Apple the catalog open itself adopts a
+//       pre-catalog FLAT estate (a 1.0.x install's estate.sqlite beside the
+//       catalog file) into databases/default/ before it returns, so the
+//       Swift side has no separate flat-layout step here: every opener of
+//       the catalog, in this funnel or outside it, gets the adoption. The
+//       commands that own the daemon stop it first (FlatLayoutStep).
 //
 // Routing every command through this funnel guarantees the adoption always
 // precedes the open, regardless of which command the operator invokes first

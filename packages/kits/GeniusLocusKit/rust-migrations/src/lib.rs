@@ -8,10 +8,11 @@
 //! a schema concern, and runs on ANY plaintext estate with nonzero
 //! reserved-bytes-per-page regardless of migration floor.
 //!
-//! Layout capsules: none, on purpose. The Swift umbrella carries two
-//! (`GLKMigrationFlatLayoutToCatalog`, `GLKMigrationAppContainerToCatalog`)
-//! because pre-catalog Swift installs kept their estate flat in the
-//! configuration directory or in the Apple app container. No pre-catalog Rust
+//! Layout adoptions: none, on purpose. The Swift side carries two (the
+//! flat-layout adoption `EstateCatalog.open()` runs, and the
+//! `GLKMigrationAppContainerToCatalog` capsule) because pre-catalog Swift
+//! installs kept their estate flat in the configuration directory or in the
+//! Apple app container. No pre-catalog Rust
 //! install ever had a flat layout: every Rust estate this port has written
 //! lived under `<data directory>/databases/<name>/` (the shape the catalog
 //! records as `<defaultLocation>/<name>/`), so there is nothing for a Rust
