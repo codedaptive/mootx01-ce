@@ -15,7 +15,7 @@
 # because Windows blocks script files by default (Restricted policy); it
 # applies to that one run only and changes no system setting:
 #   [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-#   irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
+#   irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.1.x/install.ps1 -OutFile install.ps1
 #   # review install.ps1, then:
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #
@@ -523,6 +523,34 @@ $mgrSrc = Join-Path $tmpDir "moot-mgr.exe"
 if (Test-Path $mgrSrc) {
     Copy-Item -Force $mgrSrc $MGR_BINARY
     Write-Host "  Installed $MGR_BINARY"
+}
+
+# Every release archive carries share/mootx01/models/ — the recall encoder and
+# the fact-extraction model — and the runtime resolves them from the share slot
+# beside the install dir (<exe>\..\share\mootx01\models\<id>\). Copy the whole
+# share tree rather than a named model, so a model added to a later release
+# installs without touching this script. Their absence is a packaging defect,
+# not a degraded mode: recall would come up with no encoder at all.
+$shareSrc  = Join-Path $tmpDir "share"
+$shareRoot = Split-Path -Parent $INSTALL_DIR
+if (Test-Path $shareSrc) {
+    $shareDest = Join-Path $shareRoot "share"
+    New-Item -ItemType Directory -Force -Path $shareDest | Out-Null
+    Copy-Item -Recurse -Force (Join-Path $shareSrc "*") $shareDest
+    Write-Host "  Installed $shareDest\mootx01\models"
+
+    # Name the Windows (Candle) model files so a truncated or mis-built archive
+    # fails here rather than at the first recall.
+    $modelDest = Join-Path $shareDest "mootx01\models\arctic-embed-s-w60"
+    foreach ($entry in @("config.json", "tokenizer.json", "model.safetensors", "vocab.txt")) {
+        if (-not (Test-Path (Join-Path $modelDest $entry))) {
+            Write-Error "mootx01: encoder model install incomplete: missing $entry"
+            exit 1
+        }
+    }
+} else {
+    Write-Error "mootx01: release archive is missing share/mootx01/models; refusing to install."
+    exit 1
 }
 
 Remove-Item -Recurse -Force $tmpDir

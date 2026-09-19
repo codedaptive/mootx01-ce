@@ -102,7 +102,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [arm64, x86_64]
-    runs-on: macos-27
+    runs-on: xcode-27
     env:
       # GitHub's newest runner Xcode is 26.6; the Apple-app surface needs the
       # macOS 27 SDK. Those roots are local-compile-only and the shipped
@@ -702,7 +702,10 @@ jobs:
           - os: linux
             runner: ubuntu-latest
           - os: macos
-            runner: macos-26
+            # The installed binary requires macOS 27 (ADR-029), which is
+            # published only under the xcode-27 label; macos-26 would install
+            # a binary it cannot then run.
+            runner: xcode-27
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
