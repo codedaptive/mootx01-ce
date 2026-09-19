@@ -1,0 +1,11 @@
+{"id":"n0000","content":"the Quillon Charter was chartered in the year 1926.","location":"Ledger/quillon-charter","tier":"T1","role":"needle","needleID":"n0000"}
+{"id":"n0000-t1-0","content":"the Quillon Charter operates a fleet numbering exactly 392 vessels.","location":"Ledger/quillon-charter","tier":"T1","role":"distractor","needleID":"n0000"}
+{"id":"n0001","content":"Fenmark Atelier is headquartered in the district of Ostry.","location":"Charter/fenmark-atelier","tier":"T2","role":"needle","needleID":"n0001"}
+{"id":"n0001-t2-0","content":"Records indicate that Fenmark Atelier, as to its headquarters district, shows Brenne.","location":"Charter/fenmark-atelier","tier":"T2","role":"distractor","needleID":"n0001"}
+{"id":"n0002","content":"the Marrowgate Trust is headquartered in the district of Brenne. (current as of 2023)","location":"Charter/marrowgate-trust","tier":"T3","role":"needle","needleID":"n0002"}
+{"id":"n0002-t3-0","content":"the Marrowgate Trust is headquartered in the district of Cawl. (superseded; recorded 2009)","location":"Charter/marrowgate-trust","tier":"T3","role":"distractor","needleID":"n0002"}
+{"id":"n0003","content":"the Ashfen Protocol records its charter year under reference REF-0934; see the matching reference entry for the value.","location":"Ledger/ashfen-protocol","tier":"T4","role":"needle","needleID":"n0003"}
+{"id":"n0003-partner","content":"Reference REF-0934: the charter year is 1854.","location":"Ledger/ashfen-protocol","tier":"T4","role":"splitPartner","needleID":"n0003"}
+{"id":"n0003-t4-0","content":"Reference REF-6889: the charter year is 1993.","location":"Ledger/ashfen-protocol","tier":"T4","role":"distractor","needleID":"n0003"}
+{"id":"n0004","content":"Mirelle Station is governed by the steward named Oren Vask.","location":"Ledger/Outpost-349","tier":"T5","role":"needle","needleID":"n0004"}
+{"id":"n0004-t5-0","content":"Mirelle Station is governed by the steward named Nessa Pyke.","location":"Steward/mirelle-station","tier":"T5","role":"distractor","needleID":"n0004"}

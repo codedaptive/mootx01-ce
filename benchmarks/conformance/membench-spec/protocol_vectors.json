@@ -1,0 +1,246 @@
+{
+  "_comment": "Conformance vectors for MemBenchSpecProtocol (Swift) / membench_spec_protocol (Rust). Both ports must produce byte-identical output for every input. § references point to MEMBENCH_OFFICIAL_PROTOCOL.md. All expected strings are fully rendered — no substitution by the consumer.",
+
+  "initial_instruaction": {
+    "_comment": "§2 official constant. Name typo 'INSTRUACTION' is official.",
+    "expected": "Please help me record the following information. If there are any questions within the information, please help me answer them."
+  },
+
+  "storage_line_string_cases": [
+    {
+      "id": "step-1-hello-world",
+      "note": "§2 string form: basic step 1 message",
+      "step": 1,
+      "message": "hello world",
+      "expected": "1[|]hello world"
+    },
+    {
+      "id": "step-42-phrase",
+      "note": "§2 string form: larger step number with period in message",
+      "step": 42,
+      "message": "Please help me record this.",
+      "expected": "42[|]Please help me record this."
+    },
+    {
+      "id": "step-0-empty-message",
+      "note": "§2 string form: edge case — empty message, delimiter still present",
+      "step": 0,
+      "message": "",
+      "expected": "0[|]"
+    },
+    {
+      "id": "step-119-with-punctuation",
+      "note": "§2 string form: step id matching a global sid seen in real MemBench data",
+      "step": 119,
+      "message": "The conference is scheduled for next Friday in San Francisco.",
+      "expected": "119[|]The conference is scheduled for next Friday in San Francisco."
+    }
+  ],
+
+  "storage_line_dict_cases": [
+    {
+      "id": "step-3-hi-hello",
+      "note": "§2 dict form: basic user/agent exchange",
+      "step": 3,
+      "user": "Hi there",
+      "agent": "Hello!",
+      "expected": "3[|]'user': Hi there; 'agent': Hello!"
+    },
+    {
+      "id": "step-5-morning",
+      "note": "§2 dict form: longer agent response with punctuation",
+      "step": 5,
+      "user": "Good morning",
+      "agent": "Good morning to you too!",
+      "expected": "5[|]'user': Good morning; 'agent': Good morning to you too!"
+    },
+    {
+      "id": "step-20-multiword",
+      "note": "§2 dict form: multi-word user and agent messages",
+      "step": 20,
+      "user": "What did we decide about the project timeline?",
+      "agent": "We agreed to push the deadline to March 15th.",
+      "expected": "20[|]'user': What did we decide about the project timeline?; 'agent': We agreed to push the deadline to March 15th."
+    }
+  ],
+
+  "step_id_parse_cases": [
+    {
+      "id": "parse-step-1-string-form",
+      "note": "§4: basic string-form line, step 1",
+      "input": "1[|]hello world",
+      "expected_step_id": 1,
+      "expected_error": null
+    },
+    {
+      "id": "parse-step-42",
+      "note": "§4: larger step number",
+      "input": "42[|]some message",
+      "expected_step_id": 42,
+      "expected_error": null
+    },
+    {
+      "id": "parse-step-0",
+      "note": "§4: step 0 is valid",
+      "input": "0[|]",
+      "expected_step_id": 0,
+      "expected_error": null
+    },
+    {
+      "id": "parse-step-5-dict-form",
+      "note": "§4: dict-form line — parser only reads the prefix, ignores content",
+      "input": "5[|]'user': Hi; 'agent': Bye",
+      "expected_step_id": 5,
+      "expected_error": null
+    },
+    {
+      "id": "parse-step-119",
+      "note": "§4: large sid matching real MemBench data",
+      "input": "119[|]The conference is next Friday.",
+      "expected_step_id": 119,
+      "expected_error": null
+    },
+    {
+      "id": "parse-missing-delimiter",
+      "note": "§4: no '[|]' separator → missing_delimiter error",
+      "input": "malformed line",
+      "expected_step_id": null,
+      "expected_error": "missing_delimiter"
+    },
+    {
+      "id": "parse-empty-string",
+      "note": "§4: empty input has no delimiter → missing_delimiter error",
+      "input": "",
+      "expected_step_id": null,
+      "expected_error": "missing_delimiter"
+    },
+    {
+      "id": "parse-invalid-prefix",
+      "note": "§4: non-integer prefix → invalid_step_id error",
+      "input": "abc[|]message",
+      "expected_step_id": null,
+      "expected_error": "invalid_step_id"
+    },
+    {
+      "id": "parse-float-prefix",
+      "note": "§4: float prefix (not an int) → invalid_step_id error",
+      "input": "3.5[|]message",
+      "expected_step_id": null,
+      "expected_error": "invalid_step_id"
+    }
+  ],
+
+  "recall_query_cases": [
+    {
+      "id": "vacation-question",
+      "note": "§3–4: standard recall query format '%s (%s)' % (question, time)",
+      "question": "Where did the user go on vacation?",
+      "time": "2024-01-15 10:00",
+      "expected": "Where did the user go on vacation? (2024-01-15 10:00)"
+    },
+    {
+      "id": "alice-question",
+      "note": "§3–4: natural language time string",
+      "question": "What did Alice say?",
+      "time": "last Tuesday",
+      "expected": "What did Alice say? (last Tuesday)"
+    },
+    {
+      "id": "conference-question",
+      "note": "§3–4: question with preposition, ISO-like time",
+      "question": "When is the conference scheduled?",
+      "time": "2024-03-10",
+      "expected": "When is the conference scheduled? (2024-03-10)"
+    }
+  ],
+
+  "answer_prompt_cases": [
+    {
+      "id": "first-agent-paris",
+      "note": "§3 FirstAgent (Participation): official typo 'your'conversation' in first line",
+      "perspective": "FirstAgent",
+      "memory": "The user went to Paris.",
+      "question": "Where did the user go?",
+      "time": "2024-01-15",
+      "choices": { "A": "Paris", "B": "London", "C": "Berlin", "D": "Tokyo" },
+      "expected": "Please answer the following question based on past memories of your'conversation with the user.\nPast memory: The user went to Paris.\nQuestion: (current time is 2024-01-15) Where did the user go?\nChoices:\nA. Paris\nB. London\nC. Berlin\nD. Tokyo\nPlease output the correct option for the question, only one corresponding letter, without any other messages.\nExample: D"
+    },
+    {
+      "id": "third-agent-hiking",
+      "note": "§3 ThirdAgent (Observation): third-person framing in first line",
+      "perspective": "ThirdAgent",
+      "memory": "Alice mentioned she loves hiking.",
+      "question": "What does Alice love?",
+      "time": "2024-02-20",
+      "choices": { "A": "Swimming", "B": "Hiking", "C": "Cycling", "D": "Running" },
+      "expected": "Please answer the following question based on past memories of the user's messages.\nPast memory: Alice mentioned she loves hiking.\nQuestion: (current time is 2024-02-20) What does Alice love?\nChoices:\nA. Swimming\nB. Hiking\nC. Cycling\nD. Running\nPlease output the correct option for the question, only one corresponding letter, without any other messages.\nExample: D"
+    },
+    {
+      "id": "first-agent-empty-memory",
+      "note": "§3 FirstAgent: empty memory string — delimiter lines still present",
+      "perspective": "FirstAgent",
+      "memory": "",
+      "question": "What happened?",
+      "time": "2024-06-01",
+      "choices": { "A": "Option A", "B": "Option B", "C": "Option C", "D": "Option D" },
+      "expected": "Please answer the following question based on past memories of your'conversation with the user.\nPast memory: \nQuestion: (current time is 2024-06-01) What happened?\nChoices:\nA. Option A\nB. Option B\nC. Option C\nD. Option D\nPlease output the correct option for the question, only one corresponding letter, without any other messages.\nExample: D"
+    }
+  ],
+
+  "parse_answer_choice_cases": [
+    {
+      "id": "json-choice-a",
+      "note": "§3 primary path: JSON object with choice key",
+      "input": "{\"choice\": \"A\"}",
+      "expected": "A"
+    },
+    {
+      "id": "json-choice-d",
+      "note": "§3 primary path: JSON object, last valid letter",
+      "input": "{\"choice\": \"D\"}",
+      "expected": "D"
+    },
+    {
+      "id": "json-choice-b",
+      "note": "§3 primary path: JSON object, middle letter",
+      "input": "{\"choice\": \"B\"}",
+      "expected": "B"
+    },
+    {
+      "id": "fallback-bare-letter",
+      "note": "§3 fallback: bare single letter, no JSON wrapper",
+      "input": "B",
+      "expected": "B"
+    },
+    {
+      "id": "fallback-whitespace-stripped",
+      "note": "§3 fallback: letter with trailing space stripped",
+      "input": "C ",
+      "expected": "C"
+    },
+    {
+      "id": "fallback-newline-stripped",
+      "note": "§3 fallback: letter followed by newline stripped",
+      "input": "A\n",
+      "expected": "A"
+    },
+    {
+      "id": "json-invalid-letter",
+      "note": "§3: 'E' is not in enum [A,B,C,D] → null",
+      "input": "{\"choice\": \"E\"}",
+      "expected": null
+    },
+    {
+      "id": "garbage-input",
+      "note": "§3: neither path yields a valid letter → null",
+      "input": "invalid json and not a letter",
+      "expected": null
+    },
+    {
+      "id": "empty-input",
+      "note": "§3: empty string → null",
+      "input": "",
+      "expected": null
+    }
+  ]
+}

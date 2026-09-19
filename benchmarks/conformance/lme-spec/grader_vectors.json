@@ -1,0 +1,114 @@
+{
+  "_comment": "Conformance vectors for LMESpecGrader (lme-spec lane). Both Swift and Rust legs must produce byte-identical prompt strings and identical numbers on every vector. Prompt strings use JSON \\n for real newlines (U+000A). Trailing-space differences before \\n\\n are preserved verbatim from LONGMEMEVAL_OFFICIAL_PROTOCOL.md §2.",
+
+  "template_cases": [
+    {
+      "id": "standard-single-session-user",
+      "_comment": "§2 standard template (shared by single-session-user, single-session-assistant, multi-session). question_type='single-session-user', question_id has no '_abs'. Note trailing space after 'answer no.' before the double-newline — verbatim from spec.",
+      "question_type": "single-session-user",
+      "question_id": "q_ssu_001",
+      "question": "What color is the sky?",
+      "answer": "blue",
+      "hypothesis": "The sky is blue.",
+      "expected_prompt": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. \n\nQuestion: What color is the sky?\n\nCorrect Answer: blue\n\nModel Response: The sky is blue.\n\nIs the model response correct? Answer yes or no only."
+    },
+    {
+      "id": "temporal-reasoning",
+      "_comment": "§2 temporal-reasoning template. Off-by-one grace clause appended. Trailing space after 'is still correct.' before the double-newline — verbatim from spec.",
+      "question_type": "temporal-reasoning",
+      "question_id": "q_tr_001",
+      "question": "How many days have passed?",
+      "answer": "18",
+      "hypothesis": "About 19 days.",
+      "expected_prompt": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response is equivalent to the correct answer or contains all the intermediate steps to get the correct answer, you should also answer yes. If the response only contains a subset of the information required by the answer, answer no. In addition, do not penalize off-by-one errors for the number of days. If the question asks for the number of days/weeks/months, etc., and the model makes off-by-one errors (e.g., predicting 19 days when the answer is 18), the model's response is still correct. \n\nQuestion: How many days have passed?\n\nCorrect Answer: 18\n\nModel Response: About 19 days.\n\nIs the model response correct? Answer yes or no only."
+    },
+    {
+      "id": "knowledge-update",
+      "_comment": "§2 knowledge-update template. No trailing space before the first \\n\\n (verbatim from spec: 'required answer.\\n\\n').",
+      "question_type": "knowledge-update",
+      "question_id": "q_ku_001",
+      "question": "What is my current job?",
+      "answer": "nurse",
+      "hypothesis": "You work as a nurse now.",
+      "expected_prompt": "I will give you a question, a correct answer, and a response from a model. Please answer yes if the response contains the correct answer. Otherwise, answer no. If the response contains some previous information along with an updated answer, the response should be considered as correct as long as the updated answer is the required answer.\n\nQuestion: What is my current job?\n\nCorrect Answer: nurse\n\nModel Response: You work as a nurse now.\n\nIs the model response correct? Answer yes or no only."
+    },
+    {
+      "id": "single-session-preference",
+      "_comment": "§2 preference template. Second slot labeled 'Rubric' (not 'Correct Answer'). No trailing space before \\n\\n.",
+      "question_type": "single-session-preference",
+      "question_id": "q_ssp_001",
+      "question": "What food should I order?",
+      "answer": "User prefers spicy food",
+      "hypothesis": "I would suggest something spicy.",
+      "expected_prompt": "I will give you a question, a rubric for desired personalized response, and a response from a model. Please answer yes if the response satisfies the desired response. Otherwise, answer no. The model does not need to reflect all the points in the rubric. The response is correct as long as it recalls and utilizes the user's personal information correctly.\n\nQuestion: What food should I order?\n\nRubric: User prefers spicy food\n\nModel Response: I would suggest something spicy.\n\nIs the model response correct? Answer yes or no only."
+    },
+    {
+      "id": "abstention",
+      "_comment": "§2 abstention template, selected because '_abs' appears in question_id (regardless of question_type). Second slot labeled 'Explanation'. Closing question differs. No trailing space before \\n\\n.",
+      "question_type": "single-session-user",
+      "question_id": "q_ssu_001_abs",
+      "question": "What did I do last summer?",
+      "answer": "The context contains no information about last summer.",
+      "hypothesis": "I cannot find information about your last summer.",
+      "expected_prompt": "I will give you an unanswerable question, an explanation, and a response from a model. Please answer yes if the model correctly identifies the question as unanswerable. The model could say that the information is incomplete, or some other information is given but the asked information is not.\n\nQuestion: What did I do last summer?\n\nExplanation: The context contains no information about last summer.\n\nModel Response: I cannot find information about your last summer.\n\nDoes the model correctly identify the question as unanswerable? Answer yes or no only."
+    }
+  ],
+
+  "verdict_cases": [
+    {
+      "id": "yes-with-period",
+      "_comment": "'Yes.' strip→'Yes.' lower→'yes.' contains 'yes'→true",
+      "eval_response": "Yes.",
+      "expected_label": true
+    },
+    {
+      "id": "no",
+      "_comment": "'no' lower→'no' does not contain 'yes'→false",
+      "eval_response": "no",
+      "expected_label": false
+    },
+    {
+      "id": "yes-it-is",
+      "_comment": "'YES it is' lower→'yes it is' contains 'yes'→true",
+      "eval_response": "YES it is",
+      "expected_label": true
+    },
+    {
+      "id": "leading-space-yes",
+      "_comment": "' yes' strip→'yes' lower→'yes' contains 'yes'→true",
+      "eval_response": " yes",
+      "expected_label": true
+    }
+  ],
+
+  "aggregation_cases": [
+    {
+      "id": "eight-instance-case",
+      "_comment": "Hand-computable §4 case. Per-type accuracies: ssu=0.5(2), ssp=1.0(1), ssa=0.0(1), ms=0.5(2), tr=1.0(1), ku=1.0(1). task-avg=(0.5+1.0+0.0+0.5+1.0+1.0)/6=4.0/6=0.6667. overall=5/8=0.6250. abstention=1/2=0.5000.",
+      "records": [
+        { "question_id": "q1",     "base_question_type": "single-session-user",       "judge_model": "m", "label": true  },
+        { "question_id": "q2",     "base_question_type": "single-session-user",       "judge_model": "m", "label": false },
+        { "question_id": "q3_abs", "base_question_type": "single-session-preference", "judge_model": "m", "label": true  },
+        { "question_id": "q4_abs", "base_question_type": "single-session-assistant",  "judge_model": "m", "label": false },
+        { "question_id": "q5",     "base_question_type": "multi-session",             "judge_model": "m", "label": true  },
+        { "question_id": "q6",     "base_question_type": "multi-session",             "judge_model": "m", "label": false },
+        { "question_id": "q7",     "base_question_type": "temporal-reasoning",        "judge_model": "m", "label": true  },
+        { "question_id": "q8",     "base_question_type": "knowledge-update",          "judge_model": "m", "label": true  }
+      ],
+      "expected": {
+        "per_type": [
+          { "question_type": "single-session-user",       "accuracy": 0.5,    "count": 2 },
+          { "question_type": "single-session-preference", "accuracy": 1.0,    "count": 1 },
+          { "question_type": "single-session-assistant",  "accuracy": 0.0,    "count": 1 },
+          { "question_type": "multi-session",             "accuracy": 0.5,    "count": 2 },
+          { "question_type": "temporal-reasoning",        "accuracy": 1.0,    "count": 1 },
+          { "question_type": "knowledge-update",          "accuracy": 1.0,    "count": 1 }
+        ],
+        "task_averaged_accuracy": 0.6667,
+        "overall_accuracy": 0.625,
+        "abstention_accuracy": 0.5,
+        "abstention_count": 2
+      }
+    }
+  ]
+}
