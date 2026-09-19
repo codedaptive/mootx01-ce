@@ -1517,14 +1517,39 @@ impl Default for EstateCoordinator {
 /// until a model exists; tests inject stubs. The producer's pipeline
 /// version is stored as provenance on every subject it writes and is
 /// the regeneration lever. Mirrors Swift `SubjectProducer`.
+/// How a producer fails on one drawer, which decides what the sweep does
+/// next (codex finding 2026-09-19: one guardrail refusal pinned the whole
+/// lane on the same drawer every cadence). Mirrors Swift `SubjectProducerError`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubjectProducerError {
+    /// The producer will never produce a subject for THIS content. The
+    /// sweep marks the drawer refused for the producer's pipeline and
+    /// moves on.
+    Refused(String),
+    /// The producer cannot answer right now. The sweep stops for this
+    /// cadence, marks nothing, and retries next cadence.
+    Unavailable(String),
+}
+
+impl std::fmt::Display for SubjectProducerError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SubjectProducerError::Refused(reason) => write!(f, "refused: {reason}"),
+            SubjectProducerError::Unavailable(reason) => write!(f, "unavailable: {reason}"),
+        }
+    }
+}
+
 pub trait SubjectProducer: Send + Sync {
     /// Provenance tier written to `subject_pipeline_version`
     /// (e.g. `locus_kit::drawer_store::SUBJECT_PIPELINE_MINILLM_V1`).
     fn pipeline_version(&self) -> &str;
     /// Produce a subject for `content`. The sweep validates the result
     /// against `locus_kit::subject_register` before writing;
-    /// inadmissible output is counted and skipped, never stored.
-    fn subject_for_content(&self, content: &str) -> Result<String, String>;
+    /// inadmissible output is counted and skipped, never stored. A
+    /// `Refused` error marks the drawer and the sweep continues; an
+    /// `Unavailable` error stops the sweep for this cadence.
+    fn subject_for_content(&self, content: &str) -> Result<String, SubjectProducerError>;
 
     /// The pipeline tiers this producer is allowed to REGENERATE, in
     /// addition to NULL rows (PR-10). Trust ladder by construction: a
@@ -1542,6 +1567,9 @@ pub trait SubjectProducer: Send + Sync {
 pub struct SubjectBackfillReport {
     /// Subjects written this sweep.
     pub written: usize,
+    /// Drawers the producer refused this sweep; each carries the
+    /// producer's refusal marker and has left its lane.
+    pub refused: usize,
     /// Producer outputs rejected by the register contract (skipped; the
     /// rows remain debt and re-enumerate next sweep).
     pub skipped_inadmissible: usize,
@@ -2800,15 +2828,20 @@ impl EstateCoordinator {
         // Mirrors the Swift drainStatuses entry.
         if let Some(producer) = self.subject_producers.get(handle) {
             let debt = estate
-                .count_subject_debt_including(&producer.regenerates_pipelines())
+                .count_subject_debt_for_producer(&producer.regenerates_pipelines(), Some(producer.pipeline_version()))
                 .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                     reason: format!("count_subject_debt: {e:?}"),
+                })?;
+            let refused = estate
+                .count_subject_refused(producer.pipeline_version())
+                .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                    reason: format!("count_subject_refused: {e:?}"),
                 })?;
             statuses.push(DrainStatus {
                 name: DrainStatus::SUBJECT_BACKFILL_NAME.to_string(),
                 pending: debt,
                 in_flight: 0,
-                detail: Some(format!("pipeline: {}", producer.pipeline_version())),
+                detail: Some(format!("pipeline: {}, refused: {refused}", producer.pipeline_version())),
                 rejected: None,
             });
         }
@@ -2918,18 +2951,36 @@ impl EstateCoordinator {
         };
         let estate = self.estate_for(handle)?;
         let batch = estate
-            .subject_debt_batch_including(batch_limit, &producer.regenerates_pipelines())
+            .subject_debt_batch_for_producer(
+                batch_limit, &producer.regenerates_pipelines(), Some(producer.pipeline_version()))
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("subject_debt_batch: {e:?}"),
             })?;
         let mut written = 0usize;
+        let mut refused = 0usize;
         let mut skipped = 0usize;
         for drawer in &batch {
-            let candidate = producer.subject_for_content(&drawer.content).map_err(|e| {
-                GeniusLocusKitError::UnderlyingEstateFailure {
-                    reason: format!("subject producer: {e}"),
+            let candidate = match producer.subject_for_content(&drawer.content) {
+                Ok(candidate) => candidate,
+                Err(SubjectProducerError::Refused(reason)) => {
+                    // A refusal is a property of this content: mark it for
+                    // this producer so the row leaves the lane and the next
+                    // cadence moves on. Unavailability propagates and ends
+                    // the sweep with nothing marked.
+                    estate
+                        .mark_subject_refused(&drawer.id, producer.pipeline_version(), &reason, now)
+                        .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                            reason: format!("mark_subject_refused: {e:?}"),
+                        })?;
+                    refused += 1;
+                    continue;
                 }
-            })?;
+                Err(e) => {
+                    return Err(GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!("subject producer: {e}"),
+                    });
+                }
+            };
             if !locus_kit::subject_register::violations(&candidate).is_empty() {
                 // Inadmissible output is skipped, never stored — the row
                 // stays debt and re-enumerates next sweep.
@@ -2949,12 +3000,13 @@ impl EstateCoordinator {
             written += 1;
         }
         let remaining = estate
-            .count_subject_debt_including(&producer.regenerates_pipelines())
+            .count_subject_debt_for_producer(&producer.regenerates_pipelines(), Some(producer.pipeline_version()))
             .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
                 reason: format!("count_subject_debt: {e:?}"),
             })?;
         Ok(SubjectBackfillReport {
             written,
+            refused,
             skipped_inadmissible: skipped,
             remaining_debt: remaining,
         })

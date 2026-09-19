@@ -207,12 +207,14 @@ extension GeniusLocusKit {
         // synchronous bounded batches, never a queue.
         if let producer = subjectProducers[handle] {
             let debt = try await estate.countSubjectDebt(
-                includingPipelines: producer.regeneratesPipelines)
+                includingPipelines: producer.regeneratesPipelines,
+                refusedBy: producer.pipelineVersion)
+            let refused = try await estate.countSubjectRefused(pipelineVersion: producer.pipelineVersion)
             statuses.append(DrainStatus(
                 name: DrainStatus.subjectBackfillName,
                 pending: debt,
                 inFlight: 0,
-                detail: "pipeline: \(producer.pipelineVersion)"
+                detail: "pipeline: \(producer.pipelineVersion), refused: \(refused)"
             ))
         }
 
