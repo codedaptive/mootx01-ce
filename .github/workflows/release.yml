@@ -671,6 +671,10 @@ jobs:
         if: ${{ env.SIGNING_READY == '1' }}
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
+          # A cache hit makes the action skip its own Install-Module step, and
+          # Invoke-ArtifactSigning is then not a recognised cmdlet. Restoring
+          # the module directory is not the same as installing it.
+          cache-dependencies: false
           endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
@@ -812,6 +816,10 @@ jobs:
         if: ${{ env.SIGNING_READY == '1' }}
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
+          # A cache hit makes the action skip its own Install-Module step, and
+          # Invoke-ArtifactSigning is then not a recognised cmdlet. Restoring
+          # the module directory is not the same as installing it.
+          cache-dependencies: false
           endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
@@ -986,6 +994,10 @@ jobs:
         if: ${{ env.SIGNING_READY == '1' }}
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
+          # A cache hit makes the action skip its own Install-Module step, and
+          # Invoke-ArtifactSigning is then not a recognised cmdlet. Restoring
+          # the module directory is not the same as installing it.
+          cache-dependencies: false
           endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
@@ -1119,6 +1131,10 @@ jobs:
         if: ${{ env.SIGNING_READY == '1' }}
         uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
         with:
+          # A cache hit makes the action skip its own Install-Module step, and
+          # Invoke-ArtifactSigning is then not a recognised cmdlet. Restoring
+          # the module directory is not the same as installing it.
+          cache-dependencies: false
           endpoint: ${{ secrets.AZURE_CODESIGN_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODESIGN_ACCOUNT }}
           certificate-profile-name: ${{ secrets.AZURE_CODESIGN_PROFILE }}
