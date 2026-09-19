@@ -1,0 +1,423 @@
+{
+  "_comment": "LMEB official metric conformance vectors for LMEBSpecMetrics.swift and lmeb_spec_metrics.rs. Both ports must produce identical numbers on every vector to within 1e-9. Values are hand-computed against metric.py (§A3) and verified by Python in the build log.",
+
+  "ndcg_cases": [
+    {
+      "id": "ndcg_rank1_hit",
+      "description": "Single relevant doc at rank 1: nDCG@k = 1.0 for all k.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A"],
+      "k": 1,
+      "ndcg": 1.0
+    },
+    {
+      "id": "ndcg_rank1_miss",
+      "description": "Relevant doc at rank 2: nDCG@1 = 0.0.",
+      "ranked_doc_ids": ["B", "A", "C"],
+      "relevant_doc_ids": ["A"],
+      "k": 1,
+      "ndcg": 0.0
+    },
+    {
+      "id": "ndcg_two_relevant_at_1_and_3_k5",
+      "description": "Two relevant docs at ranks 1 and 3, k=5. DCG=1.5, IDCG=1+1/log2(3). nDCG≈0.91972.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A", "C"],
+      "k": 5,
+      "ndcg": 0.9197207891481882
+    },
+    {
+      "id": "ndcg_two_relevant_at_1_and_3_k10",
+      "description": "Same as k5 but k=10: no extra docs, nDCG identical.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A", "C"],
+      "k": 10,
+      "ndcg": 0.9197207891481882
+    },
+    {
+      "id": "ndcg_one_relevant_at_rank3_k5",
+      "description": "Single relevant at rank 3, k=5. DCG=1/log2(4)=0.5, IDCG=1. nDCG=0.5.",
+      "ranked_doc_ids": ["X", "Y", "A", "Z", "W"],
+      "relevant_doc_ids": ["A"],
+      "k": 5,
+      "ndcg": 0.5
+    },
+    {
+      "id": "ndcg_empty_relevant_k10",
+      "description": "Empty relevant set: nDCG = 0.0 for all k (IDCG=0).",
+      "ranked_doc_ids": ["A", "B", "C"],
+      "relevant_doc_ids": [],
+      "k": 10,
+      "ndcg": 0.0
+    },
+    {
+      "id": "ndcg_no_relevant_hit_in_ranked",
+      "description": "Relevant doc absent from ranked list: nDCG = 0.0.",
+      "ranked_doc_ids": ["X", "Y", "Z"],
+      "relevant_doc_ids": ["A"],
+      "k": 10,
+      "ndcg": 0.0
+    }
+  ],
+
+  "ap_cases": [
+    {
+      "id": "ap_two_relevant_at_1_and_3_k5",
+      "description": "AP@5 with relevant at ranks 1,3. P@1=1, P@3=2/3. AP=(1+2/3)/2=5/6≈0.8333.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A", "C"],
+      "k": 5,
+      "ap": 0.8333333333333334
+    },
+    {
+      "id": "ap_one_relevant_at_rank3_k5",
+      "description": "AP@5 with 1 relevant at rank 3. P@3=1/3. AP=(1/3)/1=1/3≈0.3333.",
+      "ranked_doc_ids": ["X", "Y", "A", "Z", "W"],
+      "relevant_doc_ids": ["A"],
+      "k": 5,
+      "ap": 0.3333333333333333
+    },
+    {
+      "id": "ap_single_hit_at_rank1_k10",
+      "description": "Single relevant at rank 1, k=10. AP@10=1.0.",
+      "ranked_doc_ids": ["A", "B", "C"],
+      "relevant_doc_ids": ["A"],
+      "k": 10,
+      "ap": 1.0
+    },
+    {
+      "id": "ap_empty_relevant_k10",
+      "description": "Empty relevant: AP = 0.0.",
+      "ranked_doc_ids": ["A", "B"],
+      "relevant_doc_ids": [],
+      "k": 10,
+      "ap": 0.0
+    }
+  ],
+
+  "recall_cases": [
+    {
+      "id": "recall_single_relevant_at_rank1",
+      "description": "1 relevant at rank 1. Recall@1=1, Recall@5=1.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A"],
+      "recall_at_1": 1.0,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0
+    },
+    {
+      "id": "recall_single_relevant_at_rank2",
+      "description": "1 relevant at rank 2. Recall@1=0, Recall@5=1.",
+      "ranked_doc_ids": ["B", "A", "C", "D", "E"],
+      "relevant_doc_ids": ["A"],
+      "recall_at_1": 0.0,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0
+    },
+    {
+      "id": "recall_two_relevant_partial",
+      "description": "2 relevant (A,C); ranked=[A,B,C,D,E]. Recall@1=0.5, Recall@5=1.0.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A", "C"],
+      "recall_at_1": 0.5,
+      "recall_at_5": 1.0,
+      "recall_at_10": 1.0
+    },
+    {
+      "id": "recall_empty_relevant",
+      "description": "Empty relevant: Recall = 0.0.",
+      "ranked_doc_ids": ["A", "B"],
+      "relevant_doc_ids": [],
+      "recall_at_1": 0.0,
+      "recall_at_5": 0.0,
+      "recall_at_10": 0.0
+    }
+  ],
+
+  "precision_cases": [
+    {
+      "id": "precision_one_hit_at_rank1_k5",
+      "description": "1 relevant at rank 1, k=5. Precision@1=1.0, Precision@5=0.2.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A"],
+      "precision_at_1": 1.0,
+      "precision_at_5": 0.2,
+      "precision_at_10": 0.1
+    },
+    {
+      "id": "precision_two_hits_in_top5",
+      "description": "2 relevant at ranks 1,3 out of 5. Precision@5=2/5=0.4.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A", "C"],
+      "precision_at_1": 1.0,
+      "precision_at_5": 0.4,
+      "precision_at_10": 0.2
+    },
+    {
+      "id": "precision_no_hit_at_k1",
+      "description": "Relevant at rank 2; Precision@1 = 0.",
+      "ranked_doc_ids": ["B", "A", "C"],
+      "relevant_doc_ids": ["A"],
+      "precision_at_1": 0.0,
+      "precision_at_5": 0.2,
+      "precision_at_10": 0.1
+    }
+  ],
+
+  "mrr_cases": [
+    {
+      "id": "mrr_hit_at_rank1",
+      "description": "Relevant at rank 1. MRR@1=1, MRR@5=1.",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A"],
+      "mrr_at_1": 1.0,
+      "mrr_at_5": 1.0,
+      "mrr_at_10": 1.0
+    },
+    {
+      "id": "mrr_hit_at_rank3",
+      "description": "Relevant at rank 3. MRR@1=0, MRR@2=0 (cutoff), MRR@5=1/3.",
+      "ranked_doc_ids": ["X", "Y", "A", "Z", "W"],
+      "relevant_doc_ids": ["A"],
+      "mrr_at_1": 0.0,
+      "mrr_at_5": 0.3333333333333333,
+      "mrr_at_10": 0.3333333333333333
+    },
+    {
+      "id": "mrr_beyond_k_cutoff",
+      "description": "Relevant at rank 3; MRR@2 = 0 because rank 3 is beyond the k=2 cutoff.",
+      "ranked_doc_ids": ["X", "Y", "A"],
+      "relevant_doc_ids": ["A"],
+      "k": 2,
+      "mrr": 0.0
+    },
+    {
+      "id": "mrr_empty_relevant",
+      "description": "Empty relevant: MRR = 0.0.",
+      "ranked_doc_ids": ["A", "B"],
+      "relevant_doc_ids": [],
+      "mrr_at_1": 0.0,
+      "mrr_at_5": 0.0,
+      "mrr_at_10": 0.0
+    }
+  ],
+
+  "rcap_cases": [
+    {
+      "id": "rcap_zero_relevant_none",
+      "description": "Zero relevant docs: R_cap@k = None for all k (§A3, metric.py). NOT 0.0.",
+      "ranked_doc_ids": ["A", "B", "C"],
+      "relevant_doc_ids": [],
+      "rcap_at_1": null,
+      "rcap_at_5": null,
+      "rcap_at_10": null,
+      "rcap_at_25": null,
+      "rcap_at_50": null
+    },
+    {
+      "id": "rcap_one_relevant_hit_at_rank1",
+      "description": "1 relevant at rank 1. R_cap@k = 1/min(1,k) = 1.0 for all k≥1.",
+      "ranked_doc_ids": ["A", "B", "C"],
+      "relevant_doc_ids": ["A"],
+      "rcap_at_1": 1.0,
+      "rcap_at_5": 1.0,
+      "rcap_at_10": 1.0
+    },
+    {
+      "id": "rcap_one_relevant_miss_at_k1",
+      "description": "1 relevant at rank 2. R_cap@1=0/min(1,1)=0.0; R_cap@5=1/min(1,5)=1.0.",
+      "ranked_doc_ids": ["B", "A", "C", "D", "E"],
+      "relevant_doc_ids": ["A"],
+      "rcap_at_1": 0.0,
+      "rcap_at_5": 1.0,
+      "rcap_at_10": 1.0
+    },
+    {
+      "id": "rcap_two_relevant_partial_hit",
+      "description": "2 relevant (A,C); ranked=[A,B,C]. R_cap@1=1/min(2,1)=1.0; R_cap@5=2/min(2,5)=1.0.",
+      "ranked_doc_ids": ["A", "B", "C"],
+      "relevant_doc_ids": ["A", "C"],
+      "rcap_at_1": 1.0,
+      "rcap_at_5": 1.0
+    },
+    {
+      "id": "rcap_three_relevant_only_two_hit",
+      "description": "3 relevant (A,B,C); ranked=[A,B,X,Y,Z]. R_cap@5=2/min(3,5)=2/3≈0.6667.",
+      "ranked_doc_ids": ["A", "B", "X", "Y", "Z"],
+      "relevant_doc_ids": ["A", "B", "C"],
+      "rcap_at_1": 1.0,
+      "rcap_at_5": 0.66667,
+      "rcap_at_10": 0.66667
+    }
+  ],
+
+  "rcap_macro_average_cases": [
+    {
+      "id": "rcap_macro_avg_ignores_none",
+      "description": "Macro average ignores None: [None, 1.0] → avg=1.0 (§A3, metric.py round(val,5)).",
+      "per_query_values": [null, 1.0],
+      "expected_avg": 1.0
+    },
+    {
+      "id": "rcap_macro_avg_all_none",
+      "description": "All None → macro average = None (§A3).",
+      "per_query_values": [null, null, null],
+      "expected_avg": null
+    },
+    {
+      "id": "rcap_macro_avg_mixed",
+      "description": "Mixed [0.5, None, 1.0] → avg=round((0.5+1.0)/2, 5)=0.75.",
+      "per_query_values": [0.5, null, 1.0],
+      "expected_avg": 0.75
+    },
+    {
+      "id": "rcap_macro_avg_rounding_5decimals",
+      "description": "Values sum to non-terminating decimal: [1.0, 0.5, 0.0] → avg=0.5.",
+      "per_query_values": [1.0, 0.5, 0.0],
+      "expected_avg": 0.5
+    }
+  ],
+
+  "skip_first_result_cases": [
+    {
+      "id": "skip_first_result_drops_rank1_relevant",
+      "description": "Relevant at rank 1; after skip_first_result, rank 1 is dropped. nDCG@5=0, Recall@5=0.",
+      "options": {"skip_first_result": true, "ignore_identical_ids": false},
+      "query_id": "q1",
+      "ranked_doc_ids": ["A", "B", "C", "D", "E"],
+      "relevant_doc_ids": ["A"],
+      "after_filter": ["B", "C", "D", "E"],
+      "ndcg_at_5": 0.0,
+      "recall_at_5": 0.0,
+      "rcap_at_5": 0.0,
+      "mrr_at_5": 0.0
+    },
+    {
+      "id": "skip_first_result_irrelevant_head",
+      "description": "skip_first_result=true; rank 1 is irrelevant (B), relevant A at rank 2 → rank 1 after skip. nDCG@5=1.0.",
+      "options": {"skip_first_result": true, "ignore_identical_ids": false},
+      "query_id": "q1",
+      "ranked_doc_ids": ["B", "A", "C"],
+      "relevant_doc_ids": ["A"],
+      "after_filter": ["A", "C"],
+      "ndcg_at_5": 1.0,
+      "recall_at_5": 1.0,
+      "rcap_at_5": 1.0,
+      "mrr_at_5": 1.0
+    }
+  ],
+
+  "ignore_identical_ids_cases": [
+    {
+      "id": "ignore_identical_ids_removes_self",
+      "description": "Query ID = 'doc1'; doc1 is at rank 1 and removed. doc2 (relevant) becomes rank 1. nDCG@1=1.0.",
+      "options": {"skip_first_result": false, "ignore_identical_ids": true},
+      "query_id": "doc1",
+      "ranked_doc_ids": ["doc1", "doc2", "doc3"],
+      "relevant_doc_ids": ["doc2"],
+      "after_filter": ["doc2", "doc3"],
+      "ndcg_at_1": 1.0,
+      "recall_at_1": 1.0,
+      "mrr_at_1": 1.0
+    },
+    {
+      "id": "ignore_identical_ids_no_self_in_ranked",
+      "description": "ignore_identical_ids=true but query ID not in ranked list: list unchanged.",
+      "options": {"skip_first_result": false, "ignore_identical_ids": true},
+      "query_id": "q_absent",
+      "ranked_doc_ids": ["A", "B", "C"],
+      "relevant_doc_ids": ["A"],
+      "after_filter": ["A", "B", "C"],
+      "ndcg_at_1": 1.0
+    }
+  ],
+
+  "aggregation_cases": [
+    {
+      "id": "aggregation_two_level",
+      "description": "Two-level aggregation: subset macro mean → task mean (§A1/§A3). nDCG@10 headline.",
+      "subsets": [
+        {
+          "subset_name": "user_evidence",
+          "queries": [
+            {
+              "query_id": "q1",
+              "ranked_doc_ids": ["A"],
+              "relevant_doc_ids": ["A"]
+            },
+            {
+              "query_id": "q2",
+              "ranked_doc_ids": ["X", "Y", "A", "Z"],
+              "relevant_doc_ids": ["A"]
+            }
+          ],
+          "expected_ndcg_at_10": 0.75
+        },
+        {
+          "subset_name": "preference_evidence",
+          "queries": [
+            {
+              "query_id": "q3",
+              "ranked_doc_ids": ["X", "Y", "Z"],
+              "relevant_doc_ids": ["A"]
+            }
+          ],
+          "expected_ndcg_at_10": 0.0
+        }
+      ],
+      "expected_task_ndcg_at_10": 0.375
+    },
+    {
+      "id": "aggregation_rcap_none_propagation",
+      "description": "R_cap None propagation through both aggregation levels (§A3).",
+      "subsets": [
+        {
+          "subset_name": "user_evidence",
+          "queries": [
+            {
+              "query_id": "q_no_relevant",
+              "ranked_doc_ids": ["A", "B"],
+              "relevant_doc_ids": []
+            },
+            {
+              "query_id": "q_with_relevant",
+              "ranked_doc_ids": ["A", "B"],
+              "relevant_doc_ids": ["A"]
+            }
+          ],
+          "expected_rcap_at_5": 1.0,
+          "note": "None ignored in macro avg; only q_with_relevant contributes: 1/min(1,5)=1.0"
+        },
+        {
+          "subset_name": "preference_evidence",
+          "queries": [
+            {
+              "query_id": "q_all_none",
+              "ranked_doc_ids": ["A", "B"],
+              "relevant_doc_ids": []
+            }
+          ],
+          "expected_rcap_at_5": null,
+          "note": "All queries have None → subset R_cap@5 = None"
+        }
+      ],
+      "expected_task_rcap_at_5": 1.0,
+      "task_note": "One subset None, one subset 1.0 → task mean = 1.0"
+    }
+  ],
+
+  "instruction_cases": [
+    {
+      "id": "instruction_all_six_subsets",
+      "description": "All six §A4 instruction strings verbatim from task_instructions.json.",
+      "instructions": {
+        "abstention_evidence": "Given a query, retrieve documents that answer the query",
+        "assistant_facts_evidence": "Given a query, retrieve assistant messages that answer the query",
+        "changing_evidence": "Given a question, retrieve the latest information to answer the question",
+        "implicit_connection_evidence": "Given a query, retrieve documents that answer the query",
+        "preference_evidence": "Given a query, retrieve the user's stated preferences that can help answer the query",
+        "user_evidence": "Given a query, retrieve documents that answer the query"
+      }
+    }
+  ]
+}
