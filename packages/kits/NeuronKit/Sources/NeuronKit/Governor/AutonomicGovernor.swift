@@ -11,6 +11,15 @@ import SubstrateTypes
 /// Private to this file — callers use the module-level `logger` symbol defined here.
 private let logger = Logger(subsystem: NeuronKitLogging.subsystem, category: "NeuronKit")
 
+/// A governor failure goes to OSLog AND to stderr. The daemon's stderr is
+/// the file an operator or a harness keeps per process; OSLog on an unsigned
+/// build is not reliably retained, and a dreaming pump that failed every
+/// cadence for half an hour left no trace in the unit's log (2026-09-19).
+private func governorError(_ message: String) {
+    logger.error("\(message, privacy: .public)")
+    FileHandle.standardError.write(Data((message + "\n").utf8))
+}
+
 /// Read the topology snapshot cadence from the environment.
 ///
 /// `MOOTX01_TOPOLOGY_CADENCE_SECONDS` controls how often the governor recomputes
@@ -347,9 +356,9 @@ public actor AutonomicGovernor {
         // Load persisted cadence policy once (best-effort; an empty store leaves
         // the spec defaults in place).
         do { try await dreaming.loadPersistedPolicy() }
-        catch { logger.error("AutonomicGovernor: dreaming policy load failed: \(error)") }
+        catch { governorError("AutonomicGovernor: dreaming policy load failed: \(error)") }
         do { try await maintenance.loadPersistedPolicy() }
-        catch { logger.error("AutonomicGovernor: maintenance policy load failed: \(error)") }
+        catch { governorError("AutonomicGovernor: maintenance policy load failed: \(error)") }
 
         // Confirm auto-reindex is wired (the EstateCorpusGrowthProbe is always
         // passed at construction in the production governor).
@@ -399,7 +408,7 @@ public actor AutonomicGovernor {
                 if await dreaming.timerDue(now: now) {
                     if let count = pending, count > 0 {
                         do { dreamingFired = try await dreaming.pump(now: now) != nil }
-                        catch { logger.error("AutonomicGovernor: \(entry.name) pump error: \(error)") }
+                        catch { governorError("AutonomicGovernor: \(entry.name) pump error: \(error)") }
                     }
                     // else: nil (not mounted) or 0 (empty) — no-op this tick.
                 }
@@ -416,22 +425,22 @@ public actor AutonomicGovernor {
                             dreamingFired = true
                         }
                     }
-                    catch { logger.error("AutonomicGovernor: \(entry.name) pumpOnEvent error: \(error)") }
+                    catch { governorError("AutonomicGovernor: \(entry.name) pumpOnEvent error: \(error)") }
                 }
             case .theta:
                 if await dreaming.thetaDue(now: now) {
                     do { _ = try await dreaming.runThetaCycle(now: now) }
-                    catch { logger.error("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
+                    catch { governorError("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
                 }
             case .beta:
                 if await dreaming.betaDue(now: now) {
                     do { _ = try await dreaming.runBetaCycle(now: now) }
-                    catch { logger.error("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
+                    catch { governorError("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
                 }
             case .omega:
                 if await dreaming.omegaDue(now: now) {
                     do { _ = try await dreaming.runOmegaCycle(now: now) }
-                    catch { logger.error("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
+                    catch { governorError("AutonomicGovernor: \(entry.name) cycle error: \(error)") }
                 }
             }
         }
@@ -452,10 +461,10 @@ public actor AutonomicGovernor {
             if case .schedulerNotStarted = error {
                 // benign — no standing signals registered yet, nothing to tick.
             } else {
-                logger.error("AutonomicGovernor: signalTick error: \(error)")
+                governorError("AutonomicGovernor: signalTick error: \(error)")
             }
         } catch {
-            logger.error("AutonomicGovernor: signalTick error: \(error)")
+            governorError("AutonomicGovernor: signalTick error: \(error)")
         }
 
         // Graph analytics: fire on the configured interval (default 10 min).
@@ -474,7 +483,7 @@ public actor AutonomicGovernor {
             if let handler = graphAnalyticsHandler {
                 Task { [kit, handle, now, handler] in
                     do { try await handler(kit, handle, now) }
-                    catch { logger.error("AutonomicGovernor: graphAnalytics error: \(error)") }
+                    catch { governorError("AutonomicGovernor: graphAnalytics error: \(error)") }
                 }
             }
         }
@@ -496,7 +505,7 @@ public actor AutonomicGovernor {
             lastGraphCentralityFired = now
             Task { [kit, handle, now] in
                 do { try await AutonomicGovernor.graphCentralityScan(kit: kit, handle: handle, now: now) }
-                catch { logger.error("AutonomicGovernor: graphCentralityScan error: \(error)") }
+                catch { governorError("AutonomicGovernor: graphCentralityScan error: \(error)") }
             }
         }
 
@@ -518,7 +527,7 @@ public actor AutonomicGovernor {
             lastPreferenceFired = now
             Task { [kit, handle, now] in
                 do { try await AutonomicGovernor.preferenceScan(kit: kit, handle: handle, now: now) }
-                catch { logger.error("AutonomicGovernor: preferenceScan error: \(error)") }
+                catch { governorError("AutonomicGovernor: preferenceScan error: \(error)") }
             }
         }
 
@@ -555,7 +564,7 @@ public actor AutonomicGovernor {
                             handler: handler)
                         self.recordTopologyInputsToken(token)
                     } catch {
-                        logger.error("AutonomicGovernor: topologySnapshotDuty error: \(error)")
+                        governorError("AutonomicGovernor: topologySnapshotDuty error: \(error)")
                     }
                 }
             }
@@ -637,7 +646,7 @@ public actor AutonomicGovernor {
             } catch {
                 // A missing/unwritable table artifact is the expected state until
                 // a writable table is provisioned; log once per fire, never crash.
-                logger.error("AutonomicGovernor: pool reduce skipped (\(error))")
+                governorError("AutonomicGovernor: pool reduce skipped (\(error))")
             }
         }
 
