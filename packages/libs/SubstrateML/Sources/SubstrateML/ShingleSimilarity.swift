@@ -58,10 +58,10 @@ public enum ShingleSimilarity {
     /// content, short enough to share substrings across paraphrases.
     public static let windowSize: Int = 3
 
-    /// The set of `windowSize`-character lowercase shingles of `s`.
+    /// The set of `windowSize`-scalar lowercase shingles of `s`.
     ///
     /// Folds to lowercase, then windows over every contiguous
-    /// `windowSize`-character run. A string shorter than the window
+    /// `windowSize`-scalar run (Unicode scalars, as the Rust twin's `char`s). A string shorter than the window
     /// yields a single shingle — the whole lowercased string — unless
     /// it is empty, in which case the set is empty.
     ///
@@ -69,17 +69,24 @@ public enum ShingleSimilarity {
     /// - Returns: the deduplicated shingle set.
     public static func shingles(_ s: String) -> Set<String> {
         let lower = s.lowercased()
-        let chars = Array(lower)
+        // Windows run over Unicode scalars, not extended grapheme clusters:
+        // the Rust twin windows over `char`s (scalars), and a combining
+        // sequence such as "a\u{0301}bc" is three Characters but four
+        // scalars, so windowing by Character gave the two ports different
+        // shingle sets and different content fingerprints for the same
+        // text (codex finding 2026-09-19). Chest placement keys on the
+        // fingerprint, so the ports must agree byte for byte here.
+        let chars = Array(lower.unicodeScalars)
         guard chars.count >= windowSize else {
-            // 1–2 characters collapse to a single whole-string shingle;
+            // 1–2 scalars collapse to a single whole-string shingle;
             // the empty string yields no shingle at all. This matches the
             // canonical recall-path behaviour the kits delegate from.
-            return chars.isEmpty ? [] : [String(chars)]
+            return chars.isEmpty ? [] : [String(String.UnicodeScalarView(chars))]
         }
         var out = Set<String>()
         out.reserveCapacity(chars.count - (windowSize - 1))
         for i in 0...(chars.count - windowSize) {
-            out.insert(String(chars[i..<(i + windowSize)]))
+            out.insert(String(String.UnicodeScalarView(chars[i..<(i + windowSize)])))
         }
         return out
     }

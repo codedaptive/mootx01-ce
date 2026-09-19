@@ -99,6 +99,19 @@ mod tests {
     }
 
     #[test]
+    fn windows_over_unicode_scalars_pin_the_cross_port_shape() {
+        // "a" + U+0301 (combining acute) + "bc": four chars (scalars). The
+        // Swift twin windows over unicode scalars for the same result.
+        let mut expect = BTreeSet::new();
+        expect.insert("a\u{0301}b".to_string());
+        expect.insert("\u{0301}bc".to_string());
+        assert_eq!(shingles("a\u{0301}bc"), expect);
+        let mut two = BTreeSet::new();
+        two.insert("e\u{0301}".to_string());
+        assert_eq!(shingles("e\u{0301}"), two);
+    }
+
+    #[test]
     fn short_input_returns_whole_lowercased_string() {
         let mut expect = BTreeSet::new();
         expect.insert("ab".to_string());

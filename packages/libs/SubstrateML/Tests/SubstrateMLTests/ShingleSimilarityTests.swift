@@ -21,6 +21,15 @@ struct ShingleSimilarityTests {
         #expect(ShingleSimilarity.shingles("").isEmpty)
     }
 
+    @Test("windows run over Unicode scalars, so a combining sequence shingles as the Rust twin does")
+    func windowsOverUnicodeScalars() {
+        // "a" + U+0301 (combining acute) + "bc": three Characters, four scalars.
+        // Rust windows over chars (scalars): {"a\u{0301}b", "\u{0301}bc"}.
+        #expect(ShingleSimilarity.shingles("a\u{0301}bc") == ["a\u{0301}b", "\u{0301}bc"])
+        // Two scalars collapse to the whole string even though it is one Character.
+        #expect(ShingleSimilarity.shingles("e\u{0301}") == ["e\u{0301}"])
+    }
+
     @Test("short input returns the whole lowercased string as one shingle")
     func shortInputWholeString() {
         #expect(ShingleSimilarity.shingles("ab") == ["ab"])
