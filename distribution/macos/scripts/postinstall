@@ -242,7 +242,8 @@ fi
 # job only if it is loaded, so on a fresh install (nothing loaded yet) both
 # calls are silent no-ops. Daemon first, console second, matching
 # LaunchAgent.restart() so the console reconnects to the fresh daemon.
-# Labels mirror MootPaths.daemonLabel / MootPaths.launchAgentLabel in
+# Labels mirror MootPaths.daemonLabel, DaemonProvider.launchAgentLabel and
+# MootPaths.launchAgentLabel in
 # apps/mootx01/Sources/MootInstallerCore/Paths.swift — keep in sync.
 # Best-effort: never fails the install.
 #
@@ -251,11 +252,20 @@ fi
 # moves the estate in rather than creating an empty one beside it. This block
 # briefly skipped the restart in that case, which only left the resident
 # stopped after the install.
+# BOTH daemon labels. com.mootx01.daemon is MootPaths.daemonLabel, the legacy
+# raw-serve plist; com.codedaptive.mootx01.daemon is
+# DaemonProvider.launchAgentLabel, the bundle-form registration an installed
+# machine actually reports. Paths.swift:337 says the two coexist under the
+# arbiter rather than replacing each other, so an upgrade has to restart
+# whichever is loaded. Naming only the legacy label made this a silent no-op on
+# every bundle-provider machine — `kickstart -k` says nothing about a job that
+# is not loaded, so the upgrade looked done and the server never came back.
 if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     REAL_UID="$(id -u "$REAL_USER" 2>/dev/null)"
     if [ -n "$REAL_UID" ]; then
-        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.daemon" 2>/dev/null
-        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.mgr"    2>/dev/null
+        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.daemon"            2>/dev/null
+        launchctl kickstart -k "gui/$REAL_UID/com.codedaptive.mootx01.daemon" 2>/dev/null
+        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.mgr"               2>/dev/null
     fi
 fi
 
