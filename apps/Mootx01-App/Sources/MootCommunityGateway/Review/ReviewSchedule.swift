@@ -166,8 +166,8 @@ public struct ReviewSchedule: Sendable {
 
     /// ISO8601 rendering for lens arguments that take an instant (`splitAt`).
     /// Plain `ISO8601DateFormatter()` — `.withInternetDateTime`, no fractional
-    /// seconds — which is exactly what the lens boundary parses with
-    /// (`LensTools.requireDate`). A fractional-seconds variant would be rejected.
+    /// seconds — which is exactly what the ARIA v2 lens boundary parses.
+    /// A fractional-seconds variant would be rejected.
     public static func iso8601(_ date: Date) -> String {
         ISO8601DateFormatter().string(from: date)
     }
