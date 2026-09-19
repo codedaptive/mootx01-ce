@@ -102,7 +102,7 @@ jobs:
       fail-fast: false
       matrix:
         arch: [arm64, x86_64]
-    runs-on: macos-26
+    runs-on: macos-27
     env:
       # GitHub's newest runner Xcode is 26.6; the Apple-app surface needs the
       # macOS 27 SDK. Those roots are local-compile-only and the shipped
