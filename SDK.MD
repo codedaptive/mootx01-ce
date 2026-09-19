@@ -24,6 +24,7 @@ This document is the detailed map. The short version is in the
 | [`moot-semantics`](https://github.com/codedaptive/moot-semantics) | ARIA vocabulary and deterministic local classification | [`docs/README.md`](https://github.com/codedaptive/moot-semantics/blob/main/docs/README.md) |
 | [`moot-system`](https://github.com/codedaptive/moot-system) | Storage, datasets, queues, sync, telemetry, and loopback HTTP | [`docs/README.md`](https://github.com/codedaptive/moot-system/blob/main/docs/README.md) |
 | [`moot-core`](https://github.com/codedaptive/moot-core) | Shared types, kernel, fingerprints, lifecycle rules, and memory math | [`docs/README.md`](https://github.com/codedaptive/moot-core/blob/main/docs/README.md) |
+| [`moot-cognition`](https://github.com/codedaptive/moot-cognition) | The cognitive layer: association, dreaming, and the locus graph | [`docs/README.md`](https://github.com/codedaptive/moot-cognition/blob/main/docs/README.md) |
 
 If you are building memory or retrieval, begin with `moot-memory`. Its
 dependencies bring in the lower repositories. Each venue README lists exact
@@ -94,6 +95,17 @@ repository remains the stable SDK release line until 1.1 is published.
 **Use it when:** you want deterministic semantic grounding — the same text in,
 the same anchor out, every time, no model in the loop.
 
+### [`moot-cognition`](https://github.com/codedaptive/moot-cognition) — the cognitive layer
+
+| Package | What it is |
+|---|---|
+| `CognitionKit` | Reasoning over what memory holds |
+| `NeuronKit` | Association, dreaming, and the autonomic duties that maintain an estate |
+| `GeniusLocusKit` | The locus graph and its migrations |
+
+**Use it when:** you want an estate that reasons about its own contents rather
+than only storing and returning them.
+
 ---
 
 ## Installing
@@ -101,14 +113,14 @@ the same anchor out, every time, no model in the loop.
 SwiftPM — depend on a venue directly:
 
 ```swift
-.package(url: "https://github.com/codedaptive/moot-memory.git", from: "1.0.32")
+.package(url: "https://github.com/codedaptive/moot-memory.git", from: "1.1.0")
 ```
 
 Cargo — git dependency; each repo's `docs/PACKAGE_MAP.md` lists the crate names:
 
 ```toml
 [dependencies]
-locus-kit = { git = "https://github.com/codedaptive/moot-memory", tag = "v1.0.32" }
+locus-kit = { git = "https://github.com/codedaptive/moot-memory", tag = "v1.1.0" }
 ```
 
 No clone of this repository is required. The venues are self-contained.
