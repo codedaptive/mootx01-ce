@@ -1,6 +1,6 @@
-# vectorkit (Rust)
+# synapsekit (Rust)
 
-Rust port of the Swift `VectorKit` Swift Package. On-device embedding generation, model-tagged vector storage, and Hamming-distance nearest-neighbour retrieval.
+Rust port of the Swift `SynapseKit` Swift Package. On-device embedding generation, model-tagged vector storage, and Hamming-distance nearest-neighbour retrieval.
 
 **Status:** v0.2.0 — refactored 2026-05-19 (Rust mission 6) per `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership` section 4.6.
 
@@ -14,7 +14,7 @@ Rust port of the Swift `VectorKit` Swift Package. On-device embedding generation
 
 ## API surface
 
-- `EmbeddingProvider` trait (unchanged): `model_id()`, `model_version()`, `embed(&str) -> Result<Engram, VectorKitError>`
+- `EmbeddingProvider` trait (unchanged): `model_id()`, `model_version()`, `embed(&str) -> Result<Engram, SynapseKitError>`
 - `MockEmbeddingProvider` — deterministic FNV stub for tests
 - `ScalarEmbeddingProvider` — pure-Rust FNV stub for Linux builds
 - `FloatSimHashEmbeddingProvider` — closure-injected inference + FloatSimHash projection; `::minilm`, `::mpnet`, `::embedding_gemma` convenience constructors with Swift-matching seeds
@@ -27,7 +27,7 @@ Rust port of the Swift `VectorKit` Swift Package. On-device embedding generation
 - `mock_provider_tests.rs` (4): determinism, distinct seeds, empty input, model identity
 - `scalar_provider_tests.rs` (4): same shape as mock, distinct seed space
 - `embedding_provider_tests.rs` (4): trait conformance, Send + Sync
-- `simhash_provider_tests.rs` (6, new): model identity carries through, embed deterministic for same text, different providers produce different engrams, EmbeddingGemma seed distinct from MiniLM, inference failure surfaces as `VectorKitError::EmbeddingFailed`, empty text produces a stable non-zero engram
+- `simhash_provider_tests.rs` (6, new): model identity carries through, embed deterministic for same text, different providers produce different engrams, EmbeddingGemma seed distinct from MiniLM, inference failure surfaces as `SynapseKitError::EmbeddingFailed`, empty text produces a stable non-zero engram
 - `vector_store_tests.rs` (15): add+get roundtrip, get returns None for unknown, multi-model storage for same drawer, ordering by `filed_at`, delete, model+version roundtrip, upsert on conflict, empty store, `find_nearest` k-results sorted, find_nearest with k > corpus, find_nearest on empty store, find_nearest index maps to correct drawers, `find_by_keyword` matching, find_by_keyword empty for no match, hybrid find_nearest + find_by_keyword overlap
 
 ## What does NOT ship at v0.2.0
@@ -39,7 +39,7 @@ Rust port of the Swift `VectorKit` Swift Package. On-device embedding generation
 ## Building
 
 ```
-cd VectorKit/rust
+cd SynapseKit/rust
 cargo build
 cargo test
 ```
@@ -48,5 +48,5 @@ Requires Rust 1.75+ and sibling `substrate-kit`, `engram-kit`, `storage-kit` cra
 
 ## See also
 
-- Swift counterpart: `VectorKit/Sources/`
+- Swift counterpart: `SynapseKit/Sources/`
 - Kit graph rule: `docs/engineering/SYSTEM_ENGINEERING_REFERENCE.md#21-dependency-direction-and-kit-ownership`
