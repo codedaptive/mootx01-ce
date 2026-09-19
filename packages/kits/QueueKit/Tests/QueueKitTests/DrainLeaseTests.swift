@@ -40,6 +40,28 @@ struct DrainLeaseTests {
 
     // MARK: - Second owner cannot acquire while first holds a fresh lease
 
+    @Test("a fresh lease of a dead process is reclaimable at once; a live foreign holder still blocks")
+    func deadHolderLeaseIsStaleAtOnce() throws {
+        try withTempDir { dir in
+            // A child that has already exited: its pid is gone.
+            let child = Process()
+            child.executableURL = URL(fileURLWithPath: "/usr/bin/true")
+            try child.run()
+            child.waitUntilExit()
+            let deadPid = child.processIdentifier
+            let leasePath = dir.appendingPathComponent("encode.drain.lease")
+            let now = Date()
+            try "pid-\(deadPid)-old\n\(now.timeIntervalSince1970)\n".write(to: leasePath, atomically: true, encoding: .utf8)
+            let mine = DrainLease(directory: dir, stream: "encode", instanceToken: "mine")
+            #expect(!mine.isHeldByOther(now: now), "a dead holder's fresh lease is not held")
+            #expect(mine.tryAcquire(now: now), "reclaimed without waiting out the TTL")
+            // A live foreign holder (this process under another token) still blocks.
+            let other = DrainLease(directory: dir, stream: "encode", instanceToken: "other")
+            #expect(other.isHeldByOther(now: now))
+            #expect(!other.tryAcquire(now: now))
+        }
+    }
+
     @Test("second owner cannot acquire while first holds a fresh lease")
     func secondOwnerBlockedWhileLeaseHeld() throws {
         try withTempDir { dir in
