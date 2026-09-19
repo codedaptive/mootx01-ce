@@ -1,0 +1,98 @@
+{
+  "_comment": "Conformance vectors for jaccardDivergence and rankDivergence. Both legs (Swift and Rust) must reproduce every expected value to within 1e-9. See Divergence.swift for the authoritative algorithm.",
+  "jaccard": [
+    {
+      "id": "jaccard-identical",
+      "expected": ["a", "b", "c"],
+      "got": ["a", "b", "c"],
+      "result": 0.0,
+      "note": "Identical sets → 0.0 (no divergence)"
+    },
+    {
+      "id": "jaccard-disjoint",
+      "expected": ["a", "b"],
+      "got": ["c", "d"],
+      "result": 1.0,
+      "note": "Fully disjoint sets → 1.0 (max divergence)"
+    },
+    {
+      "id": "jaccard-partial",
+      "expected": ["a", "b", "c"],
+      "got": ["b", "c", "d"],
+      "result": 0.5,
+      "note": "Intersection {b,c}=2, union {a,b,c,d}=4 → similarity 0.5 → divergence 0.5"
+    },
+    {
+      "id": "jaccard-both-empty",
+      "expected": [],
+      "got": [],
+      "result": 0.0,
+      "note": "Two empty sets defined as identical (SPEC: nothing failed to land)"
+    },
+    {
+      "id": "jaccard-one-empty",
+      "expected": ["a"],
+      "got": [],
+      "result": 1.0,
+      "note": "One empty, one non-empty → intersection 0, union 1 → divergence 1.0"
+    },
+    {
+      "id": "jaccard-superset",
+      "expected": ["a", "b"],
+      "got": ["a", "b", "c", "d"],
+      "result": 0.5,
+      "note": "got is a superset: intersection 2, union 4 → divergence 0.5"
+    }
+  ],
+  "rank": [
+    {
+      "id": "rank-identical",
+      "expected": ["a", "b", "c", "d"],
+      "got": ["a", "b", "c", "d"],
+      "result": 0.0,
+      "note": "Identical order → 0 discordant pairs / 6 total = 0.0"
+    },
+    {
+      "id": "rank-fully-reversed",
+      "expected": ["a", "b", "c", "d"],
+      "got": ["d", "c", "b", "a"],
+      "result": 1.0,
+      "note": "Fully reversed → all 6 pairs discordant / 6 = 1.0"
+    },
+    {
+      "id": "rank-non-shared-ignored",
+      "expected": ["a", "b", "c"],
+      "got": ["x", "a", "y", "b", "c"],
+      "result": 0.0,
+      "note": "Extra IDs x,y in got dropped; shared order a,b,c is preserved → 0.0"
+    },
+    {
+      "id": "rank-non-shared-reversed",
+      "expected": ["a", "b", "c"],
+      "got": ["c", "b", "a", "z"],
+      "result": 1.0,
+      "note": "Shared {a,b,c}; got order reversed → all 3 pairs discordant / 3 = 1.0"
+    },
+    {
+      "id": "rank-fewer-than-two-shared",
+      "expected": ["a"],
+      "got": ["a", "b"],
+      "result": 0.0,
+      "note": "Fewer than 2 shared IDs → no pairs exist → divergence 0.0"
+    },
+    {
+      "id": "rank-partial-rotation",
+      "expected": ["a", "b", "c"],
+      "got": ["c", "a", "b"],
+      "result": 0.6666666666666666,
+      "note": "gotOrder=[c,a,b]: pairs (a,b) concordant, (a,c) discordant, (b,c) discordant → 2/3"
+    },
+    {
+      "id": "rank-disjoint-sets",
+      "expected": ["a", "b", "c"],
+      "got": ["x", "y", "z"],
+      "result": 0.0,
+      "note": "No shared IDs → shared set empty → n=0 < 2 → 0.0"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+{"answer_hydration_depth":10,"benchmark":"locomo-spec","corpus_digest":"fixture","hydration_tier":"distilled","run_label":"conformance","seed":7,"type":"header"}
+{"benchmark":"locomo-spec","category":1,"category_label":"single_hop","gold_answer":"Boston","memory_texts":["Alice moved to Boston."],"question":"Where did Alice move?","question_id":"q1","retrieved_dia_ids":["D1:1"],"retrieved_drawer_ids":["drawer-1"],"retrieved_ranks":[1],"type":"answer_input"}

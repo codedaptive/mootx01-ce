@@ -1,0 +1,233 @@
+{
+  "preciseMiss": {
+    "records": [
+      {
+        "content": "Calwen count survey north zone result: 12. Field crew verified the total.",
+        "eventTime": "2020-01-26T00:53:20Z",
+        "id": "pm-0-t"
+      },
+      {
+        "content": "The Calwen count survey examined north zone data. Calwen count survey north zone readings were logged. Count survey Calwen north zone figures are on record.",
+        "eventTime": "2020-01-26T00:53:20Z",
+        "id": "pm-0-d"
+      },
+      {
+        "content": "Calwen count survey equipment was staged before deployment.",
+        "eventTime": "2020-01-26T00:53:20Z",
+        "id": "pm-0-f0"
+      },
+      {
+        "content": "North zone observations were noted in Calwen count survey records.",
+        "eventTime": "2020-01-26T00:53:20Z",
+        "id": "pm-0-f1"
+      },
+      {
+        "content": "Batch B5 lab test output: 31 units. Technician sign-off on file.",
+        "eventTime": "2020-02-02T00:53:20Z",
+        "id": "pm-1-t"
+      },
+      {
+        "content": "Batch B5 lab test batch B5 data was processed. The lab test for batch B5 examined lab test batch parameters. Batch B5 lab test logs are on file.",
+        "eventTime": "2020-02-02T00:53:20Z",
+        "id": "pm-1-d"
+      },
+      {
+        "content": "Batch B5 materials were staged before the lab test.",
+        "eventTime": "2020-02-02T00:53:20Z",
+        "id": "pm-1-f0"
+      },
+      {
+        "content": "The lab test protocol was verified for batch B5.",
+        "eventTime": "2020-02-02T00:53:20Z",
+        "id": "pm-1-f1"
+      },
+      {
+        "content": "Station S-3 pressure report: reading was 38 kPa at 0800.",
+        "eventTime": "2020-02-09T00:53:20Z",
+        "id": "pm-2-t"
+      },
+      {
+        "content": "Station S-3 pressure report readings were taken at station S-3. The S-3 pressure report station S-3 log was filed. Pressure report station S-3 data is archived.",
+        "eventTime": "2020-02-09T00:53:20Z",
+        "id": "pm-2-d"
+      },
+      {
+        "content": "Station S-3 equipment was inspected last quarter.",
+        "eventTime": "2020-02-09T00:53:20Z",
+        "id": "pm-2-f0"
+      },
+      {
+        "content": "The pressure team reviewed station S-3 logs.",
+        "eventTime": "2020-02-09T00:53:20Z",
+        "id": "pm-2-f1"
+      },
+      {
+        "content": "Mallow route check north segment distance: 5.6 km. Inspector sign-off complete.",
+        "eventTime": "2020-02-16T00:53:20Z",
+        "id": "pm-3-t"
+      },
+      {
+        "content": "The Mallow route check north segment records were filed. Mallow route check north segment measurements are on file. Route check Mallow north segment data was recorded.",
+        "eventTime": "2020-02-16T00:53:20Z",
+        "id": "pm-3-d"
+      },
+      {
+        "content": "Mallow route check team departed at first light.",
+        "eventTime": "2020-02-16T00:53:20Z",
+        "id": "pm-3-f0"
+      },
+      {
+        "content": "North segment conditions were noted in the Mallow route check.",
+        "eventTime": "2020-02-16T00:53:20Z",
+        "id": "pm-3-f1"
+      }
+    ],
+    "scenarioCount": 4,
+    "scenarios": [
+      {
+        "decoyRecordID": "pm-0-d",
+        "fillerRecordIDs": [
+          "pm-0-f0",
+          "pm-0-f1"
+        ],
+        "id": "pm-q-0",
+        "question": "What did the Calwen count survey record for the north zone?",
+        "targetRecordID": "pm-0-t"
+      },
+      {
+        "decoyRecordID": "pm-1-d",
+        "fillerRecordIDs": [
+          "pm-1-f0",
+          "pm-1-f1"
+        ],
+        "id": "pm-q-1",
+        "question": "What output did batch B5 produce in the lab test?",
+        "targetRecordID": "pm-1-t"
+      },
+      {
+        "decoyRecordID": "pm-2-d",
+        "fillerRecordIDs": [
+          "pm-2-f0",
+          "pm-2-f1"
+        ],
+        "id": "pm-q-2",
+        "question": "What reading did station S-3 log in the pressure report?",
+        "targetRecordID": "pm-2-t"
+      },
+      {
+        "decoyRecordID": "pm-3-d",
+        "fillerRecordIDs": [
+          "pm-3-f0",
+          "pm-3-f1"
+        ],
+        "id": "pm-q-3",
+        "question": "What distance did the Mallow route check record for the north segment?",
+        "targetRecordID": "pm-3-t"
+      }
+    ],
+    "seed": 20260725
+  },
+  "seed": 20260725,
+  "vagueNarrow": {
+    "clusterCount": 3,
+    "clusters": [
+      {
+        "id": "vn-q-0",
+        "memberIDs": [
+          "vn-0-0",
+          "vn-0-1",
+          "vn-0-2",
+          "vn-0-3"
+        ],
+        "question": "Which entry in the Dunmore protocol set handles the critical path procedure?",
+        "trueID": "vn-0-3"
+      },
+      {
+        "id": "vn-q-1",
+        "memberIDs": [
+          "vn-1-0",
+          "vn-1-1",
+          "vn-1-2",
+          "vn-1-3"
+        ],
+        "question": "Which item on the Lab-A equipment list measures peak load?",
+        "trueID": "vn-1-3"
+      },
+      {
+        "id": "vn-q-2",
+        "memberIDs": [
+          "vn-2-0",
+          "vn-2-1",
+          "vn-2-2",
+          "vn-2-3"
+        ],
+        "question": "Which entry in the Tenby log book records the initial calibration?",
+        "trueID": "vn-2-1"
+      }
+    ],
+    "membersPerCluster": 4,
+    "records": [
+      {
+        "content": "Dunmore protocol set entry 0: general administration procedures. Standard reference.",
+        "eventTime": "2020-02-23T00:53:20Z",
+        "id": "vn-0-0"
+      },
+      {
+        "content": "Dunmore protocol set entry 1: general administration procedures. Standard reference.",
+        "eventTime": "2020-02-23T00:53:20Z",
+        "id": "vn-0-1"
+      },
+      {
+        "content": "Dunmore protocol set entry 2: general administration procedures. Standard reference.",
+        "eventTime": "2020-02-23T00:53:20Z",
+        "id": "vn-0-2"
+      },
+      {
+        "content": "Dunmore protocol set entry 3: critical path procedure requires 48-hour hold and dual sign-off. Verified effective.",
+        "eventTime": "2020-02-23T00:53:20Z",
+        "id": "vn-0-3"
+      },
+      {
+        "content": "Lab-A equipment list item 0: general monitoring equipment. Routine maintenance.",
+        "eventTime": "2020-03-01T00:53:20Z",
+        "id": "vn-1-0"
+      },
+      {
+        "content": "Lab-A equipment list item 1: general monitoring equipment. Routine maintenance.",
+        "eventTime": "2020-03-01T00:53:20Z",
+        "id": "vn-1-1"
+      },
+      {
+        "content": "Lab-A equipment list item 2: general monitoring equipment. Routine maintenance.",
+        "eventTime": "2020-03-01T00:53:20Z",
+        "id": "vn-1-2"
+      },
+      {
+        "content": "Lab-A equipment list item 3: peak load meter, calibrated range 0-500 N. In service.",
+        "eventTime": "2020-03-01T00:53:20Z",
+        "id": "vn-1-3"
+      },
+      {
+        "content": "Tenby log book entry 0: routine check, no anomalies noted. Closed.",
+        "eventTime": "2020-03-08T00:53:20Z",
+        "id": "vn-2-0"
+      },
+      {
+        "content": "Tenby log book entry 1: initial calibration completed, reference value 1.00. Accepted.",
+        "eventTime": "2020-03-08T00:53:20Z",
+        "id": "vn-2-1"
+      },
+      {
+        "content": "Tenby log book entry 2: routine check, no anomalies noted. Closed.",
+        "eventTime": "2020-03-08T00:53:20Z",
+        "id": "vn-2-2"
+      },
+      {
+        "content": "Tenby log book entry 3: routine check, no anomalies noted. Closed.",
+        "eventTime": "2020-03-08T00:53:20Z",
+        "id": "vn-2-3"
+      }
+    ],
+    "seed": 20260725
+  }
+}
