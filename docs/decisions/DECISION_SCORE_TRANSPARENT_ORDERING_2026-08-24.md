@@ -1,12 +1,13 @@
 ---
-version: v0.2
+version: 0.2.1
 status: accepted
-date: 2026-08-24
+date: 2026-09-06
 description: >
   Recall result ordering contract: score in the payload; (score DESC,
   subject ASC) as the only ordering; windowed tie resolution at the
   presentation boundary (4x gate); no UUID in ordering; no third
-  tie-break.
+  tie-break. 0.2.1: wording only — hedging vocabulary removed from the
+  prose; no decision change.
 ---
 
 # Decision: Score-Transparent Ordering
@@ -43,9 +44,8 @@ description: >
    design.
 
 4. **The score travels in the return payload.** The consumer sees the
-   tie instead of inferring a false priority from row order. This is the
-   same philosophy as the adornment: give the AI the discriminating
-   information rather than pre-deciding for it. Rendering: a trailing
+   tie instead of inferring a false priority from row order. The payload
+   exposes the discriminating information. Rendering: a trailing
    4-decimal column (` · %.4f`) on each dense row. The visible score
    column is the SOLE tie disclosure in the reply body — the header does
    not name tie groups (Bob, 2026-08-24).
@@ -95,3 +95,7 @@ score column alone — before the windowed tie resolution lands.
   score column ruled the sole tie disclosure (no header naming);
   validation result recorded.
 - v0.1 (2026-08-24) — initial draft from the ordering design session.
+
+### 0.2.1 -- 2026-09-06
+
+Removed the retired adornment analogy from the score-presentation rationale.

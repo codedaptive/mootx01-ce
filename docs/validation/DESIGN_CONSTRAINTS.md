@@ -15,7 +15,7 @@ artifact landing.
 
 ## C-1: No external runtime dependencies for substrate features
 
-The substrate (LocusKit, VectorKit, CorpusKit, GeniusLocusKit,
+The substrate (LocusKit, SynapseKit, CorpusKit, GeniusLocusKit,
 ConvergenceKit, PersistenceKit, QueueKit, SubstrateLib,
 AriaLexiconLib) depends only on:
 

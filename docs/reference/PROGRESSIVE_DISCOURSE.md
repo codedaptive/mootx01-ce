@@ -1,8 +1,8 @@
 ---
 title: Progressive Discourse
-version: 0.2.1
+version: 0.4.0
 status: active
-date: 2026-08-26
+date: 2026-09-05
 description: "The journey model of the ARIA surface: travel on subjects, confirm on distilled, read full text terminal-only — with the three canonical journeys as worked examples."
 spec_type: protocol
 authors: MOOTx01 maintainers
@@ -26,15 +26,15 @@ first, widened only by follow-up questions the AI chooses to ask.
 Three rules govern every journey:
 
 1. **Travel on candidate rows.** Survey and Focus replies are the
-   canonical candidate row (ARIA_MCP_SPEC 2.0.0 § 8) — seven fixed
-   columns: `uuid · subject · first sentence · SSC facts · adornment ·
-   event_time · score`, absent optional values rendered `-`. The subject
-   is a one-sentence assertion written for exactly this moment: an AI
-   deciding which rows are worth pursuing; the first sentence, SSC
-   (Semantic Search Candle), and
-   adornment are the verification evidence beside it. Row cost is
-   near-uniform per estate (each pick field is capped), so a reply's
-   cost is its row count, not its luck.
+   canonical candidate row (ARIA_MCP_SPEC 2.4.0 § 8.3) — six fixed
+   columns: `uuid · subject · bestSpan · sscFacts · event_time · score`,
+   absent optional values rendered `-`. The subject is a one-sentence
+   assertion written for exactly this moment: an AI deciding which rows
+   are worth pursuing; bestSpan (the best content span, capped at 60
+   words) and sscFacts (structured findability facts) are the
+   verification evidence beside it. Row cost is near-uniform per estate
+   (each pick field is capped), so a reply's cost is its row count, not
+   its luck.
 2. **Confirm on distilled.** When a shortlist needs judging, hydrate it
    at the distilled tier — compressed representations sized for
    comparison, not narration. `moot_memory_get ids:[...]
@@ -88,9 +88,8 @@ Winnow the plausible five in ONE call at the confirm tier:
     → resolved 5 of 5 requested memories, in request order
 
 Each returns its candidate row (no score — a get is not a ranking) plus
-the distilled text as an unlabeled indented continuation (or the
-verbatim body behind a `source: content (not yet distilled)` marker).
-Judge, then
+the distilled text as an unlabeled indented continuation (distillation
+is computed inline at read time via ContextDistiller). Judge, then
 terminal-read the winner at depth:full — or pivot sideways from the
 best row:
 
@@ -145,6 +144,13 @@ user an interactive backfill and proceed only with their consent
 `moot_update_memory mutation=setSubject`).
 
 ## Changelog
+
+### 0.4.0 -- 2026-09-05
+
+ENC-W6B: removed the `source: content (not yet distilled)` fallback marker from the
+journey-2 narrative. Distillation is now computed inline at read time via ContextDistiller;
+every `depth:distilled` response carries a rendered representation with no stored-distillate
+prerequisite.
 
 ### 0.2.1 -- 2026-08-26
 

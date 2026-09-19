@@ -1,9 +1,9 @@
 ---
 title: ARIA Verb Families
-version: 0.1.1
+version: 0.4.0
 status: active
-date: 2026-08-26
-description: "The ARIA verb surface documented in the ratified six-family, three-tier taxonomy: every live verb with its use, arguments, default reply shape, and follow-up affordances."
+date: 2026-09-11
+description: "The ARIA verb surface documented in the ratified six-family, three-tier taxonomy: every live verb with its use, arguments, default reply shape, and follow-up affordances. 0.2.0: moot_distill and moot_redistill retired (ENC-W6B). 0.3.1: removed the obsolete distillation-debt count from the drain description. 0.4.0: the four work-packet operations retired (moot_file_packet, moot_packet_get, moot_packet_list, moot_packet_lineage) — see ARIA_MCP_INTERFACE.md Changelog 4.0.0."
 spec_type: protocol
 authors: MOOTx01 maintainers
 relates_to:
@@ -24,12 +24,12 @@ each appears exactly once below.
 
 Reply-shape vocabulary used throughout:
 
-- **dense row** — `uuid · subject · fdc:<code> · qid:<QID> ·
-  <event_time>`: the default hit/citation row across the recall family.
-  The UUID is the conversational cursor; the subject is the assertion;
-  the other three fields are lattice coordinates. Absence markers are
-  uniform (`(no subject)`, `-`); provenance-redacted rows carry the
-  redaction marker in place of the subject.
+- **dense row** — `uuid · subject · bestSpan · sscFacts · event_time · score`:
+  the default hit/citation row across the recall family (ARIA_MCP_SPEC 2.4.0 § 8.3).
+  The UUID is the conversational cursor; the subject is the one-sentence
+  assertion; bestSpan and sscFacts are the evidence fields. Absence markers
+  render `-`; provenance-redacted rows carry the redaction marker in place
+  of the subject.
 - **deviation-only narration** — status lines appear only when something
   is off-nominal (low/medium discrimination, dark dense lane, degraded
   stages, fallback service). Silence means nominal.
@@ -99,11 +99,9 @@ judged on whether the right item surfaces at the top. The working tier.
   Reply: dense rows. Follow-ups: switch preset; moot_recall_precise for
   precision.
 - **moot_recall_distilled** — the confirm tier's text: dense row THEN
-  the distilled rendering per hit; rows still owing a distillate fall
-  back to verbatim content behind a `source: content (not yet
-  distilled)` marker. Args: query, limit, filter, echo_query, ack.
-  Follow-ups: moot_memory_get depth:full for the verbatim terminal;
-  moot_distill to pay representation debt.
+  the distilled rendering per hit; distillation is computed inline at
+  read time (ENC-W6B). Args: query, limit, filter, echo_query, ack.
+  Follow-ups: moot_memory_get depth:full for the verbatim terminal.
 - **moot_fact_search** — structured triples by substring or exact
   field. Args: query, subject_exact, predicate_exact, object_exact,
   source_id_exact, limit. Reply: fact lines with ids and grounding.
@@ -124,8 +122,8 @@ discourse; everything above exists to hand this tier a UUID worth
 pulling on.
 
 - **moot_memory_get** — one hydration verb, three depths: `subject`
-  (dense row only — travel), `distilled` (dense row + distilled text;
-  fallback marker on rows owing one — confirm), `full` (default; the
+  (dense row only — travel), `distilled` (dense row + distilled text,
+  rendered inline at read time — confirm), `full` (default; the
   complete record with verbatim content — terminal). Batch with
   `ids: [...]` to winnow a shortlist in one call. Args: id|ids, depth.
   Follow-ups: moot_connection_search/map from the id; near:<uuid> to
@@ -166,9 +164,6 @@ fabricated summaries at import speed.
   dataset-handle drawer (the only sanctioned path for
   `contentKind == .dataset`). Args: dataset definition + rows.
   Follow-ups: moot_dataset_query, moot_dataset_stats.
-- **moot_file_packet** — admit a structured JSON packet (typed content,
-  not a new noun) with lineage. Args: packet fields per schema.
-  Follow-ups: moot_packet_get/list/lineage.
 
 ### Tier 2 — Filing
 
@@ -320,8 +315,7 @@ Bounded passes with a specific product; settled work skipped on rerun.
 as the `subject_backfill` drain lane only while a subject producer —
 e.g. the user-enabled Apple miniLLM rider — is registered.)
 
-- **moot_distill** — populate distilled representations (bounded,
-  budget-scoped, reported). Follow-ups: moot_recall_distilled.
+- ~~**moot_distill**~~ — retired ENC-W6B. Distillation now runs inline at read time via ContextDistiller; no explicit distillation pass is needed.
 - **moot_hunt_contradictions** — content screen over lexically-near
   pairs; strong conflicts persist as PROPOSED contradicts edges.
   Follow-ups: moot_review_tunnel.
@@ -372,14 +366,11 @@ Discovery without side effects.
 One job or one thread of continuity, read or appended precisely.
 
 - **moot_drain_status** — every long-running drain's frontier
-  (corpus_encode queue depth; the distillation eligibility count; the
-  rider-gated subject_backfill lane). Pollable; no orientation block.
+  (corpus_encode queue depth and the rider-gated subject_backfill lane).
+  Pollable; no orientation block.
 - **moot_vault_export** — start/drive a vault export job.
 - **moot_vault_job** — one vault job's progress.
 - **moot_vault_reconcile** — reconcile vault state against the estate.
-- **moot_packet_get** — one packet by id.
-- **moot_packet_list** — packets, filtered.
-- **moot_packet_lineage** — one packet's derivation thread.
 - **moot_read_journal** — the agent journal's recent entries.
 - **moot_write_journal** — append one journal entry (session
   continuity).
@@ -397,6 +388,24 @@ Orientation; vault_export in Operations. `moot_recollect` is retired
 
 ## Changelog
 
+### 0.4.0 -- 2026-09-11
+
+The four work-packet operations are retired from the ARIA surface, both
+tiers they appeared in: `moot_file_packet` (Tier 1 — Intake) and
+`moot_packet_get`/`moot_packet_list`/`moot_packet_lineage` (Tier 5 —
+Estate/Utility). See `ARIA_MCP_INTERFACE.md` Changelog 4.0.0 for the
+full removed-operation list and new tool counts.
+
+### 0.3.0 -- 2026-09-05
+
+ENC-W6B prose sweep: updated dense-row format from the retired 7-column FDC/QID
+shape to the live 6-column `uuid · subject · bestSpan · sscFacts · event_time · score`
+(ARIA_MCP_SPEC 2.4.0 § 8.3); replaced the `(no subject)` absence marker with `-`.
+`moot_recall_distilled`: removed the retired `source: content (not yet distilled)`
+fallback marker; distillation is computed inline at read time.
+`moot_memory_get`: updated depth:distilled description to reflect inline rendering.
+`moot_distill` and `moot_redistill` were already shown as retired (ENC-W6B, 0.2.0).
+
 ### 0.1.1 -- 2026-08-26
 
 Hedging-vocabulary sweep (Bob ruling 2026-08-25): normative prose now states facts as facts. No contract change.
@@ -407,3 +416,7 @@ Initial family pages from the ratified 2026-08-02 taxonomy: six
 families × three tiers, all 75 live verbs documented with use,
 arguments, default reply shape (dense row), and follow-up affordances
 (progressive recall PR-11).
+
+### 0.3.1 -- 2026-09-06
+
+Removed the obsolete distillation-debt count from the drain description.

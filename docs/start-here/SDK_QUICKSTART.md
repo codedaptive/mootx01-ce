@@ -2,7 +2,7 @@
 title: "MOOTx01 SDK Quickstart"
 subtitle: "Build on the substrate: open an estate, capture a memory, recall it"
 author: "MOOTx01 maintainers"
-date: "2026-06-15"
+date: "2026-09-15"
 ---
 
 # SDK Quickstart
@@ -91,7 +91,6 @@ let kit = GeniusLocusKit()
 let owner = OwnerCredentials(ownerIdentifier: "my-app")
 _ = try await LocusKit.Estate.create(storage: storage, owner: owner)
 let handle = try await kit.open(storage: storage, owner: owner)
-let estate = try await kit.estate(for: handle)
 
 // 3. Capture a memory. A CaptureFrame is the content plus where it lives and how it's anchored.
 let frame = CaptureFrame(
@@ -101,7 +100,7 @@ let frame = CaptureFrame(
     latticeAnchor: .udc("decision"),   // a coarse subject anchor; .udc(<code>) is the easy form
     addedBy: "my-app",
     embeddingModelID: "default")
-let drawer = try await estate.capture(frame)
+let drawer = try await kit.capture(handle, frame)
 
 // 4. Recall it. The filter chain selects what to return.
 //    NOTE: a freshly captured drawer is `.unconfirmed`; recall prepends a default
@@ -109,15 +108,14 @@ let drawer = try await estate.capture(frame)
 let recall = RecallFrame(
     filterChain: [.inRoom("decisions"), .currentlyBelieve, .unconfirmed],
     hydrationLevel: .full)          // .full loads the content blob; .structured omits it
-let stream = await estate.recall(recall)
-var rows: [Drawer] = []
-for await page in stream { rows.append(contentsOf: page.rows) }
+let rows = try await kit.recall(handle, recall)
 
 print(rows.first?.content ?? "nothing recalled")   // → "We decided to use SQLite for local storage."
 ```
 
-That's the whole loop: `capture(CaptureFrame) -> Drawer`, then `recall(RecallFrame) -> RecallStream`
-(an async, paged sequence of `RecallPage`, each with `.rows: [Drawer]`).
+That's the whole loop: `kit.capture(handle, CaptureFrame) -> Drawer`, then
+`kit.recall(handle, RecallFrame) -> [Drawer]`. Every verb takes the handle; the
+kit never hands out the `LocusKit.Estate` behind it.
 
 ## The same in Rust
 
@@ -171,7 +169,7 @@ file (dates stored as ISO8601 text). No cloud is required; sync is a separate, o
 ## Going lighter (direct kit)
 
 If you don't need estate semantics, you can depend on a single kit and use it directly — e.g.
-`VectorKit` for nearest-neighbour search, or `LocusKit` for a single estate's drawers — without
+`SynapseKit` for nearest-neighbour search, or `LocusKit` for a single estate's drawers — without
 GLK. You give up GLK's audit, grants, federation, and composed recall, but the modules are
 designed to stand alone. That's the "modular" promise: take only what you need.
 
