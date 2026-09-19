@@ -21,8 +21,8 @@
 // The Swift port needs no twin. Its Apple base directory did not move:
 // `~/Library/Application Support/com.mootx01.ce` before the catalog and after
 // it (`MootProductIdentity.Storage.applicationSupportFolder`). What moved on
-// the Swift side is the layout inside that base, which
-// `GLKMigrationFlatLayoutToCatalog` adopts.
+// the Swift side is the layout inside that base, which the flat-layout
+// adoption inside `EstateCatalog.open()` (`FlatLayoutMigration`) carries.
 //
 // What the capsule moves: EVERY child of the old base, not a named subset.
 // The old base is the same role the new one now plays, so its whole content

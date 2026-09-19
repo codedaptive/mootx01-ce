@@ -103,16 +103,19 @@ let package = Package(
         .trait(name: "MigrationV1_9ToV1_10", description: "Offline matrix BLOB retirement and record rebuild."),
         .trait(name: "MigrationFloor1_8", description: "Support estate format 1.8.", enabledTraits: ["MigrationV1_8ToV1_9", "MigrationV1_9ToV1_10"]),
         .trait(name: "MigrationFloor1_9", description: "Support estate format 1.9.", enabledTraits: ["MigrationV1_9ToV1_10"]),
-        // Layout capsule, not a format step: a 1.0.x Swift install kept its
+        // Layout adoption, not a format step: a 1.0.x Swift install kept its
         // estate flat in the configuration directory; the catalog places it
         // at databases/default/. Detected by the filesystem, not by the
         // format stamp, so no format version separates the two layouts.
-        // Every floor from 1.0 through 1.6 enables it; MigrationFloor1_7
-        // omits it because a format 1.7 estate was already produced by a
-        // build that writes the catalog layout.
+        // Compiled into the GeniusLocusKit target itself (not a capsule
+        // target) because `EstateCatalog.open()` performs the adoption, so
+        // no opener can create an empty catalog estate beside an unadopted
+        // flat one. Every floor from 1.0 through 1.6 enables it;
+        // MigrationFloor1_7 omits it because a format 1.7 estate was already
+        // produced by a build that writes the catalog layout.
         .trait(
             name: "MigrationFlatLayoutToCatalog",
-            description: "Compile the flat-layout to catalog-layout capsule (moves a pre-catalog estate from the configuration directory into databases/default/)."
+            description: "Compile the flat-layout to catalog-layout adoption in EstateCatalog.open (moves a pre-catalog estate from the configuration directory into databases/default/)."
         ),
         // Layout capsule for the app: a pre-catalog Apple app kept its estate
         // at <Application Support>/mootx01/mootx01.sqlite inside its container;
@@ -401,15 +404,6 @@ let package = Package(
         .target(name: "GLKMigrationV1_9ToV1_10", dependencies: [
             "GeniusLocusKit", .product(name: "PersistenceKit", package: "PersistenceKit")
         ]),
-        // Flat-layout -> catalog-layout capsule: renames a pre-catalog
-        // estate's files from the configuration directory into the default
-        // record's directory. Filesystem only; depends on GeniusLocusKit for
-        // the catalog names and the record type.
-        .target(
-            name: "GLKMigrationFlatLayoutToCatalog",
-            dependencies: ["GeniusLocusKit", .product(name: "MootProductIdentity", package: "MootProductIdentity")],
-            path: "Sources/GLKMigrationFlatLayoutToCatalog"
-        ),
         // App-container layout capsule: moves a pre-catalog Apple app estate
         // (<Application Support>/mootx01/mootx01.sqlite and its WAL/SHM) into
         // the default record's directory under the catalog's names, key first.
@@ -455,10 +449,6 @@ let package = Package(
                 ),
                 .target(name: "GLKMigrationV1_9ToV1_10", condition: .when(traits: ["MigrationV1_9ToV1_10"])),
                 .target(
-                    name: "GLKMigrationFlatLayoutToCatalog",
-                    condition: .when(traits: ["MigrationFlatLayoutToCatalog"])
-                ),
-                .target(
                     name: "GLKMigrationAppContainerToCatalog",
                     condition: .when(traits: ["MigrationAppContainerToCatalog"])
                 ),
@@ -489,10 +479,6 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_V1_8_TO_V1_9",
                     .when(traits: ["MigrationV1_8ToV1_9"])
-                ),
-                .define(
-                    "GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG",
-                    .when(traits: ["MigrationFlatLayoutToCatalog"])
                 ),
                 .define(
                     "GLK_MIGRATION_APP_CONTAINER_TO_CATALOG",
@@ -567,6 +553,13 @@ let package = Package(
                 // AppleEncoders trait.
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
+                // The flat-layout adoption (FlatLayoutMigration.swift and the
+                // block in EstateCatalog.open) compiles with its trait; a floor
+                // above 1.7 leaves the open with no adoption to run.
+                .define(
+                    "GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG",
+                    .when(traits: ["MigrationFlatLayoutToCatalog"])
+                ),
             ]
         ),
         .testTarget(
@@ -615,6 +608,10 @@ let package = Package(
                 // Mirror the production trait defines into the test target.
                 .define("APPLE_ENCODERS", .when(traits: ["AppleEncoders"])),
                 .define("MOOTX01_CROSS_ENCODER", .when(traits: ["CrossEncoder"])),
+                .define(
+                    "GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG",
+                    .when(traits: ["MigrationFlatLayoutToCatalog"])
+                ),
             ]
         ),
         .testTarget(
@@ -843,27 +840,6 @@ let package = Package(
                 .define(
                     "GLK_MIGRATION_APP_CONTAINER_TO_CATALOG",
                     .when(traits: ["MigrationAppContainerToCatalog"])
-                ),
-            ]
-        ),
-        // Tests for the flat-layout -> catalog-layout capsule over temporary
-        // directories: no-op, full move, partial move, refusal when both
-        // layouts hold a database, non-default records left alone, resume
-        // after an interrupted move.
-        .testTarget(
-            name: "GLKMigrationFlatLayoutToCatalogTests",
-            dependencies: [
-                "GeniusLocusKit",
-                .target(
-                    name: "GLKMigrationFlatLayoutToCatalog",
-                    condition: .when(traits: ["MigrationFlatLayoutToCatalog"])
-                ),
-            ],
-            path: "Tests/GLKMigrationFlatLayoutToCatalogTests",
-            swiftSettings: [
-                .define(
-                    "GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG",
-                    .when(traits: ["MigrationFlatLayoutToCatalog"])
                 ),
             ]
         ),

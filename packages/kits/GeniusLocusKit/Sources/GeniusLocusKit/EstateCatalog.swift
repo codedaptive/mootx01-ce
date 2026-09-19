@@ -308,6 +308,11 @@ public enum EstateCatalogError: Error, Sendable, Equatable, CustomStringConverti
     case notAvailableInThisVersion(operation: String)
     /// `estate.json` is missing, unreadable, or names a different estate.
     case unreadableEstateManifest(url: URL, detail: String)
+    /// A pre-catalog flat estate and the default record's database both
+    /// exist; the open touched nothing. `mootx01 upgrade` retires a catalog
+    /// estate that holds only the product's seeded charters and adopts the
+    /// flat one; anything else is the operator's decision.
+    case twoDefaultEstates(flat: URL, catalog: URL)
 
     public var description: String {
         switch self {
@@ -331,6 +336,13 @@ public enum EstateCatalogError: Error, Sendable, Equatable, CustomStringConverti
             return "\(operation) is not available in this version"
         case .unreadableEstateManifest(let url, let detail):
             return "estate manifest at \(url.path) is unreadable: \(detail)"
+        case .twoDefaultEstates(let flat, let catalog):
+            return """
+                two default estates found and nothing was changed.
+                  flat:    \(flat.path)
+                  catalog: \(catalog.path)
+                Run `mootx01 upgrade`: a catalog estate holding only the product's charter hints is retired and the flat estate adopted. Otherwise move or remove one of them, then run the command again.
+                """
         }
     }
 }
@@ -451,11 +463,28 @@ public struct EstateCatalog: Sendable, Equatable {
 
     /// Load the catalog, creating it on first run.
     /// The one call every command uses to find its estate: `open(...).active`.
+    ///
+    /// Under the `MigrationFlatLayoutToCatalog` trait the open also adopts a
+    /// pre-catalog flat estate into the default record's directory before
+    /// returning, so no caller can open the default estate, and create an
+    /// empty one at the catalog path, while an unadopted flat estate exists
+    /// (see `FlatLayoutMigration`). When both layouts hold a database the
+    /// open throws `EstateCatalogError.twoDefaultEstates` and touches nothing.
     public static func open() throws -> EstateCatalog {
+        let catalog: EstateCatalog
         if FileManager.default.fileExists(atPath: catalogURL.path) {
-            return try load()
+            catalog = try load()
+        } else {
+            catalog = try create()
         }
-        return try create()
+        #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG
+        if let record = catalog.records.first(where: { $0.kind == .registered && $0.name == defaultName }),
+           case .refused(let flat, let catalogDatabase) = try FlatLayoutMigration.run(
+               configurationDirectory: configurationDirectory, into: record) {
+            throw EstateCatalogError.twoDefaultEstates(flat: flat, catalog: catalogDatabase)
+        }
+        #endif
+        return catalog
     }
 
     /// Open the catalog and make `--db <value>` the active estate for this

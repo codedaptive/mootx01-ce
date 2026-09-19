@@ -74,7 +74,7 @@ struct InstallCommand: AsyncParsableCommand {
         // Existing-database disposition (reinstall contract): resolved BEFORE
         // any wiring so a 'replace' that cannot proceed (daemon running,
         // trash failure) aborts the install with nothing half-done.
-        try handleExistingDatabase(homeDirectory: home)
+        try await handleExistingDatabase(homeDirectory: home)
 
         // At-rest encryption posture for the DEFAULT estate.
         //
@@ -734,7 +734,20 @@ struct InstallCommand: AsyncParsableCommand {
     ///
     /// The existing estate is the catalog's default record. Opening the
     /// catalog creates it on a first install, which is what install is for.
-    private func handleExistingDatabase(homeDirectory home: URL) throws {
+    private func handleExistingDatabase(homeDirectory home: URL) async throws {
+        let configuration = EstateCatalog.configurationDirectory
+        #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG && os(macOS)
+        // Install over a 1.0.x install: the estate sits flat in the
+        // configuration directory. That is a mandatory reuse — the catalog
+        // open moves it into the record's directory; install stops the
+        // resident BEFORE that open and adopts the record after it; no
+        // prompt. Only ever true once per machine (see FlatLayoutStep).
+        let flatEstate = FlatLayoutStep.pending()
+        if flatEstate {
+            stopResidentServices(homeDirectory: home)
+            guard await FlatLayoutStep.adopt() else { throw ExitCode.failure }
+        }
+        #endif
         var catalog: EstateCatalog
         do {
             catalog = try EstateOpen.catalog(selecting: nil)
@@ -743,17 +756,10 @@ struct InstallCommand: AsyncParsableCommand {
             throw ExitCode.failure
         }
         guard let record = catalog.record(named: EstateCatalog.defaultName) else { return }
-        let configuration = EstateCatalog.configurationDirectory
         let estateFiles = record.ownedFileURLs + [record.legacyEncryptionOptOutURL]
 
         #if GLK_MIGRATION_FLAT_LAYOUT_TO_CATALOG && os(macOS)
-        // Install over a 1.0.x install: the estate sits flat in the
-        // configuration directory. That is a mandatory reuse — move it into
-        // the record's directory and adopt it; no prompt. Only ever true once
-        // per machine (see FlatLayoutStep).
-        if FlatLayoutStep.pending(record) {
-            stopResidentServices(homeDirectory: home)
-            guard FlatLayoutStep.migrate(record) else { throw ExitCode.failure }
+        if flatEstate {
             do {
                 try DataRetention.applyReuse(configurationDirectory: configuration)
                 try catalog.activate(name: record.name)
