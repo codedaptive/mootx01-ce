@@ -1,0 +1,60 @@
+{
+  "cases": [
+    {
+      "description": "empty journey",
+      "expected": {
+        "hops": 0,
+        "preTerminalFullContentTokens": 0,
+        "tokenTurnIntegral": 0,
+        "totalPayloadTokens": 0
+      },
+      "steps": []
+    },
+    {
+      "description": "single terminal step",
+      "expected": {
+        "hops": 1,
+        "preTerminalFullContentTokens": 0,
+        "tokenTurnIntegral": 20,
+        "totalPayloadTokens": 20
+      },
+      "steps": [
+        {
+          "hydratedFullContent": false,
+          "payloadTokens": 20,
+          "terminal": true,
+          "verb": "recall"
+        }
+      ]
+    },
+    {
+      "description": "three-step mixed",
+      "expected": {
+        "hops": 3,
+        "preTerminalFullContentTokens": 40,
+        "tokenTurnIntegral": 115,
+        "totalPayloadTokens": 55
+      },
+      "steps": [
+        {
+          "hydratedFullContent": false,
+          "payloadTokens": 10,
+          "terminal": false,
+          "verb": "store"
+        },
+        {
+          "hydratedFullContent": true,
+          "payloadTokens": 40,
+          "terminal": false,
+          "verb": "recall"
+        },
+        {
+          "hydratedFullContent": false,
+          "payloadTokens": 5,
+          "terminal": true,
+          "verb": "recall"
+        }
+      ]
+    }
+  ]
+}
