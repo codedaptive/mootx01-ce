@@ -252,20 +252,44 @@ fi
 # moves the estate in rather than creating an empty one beside it. This block
 # briefly skipped the restart in that case, which only left the resident
 # stopped after the install.
-# BOTH daemon labels. com.mootx01.daemon is MootPaths.daemonLabel, the legacy
-# raw-serve plist; com.codedaptive.mootx01.daemon is
-# DaemonProvider.launchAgentLabel, the bundle-form registration an installed
-# machine actually reports. Paths.swift:337 says the two coexist under the
-# arbiter rather than replacing each other, so an upgrade has to restart
-# whichever is loaded. Naming only the legacy label made this a silent no-op on
-# every bundle-provider machine — `kickstart -k` says nothing about a job that
-# is not loaded, so the upgrade looked done and the server never came back.
+# Reload every MOOTx01 LaunchAgent the user actually has, the way the product
+# does it.
+#
+# `kickstart -k` restarts a job that is ALREADY LOADED and says nothing about
+# one that is not, so it cannot bring a stopped service back — which is how an
+# upgrade could finish with the server down and no diagnostic. Two labels are
+# in play and either may be the live one: com.mootx01.daemon
+# (MootPaths.daemonLabel, the legacy raw-serve plist) and
+# com.codedaptive.mootx01.daemon (DaemonProvider.launchAgentLabel, the
+# bundle-form registration); Paths.swift:337 records that they coexist under
+# the arbiter rather than replacing each other.
+#
+# So iterate the plists on disk and bootout-then-bootstrap each, mirroring
+# LaunchAgent.bootstrapJob. bootout is asynchronous and a late completion can
+# tear down the replacement, so wait for launchd to drop the job before
+# bootstrapping it again — the same hazard that function documents from a live
+# observation. Best-effort throughout: never fail the install.
 if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
     REAL_UID="$(id -u "$REAL_USER" 2>/dev/null)"
-    if [ -n "$REAL_UID" ]; then
-        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.daemon"            2>/dev/null
-        launchctl kickstart -k "gui/$REAL_UID/com.codedaptive.mootx01.daemon" 2>/dev/null
-        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.mgr"               2>/dev/null
+    AGENT_DIR="$REAL_HOME/Library/LaunchAgents"
+    if [ -n "$REAL_UID" ] && [ -n "$REAL_HOME" ] && [ -d "$AGENT_DIR" ]; then
+        for LABEL in com.mootx01.daemon com.codedaptive.mootx01.daemon com.mootx01.mgr; do
+            PLIST="$AGENT_DIR/$LABEL.plist"
+            [ -f "$PLIST" ] || continue
+            TARGET="gui/$REAL_UID/$LABEL"
+            sudo -u "$REAL_USER" launchctl bootout "$TARGET" 2>/dev/null
+            WAITED=0
+            while sudo -u "$REAL_USER" launchctl print "$TARGET" >/dev/null 2>&1; do
+                [ "$WAITED" -ge 20 ] && break
+                sleep 0.25
+                WAITED=$((WAITED + 1))
+            done
+            if sudo -u "$REAL_USER" launchctl bootstrap "gui/$REAL_UID" "$PLIST" 2>/dev/null; then
+                echo "postinstall: reloaded $LABEL"
+            else
+                echo "postinstall: could not reload $LABEL — run \`mootx01 install\` to register it" >&2
+            fi
+        done
     fi
 fi
 
