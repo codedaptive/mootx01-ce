@@ -23,13 +23,30 @@ import LocusKit
 /// AI-facing subject. Implementations: the PR-10 Apple miniLLM rider;
 /// test stubs. The producer's `pipelineVersion` is stored as provenance
 /// on every subject it writes (SPEC B-19) and is the regeneration lever.
+/// How a producer fails on one drawer, which decides what the sweep does
+/// next (codex finding 2026-09-19: one guardrail refusal pinned the whole
+/// lane on the same drawer every cadence).
+public enum SubjectProducerError: Error, Sendable, Equatable {
+    /// The producer will never produce a subject for THIS content (a
+    /// guardrail or model refusal, an over-long input, an unsupported
+    /// language). The sweep marks the drawer refused for the producer's
+    /// pipeline and moves on.
+    case refused(reason: String)
+    /// The producer cannot answer right now (assets missing, rate limited,
+    /// too many concurrent requests). The sweep stops for this cadence,
+    /// marks nothing, and retries next cadence.
+    case unavailable(reason: String)
+}
+
 public protocol SubjectProducer: Sendable {
     /// Provenance tier written to `subject_pipeline_version`
     /// (e.g. `DrawerStore.subjectPipelineMiniLLMV1`).
     var pipelineVersion: String { get }
     /// Produce a subject for `content`. The sweep validates the result
     /// against `SubjectRegister` before writing; inadmissible output is
-    /// counted and skipped, never stored.
+    /// counted and skipped, never stored. A thrown
+    /// `SubjectProducerError.refused` marks the drawer and the sweep
+    /// continues; any other error stops the sweep for this cadence.
     func subject(forContent content: String) async throws -> String
 
     /// The pipeline tiers this producer is allowed to REGENERATE, in
@@ -53,6 +70,9 @@ extension SubjectProducer {
 public struct SubjectBackfillReport: Sendable, Equatable {
     /// Subjects written this sweep.
     public let written: Int
+    /// Drawers the producer refused this sweep; each carries the
+    /// producer's refusal marker and has left its lane.
+    public let refused: Int
     /// Producer outputs rejected by the register contract (skipped;
     /// the rows remain debt and re-enumerate next sweep).
     public let skippedInadmissible: Int
@@ -102,11 +122,26 @@ extension GeniusLocusKit {
         }
         let estate = try estate(for: handle)
         let batch = try await estate.subjectDebtBatch(
-            limit: batchLimit, includingPipelines: producer.regeneratesPipelines)
+            limit: batchLimit, includingPipelines: producer.regeneratesPipelines,
+            refusedBy: producer.pipelineVersion)
         var written = 0
+        var refused = 0
         var skipped = 0
         for drawer in batch {
-            let candidate = try await producer.subject(forContent: drawer.content)
+            let candidate: String
+            do {
+                candidate = try await producer.subject(forContent: drawer.content)
+            } catch SubjectProducerError.refused(let reason) {
+                // A refusal is a property of this content: mark it for this
+                // producer so the row leaves the lane and the next cadence
+                // moves on. Anything else (unavailable, unknown) propagates
+                // and ends the sweep with nothing marked.
+                _ = try await estate.markSubjectRefused(
+                    drawerId: drawer.id, pipelineVersion: producer.pipelineVersion,
+                    reason: reason, at: now)
+                refused += 1
+                continue
+            }
             guard SubjectRegister.violations(candidate).isEmpty else {
                 // Inadmissible output is skipped, never stored — the row
                 // stays debt and re-enumerates next sweep (a persistently
@@ -122,9 +157,11 @@ extension GeniusLocusKit {
             written += 1
         }
         let remaining = try await estate.countSubjectDebt(
-            includingPipelines: producer.regeneratesPipelines)
+            includingPipelines: producer.regeneratesPipelines,
+            refusedBy: producer.pipelineVersion)
         return SubjectBackfillReport(
             written: written,
+            refused: refused,
             skippedInadmissible: skipped,
             remainingDebt: remaining)
     }

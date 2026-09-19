@@ -30,6 +30,24 @@ private struct InadmissibleProducer: SubjectProducer {
     }
 }
 
+
+/// Refuses any content carrying the marker word, produces for the rest.
+private struct RefusingProducer: SubjectProducer {
+    let pipelineVersion = "refusing-v1"
+    func subject(forContent content: String) async throws -> String {
+        if content.contains("REFUSE") { throw SubjectProducerError.refused(reason: "guardrail") }
+        return String(content.split(separator: "\n").first.map(String.init)!.prefix(120))
+    }
+}
+
+/// Cannot answer at all right now.
+private struct UnavailableProducer: SubjectProducer {
+    let pipelineVersion = "unavailable-v1"
+    func subject(forContent content: String) async throws -> String {
+        throw SubjectProducerError.unavailable(reason: "rate limited")
+    }
+}
+
 @Suite("Subject backfill cycle — rider seam", .serialized)
 struct SubjectBackfillCycleTests {
 
@@ -61,6 +79,60 @@ struct SubjectBackfillCycleTests {
                 embeddingModelID: "test-model-v1")
             _ = try await kit.capture(handle, frame)
         }
+    }
+
+
+    @Test func aRefusalMarksTheDrawerAndTheSweepMovesOn() async throws {
+        let (kit, handle, estate) = try await openEstate(owner: "refusal")
+        try await seedDebt(kit, handle, count: 4)
+        for i in 1...2 {
+            let frame = CaptureFrame(
+                content: "REFUSE row \(i) the model will not summarise.",
+                channel: .typed, room: "backfill-tests",
+                latticeAnchor: LatticeAnchor(udcCode: "000"),
+                addedBy: "subject-backfill-tests", embeddingModelID: "test-model-v1")
+            _ = try await kit.capture(handle, frame)
+        }
+        try await kit.registerSubjectProducer(RefusingProducer(), for: handle)
+        let report = try await kit.subjectBackfillSweep(handle, now: Date(timeIntervalSince1970: 1_700_000_001))
+        #expect(report.written == 4)
+        #expect(report.refused == 2)
+        #expect(report.remainingDebt == 0, "refused rows left the lane")
+        let marker = DrawerStore.subjectRefusedMarker(for: "refusing-v1")
+        var refusedRows = 0
+        for d in try await estate.allDrawers() {
+            if d.content.contains("REFUSE") {
+                #expect(d.subject == nil, "a refusal stores no subject")
+                #expect(d.subjectPipelineVersion == marker)
+                let trail = try await kit.auditTrail(in: handle, rowID: d.id)
+                #expect(trail.last?.verb == "subjectRefused", "one sealed custody event per refusal")
+                #expect(trail.last?.reason == "guardrail")
+                refusedRows += 1
+            } else {
+                #expect(d.subject != nil)
+            }
+        }
+        #expect(refusedRows == 2)
+        #expect(try await estate.countSubjectRefused(pipelineVersion: "refusing-v1") == 2)
+        // Another producer still sees those two rows as debt.
+        #expect(try await estate.countSubjectDebt(includingPipelines: [], refusedBy: "other-v1") == 2)
+        // The lane reports the refusals and the second sweep enumerates none of them.
+        let lane = try await kit.drainStatuses(handle).first { $0.name == DrainStatus.subjectBackfillName }
+        #expect(lane?.pending == 0)
+        #expect(lane?.detail == "pipeline: refusing-v1, refused: 2")
+        let again = try await kit.subjectBackfillSweep(handle, now: Date(timeIntervalSince1970: 1_700_000_002))
+        #expect(again.written == 0 && again.refused == 0)
+    }
+
+    @Test func anUnavailableProducerStopsTheSweepAndMarksNothing() async throws {
+        let (kit, handle, estate) = try await openEstate(owner: "unavailable")
+        try await seedDebt(kit, handle, count: 3)
+        try await kit.registerSubjectProducer(UnavailableProducer(), for: handle)
+        await #expect(throws: SubjectProducerError.self) {
+            try await kit.subjectBackfillSweep(handle, now: Date(timeIntervalSince1970: 1_700_000_001))
+        }
+        #expect(try await estate.countSubjectDebt(includingPipelines: [], refusedBy: "unavailable-v1") == 3, "pending unchanged")
+        #expect(try await estate.countSubjectRefused(pipelineVersion: "unavailable-v1") == 0)
     }
 
     @Test func sweepRefusesWhileLaneIsDark() async throws {
@@ -115,7 +187,7 @@ struct SubjectBackfillCycleTests {
         let drains = try await kit.drainStatuses(handle)
         let lane = drains.first { $0.name == DrainStatus.subjectBackfillName }
         #expect(lane?.pending == 5, "lane pending must be the presence debt: \(drains)")
-        #expect(lane?.detail == "pipeline: stub-v1")
+        #expect(lane?.detail == "pipeline: stub-v1, refused: 0")
 
         // Bounded batch: limit 3 writes 3, leaves 2.
         let first = try await kit.subjectBackfillSweep(handle, batchLimit: 3, now: Date())
