@@ -45,10 +45,11 @@ compliance programs) — see the [plain-language licensing
 guide](LICENSING.md), [`EDITIONS.md`](EDITIONS.md), and the binding
 [`LICENSE`](LICENSE).
 
-> **Development branch:** this branch carries the active 1.1 beta
-> (`1.1.0-beta-05`). The public release links below install stable 1.0. To
-> test 1.1, build this checkout, pin the commit, and use a backed-up estate —
-> see the [1.1 development instructions](docs/start-here/DEVELOPMENT_BETA.md).
+> **Development branch:** 1.1.0 has shipped and the public release links below
+> install it. This branch runs ahead of the release; to test what is on it
+> rather than the release, build this checkout, pin the commit, and use a
+> backed-up estate — see the
+> [development instructions](docs/start-here/DEVELOPMENT_BETA.md).
 
 ## Install in 60 seconds
 
