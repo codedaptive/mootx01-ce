@@ -254,42 +254,6 @@ extension GeniusLocusKit {
             ))
         }
 
-        // Drain 4 of N: span encode. This is row debt, not the corpus queue.
-        // Rendered whenever the estate's embedding provider is the encoder,
-        // loaded or not: a settle loop must see the debt even while no
-        // encoder is registered, otherwise an estate with every drawer owed
-        // reads as idle. The detail says which it is.
-        let encoder = spanEncoders[handle]
-        let encoderProvisioned =
-            (try? await provisionedEmbeddingProvider(for: handle)) == Self.encoderProviderID
-        if encoder != nil || encoderProvisioned {
-            let debt = try await estate.countSpanIndexDebt()
-            statuses.append(DrainStatus(
-                name: DrainStatus.spanEncodeName,
-                pending: debt,
-                inFlight: 0,
-                detail: encoder.map { "model: \($0.spec.modelID)" } ?? "encoder not loaded"
-            ))
-        }
-
-        // With the master preference off nothing is owed: the lane reads
-        // idle and says why, so a settle loop on an estate that turned
-        // extraction off (the Rust artifact build) finishes.
-        if (try? await provisionedPreference(.factExtraction, for: handle)) == .off {
-            statuses.append(DrainStatus(
-                name: DrainStatus.factExtractionName, pending: 0, inFlight: 0,
-                detail: "fact_extraction off"))
-        } else {
-            let facts = try await factExtractionWorkStatus(handle, now: Date())
-            statuses.append(DrainStatus(
-                name: DrainStatus.factExtractionName,
-                pending: facts.runnable + facts.retrying + facts.blocked,
-                inFlight: facts.inFlight,
-                detail: facts.detail,
-                rejected: facts.rejected
-            ))
-        }
-
         return statuses
     }
 
