@@ -57,9 +57,15 @@ public actor MootCaller {
     /// stands between that and a corrupted estate.
     public nonisolated let estateIdentity: EstateIdentity
 
+    /// The stable provider contract proved during MCP initialization.
+    /// Nil callers can serve legacy/community test seams; the native macOS
+    /// runtime releases only callers carrying a verified value.
+    public nonisolated let firstPartyProviderCompatibility: FirstPartyProviderCompatibility?
+
     /// Monotonic JSON-RPC request id. Every request gets a fresh integer id so
     /// a reader can pair a response to its request on the wire.
     private var nextID: Int64 = 1
+    private var transportFailureObserver: (@Sendable () async -> Void)?
 
     /// Build a caller over an established transport.
     ///
@@ -70,11 +76,21 @@ public actor MootCaller {
     public init(
         transport: any GatewayTransport,
         serverName: String,
-        estateIdentity: EstateIdentity
+        estateIdentity: EstateIdentity,
+        firstPartyProviderCompatibility: FirstPartyProviderCompatibility? = nil
     ) {
         self.transport = transport
         self.serverName = serverName
         self.estateIdentity = estateIdentity
+        self.firstPartyProviderCompatibility = firstPartyProviderCompatibility
+    }
+
+    /// Runtime lifecycle hook. A transport failure invalidates the admitted
+    /// daemon lease so the next production entry performs readiness again.
+    public func setTransportFailureObserver(
+        _ observer: (@Sendable () async -> Void)?
+    ) {
+        transportFailureObserver = observer
     }
 
     // MARK: JSON-RPC drive
@@ -94,12 +110,19 @@ public actor MootCaller {
     /// - Throws: The transport's own error when the daemon cannot be reached.
     public func exchange(method: String, params: JSONValue?) async throws -> JSONRPCResponse? {
         let request = nextRequest(method: method, params: params)
-        let response = try await transport.send(request)
+        let response: JSONRPCResponse?
+        do {
+            response = try await transport.send(request)
+        } catch {
+            await transportFailureObserver?()
+            throw error
+        }
         // Bind the answer to the question at the caller as well as at the wire.
         // HTTPTransport enforces this for the loopback path, but any transport
         // can be handed to this actor, and a result paired with the wrong call
         // is indistinguishable from a correct one once it leaves here.
         if let response, response.id != request.id {
+            await transportFailureObserver?()
             throw MootCallerError.responseIdentifierMismatch(method: method)
         }
         return response
@@ -117,7 +140,15 @@ public actor MootCaller {
     ///   - params: The notification's params, or nil.
     /// - Throws: The transport's own error when the daemon cannot be reached.
     public func notify(method: String, params: JSONValue?) async throws {
-        _ = try await transport.send(JSONRPCRequest(id: nil, method: method, params: params))
+        let request = decoratingStableToolCall(
+            JSONRPCRequest(id: nil, method: method, params: params)
+        )
+        do {
+            _ = try await transport.send(request)
+        } catch {
+            await transportFailureObserver?()
+            throw error
+        }
     }
 
     /// Forward a fully-formed request frame to the daemon and return the
@@ -152,24 +183,33 @@ public actor MootCaller {
             // A notification's delivery outcome has no frame to be reported in.
             // JSON-RPC 2.0 forbids answering it, so a send failure is dropped
             // here rather than invented into a response the peer must not get.
-            _ = try? await transport.send(request)
+            do {
+                _ = try await transport.send(decoratingStableToolCall(request))
+            } catch {
+                await transportFailureObserver?()
+            }
             return nil
         }
 
         let wireID = JSONValue.integer(nextID)
         nextID += 1
-        let forwarded = JSONRPCRequest(id: wireID, method: request.method, params: request.params)
+        let forwarded = decoratingStableToolCall(
+            JSONRPCRequest(id: wireID, method: request.method, params: request.params)
+        )
 
         do {
             guard let response = try await transport.send(forwarded) else {
                 // The daemon accepted an id-bearing frame as a notification.
+                await transportFailureObserver?()
                 return Self.forwardingFailure(peerID)
             }
             guard response.id == wireID else {
+                await transportFailureObserver?()
                 return Self.forwardingFailure(peerID)
             }
             return JSONRPCResponse(id: peerID, payload: response.payload)
         } catch {
+            await transportFailureObserver?()
             return Self.forwardingFailure(peerID)
         }
     }
@@ -201,12 +241,14 @@ public actor MootCaller {
         let request = nextRequest(method: method, params: params)
         do {
             guard let response = try await transport.send(request) else {
+                await transportFailureObserver?()
                 return GatewayResponseDecoder.unanswered(
                     request: request,
                     note: "no response — the daemon accepted the frame as a notification"
                 )
             }
             guard response.id == request.id else {
+                await transportFailureObserver?()
                 return GatewayResponseDecoder.transportFailure(
                     request: request,
                     error: MootCallerError.responseIdentifierMismatch(method: method)
@@ -214,6 +256,7 @@ public actor MootCaller {
             }
             return GatewayResponseDecoder.rendered(request: request, response: response)
         } catch {
+            await transportFailureObserver?()
             return GatewayResponseDecoder.transportFailure(request: request, error: error)
         }
     }
@@ -250,7 +293,21 @@ public actor MootCaller {
     private func nextRequest(method: String, params: JSONValue?) -> JSONRPCRequest {
         let id = JSONValue.integer(nextID)
         nextID += 1
-        return JSONRPCRequest(id: id, method: method, params: params)
+        return decoratingStableToolCall(JSONRPCRequest(id: id, method: method, params: params))
+    }
+
+    /// Stamp verified provider compatibility onto every tools/call path.
+    /// This also covers raw `call(method:params:)` and LAN frame forwarding,
+    /// so a feature cannot accidentally bypass stable admission by choosing a
+    /// lower-level caller method. A peer-supplied value is always replaced.
+    private func decoratingStableToolCall(_ request: JSONRPCRequest) -> JSONRPCRequest {
+        guard request.method == "tools/call",
+              let compatibility = firstPartyProviderCompatibility,
+              var params = request.params?.objectValue else {
+            return request
+        }
+        params["first_party_provider"] = compatibility.jsonValue
+        return JSONRPCRequest(id: request.id, method: request.method, params: .object(params))
     }
 
     /// The `tools/call` params object. Shared by `callToolFull` and the

@@ -66,6 +66,9 @@ public actor DaemonCommunityCaptureService: CommunityCaptureServicing {
             "exportEligible": .bool(request.policy.exportEligible),
             "lanEligible": .bool(request.policy.lanEligible),
         ])
+        if result.failureDisposition == .ambiguous {
+            return .failed(reason: DaemonOperationReplayPolicy.ambiguousOutcomeReason)
+        }
         guard !result.isError, let object = result.structured?.objectValue,
               let outcome = object["outcome"]?.stringValue else {
             return .failed(reason: "daemon-call-failed")
