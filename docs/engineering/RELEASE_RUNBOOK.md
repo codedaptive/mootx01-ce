@@ -63,7 +63,7 @@ was clean.
 
 ## 2 · Tag and build
 
-- [ ] Promote to `stable/1.0.x`, tag `vX.Y.Z`; `release.yml` builds, signs,
+- [ ] Promote to `stable/1.1.x`, tag `vX.Y.Z`; `release.yml` builds, signs,
       notarizes, and attaches all assets
 - [ ] Verify assets present: pkg (arm64/x86_64), setup.exe (arm64/x86_64),
       tarballs, zips, `checksums.txt` + `.minisig`

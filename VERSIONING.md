@@ -1,7 +1,7 @@
 ---
-version: 1.5.0
+version: 1.6.0
 status: active
-date: 2026-07-30
+date: 2026-09-19
 description: Defines versioning standards for code releases and specification documents across all mootx01 repositories.
 ---
 
@@ -65,23 +65,22 @@ The governing question: does the consumer have to do anything? If yes, it is a M
 
 The development channel carries an explicit SemVer pre-release version.
 
-- `develop/1.1.x` uses `1.1.0-beta-YY`.
-- `YY` is the zero-padded count of pushes to `candidate/1.1.x`, starting with
-  the branch-creation push as `01`. The field expands beyond two digits when
-  necessary.
-- The current value is `1.1.0-beta-05`: stamped 2026-07-30 for the sixth
-  push to `candidate/1.1.x` (the fifth push, on 2026-07-30, reused the
-  `beta-04` stamp and produced no build).
+- Before a minor line ships, its development branch carries
+  `MAJOR.MINOR.0-beta-YY`, where `YY` is the zero-padded count of pushes to
+  the matching candidate branch, starting with the branch-creation push as
+  `01`. The field expands beyond two digits when necessary.
+- 1.1.0 has shipped, so `develop/1.1.x` carries the released stamp `1.1.0`
+  and will carry the next version's pre-release once that version is bumped.
 - CE and EE source, binary, plugin, and embedded-installer stamps use the same
-  beta version.
+  version.
 - Candidate artifacts use the source version verbatim, without a leading `v`.
 - Release-candidate tags may use `v1.1.Z-rcN`.
 - Stable releases use `v1.1.Z`.
 
 The exact commit still identifies the code under test between candidate
-promotions. Before the next push to `candidate/1.1.x`, increment `YY` once
-across both repositories and all generated artifacts so the pushed candidate,
-its tag, and both binaries report the same version.
+promotions. While a line is still in pre-release, increment `YY` once before
+each candidate push, across both repositories and all generated artifacts, so
+the pushed candidate, its tag, and both binaries report the same version.
 
 Zero-point releases (`0.x.y`) explicitly signal no backwards compatibility guarantee. mootx01 does not ship production releases under `0.x.y`. The first public release is `1.0.0`.
 

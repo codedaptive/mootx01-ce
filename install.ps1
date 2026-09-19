@@ -15,7 +15,7 @@
 # because Windows blocks script files by default (Restricted policy); it
 # applies to that one run only and changes no system setting:
 #   [Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12
-#   irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.0.x/install.ps1 -OutFile install.ps1
+#   irm https://raw.githubusercontent.com/codedaptive/mootx01-ce/stable/1.1.x/install.ps1 -OutFile install.ps1
 #   # review install.ps1, then:
 #   powershell -ExecutionPolicy Bypass -File .\install.ps1
 #
@@ -52,6 +52,22 @@ $DEFAULT_INSTALL_DIR = Join-Path $MOOTX01_ROOT "bin"
 $INSTALL_DIR = if ($env:MOOTX01_INSTALL_DIR) { $env:MOOTX01_INSTALL_DIR } else { $DEFAULT_INSTALL_DIR }
 $BINARY      = Join-Path $INSTALL_DIR "mootx01.exe"
 $MGR_BINARY  = Join-Path $INSTALL_DIR "moot-mgr.exe"
+
+# SECURITY: Pinned SHA-256 digests for the model files carried in every
+# Windows release archive. Authenticode covers the executables; nothing signs
+# a data file, and PowerShell has no practical Ed25519 verifier, so the model
+# tree is authenticated by pinned digest instead of by archive signature.
+# Sourced from tools/encoder-models/encoder-models-linux.json and
+# nuextract-models-linux.json (files[].sha256). Update these whenever a model
+# is bumped, the same way scripts/install.ps1's pins are maintained.
+$ModelDigests = @{
+    "arctic-embed-s-w60\config.json"       = "4e519aa92ec40943356032afe458c8829d70c5766b109e4a57490b82f72dcfb7"
+    "arctic-embed-s-w60\tokenizer.json"    = "91f1def9b9391fdabe028cd3f3fcc4efd34e5d1f08c3bf2de513ebb5911a1854"
+    "arctic-embed-s-w60\model.safetensors" = "0350e62666ee2403db0223fc7cef6293c951cc63d1d2e71468da9a5aea3b544a"
+    "arctic-embed-s-w60\vocab.txt"         = "07eced375cec144d27c900241f3e339478dec958f92fddbc551f295c992038a3"
+    "nuextract-tiny-v1.5\model.gguf"       = "d193d0f0b61355959107b8ebe3d50c6350380e35aab74e6a51a9eafa58cda7b1"
+    "nuextract-tiny-v1.5\tokenizer.json"   = "2b613fea6970a5467a1d30df270257b34bab9b86ade3d75d98f6c08f08c48656"
+}
 
 # ── PATH helper ─────────────────────────────────────────────────────────────
 
@@ -523,6 +539,42 @@ $mgrSrc = Join-Path $tmpDir "moot-mgr.exe"
 if (Test-Path $mgrSrc) {
     Copy-Item -Force $mgrSrc $MGR_BINARY
     Write-Host "  Installed $MGR_BINARY"
+}
+
+# Every release archive carries share/mootx01/models/ — the recall encoder and
+# the fact-extraction model — and the runtime resolves them from the share slot
+# beside the install dir (<exe>\..\share\mootx01\models\<id>\). Copy the whole
+# share tree rather than a named model, so a model added to a later release
+# installs without touching this script. Their absence is a packaging defect,
+# not a degraded mode: recall would come up with no encoder at all.
+$shareSrc  = Join-Path $tmpDir "share"
+$shareRoot = Split-Path -Parent $INSTALL_DIR
+if (Test-Path $shareSrc) {
+    $shareDest = Join-Path $shareRoot "share"
+    New-Item -ItemType Directory -Force -Path $shareDest | Out-Null
+    Copy-Item -Recurse -Force (Join-Path $shareSrc "*") $shareDest
+    Write-Host "  Installed $shareDest\mootx01\models"
+
+    # Every pinned model file must be present AND match its digest. Presence
+    # alone catches a truncated archive; the digest is what stops a swapped
+    # encoder or tokenizer riding in beside legitimately signed executables.
+    $modelsRoot = Join-Path $shareDest "mootx01\models"
+    foreach ($rel in $ModelDigests.Keys) {
+        $path = Join-Path $modelsRoot $rel
+        if (-not (Test-Path $path)) {
+            Write-Error "mootx01: model install incomplete: missing $rel"
+            exit 1
+        }
+        $actual = (Get-FileHash -Algorithm SHA256 -Path $path).Hash.ToLowerInvariant()
+        if ($actual -ne $ModelDigests[$rel]) {
+            Remove-Item -Recurse -Force $modelsRoot -ErrorAction SilentlyContinue
+            Write-Error "mootx01: model digest mismatch for $rel`n  expected: $($ModelDigests[$rel])`n  actual:   $actual"
+            exit 1
+        }
+    }
+} else {
+    Write-Error "mootx01: release archive is missing share/mootx01/models; refusing to install."
+    exit 1
 }
 
 Remove-Item -Recurse -Force $tmpDir

@@ -35,13 +35,18 @@ Enterprise Edition offerings.
 ## Standalone Apache-2.0 SDK repositories
 
 - https://github.com/codedaptive/moot-memory
-  LocusKit, SynapseKit, and CorpusKit.
+  LocusKit, SynapseKit, CorpusKit, and FactExtractionKit.
 - https://github.com/codedaptive/moot-semantics
   ARIA grammar, FDC lattice, and deterministic grounding.
 - https://github.com/codedaptive/moot-system
-  Persistence, queueing, synchronization, telemetry, and loopback transport.
+  Persistence, queueing, synchronization, estate encryption, telemetry, and
+  loopback transport.
 - https://github.com/codedaptive/moot-core
-  Typed substrate math, kernels, learning, and graph algorithms.
+  Typed substrate math, kernels, learning, graph algorithms, context
+  distillation, and product identity.
+- https://github.com/codedaptive/moot-cognition
+  CognitionKit, NeuronKit, and GeniusLocusKit — the cognitive layer, published
+  from the 1.1 line.
 
 Use SDK.MD for package ownership and install snippets. Do not infer that every
 package in the MOOTx01 product repository belongs to a standalone SDK.
@@ -65,15 +70,16 @@ package in the MOOTx01 product repository belongs to a standalone SDK.
 
 ## Version note
 
-This branch is `develop/1.1.x`, currently versioned `1.1.0-beta-10`. It is the
-fast-moving beta for 1.1 feature updates, not the supported product release.
-Stable install links resolve to the current 1.0 release; beta evaluation builds
-this checkout and records both the beta version and tested commit. The `04`
-records four pushes to `candidate/1.1.x` since its creation.
+This branch is `develop/1.1.x`. The 1.1 line has shipped: `1.1.0` is the
+released version and the one stable install links resolve to. The 1.0 line is
+retired. This branch runs ahead of the release, so an evaluation build of the
+checkout should record the tested commit rather than presenting itself as the
+release. A 1.0 estate is migrated before 1.1 will serve it; SCHEMA_STATUS.md
+carries the commitment and the migration path.
 
-Stable 1.0.x already ships explicit, agent-directed vault import, export,
+The released line ships explicit, agent-directed vault import, export,
 status, and reconcile operations. The resulting Markdown vault opens in
 Obsidian, and the default output is a superset of Google's Open Knowledge
-Format (OKF) v0.1. The 1.1 plan adds an optional resident, continuously
-maintained Obsidian mode with automatic resync. That planned mode excludes
-private/non-exportable, restricted, and secret data from automation.
+Format (OKF) v0.1. An optional resident, continuously maintained Obsidian mode
+with automatic resync is planned; it excludes private/non-exportable,
+restricted, and secret data from automation.

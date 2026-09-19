@@ -39,8 +39,10 @@ MOOTMAIN = "apps/mootx01/Sources/mootx01/MootMain.swift"
 LIBRS = "apps/mootx01/rust/src/lib.rs"
 README = "distribution/plugin/README.md"
 PLUGIN_CHANGELOG = "distribution/plugin/CHANGELOG.md"
-INSTALL_BUNDLE = "apps/mootx01/rust/src/embedded/install-bundle.json"
-EMBEDDED_SWIFT = "apps/mootx01/Sources/MootInstallerCore/Generated/EmbeddedArtifacts.swift"
+# The v2 bundle replaced the original pair; the name carries the bundle
+# format version, not the product version, so it does not move again at 1.2.
+INSTALL_BUNDLE = "apps/mootx01/rust/src/embedded/install-bundle-v2.json"
+EMBEDDED_SWIFT = "apps/mootx01/Sources/MootInstallerCore/Generated/EmbeddedArtifactsV2.swift"
 PLUGIN_MANIFESTS = [
     "distribution/plugin/.claude-plugin/plugin.json",
     "distribution/plugin/.codex-plugin/plugin.json",
@@ -191,7 +193,7 @@ def main() -> None:
     if nj != ns:
         raise SystemExit(
             f"bump: embedded copies disagree on occurrence count "
-            f"(install-bundle.json {nj} vs EmbeddedArtifacts.swift {ns}) — inspect before committing"
+            f"(install-bundle-v2.json {nj} vs EmbeddedArtifactsV2.swift {ns}) — inspect before committing"
         )
 
     print(f"bump: rewrote all stamps. Verifying at {new}…")
