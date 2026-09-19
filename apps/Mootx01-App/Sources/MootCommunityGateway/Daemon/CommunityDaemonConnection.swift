@@ -1,5 +1,6 @@
 import AriaMCPWire
 import Foundation
+import MootProductIdentity
 #if os(macOS)
 import Security
 #endif
@@ -50,9 +51,16 @@ public protocol CommunityDaemonConnecting: Actor, Sendable {
 /// after every daemon gate succeeds.
 public actor CommunityDaemonConnector: CommunityDaemonConnecting {
     private let readiness: DaemonReadiness
+    private let verifiesCommunityContract: Bool
 
     public init(readiness: DaemonReadiness) {
         self.readiness = readiness
+        self.verifiesCommunityContract = true
+    }
+
+    fileprivate init(readiness: DaemonReadiness, verifiesCommunityContract: Bool) {
+        self.readiness = readiness
+        self.verifiesCommunityContract = verifiesCommunityContract
     }
 
     public func connect() async -> CommunityDaemonConnection {
@@ -79,13 +87,15 @@ public actor CommunityDaemonConnector: CommunityDaemonConnecting {
             guard let caller = await readiness.callerIfReady() else {
                 return CommunityDaemonConnection(state: .handshakeFailed)
             }
-            switch await CommunityContractIdentity.verify(caller: caller, descriptor: descriptor) {
-            case .accepted:
-                break
-            case .incompatible:
-                return CommunityDaemonConnection(state: .incompatible)
-            case .failed:
-                return CommunityDaemonConnection(state: .handshakeFailed)
+            if verifiesCommunityContract {
+                switch await CommunityContractIdentity.verify(caller: caller, descriptor: descriptor) {
+                case .accepted:
+                    break
+                case .incompatible:
+                    return CommunityDaemonConnection(state: .incompatible)
+                case .failed:
+                    return CommunityDaemonConnection(state: .handshakeFailed)
+                }
             }
             let identity = EstateIdentity.daemon(
                 estate: descriptor.estateIdentifier,
@@ -104,6 +114,36 @@ public enum CommunityDaemonConnections {
     /// permanently unavailable. It never substitutes an embedded estate.
     public static func live() -> any CommunityDaemonConnecting {
         #if os(macOS)
+        recovering(
+            liveConnector(
+                requiredFirstPartyProvider: .current,
+                verifiesCommunityContract: true,
+                restrictsRecallToExportable: false
+            )
+        )
+        #else
+        return UnavailableCommunityDaemonConnector()
+        #endif
+    }
+
+    /// Keep the Community caller as a live authenticated lease rather than a
+    /// snapshot of the daemon that happened to answer during application
+    /// startup. A failed transport invalidates that lease and re-runs the full
+    /// connector ceremony. Contract-declared reads retry once; mutations report
+    /// an ambiguous result without replay and use the replacement on the next
+    /// distinct action.
+    public static func recovering(
+        _ connector: any CommunityDaemonConnecting
+    ) -> any CommunityDaemonConnecting {
+        RecoveringCommunityDaemonConnector(connector: connector)
+    }
+
+    #if os(macOS)
+    fileprivate static func liveConnector(
+        requiredFirstPartyProvider: FirstPartyProviderClientContract?,
+        verifiesCommunityContract: Bool,
+        restrictsRecallToExportable: Bool
+    ) -> any CommunityDaemonConnecting {
         guard let environment = CommunityDaemonEnvironment.resolve() else {
             return UnavailableCommunityDaemonConnector()
         }
@@ -114,6 +154,8 @@ public enum CommunityDaemonConnections {
         let authenticator = FirstPartyDaemonAuthenticator(rootProvider: rootProvider)
         let descriptorURL = environment.descriptorURL
         let readiness = DaemonReadiness(
+            requiredFirstPartyProvider: requiredFirstPartyProvider,
+            restrictsRecallToExportable: restrictsRecallToExportable,
             loadDescriptor: {
                 try CommunityDaemonDescriptorFile.load(from: descriptorURL)
             },
@@ -121,7 +163,44 @@ public enum CommunityDaemonConnections {
                 try await authenticator.authenticate(descriptor, vector: vector)
             }
         )
-        return CommunityDaemonConnector(readiness: readiness)
+        return CommunityDaemonConnector(
+            readiness: readiness,
+            verifiesCommunityContract: verifiesCommunityContract
+        )
+    }
+    #endif
+}
+
+/// Production composition for native macOS product features. It uses the same
+/// authenticated daemon gates as Community, but admits the fixed provider
+/// contract instead of issuing a Community contract tool call.
+public enum FirstPartyDaemonConnections {
+    public static func live(
+        requiredProvider: FirstPartyProviderClientContract
+    ) -> any CommunityDaemonConnecting {
+        #if os(macOS)
+        return CommunityDaemonConnections.liveConnector(
+            requiredFirstPartyProvider: requiredProvider,
+            verifiesCommunityContract: false,
+            restrictsRecallToExportable: false
+        )
+        #else
+        return UnavailableCommunityDaemonConnector()
+        #endif
+    }
+
+
+    /// A separate authenticated session for the bearer LAN projection. The
+    /// daemon narrows this session before it can execute any stable read.
+    public static func liveLAN(
+        requiredProvider: FirstPartyProviderClientContract
+    ) -> any CommunityDaemonConnecting {
+        #if os(macOS)
+        return CommunityDaemonConnections.liveConnector(
+            requiredFirstPartyProvider: requiredProvider,
+            verifiesCommunityContract: false,
+            restrictsRecallToExportable: true
+        )
         #else
         return UnavailableCommunityDaemonConnector()
         #endif
@@ -142,10 +221,10 @@ private struct CommunityDaemonEnvironment: Sendable {
     static func resolve() -> Self? {
         guard let appGroup = signedEntitlementValues(
             key: "com.apple.security.application-groups"
-        ).first(where: { $0.hasSuffix("group.com.codedaptive.mootx01") }),
+        ).first(where: { $0.hasSuffix(MootProductIdentity.Apple.appGroup) }),
         let keychainGroup = signedEntitlementValues(
             key: "keychain-access-groups"
-        ).first(where: { $0.hasSuffix("com.codedaptive.mootx01.shared") }),
+        ).first(where: { $0.hasSuffix(MootProductIdentity.Keychain.sharedAccessGroup) }),
         let container = FileManager.default.containerURL(
             forSecurityApplicationGroupIdentifier: appGroup
         ) else {
