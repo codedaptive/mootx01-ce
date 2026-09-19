@@ -58,11 +58,9 @@ import Foundation
 // real handshake, and it is why the type of the transport — not a flag — is the
 // evidence.
 //
-// DEFERRED TO MACD-2c. Nothing here mints a production root, publishes a
-// descriptor, or elects a provider. Until that lands there is no live descriptor
-// to read, which is why this whole path remains dark.
-//
-// DARK INFRASTRUCTURE: nothing in production routing reaches this type yet.
+// This layer does not mint an installation root, publish a descriptor, migrate
+// storage, or elect a provider. Those daemon-owner responsibilities must finish
+// before this client can observe a descriptor; absence remains `.unavailable`.
 
 /// Where a readiness attempt ended.
 public enum DaemonReadinessState: Sendable, Equatable {
@@ -154,6 +152,8 @@ public actor DaemonReadiness {
     private let policy: DaemonCompatibilityPolicy
     private let loadDescriptor: DescriptorLoader
     private let authenticate: Authenticator
+    private let requiredFirstPartyProvider: FirstPartyProviderClientContract?
+    private let restrictsRecallToExportable: Bool
 
     /// The caller from the last attempt that published a `.ready` outcome.
     /// Cleared synchronously at every attempt entry: while a `connect()` is in
@@ -189,6 +189,12 @@ public actor DaemonReadiness {
     private var lastCredentialGeneration: UInt64?
     private var lastDescriptorGeneration: UInt64?
 
+    /// The first estate admitted by this runtime. A later reconnect may rotate
+    /// daemon instances and credentials, but it may not silently retarget the
+    /// process to another estate or service.
+    private var boundEstateIdentifier: UUID?
+    private var boundServiceIdentifier: String?
+
     /// Build a readiness checker.
     ///
     /// - Parameters:
@@ -198,10 +204,14 @@ public actor DaemonReadiness {
     ///   - authenticate: Establishes an authenticated session, on the same terms.
     public init(
         policy: DaemonCompatibilityPolicy = .current,
+        requiredFirstPartyProvider: FirstPartyProviderClientContract? = nil,
+        restrictsRecallToExportable: Bool = false,
         loadDescriptor: sending @escaping DescriptorLoader,
         authenticate: sending @escaping Authenticator
     ) {
         self.policy = policy
+        self.requiredFirstPartyProvider = requiredFirstPartyProvider
+        self.restrictsRecallToExportable = restrictsRecallToExportable
         self.loadDescriptor = loadDescriptor
         self.authenticate = authenticate
     }
@@ -271,6 +281,14 @@ public actor DaemonReadiness {
             // if it needs to distinguish the axis that closed.
             return publish(.incompatible, token: token)
         }
+        if let boundEstateIdentifier,
+           descriptor.estateIdentifier != boundEstateIdentifier {
+            return publish(.incompatible, token: token)
+        }
+        if let boundServiceIdentifier,
+           descriptor.serviceIdentifier != boundServiceIdentifier {
+            return publish(.incompatible, token: token)
+        }
 
         // Gate 2: an authenticated session. Reached only for a descriptor the
         // policy already accepted, so an untrusted provider never sees a
@@ -294,7 +312,7 @@ public actor DaemonReadiness {
         // below then requires the daemon's own handshake to report the same
         // estate, so a caller only escapes this scope naming an estate that was
         // both signed for and agreed to.
-        let candidate = MootCaller(
+        let bootstrap = MootCaller(
             transport: authenticated,
             serverName: DaemonContract.serverName,
             estateIdentity: .daemon(
@@ -302,10 +320,35 @@ public actor DaemonReadiness {
                 service: descriptor.serviceIdentifier
             )
         )
-        guard await Self.handshakeAgrees(candidate, with: descriptor) else {
+        if restrictsRecallToExportable {
+            guard await Self.restrictRecallToExportable(bootstrap) else {
+                return publish(.authenticationFailed, token: token)
+            }
+        }
+        let handshake = await Self.handshakeAgrees(
+            bootstrap,
+            with: descriptor,
+            requiredFirstPartyProvider: requiredFirstPartyProvider
+        )
+        let providerCompatibility: FirstPartyProviderCompatibility?
+        switch handshake {
+        case .accepted(let compatibility):
+            providerCompatibility = compatibility
+        case .providerIncompatible:
+            return publish(.incompatible, token: token)
+        case .failed:
             return publish(.handshakeFailed, token: token)
         }
         guard isCurrent(token) else { return .superseded }
+        let candidate = MootCaller(
+            transport: authenticated,
+            serverName: DaemonContract.serverName,
+            estateIdentity: .daemon(
+                estate: descriptor.estateIdentifier,
+                service: descriptor.serviceIdentifier
+            ),
+            firstPartyProviderCompatibility: providerCompatibility
+        )
         guard await Self.pingSucceeds(candidate) else {
             return publish(.handshakeFailed, token: token)
         }
@@ -316,6 +359,8 @@ public actor DaemonReadiness {
         if isCurrent(token) {
             lastCredentialGeneration = max(lastCredentialGeneration ?? 0, descriptor.credentialGeneration)
             lastDescriptorGeneration = max(lastDescriptorGeneration ?? 0, descriptor.descriptorGeneration)
+            boundEstateIdentifier = boundEstateIdentifier ?? descriptor.estateIdentifier
+            boundServiceIdentifier = boundServiceIdentifier ?? descriptor.serviceIdentifier
         }
         return publish(.ready(descriptor), token: token, caller: candidate)
     }
@@ -341,6 +386,20 @@ public actor DaemonReadiness {
 
     // MARK: Handshake
 
+    /// Narrow this authenticated session before initialization or any stable
+    /// provider call. The daemon records the restriction against the verified
+    /// session; it cannot be widened by later tool arguments.
+    private static func restrictRecallToExportable(_ caller: MootCaller) async -> Bool {
+        guard let response = try? await caller.exchange(
+            method: FirstPartyAuthProtocol.restrictRecallToExportableMethod,
+            params: nil
+        ), case .result(let value) = response.payload,
+        value.objectValue == ["restricted": .bool(true)] else {
+            return false
+        }
+        return true
+    }
+
     /// Gate 3: run MCP `initialize` and require the daemon's own answer to match
     /// the descriptor it published, then gate 4's lifecycle notification.
     ///
@@ -357,7 +416,17 @@ public actor DaemonReadiness {
     ///
     /// A `tools` capability is also required: a daemon that does not serve the
     /// tool surface cannot answer anything a client would ask.
-    private static func handshakeAgrees(_ caller: MootCaller, with descriptor: DaemonDescriptor) async -> Bool {
+    private enum HandshakeAdmission {
+        case accepted(FirstPartyProviderCompatibility?)
+        case providerIncompatible
+        case failed
+    }
+
+    private static func handshakeAgrees(
+        _ caller: MootCaller,
+        with descriptor: DaemonDescriptor,
+        requiredFirstPartyProvider: FirstPartyProviderClientContract?
+    ) async -> HandshakeAdmission {
         let params: JSONValue = .object([
             "protocolVersion": .string(descriptor.mcpProtocolVersion),
             "capabilities": .object([:]),
@@ -368,16 +437,26 @@ public actor DaemonReadiness {
         ])
         guard let response = try? await caller.exchange(method: "initialize", params: params),
               case .result(let value) = response.payload,
-              let result = value.objectValue else { return false }
+              let result = value.objectValue else { return .failed }
 
-        guard result["protocolVersion"]?.stringValue == descriptor.mcpProtocolVersion else { return false }
+        guard result["protocolVersion"]?.stringValue == descriptor.mcpProtocolVersion else { return .failed }
         guard let serverInfo = result["serverInfo"]?.objectValue,
               serverInfo["name"]?.stringValue == DaemonContract.serverName,
               serverInfo["version"]?.stringValue == descriptor.binaryVersion,
               serverInfo["instanceIdentifier"]?.stringValue == descriptor.instanceIdentifier.uuidString,
               serverInfo["estateIdentifier"]?.stringValue == descriptor.estateIdentifier.uuidString
-        else { return false }
-        guard result["capabilities"]?.objectValue?["tools"] != nil else { return false }
+        else { return .failed }
+        guard result["capabilities"]?.objectValue?["tools"] != nil else { return .failed }
+
+        let providerCompatibility: FirstPartyProviderCompatibility?
+        if let requiredFirstPartyProvider {
+            guard let verified = requiredFirstPartyProvider.validate(
+                discovery: serverInfo["first_party_provider"]
+            ) else { return .providerIncompatible }
+            providerCompatibility = verified
+        } else {
+            providerCompatibility = nil
+        }
 
         // Gate 4: MCP requires the client to confirm initialization before it
         // issues ordinary requests. It is a notification, so there is no reply
@@ -385,9 +464,9 @@ public actor DaemonReadiness {
         do {
             try await caller.notify(method: "notifications/initialized", params: nil)
         } catch {
-            return false
+            return .failed
         }
-        return true
+        return .accepted(providerCompatibility)
     }
 
     /// Gate 5: the dispatcher answers `ping` with a result rather than an error.
