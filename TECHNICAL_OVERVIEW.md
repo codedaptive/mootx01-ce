@@ -53,8 +53,8 @@ The interface is ARIA: consistent across implementations, surfaces, and language
 
 **The engines are open. The intelligence is the product.**
 
-Seventeen libraries and kits from the MOOTx01 Framework are open source under
-Apache 2.0 — published today, not on a timer — through four standalone venue
+Twenty-four libraries and kits from the MOOTx01 Framework are open source under
+Apache 2.0 — published today, not on a timer — through five standalone venue
 repositories, installable directly with SwiftPM or Cargo:
 
 | Repo | The engines it gives you |
@@ -63,11 +63,12 @@ repositories, installable directly with SwiftPM or Cargo:
 | [`moot-semantics`](https://github.com/codedaptive/moot-semantics) | The ARIA grammar, FDC lattice, deterministic text-to-anchor grounding |
 | [`moot-system`](https://github.com/codedaptive/moot-system) | Storage (SQLite · PostgreSQL · InMemory), queueing, sync, telemetry |
 | [`moot-core`](https://github.com/codedaptive/moot-core) | The typed substrate: 256-bit Engram math, kernel, learning + graph algorithms |
+| [`moot-cognition`](https://github.com/codedaptive/moot-cognition) | The cognitive layer: composed recall across estates, dreaming and trust, reasoning lenses |
 
 Those engines let you build your own memory system — and they're the same ones
-MOOTx01 runs on. What this repository adds is the intelligence: composed recall
-across estates, the dreaming and trust Brain, twenty-plus reasoning lenses,
-and the ARIA voice that lets any MCP client use it with zero integration code.
+MOOTx01 runs on, the cognitive layer included. What this repository adds is the
+assembly: those engines wired into one another and tuned, plus the ARIA voice
+that lets any MCP client use it with zero integration code.
 
 The full map — every package, install snippets, what the product layer adds,
 and the decision guide — is in [`SDK.MD`](SDK.MD).
@@ -116,7 +117,7 @@ Product surface (this repo):
 
 Every kit ships in two equal-status implementations, conformance-gated against shared test vectors:
 
-- **Swift** — Apple Silicon, macOS 26+, iOS 26+
+- **Swift** — Apple silicon, macOS 27+, iOS 27+
 - **Rust** — PC/Linux x86_64 and Linux aarch64
 
 Neither port leads. Both must agree bit for bit.
