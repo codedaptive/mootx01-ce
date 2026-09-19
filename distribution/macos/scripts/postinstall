@@ -246,34 +246,16 @@ fi
 # apps/mootx01/Sources/MootInstallerCore/Paths.swift — keep in sync.
 # Best-effort: never fails the install.
 #
-# NOT while a flat estate is waiting to be adopted. An installation that
-# predates the catalog layout keeps its estate at <config>/estate.sqlite, and
-# `mootx01 install` — which the setup assistant runs a moment later — moves it
-# into databases/default/ before anything opens it. A daemon restarted first
-# opens the catalog path, creates an empty estate.sqlite there, and
-# FlatLayoutMigration then finds a populated flat estate and an empty catalog
-# one and refuses rather than guess which is the user's. The install dies with
-# "two default estates found and nothing was changed", and the fresh estate has
-# already taken a Keychain key at the catalog path, so moving files alone does
-# not undo it. Leaving the old daemon running for another minute is the lesser
-# problem: `mootx01 install` restarts it once the layout is settled.
-# dscl, not `eval ~$REAL_USER`: the home directory is read from the directory
-# service rather than reconstructed from the name, and an unusual home does not
-# silently resolve to the wrong path. An empty result disables the check and
-# the restart proceeds as before.
-REAL_HOME="$(dscl . -read "/Users/$REAL_USER" NFSHomeDirectory 2>/dev/null | sed 's/^NFSHomeDirectory: //')"
-CE_CONFIG_DIR="$REAL_HOME/Library/Application Support/com.mootx01.ce"
-FLAT_ESTATE="$CE_CONFIG_DIR/estate.sqlite"
-CATALOG_ESTATE="$CE_CONFIG_DIR/databases/default/estate.sqlite"
+# Restarting over an unadopted flat estate is safe: EstateCatalog.open()
+# adopts a pre-catalog estate before it touches the database, so the daemon
+# moves the estate in rather than creating an empty one beside it. This block
+# briefly skipped the restart in that case, which only left the resident
+# stopped after the install.
 if [ -n "$REAL_USER" ] && [ "$REAL_USER" != "root" ]; then
-    if [ -n "$REAL_HOME" ] && [ -f "$FLAT_ESTATE" ] && [ ! -f "$CATALOG_ESTATE" ]; then
-        echo "postinstall: flat estate awaiting adoption — leaving the resident stopped so the layout migration runs first"
-    else
-        REAL_UID="$(id -u "$REAL_USER" 2>/dev/null)"
-        if [ -n "$REAL_UID" ]; then
-            launchctl kickstart -k "gui/$REAL_UID/com.mootx01.daemon" 2>/dev/null
-            launchctl kickstart -k "gui/$REAL_UID/com.mootx01.mgr"    2>/dev/null
-        fi
+    REAL_UID="$(id -u "$REAL_USER" 2>/dev/null)"
+    if [ -n "$REAL_UID" ]; then
+        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.daemon" 2>/dev/null
+        launchctl kickstart -k "gui/$REAL_UID/com.mootx01.mgr"    2>/dev/null
     fi
 fi
 
