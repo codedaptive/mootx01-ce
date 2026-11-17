@@ -27,14 +27,15 @@ import LocusKit
 /// next (codex finding 2026-09-19: one guardrail refusal pinned the whole
 /// lane on the same drawer every cadence).
 public enum SubjectProducerError: Error, Sendable, Equatable {
-    /// The producer will never produce a subject for THIS content (a
-    /// guardrail or model refusal, an over-long input, an unsupported
-    /// language). The sweep marks the drawer refused for the producer's
-    /// pipeline and moves on.
+    /// The producer failed on THIS drawer and the failure is not the
+    /// service's passing moment (a guardrail or model refusal, an
+    /// over-long input, an unsupported language, or any error the
+    /// producer does not recognise as passing). The sweep marks the
+    /// drawer refused for the producer's pipeline and moves on.
     case refused(reason: String)
     /// The producer cannot answer right now (assets missing, rate limited,
-    /// too many concurrent requests). The sweep stops for this cadence,
-    /// marks nothing, and retries next cadence.
+    /// too many concurrent requests, timed out, cancelled). The sweep
+    /// stops for this cadence, marks nothing, and retries next cadence.
     case unavailable(reason: String)
 }
 

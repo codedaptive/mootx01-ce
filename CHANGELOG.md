@@ -5,6 +5,18 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 line in development use an explicit SemVer qualifier, `1.1.0-beta-YY` or
 `1.1.0-rcN`.
 
+## 1.1.5 — 2026-11-17
+
+**Subject backfill drains when the on-device model fails on a drawer.** On
+macOS 27 the system language model can fail on a single drawer with an error
+the subject producer did not recognise (for example `LanguageModelError` -1
+wrapping a SensitiveContentAnalysisML error). Before this release such a
+failure counted as "model unavailable", so the sweep stopped on that drawer
+every cadence and the backlog never drained. Now only the service's passing
+conditions (rate limit, concurrent requests, timeout, missing model assets,
+cancellation) wait for the next cadence. Every other per-drawer failure
+settles the drawer the way a model refusal does, so the sweep moves on.
+
 ## 1.1.0 — 2026-09-18
 
 **The 1.1 line becomes the released version.** 1.1.0 supersedes 1.0.40 as the

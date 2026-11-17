@@ -14,6 +14,7 @@ import PersistenceKitInMemory
 @testable import GeniusLocusKit
 
 #if canImport(FoundationModels)
+import FoundationModels
 
 /// Availability bridge: Swift Testing traits and suites cannot carry
 /// `@available`, so each test guards at runtime and this helper answers
@@ -123,6 +124,86 @@ struct MiniLLMSubjectProducerTests {
         let lane = drains.first { $0.name == DrainStatus.subjectBackfillName }
         #expect(lane != nil)
         #expect(lane?.pending == report.remainingDebt)
+    }
+}
+
+private struct OpaqueModelFailure: Error, CustomStringConvertible {
+    var description: String { "opaque model failure 42" }
+}
+
+private func observedModelFailure(underlying: NSError = NSError(
+    domain: "com.apple.appleneuralengine", code: 54
+)) -> NSError {
+    NSError(domain: "FoundationModels.LanguageModelError", code: -1, userInfo: [
+        NSUnderlyingErrorKey: NSError(domain: "com.apple.SensitiveContentAnalysisML", code: 15,
+                                     userInfo: [NSUnderlyingErrorKey: underlying])
+    ])
+}
+
+private func isUnavailable(_ error: SubjectProducerError) -> Bool {
+    if case .unavailable = error { return true }
+    return false
+}
+
+@Suite("MiniLLM subject producer failure classification")
+struct MiniLLMSubjectProducerFailureTests {
+    @Test func unrecognisedErrorIsRefusedWithItsText() {
+        #expect(MiniLLMSubjectProducer.classify(failure: OpaqueModelFailure())
+                == .refused(reason: "opaque model failure 42"))
+    }
+
+    @Test func observedModelErrorChainIsRefused() {
+        let result = MiniLLMSubjectProducer.classify(failure: observedModelFailure())
+        guard case .refused(let reason) = result else {
+            Issue.record("Expected a refusal, got \(result)")
+            return
+        }
+        #expect(reason.contains("SensitiveContentAnalysisML"))
+    }
+
+    @Test func contentErrorsAreRefused() {
+        let errors: [LanguageModelError] = [
+            .guardrailViolation(.init(debugDescription: "guardrail")),
+            .refusal(.init(explanation: "refused", debugDescription: "refusal"))
+        ]
+        for error in errors {
+            #expect(MiniLLMSubjectProducer.classify(failure: error)
+                    == .refused(reason: "\(error)"))
+        }
+    }
+
+    @Test func serviceMomentsAreUnavailable() {
+        let errors: [any Error] = [
+            LanguageModelSession.GenerationError.rateLimited(.init(debugDescription: "rate")),
+            LanguageModelSession.GenerationError.assetsUnavailable(.init(debugDescription: "assets")),
+            LanguageModelSession.GenerationError.concurrentRequests(.init(debugDescription: "concurrent")),
+            LanguageModelError.rateLimited(.init(resetDate: nil, debugDescription: "rate")),
+            LanguageModelError.timeout(.init(debugDescription: "timeout")),
+            SystemLanguageModel.Error.assetsUnavailable(.init(debugDescription: "assets")),
+            LanguageModelSession.Error.concurrentRequests
+        ]
+        for error in errors {
+            #expect(isUnavailable(MiniLLMSubjectProducer.classify(failure: error)))
+        }
+    }
+
+    @Test func bridgedServiceMomentsAreUnavailable() {
+        let errors: [LanguageModelError] = [
+            .rateLimited(.init(resetDate: nil, debugDescription: "rate")),
+            .timeout(.init(debugDescription: "timeout"))
+        ]
+        for error in errors {
+            let bridged = error as NSError
+            let fresh = NSError(domain: bridged.domain, code: bridged.code)
+            #expect(isUnavailable(MiniLLMSubjectProducer.classify(failure: fresh)))
+            let wrapped = NSError(domain: "FoundationModels.LanguageModelError", code: -1,
+                                  userInfo: [NSUnderlyingErrorKey: fresh])
+            #expect(isUnavailable(MiniLLMSubjectProducer.classify(failure: wrapped)))
+        }
+    }
+
+    @Test func cancellationIsUnavailable() {
+        #expect(isUnavailable(MiniLLMSubjectProducer.classify(failure: CancellationError())))
     }
 }
 #endif

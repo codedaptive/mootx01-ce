@@ -81,16 +81,15 @@ public struct MiniLLMSubjectProducer: SubjectProducer {
                 candidate = Self.postProcess(retry.content)
             }
             return candidate
-        } catch let error as LanguageModelSession.GenerationError {
-            throw Self.classify(error)
         } catch {
-            throw SubjectProducerError.unavailable(reason: "\(error)")
+            throw Self.classify(failure: error)
         }
     }
 
-    /// Which failures are a property of the content (the model will refuse
-    /// it every time) and which are the service's moment. Only the former
-    /// may mark a drawer; the sweep retries the latter next cadence.
+    /// Which generation failures are the service's moment (unavailable:
+    /// the sweep retries next cadence) and which settle the drawer
+    /// (refused). The content cases and any case this SDK does not name
+    /// are refused, so an unrecognised failure never stops every cadence.
     static func classify(_ error: LanguageModelSession.GenerationError) -> SubjectProducerError {
         switch error {
         case .guardrailViolation, .refusal, .exceededContextWindowSize,
@@ -99,7 +98,7 @@ public struct MiniLLMSubjectProducer: SubjectProducer {
         case .assetsUnavailable, .rateLimited, .concurrentRequests:
             return .unavailable(reason: "\(error)")
         @unknown default:
-            return .unavailable(reason: "\(error)")
+            return .refused(reason: "\(error)")
         }
     }
 

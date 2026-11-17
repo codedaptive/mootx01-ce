@@ -69,10 +69,10 @@ struct Mootx01: AsyncParsableCommand {
     /// SemVer for the installed binary. Development builds carry the beta
     /// pre-release component; stable builds use a bare numeric version.
     /// The human-facing --version string adds the date via `versionDisplay`.
-    static let currentVersion = "1.1.4"
+    static let currentVersion = "1.1.5"
 
     /// Release date stamp shown alongside the version by --version.
-    static let releaseDate = "2026-09-19"
+    static let releaseDate = "2026-11-17"
 
     /// The unchanged first line printed by --version. The Rust port must print
     /// this identical line before its converter identity lines.
