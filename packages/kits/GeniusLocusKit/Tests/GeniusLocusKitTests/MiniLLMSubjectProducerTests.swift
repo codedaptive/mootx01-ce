@@ -152,13 +152,47 @@ struct MiniLLMSubjectProducerFailureTests {
                 == .refused(reason: "opaque model failure 42"))
     }
 
-    @Test func observedModelErrorChainIsRefused() {
+    @Test func observedModelErrorChainIsUnavailable() {
         let result = MiniLLMSubjectProducer.classify(failure: observedModelFailure())
-        guard case .refused(let reason) = result else {
-            Issue.record("Expected a refusal, got \(result)")
+        guard case .unavailable(let reason) = result else {
+            Issue.record("Expected unavailable, got \(result)")
             return
         }
         #expect(reason.contains("SensitiveContentAnalysisML"))
+    }
+
+    @Test func liveGuardrailChainWithANENoResourcesIsUnavailable() {
+        let error = NSError(domain: "FoundationModels.LanguageModelError", code: -1, userInfo: [
+            NSMultipleUnderlyingErrorsKey: [NSError(domain: "com.apple.SensitiveContentAnalysisML", code: 15, userInfo: [
+                NSUnderlyingErrorKey: NSError(
+                    domain: "SensitiveContentAnalysisML.CombinedTextSanitizerBackend.BackendError", code: 1,
+                    userInfo: [NSUnderlyingErrorKey: NSError(domain: "ModelManagerServices.ModelManagerError", code: 1001,
+                        userInfo: [NSUnderlyingErrorKey: NSError(domain: "ModelManagerServices.InferenceError", code: 2007,
+                            userInfo: [NSUnderlyingErrorKey: NSError(domain: "com.apple.appleneuralengine", code: 54)])])]
+                )
+            ])]
+        ])
+        #expect(MiniLLMSubjectProducer.classify(failure: error) == .unavailable(reason: "\(error)"))
+    }
+
+    @Test func topLevelANENoResourcesIsUnavailable() {
+        let error = NSError(domain: "com.apple.appleneuralengine", code: 54)
+        #expect(MiniLLMSubjectProducer.classify(failure: error) == .unavailable(reason: "\(error)"))
+    }
+
+    @Test func topLevelANEOtherCodeIsRefused() {
+        let error = NSError(domain: "com.apple.appleneuralengine", code: 53)
+        #expect(MiniLLMSubjectProducer.classify(failure: error) == .refused(reason: "\(error)"))
+    }
+
+    @Test func nestedANEOtherCodeIsRefused() {
+        let error = observedModelFailure(underlying: NSError(domain: "com.apple.appleneuralengine", code: 53))
+        #expect(MiniLLMSubjectProducer.classify(failure: error) == .refused(reason: "\(error)"))
+    }
+
+    @Test func code54InAnotherDomainIsRefused() {
+        let error = NSError(domain: "com.apple.SensitiveContentAnalysisML", code: 54)
+        #expect(MiniLLMSubjectProducer.classify(failure: error) == .refused(reason: "\(error)"))
     }
 
     @Test func contentErrorsAreRefused() {

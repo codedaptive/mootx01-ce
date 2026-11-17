@@ -14,8 +14,12 @@ wrapping a SensitiveContentAnalysisML error). Before this release such a
 failure counted as "model unavailable", so the sweep stopped on that drawer
 every cadence and the backlog never drained. Now only the service's passing
 conditions (rate limit, concurrent requests, timeout, missing model assets,
-cancellation) wait for the next cadence. Every other per-drawer failure
-settles the drawer the way a model refusal does, so the sweep moves on.
+cancellation, and the Neural Engine reporting no resources) wait for the next
+cadence. The check looks at every error nested inside the one the model
+throws, so a Neural Engine no-resources error wrapped by the content
+sanitizer also waits, and those drawers stay pending until the model can
+answer. Every other per-drawer failure settles the drawer the way a model
+refusal does, so the sweep moves on.
 
 ## 1.1.0 — 2026-09-18
 
