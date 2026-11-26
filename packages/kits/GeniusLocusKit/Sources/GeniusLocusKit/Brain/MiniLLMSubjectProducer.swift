@@ -20,8 +20,8 @@
 // seed-v1, plus NULL rows, ever enumerate for this producer).
 //
 // Safety net: the sweep's SubjectRegister gate remains the final
-// arbiter — inadmissible model output is skipped, never stored, so a
-// misbehaving model degrades to a no-op, not damage.
+// arbiter — inadmissible model output is marked refused, never stored, so
+// a misbehaving model degrades to a no-op, not damage.
 
 import Foundation
 import LocusKit
@@ -73,8 +73,8 @@ public struct MiniLLMSubjectProducer: SubjectProducer {
             var candidate = Self.postProcess(try await session.respond(to: prompt).content)
             // ONE bounded retry on over-length: re-ask with the cap
             // restated. If the model still overruns, return the long form —
-            // the sweep's register gate skips it (never stored) and the row
-            // stays debt for a later pass.
+            // the sweep cuts it at a word boundary; if the cut is still
+            // inadmissible the register gate marks the row refused.
             if candidate.count > DrawerStore.subjectLengthContract {
                 let retry = try await session.respond(
                     to: "Too long. Compress to at most 120 characters, one sentence, same claim.")

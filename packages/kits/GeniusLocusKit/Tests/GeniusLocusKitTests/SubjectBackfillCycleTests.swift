@@ -21,8 +21,7 @@ private struct StubProducer: SubjectProducer {
     }
 }
 
-/// Producer whose output always violates the register (narrative frame)
-/// — proves inadmissible output is skipped, never stored.
+/// Producer whose output always violates the register (narrative frame).
 private struct InadmissibleProducer: SubjectProducer {
     let pipelineVersion = "bad-v1"
     func subject(forContent content: String) async throws -> String {
@@ -207,18 +206,25 @@ struct SubjectBackfillCycleTests {
         #expect(third.written == 0)
     }
 
-    @Test func inadmissibleProducerOutputIsSkippedNeverStored() async throws {
+    @Test func inadmissibleProducerOutputSettlesAsRefused() async throws {
         let (kit, handle, estate) = try await openEstate(owner: "inadmissible")
         defer { Task { try? await kit.close(handle) } }
         try await seedDebt(kit, handle, count: 2)
         try await kit.registerSubjectProducer(InadmissibleProducer(), for: handle)
         let report = try await kit.subjectBackfillSweep(handle, now: Date())
         #expect(report.written == 0)
-        #expect(report.skippedInadmissible == 2)
-        #expect(report.remainingDebt == 2, "skipped rows remain debt")
+        #expect(report.refused == 2)
+        #expect(report.skippedInadmissible == 0)
+        #expect(report.remainingDebt == 0)
         let drawers = try await estate.allDrawers()
-        #expect(!drawers.contains { $0.subjectPipelineVersion == "bad-v1" },
-                "inadmissible output must never be stored")
+        #expect(drawers.count == 2)
+        for drawer in drawers {
+            #expect(drawer.subject == nil)
+            #expect(drawer.subjectPipelineVersion == DrawerStore.subjectRefusedMarker(for: "bad-v1"))
+            let trail = try await kit.auditTrail(in: handle, rowID: drawer.id)
+            #expect(trail.last?.verb == "subjectRefused")
+            #expect(trail.last?.reason == "inadmissible: narrativeFrame(\"this is a \")")
+        }
     }
 }
 
@@ -274,5 +280,77 @@ extension SubjectBackfillCycleTests {
         #expect(after[aiDrawer.id]?.subject == "Filing-AI subject stays untouched.")
         #expect(after[consDrawer.id]?.subjectPipelineVersion == "tiered-stub-v1")
         #expect(after[nullID]?.subjectPipelineVersion == "tiered-stub-v1")
+    }
+}
+
+/// Answers over the 120-character contract, the shapes the on-device model
+/// returns for dense technical drawers. Twin of Rust `OverLengthProducer`.
+private struct OverLengthProducer: SubjectProducer {
+    let pipelineVersion = "over-length-v1"
+    /// 40 three-character words separated by single spaces ("w01 w02 … w40"): 159 characters.
+    static let words = (1...40).map { String(format: "w%02d", $0) }.joined(separator: " ")
+    func subject(forContent content: String) async throws -> String {
+        if content.hasPrefix("words") { return Self.words }
+        if content.hasPrefix("identifier") { return String(repeating: "x", count: 150) }
+        // 130 two-scalar grapheme clusters (e + combining acute), no space.
+        return String(repeating: "e\u{301}", count: 130)
+    }
+}
+
+private actor RecordingInadmissibleProducer: SubjectProducer {
+    let pipelineVersion = "bad-recording-v1"
+    private(set) var asked: [String] = []
+
+    func subject(forContent content: String) async throws -> String {
+        asked.append(content)
+        return "This is a note about the row."
+    }
+}
+
+extension SubjectBackfillCycleTests {
+    @Test func overLengthAnswersAreCutAtAWordBoundary() async throws {
+        let (kit, handle, estate) = try await openEstate(owner: "over-length")
+        defer { Task { try? await kit.close(handle) } }
+        for content in ["words drawer", "identifier drawer", "accent drawer"] {
+            _ = try await kit.capture(handle, CaptureFrame(
+                content: content, channel: .typed, room: "backfill-tests",
+                latticeAnchor: LatticeAnchor(udcCode: "000"),
+                addedBy: "subject-backfill-tests", embeddingModelID: "test-model-v1"))
+        }
+        try await kit.registerSubjectProducer(OverLengthProducer(), for: handle)
+        let report = try await kit.subjectBackfillSweep(handle, now: Date(timeIntervalSince1970: 1_700_000_010))
+        #expect((report.written, report.refused, report.skippedInadmissible) == (3, 0, 0))
+        let drawers = try await estate.allDrawers()
+        func subject(_ prefix: String) -> String? { drawers.first { $0.content.hasPrefix(prefix) }?.subject }
+        // The last space within the first 121 characters is at index 119, after w30.
+        #expect(subject("words") == (1...30).map { String(format: "w%02d", $0) }.joined(separator: " "))
+        #expect(subject("identifier") == String(repeating: "x", count: 120))
+        let accent = try #require(subject("accent"))
+        #expect(accent == String(repeating: "e\u{301}", count: 120))
+        #expect(accent.count == 120)
+    }
+
+    @Test func inadmissibleRowsSettleAndTheNextSweepMovesOn() async throws {
+        let (kit, handle, _) = try await openEstate(owner: "inadmissible-batches")
+        defer { Task { try? await kit.close(handle) } }
+        try await seedDebt(kit, handle, count: 3)
+        let producer = RecordingInadmissibleProducer()
+        try await kit.registerSubjectProducer(producer, for: handle)
+
+        let first = try await kit.subjectBackfillSweep(handle, batchLimit: 2, now: Date())
+        #expect(first.refused == 2)
+        #expect(first.written == 0)
+        #expect(first.remainingDebt == 1)
+        #expect(await producer.asked.count == 2)
+
+        let second = try await kit.subjectBackfillSweep(handle, batchLimit: 2, now: Date())
+        #expect(second.refused == 1)
+        #expect(second.remainingDebt == 0)
+        let asked = await producer.asked
+        #expect(asked.count == 3)
+        #expect(Set(asked).count == 3)
+
+        _ = try await kit.subjectBackfillSweep(handle, batchLimit: 2, now: Date())
+        #expect(await producer.asked == asked)
     }
 }

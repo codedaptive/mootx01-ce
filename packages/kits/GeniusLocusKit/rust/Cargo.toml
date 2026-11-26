@@ -108,6 +108,11 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # C-1 rationale: crypto hygiene companion to the approved aes-gcm crate.
 # See the Rust AES-GCM seam.
 zeroize = "1"
+# unicode-segmentation (the crate and pin LocusKit already ships for the B-18
+# subject length contract) lets the subject backfill sweep cut an over-length
+# producer answer on grapheme clusters, the contract's unit, exactly where
+# Swift's String cuts it.
+unicode-segmentation = "=1.13.3"
 # D9 grant signature verification: decode the source estate's base64-encoded
 # Ed25519 public key from the manifest before calling convergence_kit::verify_signature.
 # Version matches the base64 = "0.22" used by locus-kit (same transitive dep, made

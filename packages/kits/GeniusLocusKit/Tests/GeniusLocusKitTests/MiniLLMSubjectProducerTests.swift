@@ -109,9 +109,10 @@ struct MiniLLMSubjectProducerTests {
         try await kit.enableAppleSubjectRider(for: handle)
         let report = try await kit.subjectBackfillSweep(handle, batchLimit: 10, now: Date())
         // The register gate is the conformance arbiter: whatever was
-        // written passed it; skipped rows stayed debt (a flaky model
-        // must never store junk). At least the drain must be observable.
-        #expect(report.written + report.skippedInadmissible == 2)
+        // written passed it; a refused or inadmissible answer is marked
+        // refused and stores no subject (a flaky model must never store
+        // junk). Every debt row is settled one way or the other.
+        #expect(report.written + report.refused == 2)
         let after = try await estate.allDrawers()
         for d in after where d.subjectPipelineVersion == DrawerStore.subjectPipelineMiniLLMV1 {
             #expect(SubjectRegister.violations(d.subject ?? "").isEmpty,

@@ -5,6 +5,16 @@ All notable code changes to MOOTx01 are recorded here. Versions follow
 line in development use an explicit SemVer qualifier, `1.1.0-beta-YY` or
 `1.1.0-rcN`.
 
+## 1.1.6 — 2026-11-25
+
+**Subject backfill no longer re-asks the same drawers for ever.** The on-device
+model can answer with a subject longer than the 120-character limit. Before
+this release such an answer was skipped without marking the drawer, so the
+sweep asked the same drawers again on every cadence and kept the CPU busy. Now
+an over-long answer is cut at its last word boundary within the limit. An
+answer that still cannot be stored, an empty one included, settles the drawer
+as refused, so the sweep moves on.
+
 ## 1.1.5 — 2026-11-17
 
 **Subject backfill drains when the on-device model fails on a drawer.** On

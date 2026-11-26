@@ -65,6 +65,8 @@ use convergence_kit::types::SyncState;
 use crate::estate_preference::{EstatePreferenceKey, EstatePreferenceValue};
 use crate::telemetry::metric_names;
 use crate::glk_emit;
+use crate::brain::subject_cut_to_contract::subject_cut_to_contract;
+use crate::brain::subject_inadmissible_reason::subject_inadmissible_reason;
 
 use corpus_kit::corpus::{EmbeddingModelConfig, EncodeSpeed};
 use corpus_kit::encoder::{
@@ -1544,10 +1546,12 @@ pub trait SubjectProducer: Send + Sync {
     /// Provenance tier written to `subject_pipeline_version`
     /// (e.g. `locus_kit::drawer_store::SUBJECT_PIPELINE_MINILLM_V1`).
     fn pipeline_version(&self) -> &str;
-    /// Produce a subject for `content`. The sweep validates the result
-    /// against `locus_kit::subject_register` before writing;
-    /// inadmissible output is counted and skipped, never stored. A
-    /// `Refused` error marks the drawer and the sweep continues; an
+    /// Produce a subject for `content`. The sweep cuts the answer to the
+    /// subject length contract at a word boundary, then validates it
+    /// against `locus_kit::subject_register` before writing. Inadmissible
+    /// output is never stored: the drawer is marked refused for the
+    /// producer's pipeline with an `inadmissible: <violations>` reason, as
+    /// a `Refused` error marks it, and the sweep continues. An
     /// `Unavailable` error stops the sweep for this cadence.
     fn subject_for_content(&self, content: &str) -> Result<String, SubjectProducerError>;
 
@@ -1567,11 +1571,13 @@ pub trait SubjectProducer: Send + Sync {
 pub struct SubjectBackfillReport {
     /// Subjects written this sweep.
     pub written: usize,
-    /// Drawers the producer refused this sweep; each carries the
-    /// producer's refusal marker and has left its lane.
+    /// Drawers refused this sweep, by the producer or by the register
+    /// contract rejecting its answer; each carries the producer's refusal
+    /// marker and has left its lane.
     pub refused: usize,
-    /// Producer outputs rejected by the register contract (skipped; the
-    /// rows remain debt and re-enumerate next sweep).
+    /// Producer outputs skipped without a mark. The sweep settles every
+    /// register-rejected answer as a refusal, so this reads 0; it stays so
+    /// a regression to skipping shows.
     pub skipped_inadmissible: usize,
     /// Estate-wide subject debt after the sweep.
     pub remaining_debt: usize,
@@ -2929,9 +2935,10 @@ impl EstateCoordinator {
 
     /// Run ONE bounded subject-backfill sweep (PR-09): enumerate up to
     /// `batch_limit` subject-debt rows (deterministic filedAt-then-id
-    /// order), produce + validate + write each, and report. Settled-work
-    /// skip is structural — written rows leave the debt predicate, so
-    /// reruns never revisit them. Refuses while the lane is dark (no
+    /// order), produce + cut + validate each, write it or mark it refused, and
+    /// report. Settled-work skip is structural — written rows leave the debt
+    /// predicate and refused rows leave this producer's lane, so reruns never
+    /// revisit them. Refuses while the lane is dark (no
     /// producer): the interactive consent-gated backfill is the only
     /// subject path until a rider exists. Mirrors Swift
     /// `subjectBackfillSweep`.
@@ -2958,10 +2965,9 @@ impl EstateCoordinator {
             })?;
         let mut written = 0usize;
         let mut refused = 0usize;
-        let mut skipped = 0usize;
         for drawer in &batch {
             let candidate = match producer.subject_for_content(&drawer.content) {
-                Ok(candidate) => candidate,
+                Ok(answer) => subject_cut_to_contract(&answer),
                 Err(SubjectProducerError::Refused(reason)) => {
                     // A refusal is a property of this content: mark it for
                     // this producer so the row leaves the lane and the next
@@ -2981,10 +2987,22 @@ impl EstateCoordinator {
                     });
                 }
             };
-            if !locus_kit::subject_register::violations(&candidate).is_empty() {
-                // Inadmissible output is skipped, never stored — the row
-                // stays debt and re-enumerates next sweep.
-                skipped += 1;
+            let violations = locus_kit::subject_register::violations(&candidate);
+            if !violations.is_empty() {
+                // Inadmissible output is never stored. Left unmarked the row
+                // would stay debt and be asked again every sweep, so it is
+                // settled as a refusal naming the violations.
+                estate
+                    .mark_subject_refused(
+                        &drawer.id,
+                        producer.pipeline_version(),
+                        &subject_inadmissible_reason(&violations),
+                        now,
+                    )
+                    .map_err(|e| GeniusLocusKitError::UnderlyingEstateFailure {
+                        reason: format!("mark_subject_refused: {e:?}"),
+                    })?;
+                refused += 1;
                 continue;
             }
             estate
@@ -3007,7 +3025,7 @@ impl EstateCoordinator {
         Ok(SubjectBackfillReport {
             written,
             refused,
-            skipped_inadmissible: skipped,
+            skipped_inadmissible: 0,
             remaining_debt: remaining,
         })
     }

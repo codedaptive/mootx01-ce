@@ -43,11 +43,14 @@ public protocol SubjectProducer: Sendable {
     /// Provenance tier written to `subject_pipeline_version`
     /// (e.g. `DrawerStore.subjectPipelineMiniLLMV1`).
     var pipelineVersion: String { get }
-    /// Produce a subject for `content`. The sweep validates the result
-    /// against `SubjectRegister` before writing; inadmissible output is
-    /// counted and skipped, never stored. A thrown
-    /// `SubjectProducerError.refused` marks the drawer and the sweep
-    /// continues; any other error stops the sweep for this cadence.
+    /// Produce a subject for `content`. The sweep cuts an answer over
+    /// `DrawerStore.subjectLengthContract` at its last word boundary
+    /// (`GeniusLocusKit.subjectCutToContract`), then validates it against
+    /// `SubjectRegister` before writing. Inadmissible output is never
+    /// stored: the drawer is marked refused for the producer's pipeline
+    /// with an `inadmissible: <violations>` reason, as a thrown
+    /// `SubjectProducerError.refused` marks it, and the sweep continues.
+    /// Any other error stops the sweep for this cadence.
     func subject(forContent content: String) async throws -> String
 
     /// The pipeline tiers this producer is allowed to REGENERATE, in
@@ -71,11 +74,13 @@ extension SubjectProducer {
 public struct SubjectBackfillReport: Sendable, Equatable {
     /// Subjects written this sweep.
     public let written: Int
-    /// Drawers the producer refused this sweep; each carries the
-    /// producer's refusal marker and has left its lane.
+    /// Drawers refused this sweep, by the producer or by the register
+    /// contract rejecting its answer; each carries the producer's refusal
+    /// marker and has left its lane.
     public let refused: Int
-    /// Producer outputs rejected by the register contract (skipped;
-    /// the rows remain debt and re-enumerate next sweep).
+    /// Producer outputs skipped without a mark. The sweep settles every
+    /// register-rejected answer as a refusal, so this reads 0; it stays in
+    /// the report as public API.
     public let skippedInadmissible: Int
     /// Estate-wide subject debt after the sweep.
     public let remainingDebt: Int
@@ -102,9 +107,10 @@ extension GeniusLocusKit {
 
     /// Run ONE bounded subject-backfill sweep: enumerate up to
     /// `batchLimit` subject-debt rows (deterministic filedAt-then-id
-    /// order), produce + validate + write each, and report. Settled-work
-    /// skip is structural — written rows leave the debt predicate, so
-    /// reruns never revisit them. Refuses when no producer is
+    /// order), produce + cut + validate each, write it or mark it refused,
+    /// and report. Settled-work skip is structural — written rows leave the
+    /// debt predicate and refused rows leave this producer's lane, so reruns
+    /// never revisit them. Refuses when no producer is
     /// registered: the interactive consent-gated backfill (PR-02/04
     /// surface) is the ONLY subject path until a rider exists.
     ///
@@ -127,11 +133,11 @@ extension GeniusLocusKit {
             refusedBy: producer.pipelineVersion)
         var written = 0
         var refused = 0
-        var skipped = 0
         for drawer in batch {
             let candidate: String
             do {
-                candidate = try await producer.subject(forContent: drawer.content)
+                candidate = Self.subjectCutToContract(
+                    try await producer.subject(forContent: drawer.content))
             } catch SubjectProducerError.refused(let reason) {
                 // A refusal is a property of this content: mark it for this
                 // producer so the row leaves the lane and the next cadence
@@ -143,11 +149,15 @@ extension GeniusLocusKit {
                 refused += 1
                 continue
             }
-            guard SubjectRegister.violations(candidate).isEmpty else {
-                // Inadmissible output is skipped, never stored — the row
-                // stays debt and re-enumerates next sweep (a persistently
-                // failing producer shows up as skipped ≈ batch).
-                skipped += 1
+            let violations = SubjectRegister.violations(candidate)
+            guard violations.isEmpty else {
+                // Inadmissible output is never stored. Left unmarked the row
+                // would stay debt and be asked again every sweep, so it is
+                // settled as a refusal naming the violations.
+                _ = try await estate.markSubjectRefused(
+                    drawerId: drawer.id, pipelineVersion: producer.pipelineVersion,
+                    reason: Self.subjectInadmissibleReason(violations), at: now)
+                refused += 1
                 continue
             }
             _ = try await estate.setSubjectRepresentation(
@@ -163,7 +173,7 @@ extension GeniusLocusKit {
         return SubjectBackfillReport(
             written: written,
             refused: refused,
-            skippedInadmissible: skipped,
+            skippedInadmissible: 0,
             remainingDebt: remaining)
     }
 }

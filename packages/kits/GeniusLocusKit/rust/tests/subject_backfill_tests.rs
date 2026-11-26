@@ -5,7 +5,7 @@
 //! producer output text is never pinned (stubs are fixtures, not model
 //! claims).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use genius_locus_kit::{
     DrainStatus, EstateCoordinator, SubjectProducer, SubjectProducerError,
@@ -29,8 +29,7 @@ impl SubjectProducer for StubProducer {
     }
 }
 
-/// Always violates the register (narrative frame) — proves inadmissible
-/// output is skipped, never stored.
+/// Always violates the register (narrative frame).
 struct InadmissibleProducer;
 impl SubjectProducer for InadmissibleProducer {
     fn pipeline_version(&self) -> &str { "bad-v1" }
@@ -240,25 +239,122 @@ fn sweep_drains_debt_with_registered_producer_and_lane_renders() {
 }
 
 #[test]
-fn inadmissible_producer_output_is_skipped_never_stored() {
+fn inadmissible_producer_output_settles_as_refused() {
     let (mut coord, handle) = open_estate();
     seed_debt(&coord, &handle, 2);
     coord
         .register_subject_producer(&handle, Arc::new(InadmissibleProducer))
         .expect("register must succeed");
     let report = coord.subject_backfill_sweep(&handle, 10, NOW + 10).unwrap();
-    assert_eq!(report.written, 0);
-    assert_eq!(report.skipped_inadmissible, 2);
-    assert_eq!(report.remaining_debt, 2, "skipped rows remain debt");
+    assert_eq!((report.written, report.refused, report.skipped_inadmissible, report.remaining_debt), (0, 2, 0, 0));
     let estate = coord.estate_for(&handle).unwrap();
-    assert!(
-        !estate
-            .all_drawers()
-            .unwrap()
+    let drawers = estate.all_drawers().unwrap();
+    assert_eq!(drawers.len(), 2);
+    let marker = locus_kit::drawer_store::subject_refused_marker("bad-v1");
+    for drawer in drawers {
+        assert!(drawer.subject.is_none());
+        assert_eq!(drawer.subject_pipeline_version.as_deref(), Some(marker.as_str()));
+    }
+    let events = estate.audit_events(None, 100).unwrap();
+    let refusals: Vec<_> = events.iter().filter(|event| event.verb == "subjectRefused").collect();
+    assert_eq!(refusals.len(), 2);
+    for event in refusals {
+        assert_eq!(event.reason.as_deref(), Some("inadmissible: narrativeFrame(\"this is a \")"));
+    }
+}
+
+/// Answers over the 120-character contract, the shapes the on-device model
+/// returns for dense technical drawers. Twin of Swift `OverLengthProducer`.
+struct OverLengthProducer;
+impl OverLengthProducer {
+    /// 40 three-character words separated by single spaces ("w01 w02 .. w40"): 159 characters.
+    fn words() -> String {
+        (1..=40).map(|i| format!("w{i:02}")).collect::<Vec<_>>().join(" ")
+    }
+}
+impl SubjectProducer for OverLengthProducer {
+    fn pipeline_version(&self) -> &str { "over-length-v1" }
+    fn subject_for_content(&self, content: &str) -> Result<String, SubjectProducerError> {
+        Ok(if content.starts_with("words") {
+            Self::words()
+        } else if content.starts_with("identifier") {
+            "x".repeat(150)
+        } else {
+            // 130 two-scalar grapheme clusters (e + combining acute), no space.
+            "e\u{301}".repeat(130)
+        })
+    }
+}
+
+/// A long answer becomes a subject of at most 120 characters (grapheme
+/// clusters), cut at its last word boundary; an answer with no boundary is
+/// cut at the limit, so the drawer never ends without a subject. Twin of
+/// Swift `overLengthAnswersAreCutAtAWordBoundary`.
+#[test]
+fn over_length_answers_are_cut_at_a_word_boundary() {
+    let (mut coord, handle) = open_estate();
+    for content in ["words drawer", "identifier drawer", "accent drawer"] {
+        let frame = CaptureFrame::new(
+            content.to_string(),
+            CaptureChannel::Typed,
+            "backfill-tests",
+            LatticeAnchor::udc("000"),
+            "subject-backfill-tests",
+            "test-model-v1",
+        );
+        coord.capture(&handle, frame, NOW).expect("capture must succeed");
+    }
+    coord
+        .register_subject_producer(&handle, Arc::new(OverLengthProducer))
+        .expect("register must succeed");
+    let report = coord.subject_backfill_sweep(&handle, 10, NOW + 10).unwrap();
+    assert_eq!((report.written, report.refused, report.skipped_inadmissible), (3, 0, 0));
+    let drawers = coord.estate_for(&handle).unwrap().all_drawers().unwrap();
+    let subject = |prefix: &str| {
+        drawers
             .iter()
-            .any(|d| d.subject_pipeline_version.as_deref() == Some("bad-v1")),
-        "inadmissible output must never be stored"
-    );
+            .find(|d| d.content.starts_with(prefix))
+            .and_then(|d| d.subject.clone())
+            .expect("every drawer ends with a subject")
+    };
+    // The last space within the first 121 characters is at index 119, after w30.
+    let words: Vec<String> = (1..=30).map(|i| format!("w{i:02}")).collect();
+    assert_eq!(subject("words"), words.join(" "));
+    assert_eq!(subject("identifier"), "x".repeat(120));
+    let accent = subject("accent");
+    assert_eq!(accent, "e\u{301}".repeat(120));
+    assert_eq!(locus_kit::drawer_store::subject_length(&accent), 120);
+}
+
+struct RecordingInadmissibleProducer {
+    asked: Mutex<Vec<String>>,
+}
+impl SubjectProducer for RecordingInadmissibleProducer {
+    fn pipeline_version(&self) -> &str { "bad-recording-v1" }
+    fn subject_for_content(&self, content: &str) -> Result<String, SubjectProducerError> {
+        self.asked.lock().unwrap().push(content.to_string());
+        Ok("This is a note about the row.".to_string())
+    }
+}
+
+#[test]
+fn inadmissible_rows_settle_and_the_next_sweep_moves_on() {
+    let (mut coord, handle) = open_estate();
+    seed_debt(&coord, &handle, 3);
+    let producer = Arc::new(RecordingInadmissibleProducer { asked: Mutex::new(Vec::new()) });
+    coord.register_subject_producer(&handle, producer.clone()).unwrap();
+    let first = coord.subject_backfill_sweep(&handle, 2, NOW + 10).unwrap();
+    assert_eq!((first.refused, first.written, first.remaining_debt), (2, 0, 1));
+    assert_eq!(producer.asked.lock().unwrap().len(), 2);
+    let second = coord.subject_backfill_sweep(&handle, 2, NOW + 20).unwrap();
+    assert_eq!((second.refused, second.remaining_debt), (1, 0));
+    {
+        let asked = producer.asked.lock().unwrap();
+        assert_eq!(asked.len(), 3);
+        assert_eq!(asked.iter().collect::<std::collections::HashSet<_>>().len(), 3);
+    }
+    coord.subject_backfill_sweep(&handle, 2, NOW + 30).unwrap();
+    assert_eq!(producer.asked.lock().unwrap().len(), 3);
 }
 
 /// Producer with regeneration tiers (PR-10 shape) — regenerates the

@@ -34,6 +34,8 @@ pub mod event_lag_pairs;
 pub mod scheduler;
 pub mod signals;
 pub mod end_of_day_tournament;
+pub(crate) mod subject_cut_to_contract;
+pub(crate) mod subject_inadmissible_reason;
 
 pub mod bounded_retraining;
 pub mod duty_queue;
