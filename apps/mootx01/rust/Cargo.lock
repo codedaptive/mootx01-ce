@@ -1360,6 +1360,7 @@ dependencies = [
  "substrate-ml",
  "substrate-types",
  "synapsekit",
+ "unicode-segmentation",
  "uuid",
  "zeroize",
 ]
